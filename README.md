@@ -7,8 +7,20 @@ MIDS Capstone · Summer 2026 · UC Berkeley
 ## Research Question
 
 Can heterogeneous air-ground robot teams (drones + ground robots) learn cooperative
-survivor search strategies via HAPPO, and how does performance degrade under
+survivor search strategies, and how does performance degrade under
 communication dropout?
+
+> **Note on HAPPO:** BenchMARL 1.x ships MAPPO, IPPO, MADDPG, MASAC, QMIX, VDN, IQL —
+> **not HAPPO**. Real HAPPO (Kuba et al., 2022) requires the separate
+> [HARL](https://github.com/PKU-MARL/HARL) library and a non-trivial integration.
+> The heterogeneity itself, however, is already captured by our scenario's
+> `group_map = {drone: [...], ground: [...]}` — both MAPPO and IPPO train
+> separate per-group policies on top of that. The baseline matrix is:
+>
+> - **MAPPO** — centralized critic, decentralized per-group actors
+> - **IPPO**  — fully decentralized (per-group actor *and* critic)
+>
+> True HAPPO is a documented stretch goal in [scripts/comms_dropout_sweep.py](scripts/comms_dropout_sweep.py).
 
 ## Stack
 
@@ -41,12 +53,18 @@ The notebook walks through dependency install, per-component verification, and a
 ## Quick Start
 
 ```bash
-# Train MAPPO on navigation (hello world)
-python -m benchmarl.run algorithm=mappo task=vmas/navigation
+# 1) MAPPO smoke training on the wildfire scenario (~3s, 6k frames)
+python scripts/train_mappo_smoke.py
 
-# Train on custom wildfire scenario (after building it)
-python scripts/train.py --config configs/training/happo.yaml
+# 2) IPPO smoke training (~3s, 6k frames)
+python scripts/train_ippo_smoke.py
+
+# 3) Comms-dropout ablation sweep (the headline experiment)
+python scripts/comms_dropout_sweep.py            # smoke: 2 algos × 4 dropouts × 6k frames
+python scripts/comms_dropout_sweep.py --research # real: ~400k frames per cell
 ```
+
+Per-cell wall time on CPU: ~3s smoke, ~30 min research. Outputs land in `results/` (gitignored).
 
 ## Layout
 
