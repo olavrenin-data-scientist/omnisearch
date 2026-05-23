@@ -72,6 +72,10 @@ Per-cell wall time on CPU: ~3s smoke, ~30 min research. Outputs land in `results
 |------|---------|
 | [notebooks/01_setup_and_demo.ipynb](notebooks/01_setup_and_demo.ipynb) | Environment setup, verification, hello-world VMAS demo |
 | [notebooks/02_detection_pipeline.ipynb](notebooks/02_detection_pipeline.ipynb) | Fire → YOLOv8 person detection pipeline, end-to-end |
+| [notebooks/03_sweep_results.ipynb](notebooks/03_sweep_results.ipynb) | Visualise the comms-dropout sweep (line plot, pivot, wall-time) |
+| [notebooks/04_closed_loop.ipynb](notebooks/04_closed_loop.ipynb) | Closed loop: sim → synthetic UAV view → detection pipeline → alert |
+| [evaluation/sim_renderer.py](evaluation/sim_renderer.py) | Renders VMAS state to a 512×512 top-down UAV image |
+| [evaluation/closed_loop.py](evaluation/closed_loop.py) | `run_closed_loop()` — sim rollout + per-frame detection + GT scoring |
 | [envs/wildfire_search.py](envs/wildfire_search.py) | `WildfireSearchScenario` — heterogeneous drones + ground robots, CA fire spread, survivor landmarks |
 | [detection/fire_detector.py](detection/fire_detector.py) | HSV-based fire detector (rule-based; swap for CNN later) |
 | [detection/person_detector.py](detection/person_detector.py) | YOLOv8 wrapper with `classes=[0]` (person only) |
