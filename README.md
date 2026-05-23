@@ -70,6 +70,7 @@ Per-cell wall time on CPU: ~3s smoke, ~30 min research. Outputs land in `results
 
 | Path | Purpose |
 |------|---------|
+| [notebooks/README.md](notebooks/README.md) | **Notebook documentation** — what each notebook does, expected outputs, prerequisites |
 | [notebooks/01_setup_and_demo.ipynb](notebooks/01_setup_and_demo.ipynb) | Environment setup, verification, hello-world VMAS demo |
 | [notebooks/02_detection_pipeline.ipynb](notebooks/02_detection_pipeline.ipynb) | Fire → YOLOv8 person detection pipeline, end-to-end |
 | [notebooks/03_sweep_results.ipynb](notebooks/03_sweep_results.ipynb) | Visualise the comms-dropout sweep (line plot, pivot, wall-time) |
