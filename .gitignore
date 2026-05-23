@@ -151,9 +151,9 @@ activemq-data/
 .env
 .envrc
 .venv
-env/
+/env/        # virtualenv at repo root only — keep configs/env/, envs/, etc.
 venv/
-ENV/
+/ENV/
 env.bak/
 venv.bak/
 
@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Project artifacts (training outputs, downloaded models)
+*.pt
+wandb/
+runs/
+results/*
+!results/.gitkeep
+*.mp4

@@ -1,0 +1,369 @@
+"""
+OmniSearch Custom VMAS Scenario: Wildfire Survivor Search
+==========================================================
+
+Heterogeneous drones (fast, wide lidar) + ground robots (slow, fire-sensitive)
+search for survivor landmarks in a 2D world while a cellular-automata fire
+spreads over a discrete grid overlaid on the continuous world.
+
+Detection in this scenario is **abstract** (lidar / distance-based) — it's the
+MARL training proxy for what the deployed system does with the YOLOv8 person
+detector (see `detection/`). Drones scout fast and broad; ground robots
+confirm precisely and pay a penalty for entering burning cells.
+
+References:
+  - VMAS scenarios: https://vmas.readthedocs.io/en/stable/usage/scenarios.html
+  - Based on the structure of vmas.scenarios.discovery
+"""
+
+from __future__ import annotations
+
+from typing import Callable, Dict, List
+
+import torch
+from torch import Tensor
+
+from vmas.simulator.core import Agent, Landmark, Sphere, World
+from vmas.simulator.scenario import BaseScenario
+from vmas.simulator.sensors import Lidar
+from vmas.simulator.utils import Color, ScenarioUtils
+
+
+# Indices into agent position tensors
+X, Y = 0, 1
+
+
+class WildfireSearchScenario(BaseScenario):
+    """Heterogeneous air-ground survivor search in a spreading wildfire."""
+
+    # ------------------------------------------------------------------
+    # World construction
+    # ------------------------------------------------------------------
+    def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
+        # Team composition
+        self.n_drones    = kwargs.pop("n_drones", 3)
+        self.n_ground    = kwargs.pop("n_ground", 2)
+        self.n_survivors = kwargs.pop("n_survivors", 5)
+        self.n_agents    = self.n_drones + self.n_ground
+
+        # World geometry
+        self.x_semidim = kwargs.pop("x_semidim", 1.0)
+        self.y_semidim = kwargs.pop("y_semidim", 1.0)
+
+        # Detection / sensing
+        self.drone_lidar_range  = kwargs.pop("drone_lidar_range",  0.50)
+        self.ground_lidar_range = kwargs.pop("ground_lidar_range", 0.20)
+        self.n_lidar_rays       = kwargs.pop("n_lidar_rays", 12)
+        self.detection_range    = kwargs.pop("detection_range", 0.10)   # ground confirm radius
+
+        # Fire spread (cellular automata on a discrete grid overlay)
+        self.fire_grid_size      = kwargs.pop("fire_grid_size", 16)
+        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.04)
+        self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
+        self.fire_step_interval  = kwargs.pop("fire_step_interval", 5)  # spread every N env steps
+
+        # Communication
+        self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
+
+        # Episode
+        self.max_steps = kwargs.pop("max_steps", 200)
+
+        # Reward weights
+        self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)
+        self.r_drone_scout    = kwargs.pop("r_drone_scout", 0.3)
+        self.r_ground_confirm = kwargs.pop("r_ground_confirm", 0.5)
+        self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.001)
+        self.r_fire_penalty   = kwargs.pop("r_fire_penalty", -1.0)
+
+        ScenarioUtils.check_kwargs_consumed(kwargs)
+
+        # Physical sizes
+        self.agent_radius    = 0.04
+        self.survivor_radius = 0.03
+
+        # ---- Build world ----
+        world = World(
+            batch_dim,
+            device,
+            x_semidim=self.x_semidim,
+            y_semidim=self.y_semidim,
+            collision_force=300,
+            substeps=2,
+            drag=0.25,
+        )
+
+        survivor_filter: Callable = lambda e: e.name.startswith("survivor")
+
+        # Drones: fast, wide lidar. VMAS requires collide=True for lidar ray
+        # casting; in concept these fly above ground (2D-abstracted here).
+        for i in range(self.n_drones):
+            agent = Agent(
+                name=f"drone_{i}",
+                collide=True,
+                shape=Sphere(radius=self.agent_radius),
+                max_speed=0.5,
+                u_range=1.0,
+                u_multiplier=0.6,
+                color=Color.BLUE,
+                sensors=[
+                    Lidar(
+                        world,
+                        n_rays=self.n_lidar_rays,
+                        max_range=self.drone_lidar_range,
+                        entity_filter=survivor_filter,
+                        render_color=Color.RED,
+                    ),
+                ],
+            )
+            agent.is_drone = True
+            world.add_agent(agent)
+
+        # Ground robots: slow, narrow lidar, fire-sensitive
+        for i in range(self.n_ground):
+            agent = Agent(
+                name=f"ground_{i}",
+                collide=True,
+                shape=Sphere(radius=self.agent_radius),
+                max_speed=0.2,
+                u_range=1.0,
+                u_multiplier=0.3,
+                color=Color.GREEN,
+                sensors=[
+                    Lidar(
+                        world,
+                        n_rays=self.n_lidar_rays,
+                        max_range=self.ground_lidar_range,
+                        entity_filter=survivor_filter,
+                        render_color=Color.RED,
+                    ),
+                ],
+            )
+            agent.is_drone = False
+            world.add_agent(agent)
+
+        # Survivor landmarks. collide=True so lidar can hit them; movable=False
+        # so they don't drift when bumped.
+        self._survivors: List[Landmark] = []
+        for i in range(self.n_survivors):
+            survivor = Landmark(
+                name=f"survivor_{i}",
+                collide=True,
+                movable=False,
+                shape=Sphere(radius=self.survivor_radius),
+                color=Color.RED,
+            )
+            world.add_landmark(survivor)
+            self._survivors.append(survivor)
+
+        # ---- Per-batch scenario state ----
+        self.found_survivors = torch.zeros(
+            batch_dim, self.n_survivors, dtype=torch.bool, device=device,
+        )
+        self.scouted_survivors = torch.zeros_like(self.found_survivors)
+        self.fire_grid = torch.zeros(
+            batch_dim, self.fire_grid_size, self.fire_grid_size,
+            dtype=torch.bool, device=device,
+        )
+        self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
+
+        # Per-agent reward buffers (filled in _compute_step_rewards)
+        for agent in world.agents:
+            agent.scenario_reward = torch.zeros(batch_dim, device=device)
+
+        return world
+
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+    def reset_world_at(self, env_index: int = None):
+        ScenarioUtils.spawn_entities_randomly(
+            entities=self._survivors + self.world.agents,
+            world=self.world,
+            env_index=env_index,
+            min_dist_between_entities=2 * self.agent_radius + 0.02,
+            x_bounds=(-self.x_semidim, self.x_semidim),
+            y_bounds=(-self.y_semidim, self.y_semidim),
+        )
+
+        if env_index is None:
+            self.found_survivors.zero_()
+            self.scouted_survivors.zero_()
+            self.fire_grid.zero_()
+            self.step_count.zero_()
+            envs_to_seed = range(self.world.batch_dim)
+        else:
+            self.found_survivors[env_index] = False
+            self.scouted_survivors[env_index] = False
+            self.fire_grid[env_index] = False
+            self.step_count[env_index] = 0
+            envs_to_seed = [env_index]
+
+        # Seed initial fire cells (random per-batch)
+        H = W = self.fire_grid_size
+        for b in envs_to_seed:
+            idx = torch.randperm(H * W, device=self.fire_grid.device)[: self.initial_fire_cells]
+            self.fire_grid[b].view(-1)[idx] = True
+
+    # ------------------------------------------------------------------
+    # Per-step hooks
+    # ------------------------------------------------------------------
+    def pre_step(self):
+        """Spread fire (cellular automata) and bump step counter."""
+        self.step_count += 1
+
+        if int(self.step_count.max().item()) % self.fire_step_interval != 0:
+            return
+
+        fire = self.fire_grid.float()
+        padded = torch.zeros(
+            fire.shape[0], fire.shape[1] + 2, fire.shape[2] + 2,
+            device=fire.device, dtype=fire.dtype,
+        )
+        padded[:, 1:-1, 1:-1] = fire
+        neighbors = (
+            padded[:, :-2, 1:-1]    # up
+            + padded[:, 2:, 1:-1]   # down
+            + padded[:, 1:-1, :-2]  # left
+            + padded[:, 1:-1, 2:]   # right
+        )
+        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** neighbors
+        new_burns = torch.rand_like(p_ignite) < p_ignite
+        self.fire_grid = self.fire_grid | new_burns
+
+    # ------------------------------------------------------------------
+    # Reward
+    # ------------------------------------------------------------------
+    def reward(self, agent: Agent) -> Tensor:
+        if agent is self.world.agents[0]:
+            self._compute_step_rewards()
+        return agent.scenario_reward
+
+    def _compute_step_rewards(self):
+        device = self.fire_grid.device
+
+        agent_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)  # [B, A, 2]
+        surv_pos  = torch.stack([s.state.pos for s in self._survivors], dim=1)    # [B, S, 2]
+        dists = torch.cdist(agent_pos, surv_pos)                                  # [B, A, S]
+
+        lidar_ranges = torch.tensor(
+            [self.drone_lidar_range] * self.n_drones
+            + [self.ground_lidar_range] * self.n_ground,
+            device=device,
+        ).view(1, self.n_agents, 1)
+        seen = dists < lidar_ranges                                # [B, A, S]
+        seen_by_drone       = seen[:, :self.n_drones, :].any(dim=1)
+        within_confirm      = dists < self.detection_range
+        confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
+
+        newly_scouted = seen_by_drone       & ~self.scouted_survivors & ~self.found_survivors
+        newly_found   = confirmed_by_ground & ~self.found_survivors
+
+        self.scouted_survivors = self.scouted_survivors | newly_scouted
+        self.found_survivors   = self.found_survivors   | newly_found
+
+        team_reward = (
+            newly_found.float().sum(dim=1) * self.r_found_survivor
+            + self.r_time_penalty
+        )
+
+        drone_seen           = seen[:, :self.n_drones, :]
+        scout_credit_mask    = drone_seen & newly_scouted.unsqueeze(1)
+        scout_per_drone      = scout_credit_mask.float().sum(dim=2)         # [B, D]
+
+        ground_within        = within_confirm[:, self.n_drones:, :]
+        confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
+        confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
+
+        ground_in_fire = self._agents_in_fire(self.world.agents[self.n_drones:])  # [B, G]
+
+        for i, agent in enumerate(self.world.agents):
+            r = team_reward.clone()
+            if agent.is_drone:
+                r = r + scout_per_drone[:, i] * self.r_drone_scout
+            else:
+                g = i - self.n_drones
+                r = r + confirm_per_ground[:, g] * self.r_ground_confirm
+                r = r + ground_in_fire[:, g].float() * self.r_fire_penalty
+            agent.scenario_reward = r
+
+    def _agents_in_fire(self, agents: List[Agent]) -> Tensor:
+        if len(agents) == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=self.fire_grid.device)
+        pos = torch.stack([a.state.pos for a in agents], dim=1)  # [B, G, 2]
+        gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
+            0, self.fire_grid_size - 1
+        ).long()
+        gy = ((pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
+            0, self.fire_grid_size - 1
+        ).long()
+        b_idx = torch.arange(self.world.batch_dim, device=pos.device).view(-1, 1).expand_as(gx)
+        return self.fire_grid[b_idx, gy, gx]
+
+    # ------------------------------------------------------------------
+    # Observation
+    # ------------------------------------------------------------------
+    def observation(self, agent: Agent) -> Tensor:
+        own_pos    = agent.state.pos                # [B, 2]
+        own_vel    = agent.state.vel                # [B, 2]
+        lidar_obs  = agent.sensors[0].measure()     # [B, n_rays]
+        fire_local = self._local_fire_density(agent)        # [B, 1]
+        neighbor   = self._neighbor_observations(agent)     # [B, (A-1)*2]
+        return torch.cat([own_pos, own_vel, lidar_obs, fire_local, neighbor], dim=-1)
+
+    def _local_fire_density(self, agent: Agent) -> Tensor:
+        pos = agent.state.pos
+        gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
+            1, self.fire_grid_size - 2
+        ).long()
+        gy = ((pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
+            1, self.fire_grid_size - 2
+        ).long()
+        b_idx = torch.arange(self.world.batch_dim, device=pos.device)
+        density = torch.zeros(self.world.batch_dim, device=pos.device)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                density = density + self.fire_grid[b_idx, gy + dy, gx + dx].float()
+        return (density / 9.0).unsqueeze(-1)
+
+    def _neighbor_observations(self, agent: Agent) -> Tensor:
+        deltas = []
+        for other in self.world.agents:
+            if other is agent:
+                continue
+            deltas.append(other.state.pos - agent.state.pos)
+        if not deltas:
+            return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
+        rel = torch.cat(deltas, dim=-1)
+        if self.comms_dropout > 0:
+            keep = (torch.rand_like(rel[..., :1]) > self.comms_dropout).float()
+            rel = rel * keep
+        return rel
+
+    # ------------------------------------------------------------------
+    # Done
+    # ------------------------------------------------------------------
+    def done(self) -> Tensor:
+        all_found = self.found_survivors.all(dim=1)
+        timed_out = self.step_count >= self.max_steps
+        return all_found | timed_out
+
+    # ------------------------------------------------------------------
+    # Info (for evaluation / debugging)
+    # ------------------------------------------------------------------
+    def info(self, agent: Agent) -> Dict[str, Tensor]:
+        return {
+            "n_found":   self.found_survivors.sum(dim=1).float(),
+            "n_scouted": self.scouted_survivors.sum(dim=1).float(),
+            "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
+        }
+
+
+if __name__ == "__main__":
+    from vmas import render_interactively
+    render_interactively(
+        WildfireSearchScenario(),
+        control_two_agents=True,
+        n_drones=3,
+        n_ground=2,
+        n_survivors=5,
+    )
