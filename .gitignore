@@ -230,3 +230,5 @@ runs/
 results/*
 !results/.gitkeep
 *.mp4
+# Web app trajectory exports (regenerated via scripts/export_trajectories.py)
+web/trajectories/

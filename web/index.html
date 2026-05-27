@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OmniSearch — Strategy Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg:        #0e1118;
+    --panel:     #151a23;
+    --border:    #1f2735;
+    --text:      #e6e9ef;
+    --muted:     #8b94a8;
+    --accent:    #5d82fa;
+    --good:      #88ff88;
+    --warn:      #ffaa00;
+    --danger:    #ff4444;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  }
+  #root { display: flex; flex-direction: column; height: 100vh; }
+  header {
+    display: flex; align-items: center; gap: 24px;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  header select {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 10px; font-size: 13px;
+  }
+  main { flex: 1; display: flex; min-height: 0; }
+  #scene-wrap {
+    flex: 1; position: relative; min-width: 0;
+    background: radial-gradient(circle at center, #1c2230 0%, var(--bg) 100%);
+  }
+  #scene { width: 100%; height: 100%; display: block; }
+  #legend {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(21, 26, 35, 0.85); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px;
+    font-size: 12px; color: var(--muted);
+  }
+  #legend .dot {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-right: 6px; vertical-align: middle;
+  }
+  aside {
+    width: 280px; border-left: 1px solid var(--border);
+    background: var(--panel); padding: 18px 18px 0; overflow-y: auto;
+  }
+  aside h2 {
+    margin: 0 0 6px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  }
+  .metric {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .metric .k { color: var(--muted); font-size: 13px; }
+  .metric .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .panel { margin-bottom: 22px; }
+  footer {
+    display: flex; align-items: center; gap: 18px;
+    padding: 12px 22px; border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  footer button {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+  }
+  footer button:hover { border-color: var(--accent); }
+  footer input[type="range"] { flex: 1; accent-color: var(--accent); }
+  footer .step { color: var(--muted); font-size: 13px; min-width: 90px; }
+  footer .speed { color: var(--muted); font-size: 13px; }
+</style>
+
+<!-- Import map: use esm.sh CDN so we need no build step -->
+<script type="importmap">
+{
+  "imports": {
+    "three":     "https://esm.sh/three@0.171.0",
+    "react":     "https://esm.sh/react@18.3.1",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
+import { createRoot } from 'react-dom/client';
+
+const h = React.createElement;
+
+// ---------------------------------------------------------------------
+// Trajectory discovery — list strategies by sniffing trajectories/index.json
+// or by trying a known list. We keep it simple: try a known list, fall
+// back to silent skip per missing file.
+// ---------------------------------------------------------------------
+const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence'];
+
+async function loadTrajectory(name) {
+  const res = await fetch(`./trajectories/${name}.json`);
+  if (!res.ok) throw new Error(`Failed to load ${name}: ${res.status}`);
+  return await res.json();
+}
+
+// ---------------------------------------------------------------------
+// Three.js scene — top-down ortho view of a [-1, 1] x [-1, 1] world
+// ---------------------------------------------------------------------
+function setupScene(canvas, width, height) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(width, height, false);
+  renderer.setClearColor(0x0e1118, 1);
+
+  // Square view, keep world aspect 1:1 inside whatever canvas size we get
+  const aspect = width / height;
+  const halfW = 1.15;
+  const halfH = halfW / aspect;
+  const camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 100);
+  camera.position.set(0, 0, 10);
+  camera.lookAt(0, 0, 0);
+
+  const scene = new THREE.Scene();
+
+  // Forest backdrop
+  const bg = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ color: 0x284e26 }),
+  );
+  bg.position.z = -0.5;
+  scene.add(bg);
+
+  return { renderer, scene, camera };
+}
+
+function clearGroup(group) {
+  while (group.children.length) {
+    const obj = group.children.pop();
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) obj.material.dispose();
+  }
+}
+
+function renderFrame(state, frame, meta) {
+  const { fireGroup, agentGroup, survGroup } = state;
+  clearGroup(fireGroup);
+  clearGroup(agentGroup);
+  clearGroup(survGroup);
+
+  // Fire cells — orange plane per burning cell
+  const G = meta.fire_grid_size;
+  const cell = 2 / G;
+  const fireMat = new THREE.MeshBasicMaterial({ color: 0xf06e1e });
+  for (const [gx, gy] of frame.fire_cells) {
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(cell, cell), fireMat);
+    mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.3);
+    fireGroup.add(mesh);
+  }
+
+  // Survivors — colored by state (unscouted=red, scouted=warn, found=good)
+  for (const s of frame.survivors) {
+    const color = s.found ? 0x88ff88 : (s.scouted ? 0xffaa00 : 0xff4444);
+    const mat = new THREE.MeshBasicMaterial({ color });
+    const mesh = new THREE.Mesh(new THREE.CircleGeometry(0.035, 24), mat);
+    mesh.position.set(s.x, s.y, -0.1);
+    survGroup.add(mesh);
+
+    // Ring outline so unscouted survivors stay visible against fire
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.035, 0.04, 24), ringMat);
+    ring.position.set(s.x, s.y, -0.09);
+    survGroup.add(ring);
+  }
+
+  // Agents — sphere markers
+  for (const a of frame.agents) {
+    const color = a.type === 'drone' ? 0x5d82fa : 0x5dc85d;
+    const mat   = new THREE.MeshBasicMaterial({ color });
+    const mesh  = new THREE.Mesh(new THREE.CircleGeometry(0.045, 24), mat);
+    mesh.position.set(a.x, a.y, 0.05);
+    agentGroup.add(mesh);
+  }
+}
+
+function useThree(meta, frame) {
+  const canvasRef = useRef(null);
+  const stateRef = useRef(null);
+
+  // Initial setup (once)
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const { renderer, scene, camera } = setupScene(canvas, rect.width, rect.height);
+
+    const fireGroup = new THREE.Group();   scene.add(fireGroup);
+    const survGroup = new THREE.Group();   scene.add(survGroup);
+    const agentGroup = new THREE.Group();  scene.add(agentGroup);
+
+    stateRef.current = { renderer, scene, camera, fireGroup, agentGroup, survGroup };
+
+    let raf;
+    const tick = () => {
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+
+    const onResize = () => {
+      const r = canvas.parentElement.getBoundingClientRect();
+      renderer.setSize(r.width, r.height, false);
+      const aspect = r.width / r.height;
+      const halfW = 1.15;
+      const halfH = halfW / aspect;
+      camera.left = -halfW; camera.right = halfW;
+      camera.top = halfH; camera.bottom = -halfH;
+      camera.updateProjectionMatrix();
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
+      renderer.dispose();
+    };
+  }, []);
+
+  // Render frame whenever frame or meta changes
+  useEffect(() => {
+    if (!stateRef.current || !frame || !meta) return;
+    renderFrame(stateRef.current, frame, meta);
+  }, [meta, frame]);
+
+  return canvasRef;
+}
+
+// ---------------------------------------------------------------------
+// Playback hook
+// ---------------------------------------------------------------------
+function usePlayback(nFrames) {
+  const [step, setStep] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  const [speed, setSpeed] = useState(1);   // frames per tick (10 ticks/sec)
+
+  useEffect(() => {
+    if (!playing) return;
+    const id = setInterval(() => {
+      setStep(s => {
+        const next = s + speed;
+        if (next >= nFrames) { setPlaying(false); return nFrames - 1; }
+        return next;
+      });
+    }, 100);
+    return () => clearInterval(id);
+  }, [playing, speed, nFrames]);
+
+  return { step, setStep, playing, setPlaying, speed, setSpeed };
+}
+
+// ---------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------
+function Legend() {
+  const items = [
+    ['#5d82fa', 'Drone'],
+    ['#5dc85d', 'Ground robot'],
+    ['#ff4444', 'Survivor (unscouted)'],
+    ['#ffaa00', 'Survivor (scouted)'],
+    ['#88ff88', 'Survivor (confirmed)'],
+    ['#f06e1e', 'Fire'],
+  ];
+  return h('div', { id: 'legend' },
+    items.map(([c, label]) => h('div', { key: label, style: { lineHeight: '1.7' } },
+      h('span', { className: 'dot', style: { background: c } }), label,
+    )),
+  );
+}
+
+function MetricsPanel({ meta }) {
+  const m = meta?.metrics ?? {};
+  const fmt = (v, suffix='') => {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(2) : v) + suffix;
+  };
+  const rows = [
+    ['Survivor recall',      fmt(m.survivor_recall)],
+    ['Time-to-verification', fmt(m.time_to_verification, ' steps')],
+    ['False-positive trips', fmt(m.false_positive_trips)],
+    ['Hazard exposure',      fmt(m.hazard_exposure, ' steps')],
+    ['UGV travel cost',      fmt(m.ugv_travel_cost)],
+    ['Episode length',       fmt(m.n_steps, ' steps')],
+  ];
+  return h('aside', null,
+    h('div', { className: 'panel' },
+      h('h2', null, 'Strategy'),
+      h('div', { style: { fontSize: 20, fontWeight: 600, marginBottom: 4 } },
+        meta?.strategy ?? '—'),
+      h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
+        `seed ${meta?.seed ?? '—'} · ${meta?.n_drones} drones + ${meta?.n_ground} ground · ${meta?.n_survivors} survivors`),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Mission metrics (final)'),
+      rows.map(([k, v]) => h('div', { key: k, className: 'metric' },
+        h('span', { className: 'k' }, k),
+        h('span', { className: 'v' }, v),
+      )),
+    ),
+  );
+}
+
+function App() {
+  const [strategy, setStrategy] = useState(STRATEGY_NAMES[2]); // nearest_candidate
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setData(null); setError(null);
+    loadTrajectory(strategy)
+      .then(setData)
+      .catch(e => setError(e.message));
+  }, [strategy]);
+
+  const meta = data?.metadata;
+  const frames = data?.frames ?? [];
+  const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
+
+  const frame = frames[step] ?? null;
+  const canvasRef = useThree(meta, frame);
+
+  return h(React.Fragment, null,
+    h('header', null,
+      h('h1', null, 'OmniSearch · Strategy Viewer'),
+      h('div', { className: 'meta' }, 'Heterogeneous air-ground swarm replay'),
+      h('div', { style: { flex: 1 } }),
+      h('label', null,
+        'Strategy: ',
+        h('select', {
+          value: strategy,
+          onChange: e => setStrategy(e.target.value),
+        }, STRATEGY_NAMES.map(n => h('option', { key: n, value: n }, n))),
+      ),
+    ),
+    h('main', null,
+      h('div', { id: 'scene-wrap' },
+        h('canvas', { id: 'scene', ref: canvasRef }),
+        h(Legend),
+        error && h('div', {
+          style: {
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            color: 'var(--danger)', fontFamily: 'monospace', padding: 30,
+          },
+        }, error, h('br'), h('br'),
+          h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
+            'Run `python scripts/export_trajectories.py` first.'),
+        ),
+      ),
+      h(MetricsPanel, { meta }),
+    ),
+    h('footer', null,
+      h('button', { onClick: () => { setPlaying(false); setStep(0); } }, '⟲'),
+      h('button', { onClick: () => setPlaying(p => !p) }, playing ? 'Pause' : 'Play'),
+      h('input', {
+        type: 'range', min: 0, max: Math.max(0, frames.length - 1),
+        value: step, onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
+      }),
+      h('div', { className: 'step' }, `step ${step} / ${Math.max(0, frames.length - 1)}`),
+      h('div', { className: 'speed' },
+        'speed: ',
+        h('select', {
+          value: speed, onChange: e => setSpeed(Number(e.target.value)),
+        }, [1, 2, 4, 8].map(s => h('option', { key: s, value: s }, `${s}×`))),
+      ),
+    ),
+  );
+}
+
+createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>
