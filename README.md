@@ -34,7 +34,6 @@ The MVP answers this in simulation. Three sub-questions:
 | Multi-agent sim | [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator) | 2D, CPU-vectorized, fast |
 | Fire spread | Cellular automata over a 16×16 grid | SimFire compatible (needs Python 3.9–3.10) |
 | MARL training | [BenchMARL](https://github.com/facebookresearch/BenchMARL) (MAPPO, IPPO) | HAPPO not in BenchMARL — see *HAPPO note* below |
-| Detection (stretch) | [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) with `classes=[0]` | Person = COCO class 0 |
 | Experiment tracking | [Weights & Biases](https://wandb.ai) | Optional; pass `loggers=["wandb"]` |
 | Deliverable (planned) | React + Three.js viewer | Strategy comparison & replay |
 
@@ -57,7 +56,7 @@ source .venv/bin/activate
 # 3. Install everything
 pip install --upgrade pip
 pip install torch torchvision
-pip install vmas torchrl benchmarl ultralytics "pettingzoo[mpe]"
+pip install vmas torchrl benchmarl "pettingzoo[mpe]"
 pip install wandb tensorboard tqdm hydra-core omegaconf matplotlib seaborn pandas numpy pyyaml scipy
 pip install pytest black ruff ipykernel jupyter nbformat nbconvert "moviepy<2.0.0"
 
@@ -167,9 +166,7 @@ See [notebooks/README.md](notebooks/README.md) for the cell-by-cell walkthrough 
 | # | Notebook | Purpose |
 |---|---|---|
 | 01 | Setup & Demo | Environment + dependency verification |
-| 02 | Detection Pipeline | Fire → YOLOv8 person → alert |
 | 03 | Sweep Results | Visualise comms-dropout JSON |
-| 04 | Closed Loop | Sim → synthetic UAV view → detection |
 | 05 | Baseline Comparison | Bar charts + winners table per metric |
 
 ### 5. Web viewer — React + Three.js replay
@@ -200,15 +197,9 @@ omnisearch/
 │   ├── baselines.py               # Hand-coded coordination strategies
 │   └── harl_env.py                # HARL-shape adapter for HAPPO training
 │
-├── detection/                     # Fire → YOLOv8 person pipeline (real images)
-│   ├── fire_detector.py           # HSV thresholding + connected components
-│   ├── person_detector.py         # YOLOv8 wrapper, classes=[0]
-│   └── pipeline.py                # Two-stage: fire-first, then person
-│
 ├── evaluation/
 │   ├── mission_metrics.py         # The 6 metrics from the project plan + DRR
-│   ├── closed_loop.py             # Sim rollout + per-frame detection + GT scoring
-│   └── sim_renderer.py            # Synthetic UAV top-down view of the scenario
+│   └── trajectory_export.py       # Per-step state → JSON for the web viewer
 │
 ├── scripts/
 │   ├── train_mappo_smoke.py       # MAPPO smoke run (BenchMARL)
@@ -269,19 +260,17 @@ highest_confidence        0.00     nan     0      3.33
 |---|---|
 | Environment + dependencies | ✓ |
 | `WildfireSearchScenario` (heterogeneous, CA fire, comms_dropout knob) | ✓ |
-| Detection pipeline (fire → YOLOv8 person → alert) | ✓ |
 | BenchMARL wired (MAPPO + IPPO) | ✓ |
-| **HAPPO wired (HARL adapter + smoke train passes)** | ✓ |
-| Comms-dropout sweep + results notebook | ✓ |
-| Closed-loop sim → UAV view → detection | ✓ |
+| HAPPO wired (HARL adapter + smoke train passes) | ✓ |
+| Comms-dropout sweep (3 algos × seeds × Mann-Whitney U) | ✓ |
 | Mission-level metrics (6 + DRR) | ✓ |
 | Hand-coded baselines + comparison harness | ✓ |
+| Trained HAPPO loadable into the trajectory viewer | ✓ |
 | Web deliverable (React + Three.js strategy viewer) | ✓ |
-| Trained-policy rollout (load checkpoint into `compare_baselines.py`) | ✗ — needs `--research` budget run first |
-| HAPPO in the comms-dropout sweep alongside MAPPO/IPPO | ✗ — sweep currently uses BenchMARL only |
-| Multi-seed sweep + confidence bands | ✗ |
-| Statistical significance tests (Mann-Whitney U) | ✗ |
-| Probabilistic sensor model + candidate belief map | ✗ — current baselines use ground-truth scout/found |
+| Comms-state visualization in viewer (per-step UP/DOWN per agent) | ✓ |
+| HAPPO at research budget (currently 80k smoke; needs 400k+ for clear wins over baselines) | ✗ |
+| Multi-seed sweep with N≥5 seeds (current default is 3) | ✗ |
+| Probabilistic sensor model + candidate belief map | ✗ — baselines currently use ground-truth scout/found |
 
 ---
 
