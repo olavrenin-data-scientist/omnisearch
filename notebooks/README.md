@@ -8,8 +8,8 @@ re-executing.
 | # | Notebook | Purpose | Runtime |
 |---|---|---|---|
 | 01 | [01_setup_and_demo.ipynb](01_setup_and_demo.ipynb) | Environment + dependency verification | ~5 s |
-| 03 | [03_sweep_results.ipynb](03_sweep_results.ipynb) | Visualise the comms-dropout sweep results | ~2 s |
-| 05 | [05_baseline_comparison.ipynb](05_baseline_comparison.ipynb) | Per-metric bars + per-metric winners across baselines | ~2 s |
+| 02 | [02_sweep_results.ipynb](02_sweep_results.ipynb) | Visualise the comms-dropout sweep results | ~2 s |
+| 03 | [03_baseline_comparison.ipynb](03_baseline_comparison.ipynb) | Per-metric bars + per-metric winners across baselines | ~2 s |
 
 Prerequisites for all three:
 
@@ -47,9 +47,9 @@ What each section does:
 
 ---
 
-## 03 — Sweep Results Viewer
+## 02 — Sweep Results Viewer
 
-**File:** [03_sweep_results.ipynb](03_sweep_results.ipynb)
+**File:** [02_sweep_results.ipynb](02_sweep_results.ipynb)
 
 Loads the most recent `results/comms_dropout_sweep_*.json` produced by
 [`scripts/comms_dropout_sweep.py`](../scripts/comms_dropout_sweep.py) and
@@ -89,9 +89,9 @@ the notebook is the workflow for iteration.
 
 ---
 
-## 05 — Baseline Comparison
+## 03 — Baseline Comparison
 
-**File:** [05_baseline_comparison.ipynb](05_baseline_comparison.ipynb)
+**File:** [03_baseline_comparison.ipynb](03_baseline_comparison.ipynb)
 
 Loads the most recent `results/baseline_comparison_*.json` produced by
 [`scripts/compare_baselines.py`](../scripts/compare_baselines.py) and shows
@@ -135,11 +135,11 @@ jupyter nbconvert --to notebook --execute --inplace notebooks/01_setup_and_demo.
 
 # 03 requires sweep output to exist
 python scripts/comms_dropout_sweep.py --seeds 3
-jupyter nbconvert --to notebook --execute --inplace notebooks/03_sweep_results.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/02_sweep_results.ipynb
 
 # 05 requires baseline comparison output to exist
 python scripts/compare_baselines.py --seeds 3 --steps 200
-jupyter nbconvert --to notebook --execute --inplace notebooks/05_baseline_comparison.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/03_baseline_comparison.ipynb
 ```
 
 Total wall time: dominated by the sweep (~7 min smoke). The notebooks themselves render in a few seconds.
