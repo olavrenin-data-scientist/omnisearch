@@ -83,6 +83,38 @@ wandb login
 
 Each entry point is a script in `scripts/` or a notebook in `notebooks/`. All outputs land in `results/` (gitignored).
 
+### TL;DR — run everything end-to-end
+
+After [Setup](#setup), one copy-paste block validates the entire pipeline (~30 s of smoke + your choice of sweep budget):
+
+```bash
+source .venv/bin/activate
+
+# All three algorithms — smoke train, ~5 s each
+python scripts/train_mappo_smoke.py
+python scripts/train_ippo_smoke.py
+python scripts/train_happo_smoke.py
+
+# Hand-coded baseline comparison on mission metrics — ~5 s
+python scripts/compare_baselines.py --seeds 3 --steps 200
+
+# Headline ablation: MAPPO × IPPO × HAPPO across 4 dropouts × N seeds
+python scripts/comms_dropout_sweep.py --seeds 3            # smoke (~7 min)
+
+# Export trajectory JSONs for the web viewer — ~2 s
+python scripts/export_trajectories.py
+
+# Execute all notebooks headlessly so they have fresh embedded outputs
+for nb in notebooks/0*.ipynb; do
+  jupyter nbconvert --to notebook --execute --inplace "$nb"
+done
+
+# Serve the React + Three.js viewer at http://localhost:8080 (Ctrl-C to stop)
+python -m http.server -d web 8080
+```
+
+The detailed per-component instructions follow below.
+
 ### 1. Smoke training — verify the MARL pipeline runs (~3–6 s each)
 
 ```bash
@@ -106,11 +138,14 @@ For a credible training run, edit the config in [agents/train_helpers.py](agents
 ### 2. Comms-dropout sweep — the headline ablation
 
 ```bash
-python scripts/comms_dropout_sweep.py             # smoke   ~30 s   (2 algos × 4 dropouts × 6k frames)
-python scripts/comms_dropout_sweep.py --research  # real    ~hours  (~400k frames per cell)
+python scripts/comms_dropout_sweep.py --seeds 3              # smoke (~7 min, 36 cells)
+python scripts/comms_dropout_sweep.py --seeds 5              # detectable p<0.05 (~12 min)
+python scripts/comms_dropout_sweep.py --seeds 5 --research   # real budget (~hours)
 ```
 
-Writes per-cell `mean_return`, wall time, and BenchMARL output directory to `results/comms_dropout_sweep_*.json`. Visualise with notebook 03.
+Sweeps **3 algorithms** (MAPPO + IPPO + HAPPO) × **4 dropouts** (0.0, 0.2, 0.5, 0.8) × **N seeds**. Writes per-cell results, mean ± std summary, **and Mann-Whitney U significance tests** (within each algorithm: d=0.0 vs each higher d) to `results/comms_dropout_sweep_*.json`. Visualise with notebook 03.
+
+**Note**: at `--seeds 3` the minimum two-sided MW-U p is 0.1 — use `--seeds 5` or more to detect p<0.05.
 
 ### 3. Baseline comparison — does MARL actually beat heuristics?
 
