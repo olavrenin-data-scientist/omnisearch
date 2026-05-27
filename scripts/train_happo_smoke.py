@@ -43,17 +43,10 @@ def _register_wildfire_with_harl():
     import harl.envs as harl_envs_pkg
     import harl.utils.envs_tools as envs_tools
     import harl.utils.configs_tools as configs_tools
-    from harl.envs.env_wrappers import ShareDummyVecEnv, ShareSubprocVecEnv
     from harl.common.base_logger import BaseLogger
 
     from agents.harl_env import WildfireHARLEnv
-
-    def _wildfire_env_fn(rank: int, seed: int, env_args: dict):
-        def init_env():
-            args = copy.deepcopy(env_args)
-            args["seed"] = seed + rank * 1000
-            return WildfireHARLEnv(args)
-        return init_env
+    from agents.harl_vec_env import make_batched_wildfire_vec_env
 
     _orig_train  = envs_tools.make_train_env
     _orig_eval   = envs_tools.make_eval_env
@@ -62,14 +55,15 @@ def _register_wildfire_with_harl():
 
     def make_train_env(env_name, seed, n_threads, env_args):
         if env_name == "wildfire":
-            fns = [_wildfire_env_fn(i, seed, env_args) for i in range(n_threads)]
-            return ShareDummyVecEnv(fns) if n_threads == 1 else ShareSubprocVecEnv(fns)
+            # n_threads is the number of parallel envs we want. Build ONE
+            # batched VMAS env at num_envs=n_threads — single tensor op per
+            # step, no subprocess overhead.
+            return make_batched_wildfire_vec_env(n_threads, seed, env_args)
         return _orig_train(env_name, seed, n_threads, env_args)
 
     def make_eval_env(env_name, seed, n_threads, env_args):
         if env_name == "wildfire":
-            fns = [_wildfire_env_fn(i, seed + 10_000, env_args) for i in range(n_threads)]
-            return ShareDummyVecEnv(fns) if n_threads == 1 else ShareSubprocVecEnv(fns)
+            return make_batched_wildfire_vec_env(n_threads, seed + 10_000, env_args)
         return _orig_eval(env_name, seed, n_threads, env_args)
 
     def make_render_env(env_name, seed, env_args):
@@ -121,8 +115,10 @@ def build_args():
             "cuda": False, "cuda_deterministic": True, "torch_threads": 4,
         },
         "train": {
-            "n_rollout_threads":     1,
-            "num_env_steps":         2_000,    # smoke
+            # n_rollout_threads now drives BatchedVMASVecEnv's num_envs —
+            # one VMAS instance running this many envs in a single batch.
+            "n_rollout_threads":     8,
+            "num_env_steps":         8_000,    # smoke (8 envs × 100 steps × ~10 updates)
             "episode_length":        100,
             "log_interval":          1,
             "eval_interval":         1,
