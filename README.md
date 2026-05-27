@@ -27,6 +27,30 @@ The MVP answers this in simulation. Three sub-questions:
 
 ---
 
+## Architecture
+
+**MARL** is the field. **MAPPO**, **IPPO**, and **HAPPO** are three algorithms inside it. **VMAS** is the simulator they all train inside. All three algorithms train the same `WildfireSearchScenario`, so their results are directly comparable on the same six mission metrics.
+
+```
+                          MARL  (the field)
+                            │
+              ┌─────────────┼─────────────┐
+              │             │             │
+            MAPPO         IPPO          HAPPO          ← three algorithms,
+         (BenchMARL)   (BenchMARL)     (HARL)            same scenario
+              │             │             │
+              └─────────────┼─────────────┘
+                            ▼
+                ┌─────────────────────┐
+                │    VMAS simulator   │  ← the heart of everything
+                │  WildfireSearch...  │
+                └─────────────────────┘
+```
+
+In one sentence: **VMAS = where things happen. MAPPO / IPPO / HAPPO = how policies are trained. MARL = the field all three belong to.**
+
+---
+
 ## Stack
 
 | Layer | Tool | Notes |
