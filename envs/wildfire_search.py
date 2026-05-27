@@ -9,7 +9,8 @@ spreads over a discrete grid overlaid on the continuous world.
 Detection in this scenario is **abstract** (lidar / distance-based) — it's the
 MARL training proxy for what the deployed system does with the YOLOv8 person
 detector (see `detection/`). Drones scout fast and broad; ground robots
-confirm precisely and pay a penalty for entering burning cells.
+confirm precisely, pay a penalty for entering burning cells, and expend more
+travel effort while crossing difficult terrain.
 
 References:
   - VMAS scenarios: https://vmas.readthedocs.io/en/stable/usage/scenarios.html
@@ -18,6 +19,7 @@ References:
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Dict, List
 
 import torch
@@ -31,6 +33,10 @@ from vmas.simulator.utils import Color, ScenarioUtils
 
 # Indices into agent position tensors
 X, Y = 0, 1
+
+# Land-cover types stored in land_cover_grid. Terrain affects ground robots;
+# drones fly above it but observe the map to coordinate ground routes.
+LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK = range(5)
 
 
 class WildfireSearchScenario(BaseScenario):
@@ -62,6 +68,24 @@ class WildfireSearchScenario(BaseScenario):
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
         self.fire_step_interval  = kwargs.pop("fire_step_interval", 5)  # spread every N env steps
 
+        # Ground terrain: procedural land cover layered on generated elevation.
+        # It shares fire resolution so vegetation can later influence spread.
+        self.terrain_brush_patches = kwargs.pop("terrain_brush_patches", 4)
+        self.terrain_forest_patches = kwargs.pop("terrain_forest_patches", 3)
+        self.terrain_rock_patches = kwargs.pop("terrain_rock_patches", 2)
+        self.terrain_patch_radius = kwargs.pop("terrain_patch_radius", 3)
+        self.terrain_hills = kwargs.pop("terrain_hills", 4)
+        self.terrain_elevation_scale = kwargs.pop("terrain_elevation_scale", 0.30)
+        self.terrain_road_width = kwargs.pop("terrain_road_width", 1)
+        self.max_ground_slope = kwargs.pop("max_ground_slope", 0.70)
+        self.slope_cost_weight = kwargs.pop("slope_cost_weight", 2.0)
+        self.slope_speed_weight = kwargs.pop("slope_speed_weight", 1.5)
+        self.terrain_path_samples = kwargs.pop("terrain_path_samples", 6)
+        land_cover_costs = kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0))
+        land_cover_speeds = kwargs.pop("land_cover_speeds", (1.0, 0.9, 0.65, 0.45, 0.0))
+        if len(land_cover_costs) != 5 or len(land_cover_speeds) != 5:
+            raise ValueError("land-cover cost and speed values must cover road/open/brush/forest/rock")
+
         # Communication
         self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
 
@@ -74,6 +98,7 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_confirm = kwargs.pop("r_ground_confirm", 0.5)
         self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.001)
         self.r_fire_penalty   = kwargs.pop("r_fire_penalty", -1.0)
+        self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.05)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -164,7 +189,21 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.bool, device=device,
         )
+        self.land_cover_grid = torch.full(
+            (batch_dim, self.fire_grid_size, self.fire_grid_size),
+            LAND_OPEN, dtype=torch.long, device=device,
+        )
+        self.elevation_grid = torch.zeros_like(self.fire_grid, dtype=torch.float)
+        self.slope_grid = torch.zeros_like(self.elevation_grid)
+        self.traversable_grid = torch.ones_like(self.fire_grid)
+        self.mobility_cost_grid = torch.ones_like(self.elevation_grid)
+        self.speed_multiplier_grid = torch.ones_like(self.elevation_grid)
+        self.land_cover_cost_values = torch.tensor(land_cover_costs, dtype=torch.float, device=device)
+        self.land_cover_speed_values = torch.tensor(land_cover_speeds, dtype=torch.float, device=device)
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
+        self._prev_ground_pos = torch.zeros(batch_dim, self.n_ground, 2, device=device)
+        self._pre_step_ground_pos = torch.zeros_like(self._prev_ground_pos)
+        self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
 
         # Per-agent reward buffers (filled in _compute_step_rewards)
         for agent in world.agents:
@@ -203,12 +242,122 @@ class WildfireSearchScenario(BaseScenario):
         for b in envs_to_seed:
             idx = torch.randperm(H * W, device=self.fire_grid.device)[: self.initial_fire_cells]
             self.fire_grid[b].view(-1)[idx] = True
+            self._generate_terrain(b)
+
+        ground_agents = self.world.agents[self.n_drones:]
+        if ground_agents:
+            ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1)
+            if env_index is None:
+                self._prev_ground_pos = ground_pos.clone()
+                self._pre_step_ground_pos = ground_pos.clone()
+            else:
+                self._prev_ground_pos[env_index] = ground_pos[env_index]
+                self._pre_step_ground_pos[env_index] = ground_pos[env_index]
+        if env_index is None:
+            self.step_ugv_travel_cost.zero_()
+        else:
+            self.step_ugv_travel_cost[env_index] = 0
+
+    def _generate_terrain(self, env_index: int) -> None:
+        """Create hills, vegetation regions, rocky barriers, and road corridors."""
+        grid = self.land_cover_grid[env_index]
+        grid.fill_(LAND_OPEN)
+        size = self.fire_grid_size
+        radius = max(int(self.terrain_patch_radius), 1)
+
+        for land_type, n_patches in (
+            (LAND_BRUSH, self.terrain_brush_patches),
+            (LAND_FOREST, self.terrain_forest_patches),
+            (LAND_ROCK, self.terrain_rock_patches),
+        ):
+            for _ in range(n_patches):
+                cx = int(torch.randint(size, (1,), device=grid.device).item())
+                cy = int(torch.randint(size, (1,), device=grid.device).item())
+                rx = int(torch.randint(1, radius + 1, (1,), device=grid.device).item())
+                ry = int(torch.randint(1, radius + 1, (1,), device=grid.device).item())
+                ys = torch.arange(size, device=grid.device).view(-1, 1)
+                xs = torch.arange(size, device=grid.device).view(1, -1)
+                patch = ((xs - cx) / rx) ** 2 + ((ys - cy) / ry) ** 2 <= 1.0
+                grid[patch] = land_type
+
+        self._generate_elevation(env_index)
+        self._paint_roads(env_index)
+        self._clear_entity_staging_areas(env_index)
+        self._refresh_mobility_layers(env_index)
+
+    def _generate_elevation(self, env_index: int) -> None:
+        """Blend smooth Gaussian hills and derive a slope raster."""
+        size = self.fire_grid_size
+        device = self.fire_grid.device
+        axis = torch.linspace(-1.0, 1.0, size, device=device)
+        yy, xx = torch.meshgrid(axis, axis, indexing="ij")
+        elevation = torch.zeros(size, size, device=device)
+        for _ in range(self.terrain_hills):
+            cx = torch.rand((), device=device) * 1.6 - 0.8
+            cy = torch.rand((), device=device) * 1.6 - 0.8
+            sx = torch.rand((), device=device) * 0.25 + 0.20
+            sy = torch.rand((), device=device) * 0.25 + 0.20
+            height = torch.rand((), device=device) * 0.55 + 0.45
+            elevation += height * torch.exp(
+                -(((xx - cx) / sx) ** 2 + ((yy - cy) / sy) ** 2) / 2.0,
+            )
+        elevation -= elevation.min()
+        elevation /= elevation.max().clamp_min(1e-6)
+        elevation *= self.terrain_elevation_scale
+        cell_width = 2.0 / max(size - 1, 1)
+        grade_y, grade_x = torch.gradient(elevation, spacing=(cell_width, cell_width))
+        self.elevation_grid[env_index] = elevation
+        self.slope_grid[env_index] = torch.sqrt(grade_x.square() + grade_y.square())
+
+    def _paint_roads(self, env_index: int) -> None:
+        """Lay two traversable winding access tracks across the landscape."""
+        grid = self.land_cover_grid[env_index]
+        size = self.fire_grid_size
+        width = max(int(self.terrain_road_width), 0)
+        phase = float(torch.rand((), device=grid.device).item()) * 6.283
+        x_mid = int(torch.randint(size // 3, max(2 * size // 3, size // 3 + 1),
+                                  (1,), device=grid.device).item())
+        y_mid = int(torch.randint(size // 3, max(2 * size // 3, size // 3 + 1),
+                                  (1,), device=grid.device).item())
+        for i in range(size):
+            offset = int(round(1.5 * math.sin(phase + i * 0.35)))
+            x = max(0, min(size - 1, x_mid + offset))
+            y = max(0, min(size - 1, y_mid + offset))
+            grid[i, max(0, x - width): min(size, x + width + 1)] = LAND_ROAD
+            grid[max(0, y - width): min(size, y + width + 1), i] = LAND_ROAD
+
+    def _clear_entity_staging_areas(self, env_index: int) -> None:
+        """Ensure survivor locations and ground starts are accessible clearings."""
+        entities = self._survivors + self.world.agents[self.n_drones:]
+        for entity in entities:
+            gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
+            x, y = int(gx.item()), int(gy.item())
+            ys = slice(max(y - 1, 0), min(y + 2, self.fire_grid_size))
+            xs = slice(max(x - 1, 0), min(x + 2, self.fire_grid_size))
+            self.land_cover_grid[env_index, ys, xs] = LAND_OPEN
+            self.slope_grid[env_index, ys, xs] = 0.0
+
+    def _refresh_mobility_layers(self, env_index: int) -> None:
+        cover = self.land_cover_grid[env_index]
+        slope = self.slope_grid[env_index]
+        road = cover == LAND_ROAD
+        traversable = (cover != LAND_ROCK) & ((slope <= self.max_ground_slope) | road)
+        cost = self.land_cover_cost_values[cover] * (1.0 + self.slope_cost_weight * slope)
+        speed = self.land_cover_speed_values[cover] / (1.0 + self.slope_speed_weight * slope)
+        self.traversable_grid[env_index] = traversable
+        self.mobility_cost_grid[env_index] = cost
+        self.speed_multiplier_grid[env_index] = torch.where(
+            traversable, speed.clamp(0.0, 1.0), torch.zeros_like(speed),
+        )
 
     # ------------------------------------------------------------------
     # Per-step hooks
     # ------------------------------------------------------------------
     def pre_step(self):
         """Spread fire (cellular automata) and bump step counter."""
+        ground_agents = self.world.agents[self.n_drones:]
+        if ground_agents:
+            self._pre_step_ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1).clone()
         self.step_count += 1
 
         if int(self.step_count.max().item()) % self.fire_step_interval != 0:
@@ -229,6 +378,33 @@ class WildfireSearchScenario(BaseScenario):
         p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** neighbors
         new_burns = torch.rand_like(p_ignite) < p_ignite
         self.fire_grid = self.fire_grid | new_burns
+
+    def process_action(self, agent: Agent):
+        """Reduce ground-robot traction/speed on slow surfaces and slopes."""
+        if agent.is_drone:
+            return
+        speed = self._grid_values_at_positions(
+            self.speed_multiplier_grid, agent.state.pos.unsqueeze(1),
+        ).squeeze(1)
+        agent.action.u = agent.action.u * speed.unsqueeze(-1)
+
+    def post_step(self):
+        """Prevent ground robots from crossing rocks or non-traversable slopes."""
+        ground_agents = self.world.agents[self.n_drones:]
+        if not ground_agents:
+            return
+        ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1)
+        traversable = self._path_is_traversable(self._pre_step_ground_pos, ground_pos)
+        for i, agent in enumerate(ground_agents):
+            blocked = ~traversable[:, i]
+            corrected_pos = torch.where(
+                blocked.unsqueeze(-1), self._pre_step_ground_pos[:, i], agent.state.pos,
+            )
+            corrected_vel = torch.where(
+                blocked.unsqueeze(-1), torch.zeros_like(agent.state.vel), agent.state.vel,
+            )
+            agent.set_pos(corrected_pos, batch_index=None)
+            agent.set_vel(corrected_vel, batch_index=None)
 
     # ------------------------------------------------------------------
     # Reward
@@ -274,7 +450,14 @@ class WildfireSearchScenario(BaseScenario):
         confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
         confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
 
-        ground_in_fire = self._agents_in_fire(self.world.agents[self.n_drones:])  # [B, G]
+        ground_agents = self.world.agents[self.n_drones:]
+        ground_in_fire = self._agents_in_fire(ground_agents)  # [B, G]
+        if ground_agents:
+            ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1)
+            self.step_ugv_travel_cost = self._terrain_path_cost(self._prev_ground_pos, ground_pos)
+            self._prev_ground_pos = ground_pos.clone()
+        else:
+            self.step_ugv_travel_cost.zero_()
 
         for i, agent in enumerate(self.world.agents):
             r = team_reward.clone()
@@ -284,20 +467,65 @@ class WildfireSearchScenario(BaseScenario):
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
                 r = r + ground_in_fire[:, g].float() * self.r_fire_penalty
+                r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
             agent.scenario_reward = r
 
     def _agents_in_fire(self, agents: List[Agent]) -> Tensor:
         if len(agents) == 0:
             return torch.zeros(self.world.batch_dim, 0, device=self.fire_grid.device)
         pos = torch.stack([a.state.pos for a in agents], dim=1)  # [B, G, 2]
+        gx, gy = self._positions_to_grid(pos)
+        b_idx = torch.arange(self.world.batch_dim, device=pos.device).view(-1, 1).expand_as(gx)
+        return self.fire_grid[b_idx, gy, gx]
+
+    def _terrain_movement_multiplier(self, agents: List[Agent]) -> Tensor:
+        """Return terrain travel multipliers underneath the provided agents."""
+        if len(agents) == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=self.land_cover_grid.device)
+        pos = torch.stack([a.state.pos for a in agents], dim=1)
+        return self._grid_values_at_positions(self.mobility_cost_grid, pos)
+
+    def _terrain_path_cost(
+        self,
+        start_pos: Tensor,
+        end_pos: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> Tensor:
+        """Terrain-weighted path length, sampled between old and new positions."""
+        samples = max(int(self.terrain_path_samples), 2)
+        alpha = torch.linspace(0.0, 1.0, samples, device=start_pos.device).view(1, 1, -1, 1)
+        path = start_pos.unsqueeze(2) + (end_pos - start_pos).unsqueeze(2) * alpha
+        multipliers = self._grid_values_at_positions(self.mobility_cost_grid, path, env_indices)
+        distance = (end_pos - start_pos).norm(dim=-1)
+        return distance * multipliers.mean(dim=-1)
+
+    def _path_is_traversable(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
+        samples = max(int(self.terrain_path_samples), 2)
+        alpha = torch.linspace(0.0, 1.0, samples, device=start_pos.device).view(1, 1, -1, 1)
+        path = start_pos.unsqueeze(2) + (end_pos - start_pos).unsqueeze(2) * alpha
+        return self._grid_values_at_positions(self.traversable_grid, path).all(dim=-1)
+
+    def _grid_values_at_positions(
+        self,
+        grid: Tensor,
+        pos: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> Tensor:
+        gx, gy = self._positions_to_grid(pos)
+        if env_indices is None:
+            env_indices = torch.arange(pos.shape[0], device=pos.device)
+        expand_shape = (pos.shape[0],) + (1,) * (gx.ndim - 1)
+        b_idx = env_indices.view(expand_shape).expand_as(gx)
+        return grid[b_idx, gy, gx]
+
+    def _positions_to_grid(self, pos: Tensor) -> tuple[Tensor, Tensor]:
         gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
             0, self.fire_grid_size - 1
         ).long()
         gy = ((pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
             0, self.fire_grid_size - 1
         ).long()
-        b_idx = torch.arange(self.world.batch_dim, device=pos.device).view(-1, 1).expand_as(gx)
-        return self.fire_grid[b_idx, gy, gx]
+        return gx, gy
 
     # ------------------------------------------------------------------
     # Observation
@@ -307,8 +535,9 @@ class WildfireSearchScenario(BaseScenario):
         own_vel    = agent.state.vel                # [B, 2]
         lidar_obs  = agent.sensors[0].measure()     # [B, n_rays]
         fire_local = self._local_fire_density(agent)        # [B, 1]
+        terrain_local = self._local_terrain_features(agent)   # [B, 18]
         neighbor   = self._neighbor_observations(agent)     # [B, (A-1)*2]
-        return torch.cat([own_pos, own_vel, lidar_obs, fire_local, neighbor], dim=-1)
+        return torch.cat([own_pos, own_vel, lidar_obs, fire_local, terrain_local, neighbor], dim=-1)
 
     def _local_fire_density(self, agent: Agent) -> Tensor:
         pos = agent.state.pos
@@ -324,6 +553,27 @@ class WildfireSearchScenario(BaseScenario):
             for dx in (-1, 0, 1):
                 density = density + self.fire_grid[b_idx, gy + dy, gx + dx].float()
         return (density / 9.0).unsqueeze(-1)
+
+    def _local_terrain_features(self, agent: Agent) -> Tensor:
+        """Expose local mobility cost and blocked-cell masks to each agent."""
+        pos = agent.state.pos
+        gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
+            1, self.fire_grid_size - 2
+        ).long()
+        gy = ((pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
+            1, self.fire_grid_size - 2
+        ).long()
+        b_idx = torch.arange(self.world.batch_dim, device=pos.device)
+        nearby_costs = []
+        nearby_blocked = []
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                nearby_costs.append(self.mobility_cost_grid[b_idx, gy + dy, gx + dx])
+                nearby_blocked.append(~self.traversable_grid[b_idx, gy + dy, gx + dx])
+        costs = torch.stack(nearby_costs, dim=-1)
+        blocked = torch.stack(nearby_blocked, dim=-1).float()
+        normalized_costs = costs / self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1)
+        return torch.cat([normalized_costs, blocked], dim=-1)
 
     def _neighbor_observations(self, agent: Agent) -> Tensor:
         deltas = []
@@ -355,6 +605,7 @@ class WildfireSearchScenario(BaseScenario):
             "n_found":   self.found_survivors.sum(dim=1).float(),
             "n_scouted": self.scouted_survivors.sum(dim=1).float(),
             "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
+            "ugv_step_travel_cost": self.step_ugv_travel_cost.sum(dim=1),
         }
 
 

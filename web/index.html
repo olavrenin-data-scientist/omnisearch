@@ -180,6 +180,13 @@ const COLORS = {
   fire_outer:          0xf06e1e,   // orange
   fire_inner:          0xfacc15,   // yellow hot core
 };
+const TERRAIN_COLORS = [
+  0xb59665,  // road
+  0x47783d,  // open
+  0x315a2e,  // brush
+  0x203d24,  // forest
+  0x555963,  // rock
+];
 
 // ---------------------------------------------------------------------
 // Entity factories — small Groups composed of primitive meshes so each
@@ -356,8 +363,35 @@ function makeFireMesh(size) {
   return g;
 }
 
+function renderTerrain(state, meta) {
+  clearGroup(state.terrainGroup);
+  const terrain = meta?.terrain;
+  if (!terrain?.land_cover) return;
+  const G = meta.fire_grid_size;
+  const cell = 2 / G;
+  for (let gy = 0; gy < G; gy++) {
+    for (let gx = 0; gx < G; gx++) {
+      const cover = terrain.land_cover[gy][gx];
+      const elevation = terrain.elevation?.[gy]?.[gx] ?? 0;
+      const slope = terrain.slope?.[gy]?.[gx] ?? 0;
+      const color = new THREE.Color(TERRAIN_COLORS[cover] ?? TERRAIN_COLORS[1]);
+      color.multiplyScalar(Math.max(0.58, Math.min(1.12, 0.88 + elevation * 0.7 - slope * 0.25)));
+      const tile = new THREE.Mesh(
+        new THREE.PlaneGeometry(cell * 0.985, cell * 0.985),
+        new THREE.MeshBasicMaterial({ color }),
+      );
+      tile.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.45);
+      state.terrainGroup.add(tile);
+    }
+  }
+}
+
 function renderFrame(state, frame, meta, histories) {
   const { fireGroup, agentGroup, survGroup, trailGroup } = state;
+  if (state.terrainSource !== meta.terrain) {
+    renderTerrain(state, meta);
+    state.terrainSource = meta.terrain;
+  }
   clearGroup(fireGroup);
   clearGroup(agentGroup);
   clearGroup(survGroup);
@@ -472,12 +506,16 @@ function useThree(meta, frame, histories) {
     const rect = canvas.parentElement.getBoundingClientRect();
     const { renderer, scene, camera } = setupScene(canvas, rect.width, rect.height);
 
+    const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
     const fireGroup  = new THREE.Group();  scene.add(fireGroup);
     const trailGroup = new THREE.Group();  scene.add(trailGroup);
     const survGroup  = new THREE.Group();  scene.add(survGroup);
     const agentGroup = new THREE.Group();  scene.add(agentGroup);
 
-    stateRef.current = { renderer, scene, camera, fireGroup, trailGroup, agentGroup, survGroup };
+    stateRef.current = {
+      renderer, scene, camera, terrainGroup, fireGroup, trailGroup, agentGroup, survGroup,
+      terrainSource: null,
+    };
 
     let raf;
     const t0 = performance.now();
@@ -550,6 +588,10 @@ function Legend() {
     ['circle', '#ff3838', 'Survivor (unscouted)'],
     ['circle', '#fbbf24', 'Survivor (scouted)'],
     ['circle', '#84cc16', 'Survivor (confirmed)'],
+    ['square', '#b59665', 'Access road'],
+    ['square', '#315a2e', 'Brush'],
+    ['square', '#203d24', 'Forest'],
+    ['square', '#555963', 'Rock / blocked'],
     ['square', '#f06e1e', 'Fire'],
   ];
   return h('div', { id: 'legend' },
