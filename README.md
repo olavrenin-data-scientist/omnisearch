@@ -167,12 +167,14 @@ omnisearch/
 │   ├── train_mappo_smoke.py       # 3-iter MAPPO training
 │   ├── train_ippo_smoke.py        # 3-iter IPPO training
 │   ├── comms_dropout_sweep.py     # 2 algos × 4 dropouts ablation
-│   └── compare_baselines.py       # Multi-seed baseline comparison
+│   ├── compare_baselines.py       # Multi-seed baseline comparison
+│   └── export_trajectories.py     # → web/trajectories/*.json for the viewer
 │
 ├── notebooks/                     # See notebooks/README.md
-├── configs/{env,training}/        # YAML configs (planned)
 ├── results/                       # Training artifacts (gitignored)
-└── web/                           # React + Three.js deliverable (planned)
+└── web/                           # React + Three.js strategy viewer
+    ├── index.html
+    └── README.md
 ```
 
 ---
