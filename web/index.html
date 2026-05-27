@@ -165,33 +165,151 @@ function clearGroup(group) {
   }
 }
 
-// --- Shape factories: drones = triangles, ground = squares, survivors = circles ---
-function triangleGeom(size = 0.06) {
-  const s = size;
-  const g = new THREE.BufferGeometry();
-  // Upward-pointing isoceles triangle
-  const verts = new Float32Array([
-     0,      s * 0.9, 0,
-    -s * 0.8, -s * 0.5, 0,
-     s * 0.8, -s * 0.5, 0,
-  ]);
-  g.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-  return g;
-}
-function squareGeom(size = 0.06) {
-  return new THREE.PlaneGeometry(size, size);
-}
-
 // --- Color palette (visually distinct, accessible) ---
 const COLORS = {
-  drone:               0x4a90ff,   // bright blue (triangle)
-  ground:              0x14b8a6,   // teal       (square)
+  drone:               0x4a90ff,   // bright blue
+  drone_dark:          0x1a3a8a,   // dark frame
+  ground:              0x14b8a6,   // teal
+  ground_dark:         0x0f4f48,
+  wheel:               0x1a1f2e,
+  skin:                0xf0c896,
   survivor_unscouted:  0xff3838,   // red
   survivor_scouted:    0xfbbf24,   // amber
   survivor_confirmed:  0x84cc16,   // lime
   survivor_outline:    0xffffff,
-  fire:                0xf06e1e,   // orange
+  fire_outer:          0xf06e1e,   // orange
+  fire_inner:          0xfacc15,   // yellow hot core
 };
+
+// ---------------------------------------------------------------------
+// Entity factories — small Groups composed of primitive meshes so each
+// entity reads as the thing it represents from a top-down view.
+// Animated children are tagged via userData so the RAF loop can update
+// them (propeller spin, fire flicker) without rebuilding geometry.
+// ---------------------------------------------------------------------
+function makeDroneMesh() {
+  const g = new THREE.Group();
+  // X-shaped frame (two crossed bars)
+  const armMat = new THREE.MeshBasicMaterial({ color: COLORS.drone_dark });
+  const arm1 = new THREE.Mesh(new THREE.PlaneGeometry(0.10, 0.007), armMat);
+  const arm2 = arm1.clone(); arm2.rotation.z = Math.PI / 2;
+  g.add(arm1, arm2);
+  // Central body
+  const body = new THREE.Mesh(
+    new THREE.CircleGeometry(0.018, 24),
+    new THREE.MeshBasicMaterial({ color: COLORS.drone }),
+  );
+  body.position.z = 0.02;
+  g.add(body);
+  // Four propellers at the tips of the X
+  const propMat = new THREE.MeshBasicMaterial({
+    color: 0xbcd0ff, transparent: true, opacity: 0.55,
+  });
+  for (const [dx, dy] of [[0.05, 0], [-0.05, 0], [0, 0.05], [0, -0.05]]) {
+    const prop = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.032, 0.005),
+      propMat.clone(),
+    );
+    prop.position.set(dx, dy, 0.03);
+    prop.userData.isProp = true;
+    prop.userData.phase  = Math.random() * Math.PI; // desync drones
+    g.add(prop);
+  }
+  return g;
+}
+
+function makeGroundMesh() {
+  const g = new THREE.Group();
+  // Chassis
+  const chassis = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.07, 0.052),
+    new THREE.MeshBasicMaterial({ color: COLORS.ground }),
+  );
+  g.add(chassis);
+  // Wheel "stripes" along the sides
+  const wheelMat = new THREE.MeshBasicMaterial({ color: COLORS.wheel });
+  for (const dy of [+0.024, -0.024]) {
+    const wheel = new THREE.Mesh(new THREE.PlaneGeometry(0.058, 0.012), wheelMat);
+    wheel.position.set(0, dy, 0.01);
+    g.add(wheel);
+  }
+  // Sensor turret on top (a white dot)
+  const sensor = new THREE.Mesh(
+    new THREE.CircleGeometry(0.011, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  );
+  sensor.position.z = 0.02;
+  g.add(sensor);
+  // Antenna (small line forward)
+  const ant = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.022, 0.003),
+    new THREE.MeshBasicMaterial({ color: COLORS.ground_dark }),
+  );
+  ant.position.set(0.025, 0, 0.025);
+  g.add(ant);
+  return g;
+}
+
+function makeSurvivorMesh(survivorState) {
+  // Top-down stylised person: shoulders (rounded rect) + head (circle)
+  const stateColor = survivorState.found
+    ? COLORS.survivor_confirmed
+    : survivorState.scouted
+      ? COLORS.survivor_scouted
+      : COLORS.survivor_unscouted;
+  const g = new THREE.Group();
+  // State ring (visible against fire)
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.038, 0.048, 28),
+    new THREE.MeshBasicMaterial({ color: stateColor }),
+  );
+  ring.position.z = -0.01;
+  g.add(ring);
+  // Shoulders (rounded rectangle — a circle for simplicity since we're tiny)
+  const shoulders = new THREE.Mesh(
+    new THREE.CircleGeometry(0.024, 24),
+    new THREE.MeshBasicMaterial({ color: stateColor }),
+  );
+  g.add(shoulders);
+  // Head
+  const head = new THREE.Mesh(
+    new THREE.CircleGeometry(0.014, 24),
+    new THREE.MeshBasicMaterial({ color: COLORS.skin }),
+  );
+  head.position.z = 0.01;
+  g.add(head);
+  // Pulse on the ring if scouted-but-not-confirmed (calls for attention)
+  if (survivorState.scouted && !survivorState.found) {
+    ring.userData.isPulse = true;
+  }
+  return g;
+}
+
+function makeFireMesh(size) {
+  const g = new THREE.Group();
+  // Outer flicker plane
+  const outer = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * 1.05, size * 1.05),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.fire_outer, transparent: true, opacity: 0.92,
+    }),
+  );
+  outer.userData.isFireOuter = true;
+  outer.userData.phase = Math.random() * Math.PI * 2;
+  g.add(outer);
+  // Hot inner core
+  const inner = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * 0.55, size * 0.55),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.fire_inner, transparent: true, opacity: 0.8,
+    }),
+  );
+  inner.position.z = 0.01;
+  inner.userData.isFireCore = true;
+  inner.userData.phase = Math.random() * Math.PI * 2;
+  g.add(inner);
+  return g;
+}
 
 function renderFrame(state, frame, meta, histories) {
   const { fireGroup, agentGroup, survGroup, trailGroup } = state;
@@ -200,40 +318,23 @@ function renderFrame(state, frame, meta, histories) {
   clearGroup(survGroup);
   clearGroup(trailGroup);
 
-  // --- Fire cells ---
+  // --- Fire cells (compound: outer flicker + hot core) ---
   const G = meta.fire_grid_size;
   const cell = 2 / G;
-  const fireMat = new THREE.MeshBasicMaterial({ color: COLORS.fire });
   for (const [gx, gy] of frame.fire_cells) {
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(cell, cell), fireMat);
+    const mesh = makeFireMesh(cell);
     mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.3);
     fireGroup.add(mesh);
   }
 
-  // --- Survivors (always circles; colour = state) ---
+  // --- Survivors (shoulders + head + state ring) ---
   for (const s of frame.survivors) {
-    const fill = s.found
-      ? COLORS.survivor_confirmed
-      : s.scouted
-        ? COLORS.survivor_scouted
-        : COLORS.survivor_unscouted;
-    const mesh = new THREE.Mesh(
-      new THREE.CircleGeometry(0.035, 24),
-      new THREE.MeshBasicMaterial({ color: fill }),
-    );
-    mesh.position.set(s.x, s.y, -0.1);
+    const mesh = makeSurvivorMesh(s);
+    mesh.position.set(s.x, s.y, -0.05);
     survGroup.add(mesh);
-
-    // White outline ring — keeps survivors visible over fire
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.038, 0.045, 24),
-      new THREE.MeshBasicMaterial({ color: COLORS.survivor_outline }),
-    );
-    ring.position.set(s.x, s.y, -0.09);
-    survGroup.add(ring);
   }
 
-  // --- Agent trails (last 25 positions per agent, fading) ---
+  // --- Agent trails (last 25 positions, semi-transparent) ---
   const TRAIL_LEN = 25;
   for (const a of frame.agents) {
     const hist = (histories[a.name] || []).slice(
@@ -244,7 +345,7 @@ function renderFrame(state, frame, meta, histories) {
     for (let i = 0; i < hist.length; i++) {
       positions[i * 3 + 0] = hist[i][0];
       positions[i * 3 + 1] = hist[i][1];
-      positions[i * 3 + 2] = -0.05;
+      positions[i * 3 + 2] = -0.04;
     }
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -255,15 +356,52 @@ function renderFrame(state, frame, meta, histories) {
     trailGroup.add(new THREE.Line(geom, mat));
   }
 
-  // --- Agents (drones = triangles, ground = squares) ---
+  // --- Agents (compound quadcopters / rovers) ---
   for (const a of frame.agents) {
-    const isDrone = a.type === 'drone';
-    const color   = isDrone ? COLORS.drone : COLORS.ground;
-    const geom    = isDrone ? triangleGeom(0.07) : squareGeom(0.07);
-    const mesh    = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color }));
+    const mesh = a.type === 'drone' ? makeDroneMesh() : makeGroundMesh();
     mesh.position.set(a.x, a.y, 0.05);
+    // Heading: rotate ground robots to face their direction of travel,
+    // based on the previous-step velocity from history.
+    if (a.type === 'ground' && histories[a.name]) {
+      const idx = frame.step;
+      const hist = histories[a.name];
+      if (idx > 0 && idx < hist.length) {
+        const [px, py] = hist[idx - 1];
+        const dx = a.x - px, dy = a.y - py;
+        if (Math.abs(dx) + Math.abs(dy) > 1e-4) {
+          mesh.rotation.z = Math.atan2(dy, dx);
+        }
+      }
+    }
     agentGroup.add(mesh);
   }
+}
+
+// Animate per-RAF: propeller spin, fire flicker, scouted-survivor pulse.
+function tickAnimation(state, t) {
+  state.agentGroup.traverse(obj => {
+    if (obj.userData?.isProp) {
+      obj.rotation.z = t * 18 + (obj.userData.phase || 0);
+    }
+  });
+  state.fireGroup.traverse(obj => {
+    if (obj.userData?.isFireCore) {
+      const phase = obj.userData.phase || 0;
+      const s = 0.85 + 0.15 * Math.sin(t * 7 + phase);
+      obj.scale.set(s, s, 1);
+      obj.material.opacity = 0.55 + 0.35 * Math.sin(t * 9 + phase);
+    }
+    if (obj.userData?.isFireOuter) {
+      const phase = obj.userData.phase || 0;
+      obj.material.opacity = 0.78 + 0.18 * Math.sin(t * 5 + phase);
+    }
+  });
+  state.survGroup.traverse(obj => {
+    if (obj.userData?.isPulse) {
+      const s = 1 + 0.08 * Math.sin(t * 6);
+      obj.scale.set(s, s, 1);
+    }
+  });
 }
 
 // Build per-agent position history from all frames (run once when data loads)
@@ -297,7 +435,10 @@ function useThree(meta, frame, histories) {
     stateRef.current = { renderer, scene, camera, fireGroup, trailGroup, agentGroup, survGroup };
 
     let raf;
+    const t0 = performance.now();
     const tick = () => {
+      const t = (performance.now() - t0) / 1000;
+      if (stateRef.current) tickAnimation(stateRef.current, t);
       renderer.render(scene, camera);
       raf = requestAnimationFrame(tick);
     };
