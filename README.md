@@ -142,7 +142,7 @@ python scripts/comms_dropout_sweep.py --seeds 5              # detectable p<0.05
 python scripts/comms_dropout_sweep.py --seeds 5 --research   # real budget (~hours)
 ```
 
-Sweeps **3 algorithms** (MAPPO + IPPO + HAPPO) × **4 dropouts** (0.0, 0.2, 0.5, 0.8) × **N seeds**. Writes per-cell results, mean ± std summary, **and Mann-Whitney U significance tests** (within each algorithm: d=0.0 vs each higher d) to `results/comms_dropout_sweep_*.json`. Visualise with notebook 03.
+Sweeps **3 algorithms** (MAPPO + IPPO + HAPPO) × **4 dropouts** (0.0, 0.2, 0.5, 0.8) × **N seeds**. Writes per-cell results, mean ± std summary, **and Mann-Whitney U significance tests** (within each algorithm: d=0.0 vs each higher d) to `results/comms_dropout_sweep_*.json`. Visualise with notebook 02.
 
 **Note**: at `--seeds 3` the minimum two-sided MW-U p is 0.1 — use `--seeds 5` or more to detect p<0.05.
 
@@ -166,8 +166,8 @@ See [notebooks/README.md](notebooks/README.md) for the cell-by-cell walkthrough 
 | # | Notebook | Purpose |
 |---|---|---|
 | 01 | Setup & Demo | Environment + dependency verification |
-| 03 | Sweep Results | Visualise comms-dropout JSON |
-| 05 | Baseline Comparison | Bar charts + winners table per metric |
+| 02 | Sweep Results | Visualise comms-dropout JSON |
+| 03 | Baseline Comparison | Bar charts + winners table per metric |
 
 ### 5. Web viewer — React + Three.js replay
 
