@@ -419,6 +419,29 @@ function renderFrame(state, frame, meta, histories) {
       }
     }
     agentGroup.add(mesh);
+
+    // --- Comms-status indicator: small dot above the agent ---
+    //   green = teammate observations received this step
+    //   red   = comms dropped this step (the "lost radio" event)
+    // `comms_up` is written by scenario._neighbor_observations and exported
+    // per-frame in trajectory_export.py. Older JSONs without the field default
+    // to true.
+    const commsUp = a.comms_up !== false;
+    const commsDot = new THREE.Mesh(
+      new THREE.CircleGeometry(0.013, 16),
+      new THREE.MeshBasicMaterial({ color: commsUp ? 0x4ade80 : 0xef4444 }),
+    );
+    commsDot.position.set(a.x, a.y + 0.062, 0.09);
+    commsDot.userData.isCommsDot = true;
+    commsDot.userData.isUp       = commsUp;
+    agentGroup.add(commsDot);
+    // Faint white stalk so it reads as "indicator for THIS agent"
+    const stalk = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.002, 0.024),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }),
+    );
+    stalk.position.set(a.x, a.y + 0.05, 0.085);
+    agentGroup.add(stalk);
   }
 }
 
@@ -444,6 +467,13 @@ function tickAnimation(state, t) {
   state.survGroup.traverse(obj => {
     if (obj.userData?.isPulse) {
       const s = 1 + 0.1 * Math.sin(t * 6);
+      obj.scale.set(s, s, 1);
+    }
+  });
+  // Pulse the comms dot when it's DOWN — draws the eye to the "lost radio" event.
+  state.agentGroup.traverse(obj => {
+    if (obj.userData?.isCommsDot && obj.userData.isUp === false) {
+      const s = 1 + 0.25 * Math.sin(t * 9);
       obj.scale.set(s, s, 1);
     }
   });
@@ -551,6 +581,8 @@ function Legend() {
     ['circle', '#fbbf24', 'Survivor (scouted)'],
     ['circle', '#84cc16', 'Survivor (confirmed)'],
     ['square', '#f06e1e', 'Fire'],
+    ['circle', '#4ade80', 'Comms UP (above agent)'],
+    ['circle', '#ef4444', 'Comms DOWN — radio dropped this step'],
   ];
   return h('div', { id: 'legend' },
     items.map(([shape, c, label]) =>

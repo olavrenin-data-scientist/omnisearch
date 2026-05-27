@@ -331,12 +331,20 @@ class WildfireSearchScenario(BaseScenario):
             if other is agent:
                 continue
             deltas.append(other.state.pos - agent.state.pos)
+        device = agent.state.pos.device
         if not deltas:
-            return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
+            # Single-agent edge case — nothing to communicate, mark "up"
+            agent.comms_up = torch.ones(self.world.batch_dim, dtype=torch.bool, device=device)
+            return torch.zeros(self.world.batch_dim, 0, device=device)
         rel = torch.cat(deltas, dim=-1)
         if self.comms_dropout > 0:
-            keep = (torch.rand_like(rel[..., :1]) > self.comms_dropout).float()
-            rel = rel * keep
+            keep_bool = torch.rand_like(rel[..., :1]) > self.comms_dropout
+            rel = rel * keep_bool.float()
+            # Record per-step comms state on the agent so trajectory_export.py
+            # (and any viewer) can read who could hear the team this step.
+            agent.comms_up = keep_bool.squeeze(-1)
+        else:
+            agent.comms_up = torch.ones(self.world.batch_dim, dtype=torch.bool, device=device)
         return rel
 
     # ------------------------------------------------------------------

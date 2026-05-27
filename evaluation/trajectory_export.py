@@ -47,11 +47,18 @@ from evaluation.mission_metrics import EpisodeRecorder
 
 def _agent_record(agent, env_index: int) -> dict:
     pos = agent.state.pos[env_index]
+    # `comms_up` is set by scenario._neighbor_observations on each obs call.
+    # True = this agent successfully received teammate positions this step,
+    # False = comms dropped this step. Defaults to True if not yet populated
+    # (e.g. before the first observation call, or when comms_dropout = 0).
+    comms_up_t = getattr(agent, "comms_up", None)
+    comms_up = bool(comms_up_t[env_index].item()) if comms_up_t is not None else True
     return {
-        "name": agent.name,
-        "type": "drone" if getattr(agent, "is_drone", False) else "ground",
-        "x":    float(pos[X]),
-        "y":    float(pos[Y]),
+        "name":     agent.name,
+        "type":     "drone" if getattr(agent, "is_drone", False) else "ground",
+        "x":        float(pos[X]),
+        "y":        float(pos[Y]),
+        "comms_up": comms_up,
     }
 
 

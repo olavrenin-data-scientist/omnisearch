@@ -29,13 +29,19 @@ from evaluation.trajectory_export import export_trajectory
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--steps", type=int, default=200)
-    p.add_argument("--seed",  type=int, default=0)
-    p.add_argument("--out",   default=str(ROOT / "web" / "trajectories"))
+    p.add_argument("--steps",         type=int,   default=200)
+    p.add_argument("--seed",          type=int,   default=0)
+    p.add_argument("--comms-dropout", type=float, default=0.3,
+                   help="Per-step prob each agent's teammate-obs is zeroed. "
+                        "0.0 = perfect radio, 0.3 = visible dropouts in viewer, "
+                        "0.8 = mostly broken.")
+    p.add_argument("--out",           default=str(ROOT / "web" / "trajectories"))
     args = p.parse_args()
 
     out_dir = Path(args.out)
-    print(f" Output: {out_dir.relative_to(ROOT)}")
+    print(f" Output:        {out_dir.relative_to(ROOT)}")
+    print(f" Steps:         {args.steps}")
+    print(f" Comms dropout: {args.comms_dropout}")
     print("-" * 60)
 
     for name, cls in BASELINES.items():
@@ -50,6 +56,7 @@ def main():
             output_path=out_dir / f"{name}.json",
             n_steps=args.steps,
             seed=args.seed,
+            scenario_kwargs={"comms_dropout": args.comms_dropout},
         )
         print(f"  ✓ {name:22s} → {path.relative_to(ROOT)}  ({time.time() - t0:.1f}s)")
 
