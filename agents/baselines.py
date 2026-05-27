@@ -38,6 +38,53 @@ from envs.wildfire_search import WildfireSearchScenario, X, Y
 # actions are 2D continuous in [-1, 1] (a force vector).
 
 
+def _coordinated_ground_actions(
+    sc: WildfireSearchScenario,
+    targetable: torch.Tensor,
+    fallback_actions: List[torch.Tensor],
+    priority: torch.Tensor | None = None,
+) -> List[torch.Tensor]:
+    """Assign at most one ground robot to each targetable survivor.
+
+    With ``priority=None`` each UGV greedily picks its nearest unassigned
+    survivor. With priority scores, each UGV picks the highest-priority
+    unassigned survivor. Extra UGVs use their fallback action.
+    """
+    if sc.n_ground == 0:
+        return []
+
+    B = sc.world.batch_dim
+    surv_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
+    assigned = torch.zeros_like(targetable)
+    actions = [a.clone() for a in fallback_actions]
+    batch_idx = torch.arange(B, device=targetable.device)
+
+    for gi in range(sc.n_ground):
+        ag_idx = sc.n_drones + gi
+        pos = sc.world.agents[ag_idx].state.pos
+        available = targetable & ~assigned
+        any_targetable = available.any(dim=-1)
+
+        if priority is None:
+            d = (surv_pos - pos.unsqueeze(1)).norm(dim=-1)
+            scores = -d
+        else:
+            scores = priority
+
+        masked_scores = torch.where(
+            available, scores, torch.full_like(scores, float("-inf")),
+        )
+        best = masked_scores.argmax(dim=-1)
+        target_pos = surv_pos.gather(1, best.view(B, 1, 1).expand(B, 1, 2)).squeeze(1)
+        delta = (target_pos - pos).clamp(-1.0, 1.0)
+        actions[gi] = torch.where(any_targetable.unsqueeze(-1), delta, actions[gi])
+
+        if any_targetable.any():
+            assigned[batch_idx[any_targetable], best[any_targetable]] = True
+
+    return actions
+
+
 # ----------------------------------------------------------------------
 # Random
 # ----------------------------------------------------------------------
@@ -90,27 +137,16 @@ class LawnmowerPolicy:
             dy = (self.drone_band_y[i] - pos[:, Y]).clamp(-1.0, 1.0)
             out.append(torch.stack([dx, dy], dim=-1))
 
-        # ---- Ground robots: go to nearest scouted survivor ----
+        # ---- Ground robots: split up across scouted survivors ----
         scouted = sc.scouted_survivors        # (B, S) bool
         found   = sc.found_survivors          # (B, S) bool
         targetable = scouted & ~found         # not yet confirmed
 
-        # Survivor positions (B, S, 2)
-        surv_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
-
-        for gi in range(sc.n_ground):
-            ag_idx = sc.n_drones + gi
-            pos = sc.world.agents[ag_idx].state.pos  # (B, 2)
-            # Distance to each survivor (B, S)
-            d = (surv_pos - pos.unsqueeze(1)).norm(dim=-1)
-            d_masked = torch.where(targetable, d, torch.full_like(d, float("inf")))
-            best = d_masked.argmin(dim=-1)               # (B,)
-            target_pos = surv_pos.gather(1, best.view(B, 1, 1).expand(B, 1, 2)).squeeze(1)
-            # If no targetable survivor, hold still
-            any_targetable = targetable.any(dim=-1)
-            delta = (target_pos - pos).clamp(-1.0, 1.0)
-            delta = torch.where(any_targetable.unsqueeze(-1), delta, torch.zeros_like(delta))
-            out.append(delta)
+        hold_actions = [
+            torch.zeros(B, 2, device=device)
+            for _ in range(sc.n_ground)
+        ]
+        out.extend(_coordinated_ground_actions(sc, targetable, hold_actions))
 
         self.t += 1
         return out
@@ -142,23 +178,15 @@ class NearestCandidatePolicy:
         for i in range(sc.n_drones):
             out.append(rand_actions[i])
 
-        # Ground: nearest scouted survivor
+        # Ground: split up across nearest scouted survivors
         scouted    = sc.scouted_survivors
         found      = sc.found_survivors
         targetable = scouted & ~found
-        surv_pos   = torch.stack([s.state.pos for s in sc._survivors], dim=1)
-
-        for gi in range(sc.n_ground):
-            ag_idx = sc.n_drones + gi
-            pos = sc.world.agents[ag_idx].state.pos
-            d = (surv_pos - pos.unsqueeze(1)).norm(dim=-1)
-            d_masked = torch.where(targetable, d, torch.full_like(d, float("inf")))
-            best = d_masked.argmin(dim=-1)
-            target_pos = surv_pos.gather(1, best.view(B, 1, 1).expand(B, 1, 2)).squeeze(1)
-            any_t = targetable.any(dim=-1)
-            delta = (target_pos - pos).clamp(-1.0, 1.0)
-            delta = torch.where(any_t.unsqueeze(-1), delta, rand_actions[ag_idx])
-            out.append(delta)
+        fallback = [
+            rand_actions[sc.n_drones + gi]
+            for gi in range(sc.n_ground)
+        ]
+        out.extend(_coordinated_ground_actions(sc, targetable, fallback))
 
         return out
 
@@ -177,47 +205,38 @@ class HighestConfidencePolicy:
 
     def __init__(self, env):
         self.scenario: WildfireSearchScenario = env.scenario
-        self.scout_step: List[int] = [-1] * self.scenario.n_survivors
+        self.scout_step = torch.full(
+            (self.scenario.world.batch_dim, self.scenario.n_survivors),
+            -1,
+            dtype=torch.float,
+            device=self.scenario.fire_grid.device,
+        )
         self.t = 0
         self._lawnmower = LawnmowerPolicy(env)
 
     def __call__(self, env) -> List[torch.Tensor]:
         sc = self.scenario
-        B = sc.world.batch_dim
-
-        # Update scout step tracking (env_index=0 for control logic)
-        sc_mask = sc.scouted_survivors[0].cpu().tolist()
-        for i, s in enumerate(sc_mask):
-            if s and self.scout_step[i] < 0:
-                self.scout_step[i] = self.t
+        newly_scouted = sc.scouted_survivors & (self.scout_step < 0)
+        self.scout_step = torch.where(
+            newly_scouted,
+            torch.full_like(self.scout_step, float(self.t)),
+            self.scout_step,
+        )
 
         actions = self._lawnmower(env)
 
-        # Replace ground actions to use freshest scouted as target
+        # Replace ground actions to use freshest unassigned scouted targets.
         found = sc.found_survivors
-        surv_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
-
-        for gi in range(sc.n_ground):
-            ag_idx = sc.n_drones + gi
-            pos = sc.world.agents[ag_idx].state.pos
-
-            # Build per-survivor freshness score; not-yet-scouted → -inf
-            freshness = torch.tensor(
-                [self.scout_step[i] if self.scout_step[i] >= 0 else -1
-                 for i in range(sc.n_survivors)],
-                device=pos.device, dtype=torch.float,
-            )
-            # Mask out already-found ones
-            valid = (freshness >= 0) & ~found[0]
-            if valid.any():
-                # Pick the freshest one (highest scout_step)
-                freshness_masked = torch.where(
-                    valid, freshness, torch.full_like(freshness, float("-inf")),
-                )
-                target_idx = freshness_masked.argmax().item()
-                tgt_pos = surv_pos[:, target_idx, :]
-                delta = (tgt_pos - pos).clamp(-1.0, 1.0)
-                actions[ag_idx] = delta
+        targetable = (self.scout_step >= 0) & ~found
+        fallback = [
+            actions[sc.n_drones + gi]
+            for gi in range(sc.n_ground)
+        ]
+        coordinated = _coordinated_ground_actions(
+            sc, targetable, fallback, priority=self.scout_step,
+        )
+        for gi, action in enumerate(coordinated):
+            actions[sc.n_drones + gi] = action
 
         self.t += 1
         return actions

@@ -37,6 +37,7 @@ X, Y = 0, 1
 # Land-cover types stored in land_cover_grid. Terrain affects ground robots;
 # drones fly above it but observe the map to coordinate ground routes.
 LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK = range(5)
+OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE = range(3)
 
 
 class WildfireSearchScenario(BaseScenario):
@@ -57,7 +58,13 @@ class WildfireSearchScenario(BaseScenario):
         self.y_semidim = kwargs.pop("y_semidim", 1.0)
 
         # Detection / sensing
-        self.drone_lidar_range  = kwargs.pop("drone_lidar_range",  0.50)
+        # Drone search uses a downward camera footprint, not a fixed magic
+        # radius: altitude * tan(FOV / 2) gives the visible ground radius.
+        kwargs.pop("drone_lidar_range", None)  # legacy name; replaced by camera FOV.
+        self.drone_camera_fov_deg = kwargs.pop("drone_camera_fov_deg", 65.0)
+        if not 0.0 < self.drone_camera_fov_deg < 180.0:
+            raise ValueError("drone_camera_fov_deg must be between 0 and 180")
+        self.drone_camera_half_angle_tan = math.tan(math.radians(self.drone_camera_fov_deg) / 2.0)
         self.ground_lidar_range = kwargs.pop("ground_lidar_range", 0.20)
         self.n_lidar_rays       = kwargs.pop("n_lidar_rays", 12)
         self.detection_range    = kwargs.pop("detection_range", 0.10)   # ground confirm radius
@@ -67,6 +74,11 @@ class WildfireSearchScenario(BaseScenario):
         self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.04)
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
         self.fire_step_interval  = kwargs.pop("fire_step_interval", 5)  # spread every N env steps
+        self.smoke_emission = kwargs.pop("smoke_emission", 0.18)
+        self.smoke_decay = kwargs.pop("smoke_decay", 0.96)
+        self.smoke_diffusion = kwargs.pop("smoke_diffusion", 0.16)
+        self.smoke_wind = kwargs.pop("smoke_wind", (1, 0))
+        self.smoke_wind_strength = kwargs.pop("smoke_wind_strength", 0.06)
 
         # Ground terrain: procedural land cover layered on generated elevation.
         # It shares fire resolution so vegetation can later influence spread.
@@ -85,6 +97,30 @@ class WildfireSearchScenario(BaseScenario):
         land_cover_speeds = kwargs.pop("land_cover_speeds", (1.0, 0.9, 0.65, 0.45, 0.0))
         if len(land_cover_costs) != 5 or len(land_cover_speeds) != 5:
             raise ValueError("land-cover cost and speed values must cover road/open/brush/forest/rock")
+        self.terrain_houses = kwargs.pop("terrain_houses", 5)
+        self.tree_height_range = kwargs.pop("tree_height_range", (0.12, 0.24))
+        self.house_height_range = kwargs.pop("house_height_range", (0.08, 0.15))
+
+        # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
+        # flight level. Higher flight clears structures but worsens sensing.
+        drone_flight_levels = kwargs.pop("drone_flight_levels", (0.18, 0.40, 0.70))
+        drone_detection_quality = kwargs.pop(
+            "drone_detection_quality",
+            kwargs.pop("drone_detection_factors", (0.95, 0.75, 0.55)),
+        )
+        drone_energy_costs = kwargs.pop("drone_energy_costs", (0.0, 0.002, 0.006))
+        if not (len(drone_flight_levels) == len(drone_detection_quality) == len(drone_energy_costs)):
+            raise ValueError("drone flight levels, detection quality, and energy costs must align")
+        drone_cover_detection_factors = kwargs.pop(
+            "drone_cover_detection_factors", (1.0, 1.0, 0.72, 0.45, 0.35),
+        )
+        if len(drone_cover_detection_factors) != 5:
+            raise ValueError("drone_cover_detection_factors must cover road/open/brush/forest/rock")
+        self.drone_smoke_detection_factor = kwargs.pop("drone_smoke_detection_factor", 0.55)
+        self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.20)
+        self.drone_safety_clearance = kwargs.pop("drone_safety_clearance", 0.03)
+        self.r_drone_climb_cost = kwargs.pop("r_drone_climb_cost", -0.02)
+        self.drone_sensor_max_range = float(max(drone_flight_levels) * self.drone_camera_half_angle_tan)
 
         # Communication
         self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
@@ -134,7 +170,7 @@ class WildfireSearchScenario(BaseScenario):
                     Lidar(
                         world,
                         n_rays=self.n_lidar_rays,
-                        max_range=self.drone_lidar_range,
+                        max_range=self.drone_sensor_max_range,
                         entity_filter=survivor_filter,
                         render_color=Color.RED,
                     ),
@@ -189,20 +225,37 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.bool, device=device,
         )
+        self.smoke_grid = torch.zeros(
+            batch_dim, self.fire_grid_size, self.fire_grid_size,
+            dtype=torch.float, device=device,
+        )
         self.land_cover_grid = torch.full(
             (batch_dim, self.fire_grid_size, self.fire_grid_size),
             LAND_OPEN, dtype=torch.long, device=device,
         )
         self.elevation_grid = torch.zeros_like(self.fire_grid, dtype=torch.float)
         self.slope_grid = torch.zeros_like(self.elevation_grid)
+        self.obstacle_type_grid = torch.zeros_like(self.land_cover_grid)
+        self.obstacle_height_grid = torch.zeros_like(self.elevation_grid)
+        self.required_clearance_grid = torch.zeros_like(self.elevation_grid)
         self.traversable_grid = torch.ones_like(self.fire_grid)
         self.mobility_cost_grid = torch.ones_like(self.elevation_grid)
         self.speed_multiplier_grid = torch.ones_like(self.elevation_grid)
         self.land_cover_cost_values = torch.tensor(land_cover_costs, dtype=torch.float, device=device)
         self.land_cover_speed_values = torch.tensor(land_cover_speeds, dtype=torch.float, device=device)
+        self.drone_flight_levels = torch.tensor(drone_flight_levels, dtype=torch.float, device=device)
+        self.drone_detection_quality = torch.tensor(drone_detection_quality, dtype=torch.float, device=device)
+        self.drone_cover_detection_factors = torch.tensor(
+            drone_cover_detection_factors, dtype=torch.float, device=device,
+        )
+        self.drone_energy_costs = torch.tensor(drone_energy_costs, dtype=torch.float, device=device)
+        self.drone_altitude = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.drone_altitude_level = torch.zeros(batch_dim, self.n_drones, dtype=torch.long, device=device)
+        self.step_drone_climb = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
         self._prev_ground_pos = torch.zeros(batch_dim, self.n_ground, 2, device=device)
         self._pre_step_ground_pos = torch.zeros_like(self._prev_ground_pos)
+        self._pre_step_drone_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
 
         # Per-agent reward buffers (filled in _compute_step_rewards)
@@ -228,12 +281,14 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.fire_grid.zero_()
+            self.smoke_grid.zero_()
             self.step_count.zero_()
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.fire_grid[env_index] = False
+            self.smoke_grid[env_index] = 0.0
             self.step_count[env_index] = 0
             envs_to_seed = [env_index]
 
@@ -243,6 +298,21 @@ class WildfireSearchScenario(BaseScenario):
             idx = torch.randperm(H * W, device=self.fire_grid.device)[: self.initial_fire_cells]
             self.fire_grid[b].view(-1)[idx] = True
             self._generate_terrain(b)
+
+        drone_agents = self.world.agents[:self.n_drones]
+        if drone_agents:
+            drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
+            if env_index is None:
+                self._pre_step_drone_pos = drone_pos.clone()
+                self._update_drone_altitudes(drone_pos, drone_pos)
+                self.step_drone_climb.zero_()
+            else:
+                self._pre_step_drone_pos[env_index] = drone_pos[env_index]
+                one = torch.tensor([env_index], device=drone_pos.device)
+                self._update_drone_altitudes(
+                    drone_pos[env_index:env_index + 1], drone_pos[env_index:env_index + 1], one,
+                )
+                self.step_drone_climb[env_index] = 0
 
         ground_agents = self.world.agents[self.n_drones:]
         if ground_agents:
@@ -282,6 +352,7 @@ class WildfireSearchScenario(BaseScenario):
 
         self._generate_elevation(env_index)
         self._paint_roads(env_index)
+        self._generate_obstacles(env_index)
         self._clear_entity_staging_areas(env_index)
         self._refresh_mobility_layers(env_index)
 
@@ -326,6 +397,38 @@ class WildfireSearchScenario(BaseScenario):
             grid[i, max(0, x - width): min(size, x + width + 1)] = LAND_ROAD
             grid[max(0, y - width): min(size, y + width + 1), i] = LAND_ROAD
 
+    def _generate_obstacles(self, env_index: int) -> None:
+        """Place tree canopy on forest cells and compact house footprints."""
+        cover = self.land_cover_grid[env_index]
+        objects = self.obstacle_type_grid[env_index]
+        heights = self.obstacle_height_grid[env_index]
+        objects.zero_()
+        heights.zero_()
+        forest = cover == LAND_FOREST
+        objects[forest] = OBJECT_TREE
+        tree_low, tree_high = self.tree_height_range
+        heights[forest] = tree_low + torch.rand_like(heights[forest]) * (tree_high - tree_low)
+
+        size = self.fire_grid_size
+        house_low, house_high = self.house_height_range
+        for _ in range(self.terrain_houses):
+            x = int(torch.randint(1, max(size - 1, 2), (1,), device=cover.device).item())
+            y = int(torch.randint(1, max(size - 1, 2), (1,), device=cover.device).item())
+            footprint_cover = cover[y:y + 2, x:x + 2]
+            buildable = (
+                (footprint_cover == LAND_OPEN)
+                | (footprint_cover == LAND_BRUSH)
+                | (footprint_cover == LAND_FOREST)
+            )
+            if not buildable.any():
+                continue
+            footprint_cover[buildable] = LAND_OPEN
+            objects[y:y + 2, x:x + 2][buildable] = OBJECT_HOUSE
+            house_height = float(
+                (house_low + torch.rand((), device=cover.device) * (house_high - house_low)).item(),
+            )
+            heights[y:y + 2, x:x + 2][buildable] = house_height
+
     def _clear_entity_staging_areas(self, env_index: int) -> None:
         """Ensure survivor locations and ground starts are accessible clearings."""
         entities = self._survivors + self.world.agents[self.n_drones:]
@@ -336,14 +439,26 @@ class WildfireSearchScenario(BaseScenario):
             xs = slice(max(x - 1, 0), min(x + 2, self.fire_grid_size))
             self.land_cover_grid[env_index, ys, xs] = LAND_OPEN
             self.slope_grid[env_index, ys, xs] = 0.0
+            self.obstacle_type_grid[env_index, ys, xs] = OBJECT_NONE
+            self.obstacle_height_grid[env_index, ys, xs] = 0.0
 
     def _refresh_mobility_layers(self, env_index: int) -> None:
         cover = self.land_cover_grid[env_index]
         slope = self.slope_grid[env_index]
+        objects = self.obstacle_type_grid[env_index]
         road = cover == LAND_ROAD
-        traversable = (cover != LAND_ROCK) & ((slope <= self.max_ground_slope) | road)
+        traversable = (
+            (cover != LAND_ROCK) & (objects == OBJECT_NONE)
+            & ((slope <= self.max_ground_slope) | road)
+        )
         cost = self.land_cover_cost_values[cover] * (1.0 + self.slope_cost_weight * slope)
         speed = self.land_cover_speed_values[cover] / (1.0 + self.slope_speed_weight * slope)
+        self.required_clearance_grid[env_index] = (
+            self.elevation_grid[env_index] + self.obstacle_height_grid[env_index]
+            + self.drone_safety_clearance
+        )
+        if self.required_clearance_grid[env_index].max() > self.drone_flight_levels.max():
+            raise ValueError("highest drone_flight_levels entry must clear generated terrain and obstacles")
         self.traversable_grid[env_index] = traversable
         self.mobility_cost_grid[env_index] = cost
         self.speed_multiplier_grid[env_index] = torch.where(
@@ -354,30 +469,67 @@ class WildfireSearchScenario(BaseScenario):
     # Per-step hooks
     # ------------------------------------------------------------------
     def pre_step(self):
-        """Spread fire (cellular automata) and bump step counter."""
+        """Spread fire, evolve smoke, and bump step counter."""
         ground_agents = self.world.agents[self.n_drones:]
         if ground_agents:
             self._pre_step_ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1).clone()
+        drone_agents = self.world.agents[:self.n_drones]
+        if drone_agents:
+            self._pre_step_drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1).clone()
         self.step_count += 1
 
-        if int(self.step_count.max().item()) % self.fire_step_interval != 0:
-            return
+        if int(self.step_count.max().item()) % self.fire_step_interval == 0:
+            self._spread_fire()
+        self._update_smoke()
 
+    def _spread_fire(self) -> None:
         fire = self.fire_grid.float()
+        neighbors = self._neighbor_sum(fire)
+        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** neighbors
+        new_burns = torch.rand_like(p_ignite) < p_ignite
+        self.fire_grid = self.fire_grid | new_burns
+
+    def _update_smoke(self) -> None:
+        """Emit smoke from burning cells, then diffuse, drift, and decay."""
+        smoke = self.smoke_grid * self.smoke_decay
+        smoke = smoke + self.fire_grid.float() * self.smoke_emission
+        neighbor_mean = self._neighbor_sum(smoke) / 4.0
+        smoke = smoke + self.smoke_diffusion * (neighbor_mean - smoke)
+
+        wind_x, wind_y = self.smoke_wind
+        if self.smoke_wind_strength > 0 and (wind_x != 0 or wind_y != 0):
+            shifted = self._shift_grid_no_wrap(smoke, int(wind_x), int(wind_y))
+            smoke = smoke + self.smoke_wind_strength * (shifted - smoke)
+
+        self.smoke_grid = smoke.clamp(0.0, 1.0)
+
+    def _neighbor_sum(self, grid: Tensor) -> Tensor:
         padded = torch.zeros(
-            fire.shape[0], fire.shape[1] + 2, fire.shape[2] + 2,
-            device=fire.device, dtype=fire.dtype,
+            grid.shape[0], grid.shape[1] + 2, grid.shape[2] + 2,
+            device=grid.device, dtype=grid.dtype,
         )
-        padded[:, 1:-1, 1:-1] = fire
-        neighbors = (
+        padded[:, 1:-1, 1:-1] = grid
+        return (
             padded[:, :-2, 1:-1]    # up
             + padded[:, 2:, 1:-1]   # down
             + padded[:, 1:-1, :-2]  # left
             + padded[:, 1:-1, 2:]   # right
         )
-        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** neighbors
-        new_burns = torch.rand_like(p_ignite) < p_ignite
-        self.fire_grid = self.fire_grid | new_burns
+
+    def _shift_grid_no_wrap(self, grid: Tensor, dx: int, dy: int) -> Tensor:
+        shifted = torch.zeros_like(grid)
+        h, w = grid.shape[-2:]
+        src_x0 = max(0, -dx)
+        src_x1 = min(w, w - dx)
+        dst_x0 = max(0, dx)
+        dst_x1 = min(w, w + dx)
+        src_y0 = max(0, -dy)
+        src_y1 = min(h, h - dy)
+        dst_y0 = max(0, dy)
+        dst_y1 = min(h, h + dy)
+        if src_x0 < src_x1 and src_y0 < src_y1:
+            shifted[:, dst_y0:dst_y1, dst_x0:dst_x1] = grid[:, src_y0:src_y1, src_x0:src_x1]
+        return shifted
 
     def process_action(self, agent: Agent):
         """Reduce ground-robot traction/speed on slow surfaces and slopes."""
@@ -389,22 +541,26 @@ class WildfireSearchScenario(BaseScenario):
         agent.action.u = agent.action.u * speed.unsqueeze(-1)
 
     def post_step(self):
-        """Prevent ground robots from crossing rocks or non-traversable slopes."""
+        """Apply blocked ground routes and auto-select safe drone altitude."""
         ground_agents = self.world.agents[self.n_drones:]
-        if not ground_agents:
-            return
-        ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1)
-        traversable = self._path_is_traversable(self._pre_step_ground_pos, ground_pos)
-        for i, agent in enumerate(ground_agents):
-            blocked = ~traversable[:, i]
-            corrected_pos = torch.where(
-                blocked.unsqueeze(-1), self._pre_step_ground_pos[:, i], agent.state.pos,
-            )
-            corrected_vel = torch.where(
-                blocked.unsqueeze(-1), torch.zeros_like(agent.state.vel), agent.state.vel,
-            )
-            agent.set_pos(corrected_pos, batch_index=None)
-            agent.set_vel(corrected_vel, batch_index=None)
+        if ground_agents:
+            ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1)
+            traversable = self._path_is_traversable(self._pre_step_ground_pos, ground_pos)
+            for i, agent in enumerate(ground_agents):
+                blocked = ~traversable[:, i]
+                corrected_pos = torch.where(
+                    blocked.unsqueeze(-1), self._pre_step_ground_pos[:, i], agent.state.pos,
+                )
+                corrected_vel = torch.where(
+                    blocked.unsqueeze(-1), torch.zeros_like(agent.state.vel), agent.state.vel,
+                )
+                agent.set_pos(corrected_pos, batch_index=None)
+                agent.set_vel(corrected_vel, batch_index=None)
+
+        drone_agents = self.world.agents[:self.n_drones]
+        if drone_agents:
+            drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
+            self._update_drone_altitudes(self._pre_step_drone_pos, drone_pos)
 
     # ------------------------------------------------------------------
     # Reward
@@ -421,13 +577,9 @@ class WildfireSearchScenario(BaseScenario):
         surv_pos  = torch.stack([s.state.pos for s in self._survivors], dim=1)    # [B, S, 2]
         dists = torch.cdist(agent_pos, surv_pos)                                  # [B, A, S]
 
-        lidar_ranges = torch.tensor(
-            [self.drone_lidar_range] * self.n_drones
-            + [self.ground_lidar_range] * self.n_ground,
-            device=device,
-        ).view(1, self.n_agents, 1)
-        seen = dists < lidar_ranges                                # [B, A, S]
-        seen_by_drone       = seen[:, :self.n_drones, :].any(dim=1)
+        drone_dists = dists[:, :self.n_drones, :]
+        drone_seen = self._drone_survivor_detections(drone_dists, surv_pos)
+        seen_by_drone       = drone_seen.any(dim=1)
         within_confirm      = dists < self.detection_range
         confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
 
@@ -442,7 +594,6 @@ class WildfireSearchScenario(BaseScenario):
             + self.r_time_penalty
         )
 
-        drone_seen           = seen[:, :self.n_drones, :]
         scout_credit_mask    = drone_seen & newly_scouted.unsqueeze(1)
         scout_per_drone      = scout_credit_mask.float().sum(dim=2)         # [B, D]
 
@@ -463,12 +614,38 @@ class WildfireSearchScenario(BaseScenario):
             r = team_reward.clone()
             if agent.is_drone:
                 r = r + scout_per_drone[:, i] * self.r_drone_scout
+                r = r - self.drone_energy_costs[self.drone_altitude_level[:, i]]
+                r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
                 r = r + ground_in_fire[:, g].float() * self.r_fire_penalty
                 r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
             agent.scenario_reward = r
+
+    def _drone_survivor_detections(self, drone_dists: Tensor, surv_pos: Tensor) -> Tensor:
+        """Stochastic drone scouting from camera footprint and scene quality."""
+        if self.n_drones == 0:
+            return torch.zeros(
+                self.world.batch_dim, 0, self.n_survivors,
+                dtype=torch.bool, device=self.fire_grid.device,
+            )
+
+        footprint = self._drone_camera_ranges().unsqueeze(-1)
+        visible = drone_dists <= footprint
+        normalized_distance = (drone_dists / footprint.clamp_min(1e-6)).clamp(0.0, 1.0)
+        distance_factor = 1.0 - (1.0 - self.drone_edge_detection_floor) * normalized_distance.square()
+
+        gx, gy = self._positions_to_grid(surv_pos)
+        b_idx = torch.arange(self.world.batch_dim, device=surv_pos.device).view(-1, 1).expand_as(gx)
+        survivor_cover = self.land_cover_grid[b_idx, gy, gx]
+        cover_factor = self.drone_cover_detection_factors[survivor_cover].unsqueeze(1)
+        smoke = self.smoke_grid[b_idx, gy, gx].unsqueeze(1)
+        smoke_factor = 1.0 - smoke * (1.0 - self.drone_smoke_detection_factor)
+        altitude_quality = self.drone_detection_quality[self.drone_altitude_level].unsqueeze(-1)
+
+        probability = (altitude_quality * distance_factor * cover_factor * smoke_factor).clamp(0.0, 1.0)
+        return visible & (torch.rand_like(probability) < probability)
 
     def _agents_in_fire(self, agents: List[Agent]) -> Tensor:
         if len(agents) == 0:
@@ -499,11 +676,45 @@ class WildfireSearchScenario(BaseScenario):
         distance = (end_pos - start_pos).norm(dim=-1)
         return distance * multipliers.mean(dim=-1)
 
-    def _path_is_traversable(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
+    def _sample_path(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
         samples = max(int(self.terrain_path_samples), 2)
         alpha = torch.linspace(0.0, 1.0, samples, device=start_pos.device).view(1, 1, -1, 1)
-        path = start_pos.unsqueeze(2) + (end_pos - start_pos).unsqueeze(2) * alpha
+        return start_pos.unsqueeze(2) + (end_pos - start_pos).unsqueeze(2) * alpha
+
+    def _path_is_traversable(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
+        path = self._sample_path(start_pos, end_pos)
         return self._grid_values_at_positions(self.traversable_grid, path).all(dim=-1)
+
+    def _update_drone_altitudes(
+        self,
+        start_pos: Tensor,
+        end_pos: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> None:
+        """Select the lowest flight level that clears each crossed cell."""
+        path = self._sample_path(start_pos, end_pos)
+        required = self._grid_values_at_positions(
+            self.required_clearance_grid, path, env_indices,
+        ).amax(dim=-1)
+        fits = self.drone_flight_levels.view(1, 1, -1) >= required.unsqueeze(-1)
+        selected = fits.to(torch.int64).argmax(dim=-1)
+        selected = torch.where(
+            fits.any(dim=-1), selected, torch.full_like(selected, self.drone_flight_levels.numel() - 1),
+        )
+        if env_indices is None:
+            previous = self.drone_altitude.clone()
+            self.drone_altitude_level = selected
+            self.drone_altitude = self.drone_flight_levels[selected]
+            self.step_drone_climb = (self.drone_altitude - previous).abs()
+        else:
+            previous = self.drone_altitude[env_indices].clone()
+            self.drone_altitude_level[env_indices] = selected
+            self.drone_altitude[env_indices] = self.drone_flight_levels[selected]
+            self.step_drone_climb[env_indices] = (self.drone_altitude[env_indices] - previous).abs()
+
+    def _drone_camera_ranges(self) -> Tensor:
+        """Ground footprint radius for each drone's current flight altitude."""
+        return self.drone_altitude * self.drone_camera_half_angle_tan
 
     def _grid_values_at_positions(
         self,
@@ -534,10 +745,21 @@ class WildfireSearchScenario(BaseScenario):
         own_pos    = agent.state.pos                # [B, 2]
         own_vel    = agent.state.vel                # [B, 2]
         lidar_obs  = agent.sensors[0].measure()     # [B, n_rays]
+        if agent.is_drone:
+            drone_idx = self.world.agents.index(agent)
+            effective_range = self._drone_camera_ranges()[:, drone_idx]
+            lidar_obs = torch.where(
+                lidar_obs <= effective_range.unsqueeze(-1),
+                lidar_obs,
+                torch.full_like(lidar_obs, self.drone_sensor_max_range),
+            )
         fire_local = self._local_fire_density(agent)        # [B, 1]
-        terrain_local = self._local_terrain_features(agent)   # [B, 18]
+        terrain_local = self._local_terrain_features(agent)  # [B, 27]
+        flight_state = self._flight_state(agent)             # [B, 2]
         neighbor   = self._neighbor_observations(agent)     # [B, (A-1)*2]
-        return torch.cat([own_pos, own_vel, lidar_obs, fire_local, terrain_local, neighbor], dim=-1)
+        return torch.cat(
+            [own_pos, own_vel, lidar_obs, fire_local, terrain_local, flight_state, neighbor], dim=-1,
+        )
 
     def _local_fire_density(self, agent: Agent) -> Tensor:
         pos = agent.state.pos
@@ -555,7 +777,7 @@ class WildfireSearchScenario(BaseScenario):
         return (density / 9.0).unsqueeze(-1)
 
     def _local_terrain_features(self, agent: Agent) -> Tensor:
-        """Expose local mobility cost and blocked-cell masks to each agent."""
+        """Expose mobility cost, blocked masks, and air-clearance requirements."""
         pos = agent.state.pos
         gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
             1, self.fire_grid_size - 2
@@ -566,14 +788,26 @@ class WildfireSearchScenario(BaseScenario):
         b_idx = torch.arange(self.world.batch_dim, device=pos.device)
         nearby_costs = []
         nearby_blocked = []
+        nearby_clearance = []
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
                 nearby_costs.append(self.mobility_cost_grid[b_idx, gy + dy, gx + dx])
                 nearby_blocked.append(~self.traversable_grid[b_idx, gy + dy, gx + dx])
+                nearby_clearance.append(self.required_clearance_grid[b_idx, gy + dy, gx + dx])
         costs = torch.stack(nearby_costs, dim=-1)
         blocked = torch.stack(nearby_blocked, dim=-1).float()
+        clearance = torch.stack(nearby_clearance, dim=-1)
         normalized_costs = costs / self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1)
-        return torch.cat([normalized_costs, blocked], dim=-1)
+        normalized_clearance = clearance / self.drone_flight_levels.max()
+        return torch.cat([normalized_costs, blocked, normalized_clearance], dim=-1)
+
+    def _flight_state(self, agent: Agent) -> Tensor:
+        state = torch.zeros(self.world.batch_dim, 2, device=self.fire_grid.device)
+        if agent.is_drone:
+            drone_idx = self.world.agents.index(agent)
+            state[:, 0] = self.drone_altitude[:, drone_idx] / self.drone_flight_levels.max()
+            state[:, 1] = self.drone_detection_quality[self.drone_altitude_level[:, drone_idx]]
+        return state
 
     def _neighbor_observations(self, agent: Agent) -> Tensor:
         deltas = []
@@ -601,11 +835,17 @@ class WildfireSearchScenario(BaseScenario):
     # Info (for evaluation / debugging)
     # ------------------------------------------------------------------
     def info(self, agent: Agent) -> Dict[str, Tensor]:
+        mean_drone_altitude = (
+            self.drone_altitude.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
+        )
         return {
             "n_found":   self.found_survivors.sum(dim=1).float(),
             "n_scouted": self.scouted_survivors.sum(dim=1).float(),
             "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
             "ugv_step_travel_cost": self.step_ugv_travel_cost.sum(dim=1),
+            "mean_drone_altitude": mean_drone_altitude,
         }
 
 

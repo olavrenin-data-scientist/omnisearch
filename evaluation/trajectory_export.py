@@ -21,7 +21,9 @@ JSON schema (one object per file):
           "elevation":     [[0.1, ...], ...],
           "slope":         [[0.2, ...], ...],
           "traversable":   [[true, ...], ...],
-          "movement_cost": [[1.0, ...], ...]
+          "movement_cost": [[1.0, ...], ...],
+          "obstacle_type": [[0, 1, 0, ...], ...],
+          "obstacle_height": [[0.0, 0.2, ...], ...]
         },
         "n_drones":        3,
         "n_ground":        2,
@@ -52,14 +54,19 @@ from envs.wildfire_search import WildfireSearchScenario, X, Y
 from evaluation.mission_metrics import EpisodeRecorder
 
 
-def _agent_record(agent, env_index: int) -> dict:
+def _agent_record(agent, scenario, env_index: int) -> dict:
     pos = agent.state.pos[env_index]
-    return {
+    record = {
         "name": agent.name,
         "type": "drone" if getattr(agent, "is_drone", False) else "ground",
         "x":    float(pos[X]),
         "y":    float(pos[Y]),
     }
+    if getattr(agent, "is_drone", False):
+        drone_index = scenario.world.agents.index(agent)
+        record["altitude"] = float(scenario.drone_altitude[env_index, drone_index])
+        record["altitude_level"] = int(scenario.drone_altitude_level[env_index, drone_index])
+    return record
 
 
 def _survivor_records(scenario, env_index: int) -> List[dict]:
@@ -83,6 +90,12 @@ def _fire_cells(scenario, env_index: int) -> List[List[int]]:
     return [[int(x), int(y)] for x, y in zip(xs, ys)]
 
 
+def _smoke_cells(scenario, env_index: int) -> List[List[float]]:
+    grid = scenario.smoke_grid[env_index].cpu().numpy()
+    ys, xs = (grid > 0.02).nonzero()
+    return [[int(x), int(y), round(float(grid[y, x]), 4)] for x, y in zip(xs, ys)]
+
+
 def _terrain_record(scenario, env_index: int) -> dict:
     """Static map layers used by the replay viewer and later route analysis."""
     def rounded_rows(tensor) -> List[List[float]]:
@@ -95,6 +108,19 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "traversable": scenario.traversable_grid[env_index].cpu().tolist(),
         "movement_cost": rounded_rows(scenario.mobility_cost_grid[env_index]),
         "cover_names": ["road", "open", "brush", "forest", "rock"],
+        "obstacle_type": scenario.obstacle_type_grid[env_index].cpu().tolist(),
+        "obstacle_height": rounded_rows(scenario.obstacle_height_grid[env_index]),
+        "required_clearance": rounded_rows(scenario.required_clearance_grid[env_index]),
+        "obstacle_names": ["none", "tree", "house"],
+        "drone_flight_levels": [round(float(v), 4) for v in scenario.drone_flight_levels.cpu().tolist()],
+        "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
+        "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range), 4),
+        "drone_detection_quality": [
+            round(float(v), 4) for v in scenario.drone_detection_quality.cpu().tolist()
+        ],
+        "drone_cover_detection_factors": [
+            round(float(v), 4) for v in scenario.drone_cover_detection_factors.cpu().tolist()
+        ],
     }
 
 
@@ -116,7 +142,8 @@ def export_trajectory(
     scenario reference get the right one. If you have a pre-built
     action_fn, wrap it as ``make_policy=lambda env: existing_fn``.
     """
-    scenario_kwargs = scenario_kwargs or {}
+    scenario_kwargs = dict(scenario_kwargs or {})
+    max_steps = scenario_kwargs.pop("max_steps", n_steps)
 
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
@@ -124,10 +151,13 @@ def export_trajectory(
         device="cpu",
         continuous_actions=True,
         seed=seed,
+        max_steps=max_steps,
         **scenario_kwargs,
     )
     env.reset()
     sc = env.scenario
+    if max_steps is not None:
+        sc.max_steps = max_steps
     action_fn = make_policy(env)
 
     recorder = EpisodeRecorder(sc, env_index=env_index)
@@ -149,9 +179,10 @@ def export_trajectory(
     # Initial frame (post-reset, before any step)
     frames.append({
         "step":       0,
-        "agents":     [_agent_record(a, env_index) for a in sc.world.agents],
+        "agents":     [_agent_record(a, sc, env_index) for a in sc.world.agents],
         "survivors":  _survivor_records(sc, env_index),
         "fire_cells": _fire_cells(sc, env_index),
+        "smoke_cells": _smoke_cells(sc, env_index),
     })
 
     for step in range(1, n_steps + 1):
@@ -159,9 +190,10 @@ def export_trajectory(
         recorder.step()
         frames.append({
             "step":       step,
-            "agents":     [_agent_record(a, env_index) for a in sc.world.agents],
+            "agents":     [_agent_record(a, sc, env_index) for a in sc.world.agents],
             "survivors":  _survivor_records(sc, env_index),
             "fire_cells": _fire_cells(sc, env_index),
+            "smoke_cells": _smoke_cells(sc, env_index),
         })
         if sc.done()[env_index].item():
             break
