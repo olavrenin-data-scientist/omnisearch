@@ -119,7 +119,7 @@ const h = React.createElement;
 // or by trying a known list. We keep it simple: try a known list, fall
 // back to silent skip per missing file.
 // ---------------------------------------------------------------------
-const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence'];
+const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'happo_trained'];
 
 async function loadTrajectory(name) {
   const res = await fetch(`./trajectories/${name}.json`);
