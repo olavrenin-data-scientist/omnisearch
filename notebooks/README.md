@@ -133,11 +133,11 @@ source .venv/bin/activate
 
 jupyter nbconvert --to notebook --execute --inplace notebooks/01_setup_and_demo.ipynb
 
-# 03 requires sweep output to exist
+# 02 requires sweep output to exist
 python scripts/comms_dropout_sweep.py --seeds 3
 jupyter nbconvert --to notebook --execute --inplace notebooks/02_sweep_results.ipynb
 
-# 05 requires baseline comparison output to exist
+# 03 requires baseline comparison output to exist
 python scripts/compare_baselines.py --seeds 3 --steps 200
 jupyter nbconvert --to notebook --execute --inplace notebooks/03_baseline_comparison.ipynb
 ```

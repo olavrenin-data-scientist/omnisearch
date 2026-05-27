@@ -33,7 +33,7 @@ The MVP answers this in simulation. Three sub-questions:
 |---|---|---|
 | Multi-agent sim | [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator) | 2D, CPU-vectorized, fast |
 | Fire spread | Cellular automata over a 16×16 grid | SimFire compatible (needs Python 3.9–3.10) |
-| MARL training | [BenchMARL](https://github.com/facebookresearch/BenchMARL) (MAPPO, IPPO) | HAPPO not in BenchMARL — see *HAPPO note* below |
+| MARL training | [BenchMARL](https://github.com/facebookresearch/BenchMARL) (MAPPO, IPPO) + [HARL](https://github.com/PKU-MARL/HARL) (HAPPO) | All three algorithms train on the same `WildfireSearchScenario` |
 | Experiment tracking | [Weights & Biases](https://wandb.ai) | Optional; pass `loggers=["wandb"]` |
 | Deliverable (planned) | React + Three.js viewer | Strategy comparison & replay |
 
@@ -153,7 +153,7 @@ python scripts/compare_baselines.py                       # 3 seeds, 200 steps, 
 python scripts/compare_baselines.py --seeds 5 --steps 250
 ```
 
-Runs each strategy across multiple seeds, reports mean ± std on all six mission-level metrics (survivor recall, time-to-verification, false-positive trips, hazard exposure, UGV travel cost), writes `results/baseline_comparison_*.json`. **Trained MAPPO/IPPO policies plug in via the same harness** once a checkpoint exists — see [scripts/compare_baselines.py](scripts/compare_baselines.py) for the TODO.
+Runs each strategy across multiple seeds, reports mean ± std on all six mission-level metrics (survivor recall, time-to-verification, false-positive trips, hazard exposure, UGV travel cost), writes `results/baseline_comparison_*.json`. **Trained HAPPO already plugs in via the same harness** — see [agents/happo_policy.py](agents/happo_policy.py) and the `happo_trained` entry in [scripts/export_trajectories.py](scripts/export_trajectories.py). MAPPO/IPPO checkpoint loaders are still TODO.
 
 ### 4. Notebooks — exploratory + visualization
 
@@ -195,7 +195,10 @@ omnisearch/
 │   ├── wildfire_task.py           # BenchMARL Task wiring (MAPPO / IPPO)
 │   ├── train_helpers.py           # smoke_config() / research_config()
 │   ├── baselines.py               # Hand-coded coordination strategies
-│   └── harl_env.py                # HARL-shape adapter for HAPPO training
+│   ├── harl_env.py                # HARL-shape adapter (single env) for HAPPO
+│   ├── harl_vec_env.py            # Batched VMAS vec env for HAPPO (4× FPS)
+│   ├── harl_runner.py             # train_happo() entry point + monkey-patches
+│   └── happo_policy.py            # Load HAPPO checkpoint → VMAS policy(env)
 │
 ├── evaluation/
 │   ├── mission_metrics.py         # The 6 metrics from the project plan + DRR
@@ -205,7 +208,7 @@ omnisearch/
 │   ├── train_mappo_smoke.py       # MAPPO smoke run (BenchMARL)
 │   ├── train_ippo_smoke.py        # IPPO  smoke run (BenchMARL)
 │   ├── train_happo_smoke.py       # HAPPO smoke run (HARL)
-│   ├── comms_dropout_sweep.py     # MAPPO × IPPO × 4 dropouts ablation
+│   ├── comms_dropout_sweep.py     # MAPPO × IPPO × HAPPO × 4 dropouts × N seeds + MW-U
 │   ├── compare_baselines.py       # Multi-seed baseline comparison
 │   └── export_trajectories.py     # → web/trajectories/*.json for the viewer
 │
