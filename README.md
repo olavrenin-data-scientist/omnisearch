@@ -124,6 +124,21 @@ See [notebooks/README.md](notebooks/README.md) for the cell-by-cell walkthrough 
 | 02 | Detection Pipeline | Fire → YOLOv8 person → alert |
 | 03 | Sweep Results | Visualise comms-dropout JSON |
 | 04 | Closed Loop | Sim → synthetic UAV view → detection |
+| 05 | Baseline Comparison | Bar charts + winners table per metric |
+
+### 5. Web viewer — React + Three.js replay
+
+```bash
+# 1. Export one trajectory JSON per baseline (~1.5 s total)
+python scripts/export_trajectories.py
+
+# 2. Serve the web/ folder (browsers need HTTP for fetch)
+python -m http.server -d web 8080
+
+# 3. Open http://localhost:8080
+```
+
+Top-down replay of each strategy with playback controls + mission-metrics panel. No `npm install`, no build — single HTML file, dependencies loaded from `esm.sh`. See [web/README.md](web/README.md).
 
 ---
 
