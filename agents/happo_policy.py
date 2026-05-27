@@ -4,7 +4,7 @@ Load a trained HAPPO checkpoint and expose it as a VMAS action_fn.
 HARL saves one ``actor_agentN.pt`` file per agent after training. This module
 reconstructs those actors (the network shape is determined by `algo_args` and
 the env's spaces), restores their state dicts, and wraps them in a callable
-that ``run_closed_loop`` / ``export_trajectory`` can use as the policy.
+that ``export_trajectory`` / ``compare_baselines`` can use as the policy.
 
 Usage::
 

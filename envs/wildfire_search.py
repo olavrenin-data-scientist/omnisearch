@@ -6,10 +6,10 @@ Heterogeneous drones (fast, wide lidar) + ground robots (slow, fire-sensitive)
 search for survivor landmarks in a 2D world while a cellular-automata fire
 spreads over a discrete grid overlaid on the continuous world.
 
-Detection in this scenario is **abstract** (lidar / distance-based) — it's the
-MARL training proxy for what the deployed system does with the YOLOv8 person
-detector (see `detection/`). Drones scout fast and broad; ground robots
-confirm precisely and pay a penalty for entering burning cells.
+Detection in this scenario is **abstract** (lidar / distance-based). Drones
+scout fast and broad; ground robots confirm precisely and pay a penalty for
+entering burning cells. The real-world perception layer (camera + detector)
+is out of scope for this MVP — sensing is modelled as VMAS lidar.
 
 References:
   - VMAS scenarios: https://vmas.readthedocs.io/en/stable/usage/scenarios.html
