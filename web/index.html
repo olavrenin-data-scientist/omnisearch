@@ -179,6 +179,7 @@ const COLORS = {
   survivor_outline:    0xffffff,
   fire_outer:          0xf06e1e,   // orange
   fire_inner:          0xfacc15,   // yellow hot core
+  smoke:               0xcbd5e1,   // pale gray-blue
 };
 const TERRAIN_COLORS = [
   0xb59665,  // road
@@ -187,6 +188,7 @@ const TERRAIN_COLORS = [
   0x203d24,  // forest
   0x555963,  // rock
 ];
+const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
 
 // ---------------------------------------------------------------------
 // Entity factories — small Groups composed of primitive meshes so each
@@ -194,8 +196,17 @@ const TERRAIN_COLORS = [
 // Animated children are tagged via userData so the RAF loop can update
 // them (propeller spin, fire flicker) without rebuilding geometry.
 // ---------------------------------------------------------------------
-function makeDroneMesh() {
+function makeDroneMesh(altitude = 0, maxAltitude = 1) {
   const g = new THREE.Group();
+  const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(0.058, 0.065, 28),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.drone, transparent: true, opacity: 0.18 + altitudeScale * 0.45,
+    }),
+  );
+  halo.position.z = -0.01;
+  g.add(halo);
   // X-shaped frame (two crossed bars)
   const armMat = new THREE.MeshBasicMaterial({ color: COLORS.drone_dark });
   const arm1 = new THREE.Mesh(new THREE.PlaneGeometry(0.10, 0.007), armMat);
@@ -222,6 +233,7 @@ function makeDroneMesh() {
     prop.userData.phase  = Math.random() * Math.PI; // desync drones
     g.add(prop);
   }
+  g.scale.setScalar(1 + altitudeScale * 0.25);
   return g;
 }
 
@@ -363,8 +375,59 @@ function makeFireMesh(size) {
   return g;
 }
 
+function makeSmokeMesh(size, intensity) {
+  const opacity = Math.min(0.42, 0.08 + intensity * 0.34);
+  const mesh = new THREE.Mesh(
+    new THREE.CircleGeometry(size * (0.45 + intensity * 0.35), 24),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.smoke,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+    }),
+  );
+  mesh.scale.set(1.25, 0.85, 1);
+  mesh.userData.isSmoke = true;
+  mesh.userData.baseOp = opacity;
+  mesh.userData.phase = intensity * Math.PI * 2;
+  return mesh;
+}
+
+function makeTreeMesh(size, height) {
+  const g = new THREE.Group();
+  const canopy = new THREE.Mesh(
+    new THREE.CircleGeometry(size * 0.43, 18),
+    new THREE.MeshBasicMaterial({ color: height > 0.18 ? 0x133521 : 0x1d5128 }),
+  );
+  canopy.position.z = 0.012;
+  const crown = new THREE.Mesh(
+    new THREE.CircleGeometry(size * 0.25, 16),
+    new THREE.MeshBasicMaterial({ color: 0x316c34 }),
+  );
+  crown.position.set(-size * 0.08, size * 0.08, 0.018);
+  g.add(canopy, crown);
+  return g;
+}
+
+function makeHouseMesh(size, height) {
+  const g = new THREE.Group();
+  const walls = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * 0.78, size * 0.70),
+    new THREE.MeshBasicMaterial({ color: 0xd5bd93 }),
+  );
+  const roof = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * 0.86, size * 0.48),
+    new THREE.MeshBasicMaterial({ color: height > 0.11 ? 0x8b3b32 : 0xa34d3d }),
+  );
+  roof.position.set(0, size * 0.05, 0.014);
+  roof.rotation.z = Math.PI / 4;
+  g.add(walls, roof);
+  return g;
+}
+
 function renderTerrain(state, meta) {
   clearGroup(state.terrainGroup);
+  clearGroup(state.obstacleGroup);
   const terrain = meta?.terrain;
   if (!terrain?.land_cover) return;
   const G = meta.fire_grid_size;
@@ -382,17 +445,28 @@ function renderTerrain(state, meta) {
       );
       tile.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.45);
       state.terrainGroup.add(tile);
+
+      const objectType = terrain.obstacle_type?.[gy]?.[gx] ?? OBJECT_NONE;
+      const objectHeight = terrain.obstacle_height?.[gy]?.[gx] ?? 0;
+      let obstacle = null;
+      if (objectType === OBJECT_TREE) obstacle = makeTreeMesh(cell, objectHeight);
+      if (objectType === OBJECT_HOUSE) obstacle = makeHouseMesh(cell, objectHeight);
+      if (obstacle) {
+        obstacle.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.20);
+        state.obstacleGroup.add(obstacle);
+      }
     }
   }
 }
 
 function renderFrame(state, frame, meta, histories) {
-  const { fireGroup, agentGroup, survGroup, trailGroup } = state;
+  const { fireGroup, smokeGroup, agentGroup, survGroup, trailGroup } = state;
   if (state.terrainSource !== meta.terrain) {
     renderTerrain(state, meta);
     state.terrainSource = meta.terrain;
   }
   clearGroup(fireGroup);
+  clearGroup(smokeGroup);
   clearGroup(agentGroup);
   clearGroup(survGroup);
   clearGroup(trailGroup);
@@ -404,6 +478,13 @@ function renderFrame(state, frame, meta, histories) {
     const mesh = makeFireMesh(cell);
     mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.3);
     fireGroup.add(mesh);
+  }
+
+  // --- Smoke plume cells (float intensity: 0 clear, 1 dense) ---
+  for (const [gx, gy, intensity] of frame.smoke_cells ?? []) {
+    const mesh = makeSmokeMesh(cell, intensity);
+    mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.10);
+    smokeGroup.add(mesh);
   }
 
   // --- Survivors (shoulders + head + state ring) ---
@@ -436,8 +517,9 @@ function renderFrame(state, frame, meta, histories) {
   }
 
   // --- Agents (compound quadcopters / rovers) ---
+  const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
   for (const a of frame.agents) {
-    const mesh = a.type === 'drone' ? makeDroneMesh() : makeGroundMesh();
+    const mesh = a.type === 'drone' ? makeDroneMesh(a.altitude, maxAltitude) : makeGroundMesh();
     mesh.position.set(a.x, a.y, 0.05);
     // Heading: rotate ground robots to face their direction of travel,
     // based on the previous-step velocity from history.
@@ -475,6 +557,13 @@ function tickAnimation(state, t) {
       obj.scale.set(s, s, 1);
     }
   });
+  state.smokeGroup.traverse(obj => {
+    if (obj.userData?.isSmoke) {
+      const phase = obj.userData.phase || 0;
+      const baseOp = obj.userData.baseOp || 0.2;
+      obj.material.opacity = Math.max(0.04, baseOp * (0.85 + 0.15 * Math.sin(t * 2.5 + phase)));
+    }
+  });
   state.survGroup.traverse(obj => {
     if (obj.userData?.isPulse) {
       const s = 1 + 0.1 * Math.sin(t * 6);
@@ -508,12 +597,15 @@ function useThree(meta, frame, histories) {
 
     const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
     const fireGroup  = new THREE.Group();  scene.add(fireGroup);
+    const smokeGroup = new THREE.Group();  scene.add(smokeGroup);
+    const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
     const trailGroup = new THREE.Group();  scene.add(trailGroup);
     const survGroup  = new THREE.Group();  scene.add(survGroup);
     const agentGroup = new THREE.Group();  scene.add(agentGroup);
 
     stateRef.current = {
-      renderer, scene, camera, terrainGroup, fireGroup, trailGroup, agentGroup, survGroup,
+      renderer, scene, camera, terrainGroup, fireGroup, smokeGroup, obstacleGroup,
+      trailGroup, agentGroup, survGroup,
       terrainSource: null,
     };
 
@@ -592,6 +684,8 @@ function Legend() {
     ['square', '#315a2e', 'Brush'],
     ['square', '#203d24', 'Forest'],
     ['square', '#555963', 'Rock / blocked'],
+    ['circle', '#1d5128', 'Tree canopy'],
+    ['square', '#a34d3d', 'House'],
     ['square', '#f06e1e', 'Fire'],
   ];
   return h('div', { id: 'legend' },
@@ -607,7 +701,7 @@ function Legend() {
   );
 }
 
-function MetricsPanel({ meta }) {
+function MetricsPanel({ meta, frame }) {
   const m = meta?.metrics ?? {};
   const fmt = (v, suffix='') => {
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
@@ -621,6 +715,7 @@ function MetricsPanel({ meta }) {
     ['UGV travel cost',      fmt(m.ugv_travel_cost)],
     ['Episode length',       fmt(m.n_steps, ' steps')],
   ];
+  const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
   return h('aside', null,
     h('div', { className: 'panel' },
       h('h2', null, 'Strategy'),
@@ -634,6 +729,13 @@ function MetricsPanel({ meta }) {
       rows.map(([k, v]) => h('div', { key: k, className: 'metric' },
         h('span', { className: 'k' }, k),
         h('span', { className: 'v' }, v),
+      )),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Drone flight altitude'),
+      drones.map(a => h('div', { key: a.name, className: 'metric' },
+        h('span', { className: 'k' }, a.name),
+        h('span', { className: 'v' }, fmt(a.altitude)),
       )),
     ),
   );
@@ -702,7 +804,7 @@ function App() {
             'Run `python scripts/export_trajectories.py` first.'),
         ),
       ),
-      h(MetricsPanel, { meta }),
+      h(MetricsPanel, { meta, frame }),
     ),
     h('footer', null,
       h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
