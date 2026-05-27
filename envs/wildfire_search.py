@@ -77,8 +77,20 @@ class WildfireSearchScenario(BaseScenario):
         self.smoke_emission = kwargs.pop("smoke_emission", 0.18)
         self.smoke_decay = kwargs.pop("smoke_decay", 0.96)
         self.smoke_diffusion = kwargs.pop("smoke_diffusion", 0.16)
-        self.smoke_wind = kwargs.pop("smoke_wind", (1, 0))
-        self.smoke_wind_strength = kwargs.pop("smoke_wind_strength", 0.06)
+        land_cover_fire_fuel = kwargs.pop("land_cover_fire_fuel", (0.05, 0.40, 1.10, 1.35, 0.0))
+        object_fire_fuel = kwargs.pop("object_fire_fuel", (0.0, 0.25, 1.00))
+        if len(land_cover_fire_fuel) != 5:
+            raise ValueError("land_cover_fire_fuel must cover road/open/brush/forest/rock")
+        if len(object_fire_fuel) != 3:
+            raise ValueError("object_fire_fuel must cover none/tree/house")
+        wind_direction = kwargs.pop("wind_direction", kwargs.pop("smoke_wind", (1, 0)))
+        if len(wind_direction) != 2:
+            raise ValueError("wind_direction must be a 2D vector")
+        self.wind_direction = (float(wind_direction[0]), float(wind_direction[1]))
+        self.wind_strength = min(
+            max(float(kwargs.pop("wind_strength", kwargs.pop("smoke_wind_strength", 0.06))), 0.0),
+            0.95,
+        )
 
         # Ground terrain: procedural land cover layered on generated elevation.
         # It shares fire resolution so vegetation can later influence spread.
@@ -154,13 +166,16 @@ class WildfireSearchScenario(BaseScenario):
         )
 
         survivor_filter: Callable = lambda e: e.name.startswith("survivor")
+        drone_collision_filter: Callable = lambda e: getattr(e, "is_drone", None) is not False
 
         # Drones: fast, wide lidar. VMAS requires collide=True for lidar ray
-        # casting; in concept these fly above ground (2D-abstracted here).
+        # casting against survivors. Their collision filter excludes UGVs so
+        # the 2D physics engine respects vertical air-ground separation.
         for i in range(self.n_drones):
             agent = Agent(
                 name=f"drone_{i}",
                 collide=True,
+                collision_filter=drone_collision_filter,
                 shape=Sphere(radius=self.agent_radius),
                 max_speed=0.5,
                 u_range=1.0,
@@ -243,6 +258,8 @@ class WildfireSearchScenario(BaseScenario):
         self.speed_multiplier_grid = torch.ones_like(self.elevation_grid)
         self.land_cover_cost_values = torch.tensor(land_cover_costs, dtype=torch.float, device=device)
         self.land_cover_speed_values = torch.tensor(land_cover_speeds, dtype=torch.float, device=device)
+        self.land_cover_fire_fuel = torch.tensor(land_cover_fire_fuel, dtype=torch.float, device=device)
+        self.object_fire_fuel = torch.tensor(object_fire_fuel, dtype=torch.float, device=device)
         self.drone_flight_levels = torch.tensor(drone_flight_levels, dtype=torch.float, device=device)
         self.drone_detection_quality = torch.tensor(drone_detection_quality, dtype=torch.float, device=device)
         self.drone_cover_detection_factors = torch.tensor(
@@ -292,12 +309,22 @@ class WildfireSearchScenario(BaseScenario):
             self.step_count[env_index] = 0
             envs_to_seed = [env_index]
 
-        # Seed initial fire cells (random per-batch)
         H = W = self.fire_grid_size
         for b in envs_to_seed:
-            idx = torch.randperm(H * W, device=self.fire_grid.device)[: self.initial_fire_cells]
-            self.fire_grid[b].view(-1)[idx] = True
             self._generate_terrain(b)
+            self._seed_initial_fire(b, H, W)
+
+    def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
+        """Start fires on cells that have enough fuel to burn."""
+        fuel = self._fire_fuel_grid(env_index)
+        candidates = (fuel > 0.20).flatten().nonzero(as_tuple=False).flatten()
+        if candidates.numel() == 0:
+            candidates = torch.arange(height * width, device=self.fire_grid.device)
+        n_cells = min(int(self.initial_fire_cells), int(candidates.numel()))
+        if n_cells <= 0:
+            return
+        choice = candidates[torch.randperm(candidates.numel(), device=self.fire_grid.device)[:n_cells]]
+        self.fire_grid[env_index].view(-1)[choice] = True
 
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
@@ -484,24 +511,66 @@ class WildfireSearchScenario(BaseScenario):
 
     def _spread_fire(self) -> None:
         fire = self.fire_grid.float()
-        neighbors = self._neighbor_sum(fire)
-        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** neighbors
-        new_burns = torch.rand_like(p_ignite) < p_ignite
+        neighbors = self._wind_weighted_neighbor_sum(fire)
+        fuel = self._fire_fuel_grid()
+        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** (neighbors * fuel)
+        new_burns = (torch.rand_like(p_ignite) < p_ignite) & (fuel > 0.0)
         self.fire_grid = self.fire_grid | new_burns
 
     def _update_smoke(self) -> None:
         """Emit smoke from burning cells, then diffuse, drift, and decay."""
         smoke = self.smoke_grid * self.smoke_decay
-        smoke = smoke + self.fire_grid.float() * self.smoke_emission
+        fuel = self._fire_fuel_grid()
+        smoke = smoke + self.fire_grid.float() * self.smoke_emission * fuel.clamp(0.0, 1.0)
         neighbor_mean = self._neighbor_sum(smoke) / 4.0
         smoke = smoke + self.smoke_diffusion * (neighbor_mean - smoke)
 
-        wind_x, wind_y = self.smoke_wind
-        if self.smoke_wind_strength > 0 and (wind_x != 0 or wind_y != 0):
-            shifted = self._shift_grid_no_wrap(smoke, int(wind_x), int(wind_y))
-            smoke = smoke + self.smoke_wind_strength * (shifted - smoke)
+        shifted = self._wind_advected_grid(smoke)
+        if shifted is not None:
+            smoke = smoke + self.wind_strength * (shifted - smoke)
 
         self.smoke_grid = smoke.clamp(0.0, 1.0)
+
+    def _normalized_wind(self) -> tuple[float, float]:
+        wind_x, wind_y = self.wind_direction
+        magnitude = math.hypot(wind_x, wind_y)
+        if magnitude <= 1e-6 or self.wind_strength <= 0:
+            return 0.0, 0.0
+        return wind_x / magnitude, wind_y / magnitude
+
+    def _wind_cell_offset(self) -> tuple[int, int]:
+        wind_x, wind_y = self._normalized_wind()
+        return int(round(wind_x)), int(round(wind_y))
+
+    def _wind_advected_grid(self, grid: Tensor) -> Tensor | None:
+        wind_x, wind_y = self._normalized_wind()
+        if self.wind_strength <= 0 or (wind_x == 0.0 and wind_y == 0.0):
+            return None
+        abs_x, abs_y = abs(wind_x), abs(wind_y)
+        total = abs_x + abs_y
+        if total <= 1e-6:
+            return None
+        advected = torch.zeros_like(grid)
+        if abs_x > 1e-6:
+            advected = advected + (abs_x / total) * self._shift_grid_no_wrap(grid, 1 if wind_x > 0 else -1, 0)
+        if abs_y > 1e-6:
+            advected = advected + (abs_y / total) * self._shift_grid_no_wrap(grid, 0, 1 if wind_y > 0 else -1)
+        return advected
+
+    def _wind_weighted_neighbor_sum(self, grid: Tensor) -> Tensor:
+        padded = torch.zeros(
+            grid.shape[0], grid.shape[1] + 2, grid.shape[2] + 2,
+            device=grid.device, dtype=grid.dtype,
+        )
+        padded[:, 1:-1, 1:-1] = grid
+        wind_x, wind_y = self._normalized_wind()
+        strength = self.wind_strength
+        return (
+            padded[:, :-2, 1:-1] * (1.0 + strength * wind_y)   # source north, spread south
+            + padded[:, 2:, 1:-1] * (1.0 - strength * wind_y)  # source south, spread north
+            + padded[:, 1:-1, :-2] * (1.0 + strength * wind_x) # source west, spread east
+            + padded[:, 1:-1, 2:] * (1.0 - strength * wind_x)  # source east, spread west
+        )
 
     def _neighbor_sum(self, grid: Tensor) -> Tensor:
         padded = torch.zeros(
@@ -515,6 +584,16 @@ class WildfireSearchScenario(BaseScenario):
             + padded[:, 1:-1, :-2]  # left
             + padded[:, 1:-1, 2:]   # right
         )
+
+    def _fire_fuel_grid(self, env_index: int | None = None) -> Tensor:
+        if env_index is None:
+            cover = self.land_cover_grid
+            objects = self.obstacle_type_grid
+        else:
+            cover = self.land_cover_grid[env_index]
+            objects = self.obstacle_type_grid[env_index]
+        fuel = self.land_cover_fire_fuel[cover] + self.object_fire_fuel[objects]
+        return fuel.clamp(0.0, 1.5)
 
     def _shift_grid_no_wrap(self, grid: Tensor, dx: int, dy: int) -> Tensor:
         shifted = torch.zeros_like(grid)
