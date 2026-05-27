@@ -148,5 +148,20 @@ def export_trajectory(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps({"metadata": metadata, "frames": frames}))
+    # allow_nan=False forces NaN → error; we sanitize first so JS's JSON.parse
+    # (which doesn't accept the JS literal `NaN`) can load the file cleanly.
+    payload = _sanitize_for_json({"metadata": metadata, "frames": frames})
+    output_path.write_text(json.dumps(payload, allow_nan=False))
     return output_path
+
+
+def _sanitize_for_json(obj):
+    """Recursively replace NaN / +-inf with None so JSON.parse can load it."""
+    import math
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
