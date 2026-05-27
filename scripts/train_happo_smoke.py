@@ -20,6 +20,7 @@ Prerequisite: HARL must be installed in the active venv:
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -32,17 +33,29 @@ from agents.harl_runner import train_happo
 
 
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--num-env-steps", type=int, default=8_000,
+                   help="Total environment steps. 8_000 = smoke (~5 s). "
+                        "80_000 ≈ 1 min, produces a useful policy. "
+                        "400_000 ≈ 5 min, research-grade.")
+    p.add_argument("--seed",          type=int, default=1)
+    p.add_argument("--comms-dropout", type=float, default=0.0)
+    p.add_argument("--exp-name",      default="happo_smoke")
+    args = p.parse_args()
+
     print("=" * 60)
-    print(" OmniSearch — HAPPO smoke training (HARL)")
+    print(" OmniSearch — HAPPO training (HARL)")
+    print(f" num_env_steps: {args.num_env_steps}")
+    print(f" comms_dropout: {args.comms_dropout}")
     print("=" * 60)
 
     t0 = time.time()
     result = train_happo(
-        seed              = 1,
-        num_env_steps     = 8_000,
-        comms_dropout     = 0.0,
+        seed              = args.seed,
+        num_env_steps     = args.num_env_steps,
+        comms_dropout     = args.comms_dropout,
         n_rollout_threads = 8,
-        exp_name          = "happo_smoke",
+        exp_name          = args.exp_name,
     )
     print("-" * 60)
     print(f" HAPPO smoke complete in {time.time() - t0:.1f}s")

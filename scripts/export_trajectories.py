@@ -25,6 +25,7 @@ import vmas
 from envs.wildfire_search import WildfireSearchScenario
 from agents.baselines import BASELINES, RandomPolicy
 from evaluation.trajectory_export import export_trajectory
+from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 
 
 def main():
@@ -59,6 +60,34 @@ def main():
             scenario_kwargs={"comms_dropout": args.comms_dropout},
         )
         print(f"  ✓ {name:22s} → {path.relative_to(ROOT)}  ({time.time() - t0:.1f}s)")
+
+    # Trained HAPPO policy — pulls the most recent checkpoint from results/harl_runs/
+    try:
+        ckpt = find_latest_happo_checkpoint().resolve()
+        try:
+            ckpt_disp = ckpt.relative_to(ROOT.resolve())
+        except ValueError:
+            ckpt_disp = ckpt
+        print(f"  · HAPPO checkpoint: {ckpt_disp}")
+        def make_happo(env, _ckpt=ckpt):
+            return HappoPolicy.from_checkpoint(_ckpt)
+        t0 = time.time()
+        path = export_trajectory(
+            strategy_name="happo_trained",
+            make_policy=make_happo,
+            output_path=out_dir / "happo_trained.json",
+            n_steps=args.steps,
+            seed=args.seed,
+            scenario_kwargs={"comms_dropout": args.comms_dropout},
+        )
+        try:
+            disp = path.relative_to(ROOT.resolve())
+        except ValueError:
+            disp = path
+        print(f"  ✓ {'happo_trained':22s} → {disp}  ({time.time() - t0:.1f}s)")
+    except FileNotFoundError as e:
+        print(f"  ⚠ HAPPO export skipped ({e})")
+        print(f"    Run `python scripts/train_happo_smoke.py` first to produce a checkpoint.")
 
     print("-" * 60)
     print(f" Done. Serve with: python -m http.server -d web")
