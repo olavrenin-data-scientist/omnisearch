@@ -342,7 +342,10 @@ function makeFireMesh(size) {
         color: L.color, transparent: true, opacity: L.opacity,
       }),
     );
-    mesh.position.z = -0.3 + i * 0.003;
+    // Local z is just stacking order inside the fire group; the group
+    // itself is positioned at z = -0.3 in renderFrame, so we keep this
+    // small and positive to avoid sinking below the background plane.
+    mesh.position.z = i * 0.003;
     mesh.userData.isFireLayer = true;
     mesh.userData.phase       = Math.random() * Math.PI * 2;
     mesh.userData.baseOp      = L.opacity;
