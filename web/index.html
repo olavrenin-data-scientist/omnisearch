@@ -251,34 +251,71 @@ function makeGroundMesh() {
 }
 
 function makeSurvivorMesh(survivorState) {
-  // Top-down stylised person: shoulders (rounded rect) + head (circle)
+  // Top-down human silhouette: head + torso + outstretched arms + legs.
+  // Clothing colour encodes detection state so the figure stays readable.
   const stateColor = survivorState.found
     ? COLORS.survivor_confirmed
     : survivorState.scouted
       ? COLORS.survivor_scouted
       : COLORS.survivor_unscouted;
   const g = new THREE.Group();
-  // State ring (visible against fire)
+
+  // State ring — outside the figure so it's visible over fire
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.038, 0.048, 28),
+    new THREE.RingGeometry(0.045, 0.054, 28),
     new THREE.MeshBasicMaterial({ color: stateColor }),
   );
-  ring.position.z = -0.01;
+  ring.position.z = -0.02;
   g.add(ring);
-  // Shoulders (rounded rectangle — a circle for simplicity since we're tiny)
-  const shoulders = new THREE.Mesh(
-    new THREE.CircleGeometry(0.024, 24),
-    new THREE.MeshBasicMaterial({ color: stateColor }),
+
+  const clothingMat = new THREE.MeshBasicMaterial({ color: stateColor });
+
+  // Outstretched arms (horizontal bar — gives the human silhouette)
+  const arms = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.052, 0.008),
+    clothingMat,
   );
-  g.add(shoulders);
-  // Head
-  const head = new THREE.Mesh(
+  arms.position.set(0, 0.002, 0.002);
+  g.add(arms);
+
+  // Torso (taller-than-wide ellipse)
+  const torso = new THREE.Mesh(
     new THREE.CircleGeometry(0.014, 24),
+    clothingMat,
+  );
+  torso.scale.set(1.0, 1.8, 1);
+  torso.position.z = 0.005;
+  g.add(torso);
+
+  // Legs (two small rectangles below torso, dark pants)
+  const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
+  for (const dx of [-1, 1]) {
+    const leg = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.008, 0.016),
+      legMat,
+    );
+    leg.position.set(dx * 0.008, -0.022, 0.003);
+    g.add(leg);
+  }
+
+  // Head (skin-tone, on top of torso)
+  const head = new THREE.Mesh(
+    new THREE.CircleGeometry(0.012, 24),
     new THREE.MeshBasicMaterial({ color: COLORS.skin }),
   );
-  head.position.z = 0.01;
+  head.position.set(0, 0.020, 0.012);
   g.add(head);
-  // Pulse on the ring if scouted-but-not-confirmed (calls for attention)
+
+  // Hair (small dark cap, hint of detail from above)
+  const hair = new THREE.Mesh(
+    new THREE.CircleGeometry(0.013, 20),
+    new THREE.MeshBasicMaterial({ color: 0x3a2412 }),
+  );
+  hair.scale.set(1, 0.65, 1);
+  hair.position.set(0, 0.023, 0.011);
+  g.add(hair);
+
+  // Pulse the state ring if scouted-but-not-confirmed (call for attention)
   if (survivorState.scouted && !survivorState.found) {
     ring.userData.isPulse = true;
   }
@@ -286,28 +323,33 @@ function makeSurvivorMesh(survivorState) {
 }
 
 function makeFireMesh(size) {
+  // Layered circular flame: dark base → red → orange → amber → white-hot.
+  // Each layer flickers opacity + scale on its own phase so a fire cell
+  // looks like a real flame dancing, not a static coloured tile.
   const g = new THREE.Group();
-  // Outer flicker plane
-  const outer = new THREE.Mesh(
-    new THREE.PlaneGeometry(size * 1.05, size * 1.05),
-    new THREE.MeshBasicMaterial({
-      color: COLORS.fire_outer, transparent: true, opacity: 0.92,
-    }),
-  );
-  outer.userData.isFireOuter = true;
-  outer.userData.phase = Math.random() * Math.PI * 2;
-  g.add(outer);
-  // Hot inner core
-  const inner = new THREE.Mesh(
-    new THREE.PlaneGeometry(size * 0.55, size * 0.55),
-    new THREE.MeshBasicMaterial({
-      color: COLORS.fire_inner, transparent: true, opacity: 0.8,
-    }),
-  );
-  inner.position.z = 0.01;
-  inner.userData.isFireCore = true;
-  inner.userData.phase = Math.random() * Math.PI * 2;
-  g.add(inner);
+  const layers = [
+    { color: 0x6b1206, r: 0.58, opacity: 0.45 },   // dark red base
+    { color: 0xa42208, r: 0.48, opacity: 0.70 },   // red
+    { color: 0xe85a18, r: 0.38, opacity: 0.85 },   // orange
+    { color: 0xf9ad22, r: 0.27, opacity: 0.93 },   // amber
+    { color: 0xfff0a8, r: 0.16, opacity: 0.90 },   // hot core
+  ];
+  for (let i = 0; i < layers.length; i++) {
+    const L = layers[i];
+    const mesh = new THREE.Mesh(
+      new THREE.CircleGeometry(size * L.r, 28),
+      new THREE.MeshBasicMaterial({
+        color: L.color, transparent: true, opacity: L.opacity,
+      }),
+    );
+    mesh.position.z = -0.3 + i * 0.003;
+    mesh.userData.isFireLayer = true;
+    mesh.userData.phase       = Math.random() * Math.PI * 2;
+    mesh.userData.baseOp      = L.opacity;
+    // Outer layers wobble more; the hot core stays focused.
+    mesh.userData.wobble      = 0.18 - i * 0.028;
+    g.add(mesh);
+  }
   return g;
 }
 
@@ -377,7 +419,7 @@ function renderFrame(state, frame, meta, histories) {
   }
 }
 
-// Animate per-RAF: propeller spin, fire flicker, scouted-survivor pulse.
+// Animate per-RAF: propeller spin, layered fire flicker, scouted-survivor pulse.
 function tickAnimation(state, t) {
   state.agentGroup.traverse(obj => {
     if (obj.userData?.isProp) {
@@ -385,20 +427,20 @@ function tickAnimation(state, t) {
     }
   });
   state.fireGroup.traverse(obj => {
-    if (obj.userData?.isFireCore) {
-      const phase = obj.userData.phase || 0;
-      const s = 0.85 + 0.15 * Math.sin(t * 7 + phase);
+    if (obj.userData?.isFireLayer) {
+      const phase  = obj.userData.phase  || 0;
+      const baseOp = obj.userData.baseOp || 0.7;
+      const wobble = obj.userData.wobble || 0.1;
+      // Opacity flicker
+      obj.material.opacity = Math.max(0.05, baseOp * (0.7 + 0.3 * Math.sin(t * 8 + phase)));
+      // Scale wobble (more on the outer layers, less on the hot core)
+      const s = 1 + wobble * Math.sin(t * 11 + phase * 1.7);
       obj.scale.set(s, s, 1);
-      obj.material.opacity = 0.55 + 0.35 * Math.sin(t * 9 + phase);
-    }
-    if (obj.userData?.isFireOuter) {
-      const phase = obj.userData.phase || 0;
-      obj.material.opacity = 0.78 + 0.18 * Math.sin(t * 5 + phase);
     }
   });
   state.survGroup.traverse(obj => {
     if (obj.userData?.isPulse) {
-      const s = 1 + 0.08 * Math.sin(t * 6);
+      const s = 1 + 0.1 * Math.sin(t * 6);
       obj.scale.set(s, s, 1);
     }
   });
