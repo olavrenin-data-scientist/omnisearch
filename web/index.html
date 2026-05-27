@@ -47,9 +47,19 @@
     border-radius: 6px; padding: 8px 12px;
     font-size: 12px; color: var(--muted);
   }
-  #legend .dot {
-    display: inline-block; width: 10px; height: 10px;
-    border-radius: 50%; margin-right: 6px; vertical-align: middle;
+  #legend .swatch {
+    display: inline-block; width: 14px; height: 14px;
+    margin-right: 8px; vertical-align: middle;
+  }
+  #legend .swatch.circle { border-radius: 50%; }
+  #legend .swatch.square { border-radius: 2px; }
+  #legend .swatch.tri {
+    width: 0; height: 0;
+    background: transparent !important;
+    border-left:  7px solid transparent;
+    border-right: 7px solid transparent;
+    border-bottom: 12px solid var(--swatch-color);
+    margin-right: 8px;
   }
   aside {
     width: 280px; border-left: 1px solid var(--border);
@@ -155,48 +165,120 @@ function clearGroup(group) {
   }
 }
 
-function renderFrame(state, frame, meta) {
-  const { fireGroup, agentGroup, survGroup } = state;
+// --- Shape factories: drones = triangles, ground = squares, survivors = circles ---
+function triangleGeom(size = 0.06) {
+  const s = size;
+  const g = new THREE.BufferGeometry();
+  // Upward-pointing isoceles triangle
+  const verts = new Float32Array([
+     0,      s * 0.9, 0,
+    -s * 0.8, -s * 0.5, 0,
+     s * 0.8, -s * 0.5, 0,
+  ]);
+  g.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  return g;
+}
+function squareGeom(size = 0.06) {
+  return new THREE.PlaneGeometry(size, size);
+}
+
+// --- Color palette (visually distinct, accessible) ---
+const COLORS = {
+  drone:               0x4a90ff,   // bright blue (triangle)
+  ground:              0x14b8a6,   // teal       (square)
+  survivor_unscouted:  0xff3838,   // red
+  survivor_scouted:    0xfbbf24,   // amber
+  survivor_confirmed:  0x84cc16,   // lime
+  survivor_outline:    0xffffff,
+  fire:                0xf06e1e,   // orange
+};
+
+function renderFrame(state, frame, meta, histories) {
+  const { fireGroup, agentGroup, survGroup, trailGroup } = state;
   clearGroup(fireGroup);
   clearGroup(agentGroup);
   clearGroup(survGroup);
+  clearGroup(trailGroup);
 
-  // Fire cells — orange plane per burning cell
+  // --- Fire cells ---
   const G = meta.fire_grid_size;
   const cell = 2 / G;
-  const fireMat = new THREE.MeshBasicMaterial({ color: 0xf06e1e });
+  const fireMat = new THREE.MeshBasicMaterial({ color: COLORS.fire });
   for (const [gx, gy] of frame.fire_cells) {
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(cell, cell), fireMat);
     mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.3);
     fireGroup.add(mesh);
   }
 
-  // Survivors — colored by state (unscouted=red, scouted=warn, found=good)
+  // --- Survivors (always circles; colour = state) ---
   for (const s of frame.survivors) {
-    const color = s.found ? 0x88ff88 : (s.scouted ? 0xffaa00 : 0xff4444);
-    const mat = new THREE.MeshBasicMaterial({ color });
-    const mesh = new THREE.Mesh(new THREE.CircleGeometry(0.035, 24), mat);
+    const fill = s.found
+      ? COLORS.survivor_confirmed
+      : s.scouted
+        ? COLORS.survivor_scouted
+        : COLORS.survivor_unscouted;
+    const mesh = new THREE.Mesh(
+      new THREE.CircleGeometry(0.035, 24),
+      new THREE.MeshBasicMaterial({ color: fill }),
+    );
     mesh.position.set(s.x, s.y, -0.1);
     survGroup.add(mesh);
 
-    // Ring outline so unscouted survivors stay visible against fire
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.035, 0.04, 24), ringMat);
+    // White outline ring — keeps survivors visible over fire
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.038, 0.045, 24),
+      new THREE.MeshBasicMaterial({ color: COLORS.survivor_outline }),
+    );
     ring.position.set(s.x, s.y, -0.09);
     survGroup.add(ring);
   }
 
-  // Agents — sphere markers
+  // --- Agent trails (last 25 positions per agent, fading) ---
+  const TRAIL_LEN = 25;
   for (const a of frame.agents) {
-    const color = a.type === 'drone' ? 0x5d82fa : 0x5dc85d;
-    const mat   = new THREE.MeshBasicMaterial({ color });
-    const mesh  = new THREE.Mesh(new THREE.CircleGeometry(0.045, 24), mat);
+    const hist = (histories[a.name] || []).slice(
+      Math.max(0, frame.step - TRAIL_LEN), frame.step + 1,
+    );
+    if (hist.length < 2) continue;
+    const positions = new Float32Array(hist.length * 3);
+    for (let i = 0; i < hist.length; i++) {
+      positions[i * 3 + 0] = hist[i][0];
+      positions[i * 3 + 1] = hist[i][1];
+      positions[i * 3 + 2] = -0.05;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: a.type === 'drone' ? COLORS.drone : COLORS.ground,
+      transparent: true, opacity: 0.55,
+    });
+    trailGroup.add(new THREE.Line(geom, mat));
+  }
+
+  // --- Agents (drones = triangles, ground = squares) ---
+  for (const a of frame.agents) {
+    const isDrone = a.type === 'drone';
+    const color   = isDrone ? COLORS.drone : COLORS.ground;
+    const geom    = isDrone ? triangleGeom(0.07) : squareGeom(0.07);
+    const mesh    = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color }));
     mesh.position.set(a.x, a.y, 0.05);
     agentGroup.add(mesh);
   }
 }
 
-function useThree(meta, frame) {
+// Build per-agent position history from all frames (run once when data loads)
+function buildHistories(frames) {
+  const out = {};
+  for (const f of frames) {
+    for (const a of f.agents) {
+      if (!out[a.name]) out[a.name] = [];
+      out[a.name].push([a.x, a.y]);
+    }
+  }
+  return out;
+}
+
+function useThree(meta, frame, histories) {
   const canvasRef = useRef(null);
   const stateRef = useRef(null);
 
@@ -207,11 +289,12 @@ function useThree(meta, frame) {
     const rect = canvas.parentElement.getBoundingClientRect();
     const { renderer, scene, camera } = setupScene(canvas, rect.width, rect.height);
 
-    const fireGroup = new THREE.Group();   scene.add(fireGroup);
-    const survGroup = new THREE.Group();   scene.add(survGroup);
+    const fireGroup  = new THREE.Group();  scene.add(fireGroup);
+    const trailGroup = new THREE.Group();  scene.add(trailGroup);
+    const survGroup  = new THREE.Group();  scene.add(survGroup);
     const agentGroup = new THREE.Group();  scene.add(agentGroup);
 
-    stateRef.current = { renderer, scene, camera, fireGroup, agentGroup, survGroup };
+    stateRef.current = { renderer, scene, camera, fireGroup, trailGroup, agentGroup, survGroup };
 
     let raf;
     const tick = () => {
@@ -240,9 +323,9 @@ function useThree(meta, frame) {
 
   // Render frame whenever frame or meta changes
   useEffect(() => {
-    if (!stateRef.current || !frame || !meta) return;
-    renderFrame(stateRef.current, frame, meta);
-  }, [meta, frame]);
+    if (!stateRef.current || !frame || !meta || !histories) return;
+    renderFrame(stateRef.current, frame, meta, histories);
+  }, [meta, frame, histories]);
 
   return canvasRef;
 }
@@ -274,18 +357,25 @@ function usePlayback(nFrames) {
 // Components
 // ---------------------------------------------------------------------
 function Legend() {
+  // [shape, color, label]
   const items = [
-    ['#5d82fa', 'Drone'],
-    ['#5dc85d', 'Ground robot'],
-    ['#ff4444', 'Survivor (unscouted)'],
-    ['#ffaa00', 'Survivor (scouted)'],
-    ['#88ff88', 'Survivor (confirmed)'],
-    ['#f06e1e', 'Fire'],
+    ['tri',    '#4a90ff', 'Drone'],
+    ['square', '#14b8a6', 'Ground robot'],
+    ['circle', '#ff3838', 'Survivor (unscouted)'],
+    ['circle', '#fbbf24', 'Survivor (scouted)'],
+    ['circle', '#84cc16', 'Survivor (confirmed)'],
+    ['square', '#f06e1e', 'Fire'],
   ];
   return h('div', { id: 'legend' },
-    items.map(([c, label]) => h('div', { key: label, style: { lineHeight: '1.7' } },
-      h('span', { className: 'dot', style: { background: c } }), label,
-    )),
+    items.map(([shape, c, label]) =>
+      h('div', { key: label, style: { lineHeight: '1.85' } },
+        h('span', {
+          className: `swatch ${shape}`,
+          style: { background: shape === 'tri' ? 'transparent' : c, '--swatch-color': c },
+        }),
+        label,
+      ),
+    ),
   );
 }
 
@@ -335,10 +425,11 @@ function App() {
 
   const meta = data?.metadata;
   const frames = data?.frames ?? [];
+  const histories = useMemo(() => buildHistories(frames), [data]);
   const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
 
   const frame = frames[step] ?? null;
-  const canvasRef = useThree(meta, frame);
+  const canvasRef = useThree(meta, frame, histories);
 
   return h(React.Fragment, null,
     h('header', null,
