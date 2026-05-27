@@ -69,7 +69,7 @@ class WildfireTask(Task):
 
 # Default scenario kwargs for a small/fast smoke training run.
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "max_steps":          200,
+    "max_steps":          400,
     "n_drones":             3,
     "n_ground":             2,
     "n_survivors":          5,
@@ -78,7 +78,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "drone_lidar_range":  0.50,
     "ground_lidar_range": 0.20,
     "n_lidar_rays":        12,
-    "detection_range":   0.10,
+    "detection_range":   0.13,
     "fire_grid_size":      16,
     "fire_spread_prob":  0.04,
     "initial_fire_cells":   1,
