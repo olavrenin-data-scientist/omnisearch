@@ -38,7 +38,7 @@ The MVP answers this in simulation. Three sub-questions:
 | Experiment tracking | [Weights & Biases](https://wandb.ai) | Optional; pass `loggers=["wandb"]` |
 | Deliverable (planned) | React + Three.js viewer | Strategy comparison & replay |
 
-**HAPPO note.** BenchMARL 1.x ships MAPPO/IPPO/MADDPG/MASAC/QMIX/VDN/IQL — *not* HAPPO. True HAPPO (Kuba 2022) requires [HARL](https://github.com/PKU-MARL/HARL) integration; we currently use MAPPO and IPPO, which already train per-group policies over the scenario's `group_map = {drone: […], ground: […]}`. That captures the heterogeneity dimension. HAPPO is a documented stretch goal.
+**HAPPO is wired.** BenchMARL 1.x ships MAPPO/IPPO/MADDPG/MASAC/QMIX/VDN/IQL — *not* HAPPO. True HAPPO (Kuba 2022) is in the [HARL](https://github.com/PKU-MARL/HARL) library. We bridge HARL to our VMAS scenario via [agents/harl_env.py](agents/harl_env.py) (a HARL-shape adapter around `WildfireSearchScenario`) and run it via [scripts/train_happo_smoke.py](scripts/train_happo_smoke.py). The script monkey-patches HARL's env registry at runtime to recognise the `wildfire` env without modifying HARL source — clone HARL once next to this repo and `pip install -e ../HARL` is the whole install. MAPPO and IPPO via BenchMARL stay available for comparison.
 
 ---
 
@@ -83,14 +83,25 @@ wandb login
 
 Each entry point is a script in `scripts/` or a notebook in `notebooks/`. All outputs land in `results/` (gitignored).
 
-### 1. Smoke training — verify the MARL pipeline runs (~3–4 s each)
+### 1. Smoke training — verify the MARL pipeline runs (~3–6 s each)
 
 ```bash
-python scripts/train_mappo_smoke.py     # MAPPO  — centralized critic, per-group actors
-python scripts/train_ippo_smoke.py      # IPPO   — fully decentralized
+python scripts/train_mappo_smoke.py     # MAPPO — centralized critic, per-group actors (BenchMARL)
+python scripts/train_ippo_smoke.py      # IPPO  — fully decentralized              (BenchMARL)
+python scripts/train_happo_smoke.py     # HAPPO — sequential update + monotonic improvement (HARL)
 ```
 
-Each trains for 3 iterations × 2 000 frames. The successful exit is the milestone — the policy is far from converged. For a credible training run, edit the config in [agents/train_helpers.py](agents/train_helpers.py) (`research_config()`).
+Each trains a tiny budget. The successful exit is the milestone — the policy is far from converged.
+
+For HAPPO, install HARL first (one-time):
+
+```bash
+cd .. && git clone https://github.com/PKU-MARL/HARL.git
+cd HARL && pip install -e .
+cd ../omnisearch
+```
+
+For a credible training run, edit the config in [agents/train_helpers.py](agents/train_helpers.py) (`research_config()`) for MAPPO/IPPO, or the `build_args()` function in `scripts/train_happo_smoke.py` for HAPPO.
 
 ### 2. Comms-dropout sweep — the headline ablation
 
@@ -149,9 +160,10 @@ omnisearch/
 ├── envs/wildfire_search.py        # WildfireSearchScenario (VMAS)
 │
 ├── agents/
-│   ├── wildfire_task.py           # BenchMARL Task wiring
+│   ├── wildfire_task.py           # BenchMARL Task wiring (MAPPO / IPPO)
 │   ├── train_helpers.py           # smoke_config() / research_config()
-│   └── baselines.py               # Hand-coded coordination strategies
+│   ├── baselines.py               # Hand-coded coordination strategies
+│   └── harl_env.py                # HARL-shape adapter for HAPPO training
 │
 ├── detection/                     # Fire → YOLOv8 person pipeline (real images)
 │   ├── fire_detector.py           # HSV thresholding + connected components
@@ -164,9 +176,10 @@ omnisearch/
 │   └── sim_renderer.py            # Synthetic UAV top-down view of the scenario
 │
 ├── scripts/
-│   ├── train_mappo_smoke.py       # 3-iter MAPPO training
-│   ├── train_ippo_smoke.py        # 3-iter IPPO training
-│   ├── comms_dropout_sweep.py     # 2 algos × 4 dropouts ablation
+│   ├── train_mappo_smoke.py       # MAPPO smoke run (BenchMARL)
+│   ├── train_ippo_smoke.py        # IPPO  smoke run (BenchMARL)
+│   ├── train_happo_smoke.py       # HAPPO smoke run (HARL)
+│   ├── comms_dropout_sweep.py     # MAPPO × IPPO × 4 dropouts ablation
 │   ├── compare_baselines.py       # Multi-seed baseline comparison
 │   └── export_trajectories.py     # → web/trajectories/*.json for the viewer
 │
@@ -223,16 +236,17 @@ highest_confidence        0.00     nan     0      3.33
 | `WildfireSearchScenario` (heterogeneous, CA fire, comms_dropout knob) | ✓ |
 | Detection pipeline (fire → YOLOv8 person → alert) | ✓ |
 | BenchMARL wired (MAPPO + IPPO) | ✓ |
+| **HAPPO wired (HARL adapter + smoke train passes)** | ✓ |
 | Comms-dropout sweep + results notebook | ✓ |
 | Closed-loop sim → UAV view → detection | ✓ |
 | Mission-level metrics (6 + DRR) | ✓ |
 | Hand-coded baselines + comparison harness | ✓ |
+| Web deliverable (React + Three.js strategy viewer) | ✓ |
 | Trained-policy rollout (load checkpoint into `compare_baselines.py`) | ✗ — needs `--research` budget run first |
-| HAPPO (real, via HARL) | ✗ — stretch |
+| HAPPO in the comms-dropout sweep alongside MAPPO/IPPO | ✗ — sweep currently uses BenchMARL only |
 | Multi-seed sweep + confidence bands | ✗ |
 | Statistical significance tests (Mann-Whitney U) | ✗ |
 | Probabilistic sensor model + candidate belief map | ✗ — current baselines use ground-truth scout/found |
-| Web deliverable (React + Three.js) | ✗ |
 
 ---
 
