@@ -16,6 +16,13 @@ JSON schema (one object per file):
         "n_steps":         200,
         "world":           { "x_semidim": 1.0, "y_semidim": 1.0 },
         "fire_grid_size":  16,
+        "terrain": {
+          "land_cover":    [[1, 1, 0, ...], ...],
+          "elevation":     [[0.1, ...], ...],
+          "slope":         [[0.2, ...], ...],
+          "traversable":   [[true, ...], ...],
+          "movement_cost": [[1.0, ...], ...]
+        },
         "n_drones":        3,
         "n_ground":        2,
         "n_survivors":     5,
@@ -76,6 +83,21 @@ def _fire_cells(scenario, env_index: int) -> List[List[int]]:
     return [[int(x), int(y)] for x, y in zip(xs, ys)]
 
 
+def _terrain_record(scenario, env_index: int) -> dict:
+    """Static map layers used by the replay viewer and later route analysis."""
+    def rounded_rows(tensor) -> List[List[float]]:
+        return [[round(float(v), 4) for v in row] for row in tensor.cpu().tolist()]
+
+    return {
+        "land_cover": scenario.land_cover_grid[env_index].cpu().tolist(),
+        "elevation": rounded_rows(scenario.elevation_grid[env_index]),
+        "slope": rounded_rows(scenario.slope_grid[env_index]),
+        "traversable": scenario.traversable_grid[env_index].cpu().tolist(),
+        "movement_cost": rounded_rows(scenario.mobility_cost_grid[env_index]),
+        "cover_names": ["road", "open", "brush", "forest", "rock"],
+    }
+
+
 def export_trajectory(
     strategy_name: str,
     make_policy:   Callable,
@@ -116,6 +138,7 @@ def export_trajectory(
         "n_steps":        n_steps,
         "world":          {"x_semidim": sc.x_semidim, "y_semidim": sc.y_semidim},
         "fire_grid_size": sc.fire_grid_size,
+        "terrain":        _terrain_record(sc, env_index),
         "n_drones":       sc.n_drones,
         "n_ground":       sc.n_ground,
         "n_survivors":    sc.n_survivors,

@@ -14,7 +14,7 @@ Per the plan:
     time_to_verification    lower      avg steps from scout → confirm
     false_positive_trips    lower      ground-robot trips to empty location
     hazard_exposure         lower      step-count of ground robots in fire
-    ugv_travel_cost         lower      total ground-robot path length
+    ugv_travel_cost         lower      terrain-weighted ground-robot path length
     drr (across dropouts)   higher     graceful degradation under comms loss
 
 The recorder runs *inside* a normal scenario rollout: every step it reads
@@ -43,7 +43,7 @@ class MissionMetrics:
     time_to_verification: float     # steps; np.nan if no verifications
     false_positive_trips: int
     hazard_exposure:      int       # ground-robot-steps spent on burning cells
-    ugv_travel_cost:      float     # sum of per-step distances across ground robots
+    ugv_travel_cost:      float     # terrain-weighted distance across ground robots
     n_steps:              int
 
     def as_dict(self) -> Dict[str, float]:
@@ -84,7 +84,11 @@ class EpisodeRecorder:
         # Ground-robot per-step state for travel / hazard / trip outcomes
         self.n_ground = scenario.n_ground
         self.n_drones = scenario.n_drones
-        self._prev_ground_pos: Optional[torch.Tensor] = None
+        ground_agents = scenario.world.agents[self.n_drones:]
+        self._prev_ground_pos: Optional[torch.Tensor] = (
+            torch.stack([a.state.pos[env_index] for a in ground_agents], dim=0).clone()
+            if ground_agents else None
+        )
         self.travel_cost     = 0.0
         self.hazard_exposure = 0
 
@@ -120,8 +124,11 @@ class EpisodeRecorder:
         if ground_agents:
             pos = torch.stack([a.state.pos[b] for a in ground_agents], dim=0)  # (G, 2)
             if self._prev_ground_pos is not None:
-                step_dist = (pos - self._prev_ground_pos).norm(dim=-1).sum().item()
-                self.travel_cost += float(step_dist)
+                env_indices = torch.tensor([b], device=pos.device, dtype=torch.long)
+                step_cost = sc._terrain_path_cost(
+                    self._prev_ground_pos.unsqueeze(0), pos.unsqueeze(0), env_indices,
+                )
+                self.travel_cost += float(step_cost.sum().item())
             self._prev_ground_pos = pos.clone()
 
             # Hazard exposure — reuse the scenario helper
