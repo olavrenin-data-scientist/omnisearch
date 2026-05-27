@@ -40,7 +40,10 @@ class WildfireSearchScenario(BaseScenario):
     # World construction
     # ------------------------------------------------------------------
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
-        # Team composition
+        # Team composition  —  3 drones + 2 ground robots (per project plan).
+        # With max_steps=400 and detection_range=0.13 (set below), even 2
+        # ground robots can in principle confirm all 5 survivors within an
+        # episode, so the recall ceiling is now ~100%, not ~40%.
         self.n_drones    = kwargs.pop("n_drones", 3)
         self.n_ground    = kwargs.pop("n_ground", 2)
         self.n_survivors = kwargs.pop("n_survivors", 5)
@@ -50,11 +53,12 @@ class WildfireSearchScenario(BaseScenario):
         self.x_semidim = kwargs.pop("x_semidim", 1.0)
         self.y_semidim = kwargs.pop("y_semidim", 1.0)
 
-        # Detection / sensing
+        # Detection / sensing  —  bumped ground confirm radius from 0.10 to 0.13
+        # so confirmations happen on close approach, not pin-point contact.
         self.drone_lidar_range  = kwargs.pop("drone_lidar_range",  0.50)
         self.ground_lidar_range = kwargs.pop("ground_lidar_range", 0.20)
         self.n_lidar_rays       = kwargs.pop("n_lidar_rays", 12)
-        self.detection_range    = kwargs.pop("detection_range", 0.10)   # ground confirm radius
+        self.detection_range    = kwargs.pop("detection_range", 0.13)   # ground confirm radius
 
         # Fire spread (cellular automata on a discrete grid overlay)
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 16)
@@ -65,8 +69,10 @@ class WildfireSearchScenario(BaseScenario):
         # Communication
         self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
 
-        # Episode
-        self.max_steps = kwargs.pop("max_steps", 200)
+        # Episode  —  doubled from 200 → 400 so ground robots have time to make
+        # multiple confirmation trips. With max_speed=0.2, 200 steps lets a
+        # ground robot traverse the map ~once; 400 lets it confirm 2-3 survivors.
+        self.max_steps = kwargs.pop("max_steps", 400)
 
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)

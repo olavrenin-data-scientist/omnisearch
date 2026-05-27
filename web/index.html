@@ -136,10 +136,15 @@ function setupScene(canvas, width, height) {
   renderer.setSize(width, height, false);
   renderer.setClearColor(0x0e1118, 1);
 
-  // Square view, keep world aspect 1:1 inside whatever canvas size we get
+  // Show the full world (x,y ∈ [-1, 1]) in BOTH axes, regardless of canvas
+  // aspect ratio. The previous code did halfH = halfW / aspect which cropped
+  // the world to a strip when the canvas was landscape — drones at y=±1 were
+  // invisible. Now we expand whichever axis is wider so the world's full
+  // 2×2 box is always inside the frustum.
+  const baseHalf = 1.15;
   const aspect = width / height;
-  const halfW = 1.15;
-  const halfH = halfW / aspect;
+  const halfW = aspect >= 1 ? baseHalf * aspect : baseHalf;
+  const halfH = aspect >= 1 ? baseHalf            : baseHalf / aspect;
   const camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 100);
   camera.position.set(0, 0, 10);
   camera.lookAt(0, 0, 0);
@@ -522,9 +527,10 @@ function useThree(meta, frame, histories) {
     const onResize = () => {
       const r = canvas.parentElement.getBoundingClientRect();
       renderer.setSize(r.width, r.height, false);
+      const baseHalf = 1.15;
       const aspect = r.width / r.height;
-      const halfW = 1.15;
-      const halfH = halfW / aspect;
+      const halfW = aspect >= 1 ? baseHalf * aspect : baseHalf;
+      const halfH = aspect >= 1 ? baseHalf            : baseHalf / aspect;
       camera.left = -halfW; camera.right = halfW;
       camera.top = halfH; camera.bottom = -halfH;
       camera.updateProjectionMatrix();
