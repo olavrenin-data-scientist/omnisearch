@@ -175,6 +175,7 @@ def train_happo(
     comms_dropout:  float = 0.0,
     n_rollout_threads: int = 8,
     exp_name:       str   = "happo",
+    entropy_coef:   float = 0.01,
 ) -> Dict[str, Any]:
     """
     Train HAPPO at the given seed + comms_dropout, return final metrics.
@@ -200,6 +201,7 @@ def train_happo(
     algo_args["seed"]["seed"] = seed
     algo_args["train"]["num_env_steps"]     = num_env_steps
     algo_args["train"]["n_rollout_threads"] = n_rollout_threads
+    algo_args["algo"]["entropy_coef"]       = entropy_coef
 
     env_args = default_env_args()
     env_args["scenario_kwargs"] = {**env_args["scenario_kwargs"],

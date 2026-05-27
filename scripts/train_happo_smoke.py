@@ -40,6 +40,9 @@ def main():
                         "400_000 ≈ 5 min, research-grade.")
     p.add_argument("--seed",          type=int, default=1)
     p.add_argument("--comms-dropout", type=float, default=0.0)
+    p.add_argument("--entropy-coef",  type=float, default=0.01,
+                   help="Higher (0.05+) encourages exploration — helps break "
+                        "the drones-at-corners action-saturation pathology.")
     p.add_argument("--exp-name",      default="happo_smoke")
     args = p.parse_args()
 
@@ -47,6 +50,7 @@ def main():
     print(" OmniSearch — HAPPO training (HARL)")
     print(f" num_env_steps: {args.num_env_steps}")
     print(f" comms_dropout: {args.comms_dropout}")
+    print(f" entropy_coef:  {args.entropy_coef}")
     print("=" * 60)
 
     t0 = time.time()
@@ -56,6 +60,7 @@ def main():
         comms_dropout     = args.comms_dropout,
         n_rollout_threads = 8,
         exp_name          = args.exp_name,
+        entropy_coef      = args.entropy_coef,
     )
     print("-" * 60)
     print(f" HAPPO smoke complete in {time.time() - t0:.1f}s")
