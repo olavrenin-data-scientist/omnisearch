@@ -121,6 +121,14 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "drone_cover_detection_factors": [
             round(float(v), 4) for v in scenario.drone_cover_detection_factors.cpu().tolist()
         ],
+        "wind_direction": [round(float(v), 4) for v in scenario.wind_direction],
+        "wind_strength": round(float(scenario.wind_strength), 4),
+        "land_cover_fire_fuel": [
+            round(float(v), 4) for v in scenario.land_cover_fire_fuel.cpu().tolist()
+        ],
+        "object_fire_fuel": [
+            round(float(v), 4) for v in scenario.object_fire_fuel.cpu().tolist()
+        ],
     }
 
 
