@@ -428,6 +428,22 @@ function App() {
   const histories = useMemo(() => buildHistories(frames), [data]);
   const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
 
+  // Reset playback whenever the user switches strategy (or trajectory reloads).
+  useEffect(() => {
+    setStep(0);
+    setPlaying(true);
+  }, [strategy]);
+
+  // Play button: if we're parked at the end, rewind first.
+  const onPlay = () => {
+    if (step >= frames.length - 1) {
+      setStep(0);
+      setPlaying(true);
+    } else {
+      setPlaying(p => !p);
+    }
+  };
+
   const frame = frames[step] ?? null;
   const canvasRef = useThree(meta, frame, histories);
 
@@ -461,8 +477,8 @@ function App() {
       h(MetricsPanel, { meta }),
     ),
     h('footer', null,
-      h('button', { onClick: () => { setPlaying(false); setStep(0); } }, '⟲'),
-      h('button', { onClick: () => setPlaying(p => !p) }, playing ? 'Pause' : 'Play'),
+      h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
+      h('button', { onClick: onPlay }, playing ? 'Pause' : (step >= frames.length - 1 ? 'Replay' : 'Play')),
       h('input', {
         type: 'range', min: 0, max: Math.max(0, frames.length - 1),
         value: step, onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
