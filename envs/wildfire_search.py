@@ -74,6 +74,13 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_confirm = kwargs.pop("r_ground_confirm", 0.5)
         self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.001)
         self.r_fire_penalty   = kwargs.pop("r_fire_penalty", -1.0)
+        # Potential-based dense shaping (Ng et al. 1999): α·(prev_dist - curr_dist)
+        # Drones get pulled toward the nearest UNSCOUTED survivor; ground robots
+        # toward the nearest SCOUTED-BUT-UNCONFIRMED one. Tiny weights so the
+        # accumulated shaping per episode is comparable to scout/confirm bonuses
+        # (not dominant). Set to 0.0 to disable shaping and reproduce sparse rewards.
+        self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
+        self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -166,6 +173,16 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
 
+        # Previous-step distances for potential-based shaping. Initialised to
+        # +inf so the first step yields shaping=0 (we only start shaping once
+        # we have a real previous reference).
+        self.prev_drone_dist = torch.full(
+            (batch_dim, self.n_drones), float("inf"), device=device,
+        )
+        self.prev_ground_dist = torch.full(
+            (batch_dim, self.n_ground), float("inf"), device=device,
+        )
+
         # Per-agent reward buffers (filled in _compute_step_rewards)
         for agent in world.agents:
             agent.scenario_reward = torch.zeros(batch_dim, device=device)
@@ -190,12 +207,16 @@ class WildfireSearchScenario(BaseScenario):
             self.scouted_survivors.zero_()
             self.fire_grid.zero_()
             self.step_count.zero_()
+            self.prev_drone_dist.fill_(float("inf"))
+            self.prev_ground_dist.fill_(float("inf"))
             envs_to_seed = range(self.world.batch_dim)
         else:
-            self.found_survivors[env_index] = False
+            self.found_survivors[env_index]   = False
             self.scouted_survivors[env_index] = False
-            self.fire_grid[env_index] = False
-            self.step_count[env_index] = 0
+            self.fire_grid[env_index]         = False
+            self.step_count[env_index]        = 0
+            self.prev_drone_dist[env_index]   = float("inf")
+            self.prev_ground_dist[env_index]  = float("inf")
             envs_to_seed = [env_index]
 
         # Seed initial fire cells (random per-batch)
@@ -276,14 +297,66 @@ class WildfireSearchScenario(BaseScenario):
 
         ground_in_fire = self._agents_in_fire(self.world.agents[self.n_drones:])  # [B, G]
 
+        # ------------------------------------------------------------------
+        # Dense potential-based shaping rewards (Ng et al. 1999)
+        # ------------------------------------------------------------------
+        # Targets are defined AFTER this step's scouted/found updates so a
+        # newly-scouted survivor stops being a drone target immediately.
+        # Each agent's shaping = α · (prev_dist - curr_dist) where dist is
+        # to the nearest live target. inf in prev means "no reference yet" →
+        # shaping is zero this step.
+        INF = float("inf")
+
+        # --- Drones: target = unscouted survivors ---
+        unscouted = ~self.scouted_survivors                                     # [B, S]
+        drone_d = torch.where(
+            unscouted.unsqueeze(1),
+            dists[:, :self.n_drones, :],
+            torch.full_like(dists[:, :self.n_drones, :], INF),
+        )
+        curr_drone_dist, _ = drone_d.min(dim=2)                                 # [B, D]
+        # When no unscouted survivors left, dist=inf; treat as 0 (no shaping signal).
+        all_scouted = torch.isinf(curr_drone_dist)
+        curr_drone_dist = torch.where(all_scouted, torch.zeros_like(curr_drone_dist), curr_drone_dist)
+        prev_known = ~torch.isinf(self.prev_drone_dist) & ~all_scouted
+        drone_shaping = torch.where(
+            prev_known,
+            (self.prev_drone_dist - curr_drone_dist) * self.r_drone_shaping,
+            torch.zeros_like(curr_drone_dist),
+        )
+        self.prev_drone_dist = curr_drone_dist
+
+        # --- Ground robots: target = scouted-but-unconfirmed survivors ---
+        unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors    # [B, S]
+        ground_d = torch.where(
+            unconfirmed_scouted.unsqueeze(1),
+            dists[:, self.n_drones:, :],
+            torch.full_like(dists[:, self.n_drones:, :], INF),
+        )
+        curr_ground_dist, _ = ground_d.min(dim=2)                               # [B, G]
+        all_done = torch.isinf(curr_ground_dist)
+        curr_ground_dist = torch.where(all_done, torch.zeros_like(curr_ground_dist), curr_ground_dist)
+        prev_known = ~torch.isinf(self.prev_ground_dist) & ~all_done
+        ground_shaping = torch.where(
+            prev_known,
+            (self.prev_ground_dist - curr_ground_dist) * self.r_ground_shaping,
+            torch.zeros_like(curr_ground_dist),
+        )
+        self.prev_ground_dist = curr_ground_dist
+
+        # ------------------------------------------------------------------
+        # Per-agent reward composition
+        # ------------------------------------------------------------------
         for i, agent in enumerate(self.world.agents):
             r = team_reward.clone()
             if agent.is_drone:
                 r = r + scout_per_drone[:, i] * self.r_drone_scout
+                r = r + drone_shaping[:, i]
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
                 r = r + ground_in_fire[:, g].float() * self.r_fire_penalty
+                r = r + ground_shaping[:, g]
             agent.scenario_reward = r
 
     def _agents_in_fire(self, agents: List[Agent]) -> Tensor:
