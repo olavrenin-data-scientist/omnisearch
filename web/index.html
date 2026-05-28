@@ -169,7 +169,7 @@ function setupScene(canvas, width, height) {
   // aspect ratio. baseHalf = 1.05 gives ~5% margin past the world boundary —
   // enough to render agents at y=±1 fully without making the world look
   // dwarfed by empty space.
-  const baseHalf = 1.00;
+  const baseHalf = 1.05;
   const aspect = width / height;
   const halfW = aspect >= 1 ? baseHalf * aspect : baseHalf;
   const halfH = aspect >= 1 ? baseHalf            : baseHalf / aspect;
@@ -555,7 +555,7 @@ function useThree(meta, frame, histories) {
     const onResize = () => {
       const r = canvas.parentElement.getBoundingClientRect();
       renderer.setSize(r.width, r.height, false);
-      const baseHalf = 1.00;
+      const baseHalf = 1.05;
       const aspect = r.width / r.height;
       const halfW = aspect >= 1 ? baseHalf * aspect : baseHalf;
       const halfH = aspect >= 1 ? baseHalf            : baseHalf / aspect;
