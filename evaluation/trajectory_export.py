@@ -180,6 +180,8 @@ def export_trajectory(
         "n_drones":       sc.n_drones,
         "n_ground":       sc.n_ground,
         "n_survivors":    sc.n_survivors,
+        "agent_radius":   round(float(sc.agent_radius), 4),
+        "survivor_radius": round(float(sc.survivor_radius), 4),
     }
 
     frames: List[Dict] = []

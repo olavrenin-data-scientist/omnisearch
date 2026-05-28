@@ -71,6 +71,7 @@ class WildfireSearchScenario(BaseScenario):
 
         # Fire spread (cellular automata on a discrete grid overlay)
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 16)
+        self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
         self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.04)
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
         self.fire_step_interval  = kwargs.pop("fire_step_interval", 5)  # spread every N env steps
@@ -101,6 +102,7 @@ class WildfireSearchScenario(BaseScenario):
         self.terrain_hills = kwargs.pop("terrain_hills", 4)
         self.terrain_elevation_scale = kwargs.pop("terrain_elevation_scale", 0.30)
         self.terrain_road_width = kwargs.pop("terrain_road_width", 1)
+        self.terrain_house_footprint = kwargs.pop("terrain_house_footprint", 2)
         self.max_ground_slope = kwargs.pop("max_ground_slope", 0.70)
         self.slope_cost_weight = kwargs.pop("slope_cost_weight", 2.0)
         self.slope_speed_weight = kwargs.pop("slope_speed_weight", 1.5)
@@ -360,7 +362,7 @@ class WildfireSearchScenario(BaseScenario):
         grid = self.land_cover_grid[env_index]
         grid.fill_(LAND_OPEN)
         size = self.fire_grid_size
-        radius = max(int(self.terrain_patch_radius), 1)
+        radius = self._scaled_cell_count(self.terrain_patch_radius, min_cells=1)
 
         for land_type, n_patches in (
             (LAND_BRUSH, self.terrain_brush_patches),
@@ -411,14 +413,17 @@ class WildfireSearchScenario(BaseScenario):
         """Lay two traversable winding access tracks across the landscape."""
         grid = self.land_cover_grid[env_index]
         size = self.fire_grid_size
-        width = max(int(self.terrain_road_width), 0)
+        scale = self._grid_scale()
+        width = self._scaled_cell_count(self.terrain_road_width, min_cells=0)
+        wiggle_cells = max(1.0, 1.5 * scale)
+        wiggle_frequency = 0.35 / max(scale, 1e-6)
         phase = float(torch.rand((), device=grid.device).item()) * 6.283
         x_mid = int(torch.randint(size // 3, max(2 * size // 3, size // 3 + 1),
                                   (1,), device=grid.device).item())
         y_mid = int(torch.randint(size // 3, max(2 * size // 3, size // 3 + 1),
                                   (1,), device=grid.device).item())
         for i in range(size):
-            offset = int(round(1.5 * math.sin(phase + i * 0.35)))
+            offset = int(round(wiggle_cells * math.sin(phase + i * wiggle_frequency)))
             x = max(0, min(size - 1, x_mid + offset))
             y = max(0, min(size - 1, y_mid + offset))
             grid[i, max(0, x - width): min(size, x + width + 1)] = LAND_ROAD
@@ -437,11 +442,17 @@ class WildfireSearchScenario(BaseScenario):
         heights[forest] = tree_low + torch.rand_like(heights[forest]) * (tree_high - tree_low)
 
         size = self.fire_grid_size
+        footprint_cells = min(
+            self._scaled_cell_count(self.terrain_house_footprint, min_cells=1),
+            max(size - 2, 1),
+        )
         house_low, house_high = self.house_height_range
         for _ in range(self.terrain_houses):
-            x = int(torch.randint(1, max(size - 1, 2), (1,), device=cover.device).item())
-            y = int(torch.randint(1, max(size - 1, 2), (1,), device=cover.device).item())
-            footprint_cover = cover[y:y + 2, x:x + 2]
+            x_high = max(size - footprint_cells, 2)
+            y_high = max(size - footprint_cells, 2)
+            x = int(torch.randint(1, x_high, (1,), device=cover.device).item())
+            y = int(torch.randint(1, y_high, (1,), device=cover.device).item())
+            footprint_cover = cover[y:y + footprint_cells, x:x + footprint_cells]
             buildable = (
                 (footprint_cover == LAND_OPEN)
                 | (footprint_cover == LAND_BRUSH)
@@ -450,24 +461,31 @@ class WildfireSearchScenario(BaseScenario):
             if not buildable.any():
                 continue
             footprint_cover[buildable] = LAND_OPEN
-            objects[y:y + 2, x:x + 2][buildable] = OBJECT_HOUSE
+            objects[y:y + footprint_cells, x:x + footprint_cells][buildable] = OBJECT_HOUSE
             house_height = float(
                 (house_low + torch.rand((), device=cover.device) * (house_high - house_low)).item(),
             )
-            heights[y:y + 2, x:x + 2][buildable] = house_height
+            heights[y:y + footprint_cells, x:x + footprint_cells][buildable] = house_height
 
     def _clear_entity_staging_areas(self, env_index: int) -> None:
         """Ensure survivor locations and ground starts are accessible clearings."""
+        clear_radius = self._scaled_cell_count(1, min_cells=1)
         entities = self._survivors + self.world.agents[self.n_drones:]
         for entity in entities:
             gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
-            ys = slice(max(y - 1, 0), min(y + 2, self.fire_grid_size))
-            xs = slice(max(x - 1, 0), min(x + 2, self.fire_grid_size))
+            ys = slice(max(y - clear_radius, 0), min(y + clear_radius + 1, self.fire_grid_size))
+            xs = slice(max(x - clear_radius, 0), min(x + clear_radius + 1, self.fire_grid_size))
             self.land_cover_grid[env_index, ys, xs] = LAND_OPEN
             self.slope_grid[env_index, ys, xs] = 0.0
             self.obstacle_type_grid[env_index, ys, xs] = OBJECT_NONE
             self.obstacle_height_grid[env_index, ys, xs] = 0.0
+
+    def _grid_scale(self) -> float:
+        return self.fire_grid_size / max(float(self.terrain_reference_grid_size), 1.0)
+
+    def _scaled_cell_count(self, cells_at_reference: float, min_cells: int = 1) -> int:
+        return max(int(round(float(cells_at_reference) * self._grid_scale())), min_cells)
 
     def _refresh_mobility_layers(self, env_index: int) -> None:
         cover = self.land_cover_grid[env_index]
@@ -640,6 +658,21 @@ class WildfireSearchScenario(BaseScenario):
         if drone_agents:
             drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
             self._update_drone_altitudes(self._pre_step_drone_pos, drone_pos)
+        self._clamp_agents_to_world()
+
+    def _clamp_agents_to_world(self) -> None:
+        """Keep agent bodies inside the visible world bounds."""
+        x_min, x_max = -self.x_semidim + self.agent_radius, self.x_semidim - self.agent_radius
+        y_min, y_max = -self.y_semidim + self.agent_radius, self.y_semidim - self.agent_radius
+        for agent in self.world.agents:
+            pos = agent.state.pos
+            clamped = pos.clone()
+            clamped[:, X] = clamped[:, X].clamp(x_min, x_max)
+            clamped[:, Y] = clamped[:, Y].clamp(y_min, y_max)
+            hit_boundary = (clamped != pos).any(dim=-1, keepdim=True)
+            vel = torch.where(hit_boundary, torch.zeros_like(agent.state.vel), agent.state.vel)
+            agent.set_pos(clamped, batch_index=None)
+            agent.set_vel(vel, batch_index=None)
 
     # ------------------------------------------------------------------
     # Reward

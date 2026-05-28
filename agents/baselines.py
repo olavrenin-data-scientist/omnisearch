@@ -26,6 +26,7 @@ queries; the policy interface stays the same.
 
 from __future__ import annotations
 
+import math
 from typing import Callable, List
 
 import torch
@@ -36,6 +37,67 @@ from envs.wildfire_search import WildfireSearchScenario, X, Y
 # Each policy returns a list of (B, action_dim) action tensors, one per
 # agent, in the same order as env.agents. WildfireSearchScenario's
 # actions are 2D continuous in [-1, 1] (a force vector).
+
+GROUND_LOOKAHEAD = 0.14
+GROUND_RECOVERY_ANGLES = (
+    0.0,
+    math.pi / 6,
+    -math.pi / 6,
+    math.pi / 3,
+    -math.pi / 3,
+    math.pi / 2,
+    -math.pi / 2,
+    math.pi,
+)
+
+
+def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
+    c = math.cos(angle)
+    s = math.sin(angle)
+    x = actions[:, X] * c - actions[:, Y] * s
+    y = actions[:, X] * s + actions[:, Y] * c
+    return torch.stack([x, y], dim=-1)
+
+
+def _terrain_safe_ground_action(
+    sc: WildfireSearchScenario,
+    ground_index: int,
+    target_pos: torch.Tensor,
+    fallback: torch.Tensor,
+) -> torch.Tensor:
+    """Choose a traversable action, backing out when direct motion is blocked."""
+    ag_idx = sc.n_drones + ground_index
+    pos = sc.world.agents[ag_idx].state.pos
+    to_target = target_pos - pos
+    distance = to_target.norm(dim=-1, keepdim=True)
+    direction = to_target / distance.clamp_min(1e-6)
+    magnitude = distance.clamp(max=1.0)
+    direct = direction * magnitude
+
+    candidates = torch.stack(
+        [_rotate(direct, angle) for angle in GROUND_RECOVERY_ANGLES],
+        dim=1,
+    )
+    endpoints = pos.unsqueeze(1) + candidates * GROUND_LOOKAHEAD
+    endpoints[..., X] = endpoints[..., X].clamp(-sc.x_semidim, sc.x_semidim)
+    endpoints[..., Y] = endpoints[..., Y].clamp(-sc.y_semidim, sc.y_semidim)
+
+    start = pos.unsqueeze(1).expand_as(endpoints)
+    traversable = sc._path_is_traversable(start, endpoints)
+    new_distance = (target_pos.unsqueeze(1) - endpoints).norm(dim=-1)
+    progress = distance.squeeze(-1).unsqueeze(1) - new_distance
+
+    # Prefer routes that still make progress; if all forward/side options are
+    # blocked, the 180-degree candidate acts as a controlled return/back-out.
+    score = torch.where(
+        traversable,
+        progress,
+        torch.full_like(progress, float("-inf")),
+    )
+    best = score.argmax(dim=-1)
+    chosen = candidates.gather(1, best.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
+    any_safe = traversable.any(dim=-1)
+    return torch.where(any_safe.unsqueeze(-1), chosen, fallback)
 
 
 def _coordinated_ground_actions(
@@ -76,7 +138,7 @@ def _coordinated_ground_actions(
         )
         best = masked_scores.argmax(dim=-1)
         target_pos = surv_pos.gather(1, best.view(B, 1, 1).expand(B, 1, 2)).squeeze(1)
-        delta = (target_pos - pos).clamp(-1.0, 1.0)
+        delta = _terrain_safe_ground_action(sc, gi, target_pos, actions[gi])
         actions[gi] = torch.where(any_targetable.unsqueeze(-1), delta, actions[gi])
 
         if any_targetable.any():

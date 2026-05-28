@@ -42,14 +42,16 @@
   }
   #scene { width: 100%; height: 100%; display: block; }
   #legend {
-    position: absolute; top: 12px; left: 12px;
-    background: rgba(21, 26, 35, 0.85); border: 1px solid var(--border);
-    border-radius: 6px; padding: 8px 12px;
     font-size: 12px; color: var(--muted);
+    columns: 1;
+  }
+  #legend .item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 0; line-height: 1.25;
   }
   #legend .swatch {
     display: inline-block; width: 14px; height: 14px;
-    margin-right: 8px; vertical-align: middle;
+    flex: 0 0 14px;
   }
   #legend .swatch.circle { border-radius: 50%; }
   #legend .swatch.square { border-radius: 2px; }
@@ -59,7 +61,6 @@
     border-left:  7px solid transparent;
     border-right: 7px solid transparent;
     border-bottom: 12px solid var(--swatch-color);
-    margin-right: 8px;
   }
   aside {
     width: 280px; border-left: 1px solid var(--border);
@@ -136,13 +137,10 @@ function setupScene(canvas, width, height) {
   renderer.setSize(width, height, false);
   renderer.setClearColor(0x0e1118, 1);
 
-  // Square view, keep world aspect 1:1 inside whatever canvas size we get
-  const aspect = width / height;
-  const halfW = 1.15;
-  const halfH = halfW / aspect;
-  const camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 100);
+  const camera = new THREE.OrthographicCamera(-VIEW_PADDING, VIEW_PADDING, VIEW_PADDING, -VIEW_PADDING, 0.1, 100);
   camera.position.set(0, 0, 10);
   camera.lookAt(0, 0, 0);
+  fitCameraToWorld(camera, width, height);
 
   const scene = new THREE.Scene();
 
@@ -189,6 +187,23 @@ const TERRAIN_COLORS = [
   0x555963,  // rock
 ];
 const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
+const VIEW_PADDING = 1.15;
+
+function fitCameraToWorld(camera, width, height) {
+  const aspect = width / height;
+  let halfW = VIEW_PADDING;
+  let halfH = VIEW_PADDING;
+  if (aspect >= 1) {
+    halfW = halfH * aspect;
+  } else {
+    halfH = halfW / aspect;
+  }
+  camera.left = -halfW;
+  camera.right = halfW;
+  camera.top = halfH;
+  camera.bottom = -halfH;
+  camera.updateProjectionMatrix();
+}
 
 // ---------------------------------------------------------------------
 // Entity factories — small Groups composed of primitive meshes so each
@@ -196,11 +211,11 @@ const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
 // Animated children are tagged via userData so the RAF loop can update
 // them (propeller spin, fire flicker) without rebuilding geometry.
 // ---------------------------------------------------------------------
-function makeDroneMesh(altitude = 0, maxAltitude = 1) {
+function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
   const g = new THREE.Group();
   const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
   const halo = new THREE.Mesh(
-    new THREE.RingGeometry(0.058, 0.065, 28),
+    new THREE.RingGeometry(radius * 1.35, radius * 1.55, 28),
     new THREE.MeshBasicMaterial({
       color: COLORS.drone, transparent: true, opacity: 0.18 + altitudeScale * 0.45,
     }),
@@ -209,12 +224,12 @@ function makeDroneMesh(altitude = 0, maxAltitude = 1) {
   g.add(halo);
   // X-shaped frame (two crossed bars)
   const armMat = new THREE.MeshBasicMaterial({ color: COLORS.drone_dark });
-  const arm1 = new THREE.Mesh(new THREE.PlaneGeometry(0.10, 0.007), armMat);
+  const arm1 = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2.5, radius * 0.18), armMat);
   const arm2 = arm1.clone(); arm2.rotation.z = Math.PI / 2;
   g.add(arm1, arm2);
   // Central body
   const body = new THREE.Mesh(
-    new THREE.CircleGeometry(0.018, 24),
+    new THREE.CircleGeometry(radius * 0.45, 24),
     new THREE.MeshBasicMaterial({ color: COLORS.drone }),
   );
   body.position.z = 0.02;
@@ -223,9 +238,9 @@ function makeDroneMesh(altitude = 0, maxAltitude = 1) {
   const propMat = new THREE.MeshBasicMaterial({
     color: 0xbcd0ff, transparent: true, opacity: 0.55,
   });
-  for (const [dx, dy] of [[0.05, 0], [-0.05, 0], [0, 0.05], [0, -0.05]]) {
+  for (const [dx, dy] of [[radius * 1.25, 0], [-radius * 1.25, 0], [0, radius * 1.25], [0, -radius * 1.25]]) {
     const prop = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.032, 0.005),
+      new THREE.PlaneGeometry(radius * 0.8, radius * 0.13),
       propMat.clone(),
     );
     prop.position.set(dx, dy, 0.03);
@@ -237,39 +252,39 @@ function makeDroneMesh(altitude = 0, maxAltitude = 1) {
   return g;
 }
 
-function makeGroundMesh() {
+function makeGroundMesh(radius = 0.04) {
   const g = new THREE.Group();
   // Chassis
   const chassis = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.07, 0.052),
+    new THREE.PlaneGeometry(radius * 1.75, radius * 1.30),
     new THREE.MeshBasicMaterial({ color: COLORS.ground }),
   );
   g.add(chassis);
   // Wheel "stripes" along the sides
   const wheelMat = new THREE.MeshBasicMaterial({ color: COLORS.wheel });
-  for (const dy of [+0.024, -0.024]) {
-    const wheel = new THREE.Mesh(new THREE.PlaneGeometry(0.058, 0.012), wheelMat);
+  for (const dy of [radius * 0.60, -radius * 0.60]) {
+    const wheel = new THREE.Mesh(new THREE.PlaneGeometry(radius * 1.45, radius * 0.30), wheelMat);
     wheel.position.set(0, dy, 0.01);
     g.add(wheel);
   }
   // Sensor turret on top (a white dot)
   const sensor = new THREE.Mesh(
-    new THREE.CircleGeometry(0.011, 16),
+    new THREE.CircleGeometry(radius * 0.28, 16),
     new THREE.MeshBasicMaterial({ color: 0xffffff }),
   );
   sensor.position.z = 0.02;
   g.add(sensor);
   // Antenna (small line forward)
   const ant = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.022, 0.003),
+    new THREE.PlaneGeometry(radius * 0.55, radius * 0.08),
     new THREE.MeshBasicMaterial({ color: COLORS.ground_dark }),
   );
-  ant.position.set(0.025, 0, 0.025);
+  ant.position.set(radius * 0.62, 0, 0.025);
   g.add(ant);
   return g;
 }
 
-function makeSurvivorMesh(survivorState) {
+function makeSurvivorMesh(survivorState, radius = 0.03) {
   // Top-down human silhouette: head + torso + outstretched arms + legs.
   // Clothing colour encodes detection state so the figure stays readable.
   const stateColor = survivorState.found
@@ -281,7 +296,7 @@ function makeSurvivorMesh(survivorState) {
 
   // State ring — outside the figure so it's visible over fire
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.045, 0.054, 28),
+    new THREE.RingGeometry(radius * 1.45, radius * 1.75, 28),
     new THREE.MeshBasicMaterial({ color: stateColor }),
   );
   ring.position.z = -0.02;
@@ -291,7 +306,7 @@ function makeSurvivorMesh(survivorState) {
 
   // Outstretched arms (horizontal bar — gives the human silhouette)
   const arms = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.052, 0.008),
+    new THREE.PlaneGeometry(radius * 1.75, radius * 0.27),
     clothingMat,
   );
   arms.position.set(0, 0.002, 0.002);
@@ -299,7 +314,7 @@ function makeSurvivorMesh(survivorState) {
 
   // Torso (taller-than-wide ellipse)
   const torso = new THREE.Mesh(
-    new THREE.CircleGeometry(0.014, 24),
+    new THREE.CircleGeometry(radius * 0.47, 24),
     clothingMat,
   );
   torso.scale.set(1.0, 1.8, 1);
@@ -310,28 +325,28 @@ function makeSurvivorMesh(survivorState) {
   const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
   for (const dx of [-1, 1]) {
     const leg = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.008, 0.016),
+      new THREE.PlaneGeometry(radius * 0.27, radius * 0.53),
       legMat,
     );
-    leg.position.set(dx * 0.008, -0.022, 0.003);
+    leg.position.set(dx * radius * 0.27, -radius * 0.73, 0.003);
     g.add(leg);
   }
 
   // Head (skin-tone, on top of torso)
   const head = new THREE.Mesh(
-    new THREE.CircleGeometry(0.012, 24),
+    new THREE.CircleGeometry(radius * 0.40, 24),
     new THREE.MeshBasicMaterial({ color: COLORS.skin }),
   );
-  head.position.set(0, 0.020, 0.012);
+  head.position.set(0, radius * 0.67, 0.012);
   g.add(head);
 
   // Hair (small dark cap, hint of detail from above)
   const hair = new THREE.Mesh(
-    new THREE.CircleGeometry(0.013, 20),
+    new THREE.CircleGeometry(radius * 0.43, 20),
     new THREE.MeshBasicMaterial({ color: 0x3a2412 }),
   );
   hair.scale.set(1, 0.65, 1);
-  hair.position.set(0, 0.023, 0.011);
+  hair.position.set(0, radius * 0.77, 0.011);
   g.add(hair);
 
   // Pulse the state ring if scouted-but-not-confirmed (call for attention)
@@ -474,6 +489,8 @@ function renderFrame(state, frame, meta, histories) {
   // --- Fire cells (compound: outer flicker + hot core) ---
   const G = meta.fire_grid_size;
   const cell = 2 / G;
+  const agentRadius = meta.agent_radius ?? 0.04;
+  const survivorRadius = meta.survivor_radius ?? 0.03;
   for (const [gx, gy] of frame.fire_cells) {
     const mesh = makeFireMesh(cell);
     mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.3);
@@ -489,7 +506,7 @@ function renderFrame(state, frame, meta, histories) {
 
   // --- Survivors (shoulders + head + state ring) ---
   for (const s of frame.survivors) {
-    const mesh = makeSurvivorMesh(s);
+    const mesh = makeSurvivorMesh(s, survivorRadius);
     mesh.position.set(s.x, s.y, -0.05);
     survGroup.add(mesh);
   }
@@ -519,7 +536,9 @@ function renderFrame(state, frame, meta, histories) {
   // --- Agents (compound quadcopters / rovers) ---
   const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
   for (const a of frame.agents) {
-    const mesh = a.type === 'drone' ? makeDroneMesh(a.altitude, maxAltitude) : makeGroundMesh();
+    const mesh = a.type === 'drone'
+      ? makeDroneMesh(agentRadius, a.altitude, maxAltitude)
+      : makeGroundMesh(agentRadius);
     mesh.position.set(a.x, a.y, 0.05);
     // Heading: rotate ground robots to face their direction of travel,
     // based on the previous-step velocity from history.
@@ -622,12 +641,7 @@ function useThree(meta, frame, histories) {
     const onResize = () => {
       const r = canvas.parentElement.getBoundingClientRect();
       renderer.setSize(r.width, r.height, false);
-      const aspect = r.width / r.height;
-      const halfW = 1.15;
-      const halfH = halfW / aspect;
-      camera.left = -halfW; camera.right = halfW;
-      camera.top = halfH; camera.bottom = -halfH;
-      camera.updateProjectionMatrix();
+      fitCameraToWorld(camera, r.width, r.height);
     };
     window.addEventListener('resize', onResize);
     return () => {
@@ -690,7 +704,7 @@ function Legend() {
   ];
   return h('div', { id: 'legend' },
     items.map(([shape, c, label]) =>
-      h('div', { key: label, style: { lineHeight: '1.85' } },
+      h('div', { key: label, className: 'item' },
         h('span', {
           className: `swatch ${shape}`,
           style: { background: shape === 'tri' ? 'transparent' : c, '--swatch-color': c },
@@ -723,6 +737,10 @@ function MetricsPanel({ meta, frame }) {
         meta?.strategy ?? '—'),
       h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
         `seed ${meta?.seed ?? '—'} · ${meta?.n_drones} drones + ${meta?.n_ground} ground · ${meta?.n_survivors} survivors`),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Legend'),
+      h(Legend),
     ),
     h('div', { className: 'panel' },
       h('h2', null, 'Mission metrics (final)'),
@@ -793,7 +811,6 @@ function App() {
     h('main', null,
       h('div', { id: 'scene-wrap' },
         h('canvas', { id: 'scene', ref: canvasRef }),
-        h(Legend),
         error && h('div', {
           style: {
             position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
