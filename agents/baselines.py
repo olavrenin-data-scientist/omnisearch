@@ -27,6 +27,7 @@ queries; the policy interface stays the same.
 from __future__ import annotations
 
 import math
+import heapq
 from typing import Callable, List
 
 import torch
@@ -39,6 +40,9 @@ from envs.wildfire_search import WildfireSearchScenario, X, Y
 # actions are 2D continuous in [-1, 1] (a force vector).
 
 GROUND_LOOKAHEAD = 0.14
+GROUND_ROUTE_WAYPOINT_CELLS = 10
+GROUND_ROUTE_REPLAN_STEPS = 18
+GROUND_ROUTE_FIRE_PENALTY = 25.0
 GROUND_RECOVERY_ANGLES = (
     0.0,
     math.pi / 6,
@@ -57,6 +61,139 @@ def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
     x = actions[:, X] * c - actions[:, Y] * s
     y = actions[:, X] * s + actions[:, Y] * c
     return torch.stack([x, y], dim=-1)
+
+
+def _grid_to_world(sc: WildfireSearchScenario, gx: int, gy: int, device: torch.device) -> torch.Tensor:
+    cell_w = 2 * sc.x_semidim / sc.fire_grid_size
+    cell_h = 2 * sc.y_semidim / sc.fire_grid_size
+    return torch.tensor(
+        [
+            -sc.x_semidim + (gx + 0.5) * cell_w,
+            -sc.y_semidim + (gy + 0.5) * cell_h,
+        ],
+        dtype=torch.float,
+        device=device,
+    )
+
+
+def _nearest_traversable_cell(sc: WildfireSearchScenario, env_index: int, gx: int, gy: int) -> tuple[int, int] | None:
+    traversable = sc.traversable_grid[env_index]
+    size = sc.fire_grid_size
+    gx = max(0, min(size - 1, gx))
+    gy = max(0, min(size - 1, gy))
+    if bool(traversable[gy, gx].item()):
+        return gx, gy
+    max_radius = min(size, 18)
+    for radius in range(1, max_radius + 1):
+        y0, y1 = max(0, gy - radius), min(size - 1, gy + radius)
+        x0, x1 = max(0, gx - radius), min(size - 1, gx + radius)
+        candidates = []
+        for y in range(y0, y1 + 1):
+            candidates.extend(((x0, y), (x1, y)))
+        for x in range(x0 + 1, x1):
+            candidates.extend(((x, y0), (x, y1)))
+        valid = [(x, y) for x, y in candidates if bool(traversable[y, x].item())]
+        if valid:
+            return min(valid, key=lambda cell: (cell[0] - gx) ** 2 + (cell[1] - gy) ** 2)
+    return None
+
+
+def _astar_grid_path(
+    traversable: torch.Tensor,
+    cost: torch.Tensor,
+    start: tuple[int, int],
+    goal: tuple[int, int],
+) -> List[tuple[int, int]]:
+    size = traversable.shape[0]
+    trav_rows = traversable.cpu().tolist()
+    cost_rows = cost.detach().cpu().tolist()
+    sx, sy = start
+    gx, gy = goal
+    frontier = [(0.0, sx, sy)]
+    came_from: dict[tuple[int, int], tuple[int, int] | None] = {(sx, sy): None}
+    best = {(sx, sy): 0.0}
+    neighbors = (
+        (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+        (-1, -1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (1, 1, 1.414),
+    )
+    while frontier:
+        _, x, y = heapq.heappop(frontier)
+        if (x, y) == (gx, gy):
+            break
+        for dx, dy, step_len in neighbors:
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < size and 0 <= ny < size) or not trav_rows[ny][nx]:
+                continue
+            new_cost = best[(x, y)] + step_len * (cost_rows[y][x] + cost_rows[ny][nx]) * 0.5
+            if new_cost < best.get((nx, ny), float("inf")):
+                best[(nx, ny)] = new_cost
+                heuristic = math.hypot(gx - nx, gy - ny)
+                heapq.heappush(frontier, (new_cost + heuristic, nx, ny))
+                came_from[(nx, ny)] = (x, y)
+    if (gx, gy) not in came_from:
+        return []
+    current = (gx, gy)
+    path = [current]
+    while came_from[current] is not None:
+        current = came_from[current]
+        path.append(current)
+    path.reverse()
+    return path
+
+
+def _route_ground_waypoints(
+    sc: WildfireSearchScenario,
+    ground_index: int,
+    target_pos: torch.Tensor,
+    target_indices: torch.Tensor,
+    route_cache: List[dict] | None = None,
+) -> torch.Tensor:
+    """Return near-term A* waypoints for UGVs whose direct route is blocked."""
+    ag_idx = sc.n_drones + ground_index
+    pos = sc.world.agents[ag_idx].state.pos
+    direct_ok = sc._path_is_traversable(pos.unsqueeze(1), target_pos.unsqueeze(1)).squeeze(1)
+    waypoint = target_pos.clone()
+    start_gx, start_gy = sc._positions_to_grid(pos.unsqueeze(1))
+    goal_gx, goal_gy = sc._positions_to_grid(target_pos.unsqueeze(1))
+    for b in range(sc.world.batch_dim):
+        if bool(direct_ok[b].item()):
+            if route_cache is not None:
+                route_cache[ground_index].pop(int(b), None)
+            continue
+        start = _nearest_traversable_cell(sc, b, int(start_gx[b, 0]), int(start_gy[b, 0]))
+        goal = _nearest_traversable_cell(sc, b, int(goal_gx[b, 0]), int(goal_gy[b, 0]))
+        if start is None or goal is None:
+            continue
+        cache_entry = None if route_cache is None else route_cache[ground_index].get(int(b))
+        step = int(sc.step_count[b].item())
+        target_id = int(target_indices[b].item())
+        path = []
+        if cache_entry is not None:
+            still_fresh = step - cache_entry["step"] < GROUND_ROUTE_REPLAN_STEPS
+            same_target = cache_entry["target_id"] == target_id
+            same_goal = cache_entry["goal"] == goal
+            if still_fresh and same_target and same_goal:
+                path = cache_entry["path"]
+        if not path:
+            route_cost = sc.mobility_cost_grid[b].clone()
+            route_cost = route_cost + sc.fire_grid[b].float() * GROUND_ROUTE_FIRE_PENALTY
+            path = _astar_grid_path(sc.traversable_grid[b], route_cost, start, goal)
+            if route_cache is not None:
+                route_cache[ground_index][int(b)] = {
+                    "step": step,
+                    "target_id": target_id,
+                    "goal": goal,
+                    "path": path,
+                }
+        if len(path) < 2:
+            continue
+        nearest_idx = min(
+            range(len(path)),
+            key=lambda idx: (path[idx][0] - start[0]) ** 2 + (path[idx][1] - start[1]) ** 2,
+        )
+        wx, wy = path[min(nearest_idx + GROUND_ROUTE_WAYPOINT_CELLS, len(path) - 1)]
+        waypoint[b] = _grid_to_world(sc, wx, wy, target_pos.device)
+    return waypoint
 
 
 def _terrain_safe_ground_action(
@@ -105,6 +242,7 @@ def _coordinated_ground_actions(
     targetable: torch.Tensor,
     fallback_actions: List[torch.Tensor],
     priority: torch.Tensor | None = None,
+    route_cache: List[dict] | None = None,
 ) -> List[torch.Tensor]:
     """Assign at most one ground robot to each targetable survivor.
 
@@ -138,7 +276,8 @@ def _coordinated_ground_actions(
         )
         best = masked_scores.argmax(dim=-1)
         target_pos = surv_pos.gather(1, best.view(B, 1, 1).expand(B, 1, 2)).squeeze(1)
-        delta = _terrain_safe_ground_action(sc, gi, target_pos, actions[gi])
+        waypoint = _route_ground_waypoints(sc, gi, target_pos, best, route_cache)
+        delta = _terrain_safe_ground_action(sc, gi, waypoint, actions[gi])
         actions[gi] = torch.where(any_targetable.unsqueeze(-1), delta, actions[gi])
 
         if any_targetable.any():
@@ -174,6 +313,7 @@ class LawnmowerPolicy:
     def __init__(self, env):
         self.scenario: WildfireSearchScenario = env.scenario
         self.t = 0
+        self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
         # Each drone gets a y-band — distribute them vertically
         self.drone_band_y = self._drone_band_ys(self.scenario.n_drones)
 
@@ -208,7 +348,9 @@ class LawnmowerPolicy:
             torch.zeros(B, 2, device=device)
             for _ in range(sc.n_ground)
         ]
-        out.extend(_coordinated_ground_actions(sc, targetable, hold_actions))
+        out.extend(_coordinated_ground_actions(
+            sc, targetable, hold_actions, route_cache=self.ground_route_cache,
+        ))
 
         self.t += 1
         return out
@@ -229,6 +371,7 @@ class NearestCandidatePolicy:
 
     def __init__(self, env):
         self.scenario: WildfireSearchScenario = env.scenario
+        self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
 
     def __call__(self, env) -> List[torch.Tensor]:
         sc = self.scenario
@@ -248,7 +391,9 @@ class NearestCandidatePolicy:
             rand_actions[sc.n_drones + gi]
             for gi in range(sc.n_ground)
         ]
-        out.extend(_coordinated_ground_actions(sc, targetable, fallback))
+        out.extend(_coordinated_ground_actions(
+            sc, targetable, fallback, route_cache=self.ground_route_cache,
+        ))
 
         return out
 
@@ -275,6 +420,7 @@ class HighestConfidencePolicy:
         )
         self.t = 0
         self._lawnmower = LawnmowerPolicy(env)
+        self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
 
     def __call__(self, env) -> List[torch.Tensor]:
         sc = self.scenario
@@ -295,7 +441,11 @@ class HighestConfidencePolicy:
             for gi in range(sc.n_ground)
         ]
         coordinated = _coordinated_ground_actions(
-            sc, targetable, fallback, priority=self.scout_step,
+            sc,
+            targetable,
+            fallback,
+            priority=self.scout_step,
+            route_cache=self.ground_route_cache,
         )
         for gi, action in enumerate(coordinated):
             actions[sc.n_drones + gi] = action

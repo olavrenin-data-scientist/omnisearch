@@ -193,6 +193,11 @@ const TERRAIN_COLORS = [
 const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
 const VIEW_PADDING = 1.15;
 
+function cellNoise(gx, gy, seed = 0) {
+  const n = Math.sin(gx * 127.1 + gy * 311.7 + seed * 74.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+
 function fitCameraToWorld(camera, width, height) {
   const aspect = width / height;
   let halfW = VIEW_PADDING;
@@ -460,14 +465,34 @@ function renderTerrain(state, meta) {
       const cover = terrain.land_cover[gy][gx];
       const elevation = terrain.elevation?.[gy]?.[gx] ?? 0;
       const slope = terrain.slope?.[gy]?.[gx] ?? 0;
+      const moisture = terrain.moisture?.[gy]?.[gx] ?? 0.45;
+      const fuel = terrain.fuel_density?.[gy]?.[gx] ?? 0.45;
+      const rockiness = terrain.rockiness?.[gy]?.[gx] ?? 0.25;
+      const fineNoise = cellNoise(gx, gy, 2);
+      const coarseNoise = cellNoise(Math.floor(gx / 4), Math.floor(gy / 4), 9);
       const color = new THREE.Color(TERRAIN_COLORS[cover] ?? TERRAIN_COLORS[1]);
-      color.multiplyScalar(Math.max(0.58, Math.min(1.12, 0.88 + elevation * 0.7 - slope * 0.25)));
+      if (cover === 1) {
+        color.lerp(new THREE.Color(0x667542), Math.max(0, 0.34 - moisture * 0.28));
+        color.lerp(new THREE.Color(0x356b42), Math.min(0.35, moisture * 0.30));
+      } else if (cover === 2) {
+        color.lerp(new THREE.Color(0x4f6b32), Math.min(0.32, fuel * 0.25 + fineNoise * 0.08));
+      } else if (cover === 3) {
+        color.lerp(new THREE.Color(0x14341f), Math.min(0.38, moisture * 0.28 + fuel * 0.12));
+      } else if (cover === 4) {
+        color.lerp(new THREE.Color(0x6b7079), Math.min(0.42, rockiness * 0.35));
+      } else if (cover === 0) {
+        color.lerp(new THREE.Color(0xc5a56f), Math.min(0.25, coarseNoise * 0.25));
+      }
+      const shade = 0.78 + elevation * 1.05 - slope * 0.42 + (fineNoise - 0.5) * 0.16 + (coarseNoise - 0.5) * 0.10;
+      color.multiplyScalar(Math.max(0.48, Math.min(1.28, shade)));
       const objectType = terrain.obstacle_type?.[gy]?.[gx] ?? OBJECT_NONE;
       const objectHeight = terrain.obstacle_height?.[gy]?.[gx] ?? 0;
       if (objectType === OBJECT_TREE) {
         color.set(objectHeight > 0.18 ? 0x133521 : 0x1d5128);
+        color.multiplyScalar(0.86 + coarseNoise * 0.20);
       } else if (objectType === OBJECT_HOUSE) {
         color.set(objectHeight > 0.11 ? 0x8b3b32 : 0xa34d3d);
+        color.multiplyScalar(0.90 + fineNoise * 0.12);
       }
       const pixelY = G - gy - 1;
       const idx = (pixelY * G + gx) * 4;
@@ -479,8 +504,8 @@ function renderTerrain(state, meta) {
   }
   ctx.putImageData(image, 0, 0);
   const texture = new THREE.CanvasTexture(canvas);
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
   texture.generateMipmaps = false;
   const terrainMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(2, 2),
