@@ -123,7 +123,7 @@ const h = React.createElement;
 const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence'];
 
 async function loadTrajectory(name) {
-  const res = await fetch(`./trajectories/${name}.json`);
+  const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to load ${name}: ${res.status}`);
   return await res.json();
 }
@@ -159,7 +159,10 @@ function clearGroup(group) {
   while (group.children.length) {
     const obj = group.children.pop();
     if (obj.geometry) obj.geometry.dispose();
-    if (obj.material) obj.material.dispose();
+    if (obj.material) {
+      if (obj.material.map) obj.material.map.dispose();
+      obj.material.dispose();
+    }
   }
 }
 
@@ -175,6 +178,7 @@ const COLORS = {
   survivor_scouted:    0xfbbf24,   // amber
   survivor_confirmed:  0x84cc16,   // lime
   survivor_outline:    0xffffff,
+  burned:              0x2b211b,   // post-fire burn scar
   fire_outer:          0xf06e1e,   // orange
   fire_inner:          0xfacc15,   // yellow hot core
   smoke:               0xcbd5e1,   // pale gray-blue
@@ -446,7 +450,11 @@ function renderTerrain(state, meta) {
   const terrain = meta?.terrain;
   if (!terrain?.land_cover) return;
   const G = meta.fire_grid_size;
-  const cell = 2 / G;
+  const canvas = document.createElement('canvas');
+  canvas.width = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(G, G);
   for (let gy = 0; gy < G; gy++) {
     for (let gx = 0; gx < G; gx++) {
       const cover = terrain.land_cover[gy][gx];
@@ -454,55 +462,198 @@ function renderTerrain(state, meta) {
       const slope = terrain.slope?.[gy]?.[gx] ?? 0;
       const color = new THREE.Color(TERRAIN_COLORS[cover] ?? TERRAIN_COLORS[1]);
       color.multiplyScalar(Math.max(0.58, Math.min(1.12, 0.88 + elevation * 0.7 - slope * 0.25)));
-      const tile = new THREE.Mesh(
-        new THREE.PlaneGeometry(cell * 0.985, cell * 0.985),
-        new THREE.MeshBasicMaterial({ color }),
-      );
-      tile.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.45);
-      state.terrainGroup.add(tile);
-
       const objectType = terrain.obstacle_type?.[gy]?.[gx] ?? OBJECT_NONE;
       const objectHeight = terrain.obstacle_height?.[gy]?.[gx] ?? 0;
-      let obstacle = null;
-      if (objectType === OBJECT_TREE) obstacle = makeTreeMesh(cell, objectHeight);
-      if (objectType === OBJECT_HOUSE) obstacle = makeHouseMesh(cell, objectHeight);
-      if (obstacle) {
-        obstacle.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.20);
-        state.obstacleGroup.add(obstacle);
+      if (objectType === OBJECT_TREE) {
+        color.set(objectHeight > 0.18 ? 0x133521 : 0x1d5128);
+      } else if (objectType === OBJECT_HOUSE) {
+        color.set(objectHeight > 0.11 ? 0x8b3b32 : 0xa34d3d);
       }
+      const pixelY = G - gy - 1;
+      const idx = (pixelY * G + gx) * 4;
+      image.data[idx + 0] = Math.round(color.r * 255);
+      image.data[idx + 1] = Math.round(color.g * 255);
+      image.data[idx + 2] = Math.round(color.b * 255);
+      image.data[idx + 3] = 255;
     }
   }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  const terrainMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ map: texture }),
+  );
+  terrainMesh.position.z = -0.45;
+  state.terrainGroup.add(terrainMesh);
 }
 
-function renderFrame(state, frame, meta, histories) {
+function resetBurnedOverlay(state, meta) {
+  clearGroup(state.burnedGroup);
+  const G = meta.fire_grid_size;
+  const canvas = document.createElement('canvas');
+  canvas.width = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, G, G);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.62 }),
+  );
+  mesh.position.z = -0.38;
+  state.burnedGroup.add(mesh);
+  state.burnedCanvas = canvas;
+  state.burnedCtx = ctx;
+  state.burnedTexture = texture;
+  state.burnedStep = -1;
+  state.burnedSource = meta.terrain;
+}
+
+function paintBurnedCells(state, meta, cells) {
+  if (!cells?.length) return;
+  const G = meta.fire_grid_size;
+  state.burnedCtx.fillStyle = 'rgba(43, 33, 27, 0.72)';
+  for (const [gx, gy] of cells) {
+    state.burnedCtx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.burnedTexture.needsUpdate = true;
+}
+
+function syncBurnedOverlay(state, meta, frame, frames) {
+  if (state.burnedSource !== meta.terrain || !state.burnedCanvas) {
+    resetBurnedOverlay(state, meta);
+  }
+  if (frame.step <= state.burnedStep) {
+    resetBurnedOverlay(state, meta);
+  }
+  const start = Math.max(0, state.burnedStep + 1);
+  for (let i = start; i <= frame.step && i < frames.length; i++) {
+    paintBurnedCells(state, meta, frames[i].burned_cells_added);
+  }
+  state.burnedStep = frame.step;
+}
+
+function resetActiveFireOverlay(state, meta) {
+  clearGroup(state.fireGroup);
+  const G = meta.fire_grid_size;
+  const scale = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = G * scale;
+  canvas.height = G * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    }),
+  );
+  mesh.position.z = -0.30;
+  mesh.userData.isFireOverlay = true;
+  mesh.userData.baseOp = 0.92;
+  state.fireGroup.add(mesh);
+  state.fireCanvas = canvas;
+  state.fireCtx = ctx;
+  state.fireTexture = texture;
+  state.fireSource = meta.terrain;
+  state.fireScale = scale;
+}
+
+function syncActiveFireOverlay(state, meta, frame) {
+  if (state.fireSource !== meta.terrain || !state.fireCanvas) {
+    resetActiveFireOverlay(state, meta);
+  }
+  const G = meta.fire_grid_size;
+  const s = state.fireScale;
+  const ctx = state.fireCtx;
+  ctx.clearRect(0, 0, state.fireCanvas.width, state.fireCanvas.height);
+  for (const [gx, gy] of frame.fire_cells ?? []) {
+    const x = gx * s;
+    const y = (G - gy - 1) * s;
+    ctx.fillStyle = 'rgba(121, 24, 7, 0.62)';
+    ctx.fillRect(x, y, s, s);
+    ctx.fillStyle = 'rgba(232, 90, 24, 0.92)';
+    ctx.fillRect(x, y, s, s);
+    ctx.fillStyle = 'rgba(255, 221, 94, 0.92)';
+    ctx.fillRect(x + Math.floor(s / 2), y, Math.max(1, Math.ceil(s / 2)), Math.max(1, Math.ceil(s / 2)));
+  }
+  state.fireTexture.needsUpdate = true;
+}
+
+function resetSmokeOverlay(state, meta) {
+  clearGroup(state.smokeGroup);
+  const G = meta.fire_grid_size;
+  const canvas = document.createElement('canvas');
+  canvas.width = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, G, G);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.78,
+      depthWrite: false,
+    }),
+  );
+  mesh.position.z = -0.10;
+  mesh.userData.isSmokeOverlay = true;
+  mesh.userData.baseOp = 0.78;
+  state.smokeGroup.add(mesh);
+  state.smokeCanvas = canvas;
+  state.smokeCtx = ctx;
+  state.smokeTexture = texture;
+  state.smokeSource = meta.terrain;
+}
+
+function syncSmokeOverlay(state, meta, frame) {
+  if (state.smokeSource !== meta.terrain || !state.smokeCanvas) {
+    resetSmokeOverlay(state, meta);
+  }
+  const G = meta.fire_grid_size;
+  const ctx = state.smokeCtx;
+  ctx.clearRect(0, 0, G, G);
+  for (const [gx, gy, intensity] of frame.smoke_cells ?? []) {
+    const alpha = Math.min(0.50, 0.05 + intensity * 0.42);
+    ctx.fillStyle = `rgba(203, 213, 225, ${alpha})`;
+    ctx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.smokeTexture.needsUpdate = true;
+}
+
+function renderFrame(state, frame, meta, histories, frames) {
   const { fireGroup, smokeGroup, agentGroup, survGroup, trailGroup } = state;
   if (state.terrainSource !== meta.terrain) {
     renderTerrain(state, meta);
     state.terrainSource = meta.terrain;
   }
-  clearGroup(fireGroup);
-  clearGroup(smokeGroup);
+  syncBurnedOverlay(state, meta, frame, frames);
+  syncActiveFireOverlay(state, meta, frame);
+  syncSmokeOverlay(state, meta, frame);
   clearGroup(agentGroup);
   clearGroup(survGroup);
   clearGroup(trailGroup);
 
-  // --- Fire cells (compound: outer flicker + hot core) ---
-  const G = meta.fire_grid_size;
-  const cell = 2 / G;
   const agentRadius = meta.agent_radius ?? 0.04;
   const survivorRadius = meta.survivor_radius ?? 0.03;
-  for (const [gx, gy] of frame.fire_cells) {
-    const mesh = makeFireMesh(cell);
-    mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.3);
-    fireGroup.add(mesh);
-  }
-
-  // --- Smoke plume cells (float intensity: 0 clear, 1 dense) ---
-  for (const [gx, gy, intensity] of frame.smoke_cells ?? []) {
-    const mesh = makeSmokeMesh(cell, intensity);
-    mesh.position.set(-1 + (gx + 0.5) * cell, -1 + (gy + 0.5) * cell, -0.10);
-    smokeGroup.add(mesh);
-  }
 
   // --- Survivors (shoulders + head + state ring) ---
   for (const s of frame.survivors) {
@@ -565,7 +716,10 @@ function tickAnimation(state, t) {
     }
   });
   state.fireGroup.traverse(obj => {
-    if (obj.userData?.isFireLayer) {
+    if (obj.userData?.isFireOverlay) {
+      const baseOp = obj.userData.baseOp || 0.92;
+      obj.material.opacity = Math.max(0.45, baseOp * (0.90 + 0.10 * Math.sin(t * 8)));
+    } else if (obj.userData?.isFireLayer) {
       const phase  = obj.userData.phase  || 0;
       const baseOp = obj.userData.baseOp || 0.7;
       const wobble = obj.userData.wobble || 0.1;
@@ -577,7 +731,10 @@ function tickAnimation(state, t) {
     }
   });
   state.smokeGroup.traverse(obj => {
-    if (obj.userData?.isSmoke) {
+    if (obj.userData?.isSmokeOverlay) {
+      const baseOp = obj.userData.baseOp || 0.78;
+      obj.material.opacity = Math.max(0.45, baseOp * (0.92 + 0.08 * Math.sin(t * 2.5)));
+    } else if (obj.userData?.isSmoke) {
       const phase = obj.userData.phase || 0;
       const baseOp = obj.userData.baseOp || 0.2;
       obj.material.opacity = Math.max(0.04, baseOp * (0.85 + 0.15 * Math.sin(t * 2.5 + phase)));
@@ -603,7 +760,7 @@ function buildHistories(frames) {
   return out;
 }
 
-function useThree(meta, frame, histories) {
+function useThree(meta, frame, histories, frames) {
   const canvasRef = useRef(null);
   const stateRef = useRef(null);
 
@@ -615,6 +772,7 @@ function useThree(meta, frame, histories) {
     const { renderer, scene, camera } = setupScene(canvas, rect.width, rect.height);
 
     const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
+    const burnedGroup = new THREE.Group(); scene.add(burnedGroup);
     const fireGroup  = new THREE.Group();  scene.add(fireGroup);
     const smokeGroup = new THREE.Group();  scene.add(smokeGroup);
     const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
@@ -623,9 +781,9 @@ function useThree(meta, frame, histories) {
     const agentGroup = new THREE.Group();  scene.add(agentGroup);
 
     stateRef.current = {
-      renderer, scene, camera, terrainGroup, fireGroup, smokeGroup, obstacleGroup,
+      renderer, scene, camera, terrainGroup, burnedGroup, fireGroup, smokeGroup, obstacleGroup,
       trailGroup, agentGroup, survGroup,
-      terrainSource: null,
+      terrainSource: null, burnedSource: null, burnedStep: -1,
     };
 
     let raf;
@@ -654,8 +812,8 @@ function useThree(meta, frame, histories) {
   // Render frame whenever frame or meta changes
   useEffect(() => {
     if (!stateRef.current || !frame || !meta || !histories) return;
-    renderFrame(stateRef.current, frame, meta, histories);
-  }, [meta, frame, histories]);
+    renderFrame(stateRef.current, frame, meta, histories, frames);
+  }, [meta, frame, histories, frames]);
 
   return canvasRef;
 }
@@ -700,6 +858,7 @@ function Legend() {
     ['square', '#555963', 'Rock / blocked'],
     ['circle', '#1d5128', 'Tree canopy'],
     ['square', '#a34d3d', 'House'],
+    ['square', '#2b211b', 'Burned / post-fire'],
     ['square', '#f06e1e', 'Fire'],
   ];
   return h('div', { id: 'legend' },
@@ -772,6 +931,9 @@ function App() {
   }, [strategy]);
 
   const meta = data?.metadata;
+  const runLabel = meta
+    ? `Loaded: seed ${meta.seed} · ${meta.actual_n_steps ?? meta.n_steps} steps · ${meta.fire_grid_size}x${meta.fire_grid_size}`
+    : 'No trajectory loaded yet';
   const frames = data?.frames ?? [];
   const histories = useMemo(() => buildHistories(frames), [data]);
   const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
@@ -793,12 +955,12 @@ function App() {
   };
 
   const frame = frames[step] ?? null;
-  const canvasRef = useThree(meta, frame, histories);
+  const canvasRef = useThree(meta, frame, histories, frames);
 
   return h(React.Fragment, null,
     h('header', null,
       h('h1', null, 'OmniSearch · Strategy Viewer'),
-      h('div', { className: 'meta' }, 'Heterogeneous air-ground swarm replay'),
+      h('div', { className: 'meta' }, runLabel),
       h('div', { style: { flex: 1 } }),
       h('label', null,
         'Strategy: ',
