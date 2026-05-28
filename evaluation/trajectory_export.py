@@ -48,6 +48,7 @@ import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+import numpy as np
 import vmas
 
 from envs.wildfire_search import WildfireSearchScenario, X, Y
@@ -87,6 +88,13 @@ def _survivor_records(scenario, env_index: int) -> List[dict]:
 def _fire_cells(scenario, env_index: int) -> List[List[int]]:
     grid = scenario.fire_grid[env_index].cpu().numpy()
     ys, xs = (grid != 0).nonzero()
+    return [[int(x), int(y)] for x, y in zip(xs, ys)]
+
+
+def _burned_cells_added(scenario, env_index: int, previous_grid) -> List[List[int]]:
+    grid = scenario.burned_grid[env_index].cpu().numpy()
+    ys, xs = (grid & ~previous_grid).nonzero()
+    previous_grid[...] = grid
     return [[int(x), int(y)] for x, y in zip(xs, ys)]
 
 
@@ -182,9 +190,15 @@ def export_trajectory(
         "n_survivors":    sc.n_survivors,
         "agent_radius":   round(float(sc.agent_radius), 4),
         "survivor_radius": round(float(sc.survivor_radius), 4),
+        "fire_model": {
+            "affected_fraction_target": round(float(sc.fire_target_fraction[env_index]), 4),
+            "spread_prob": round(float(sc.fire_spread_prob), 4),
+            "spread_variability": round(float(sc.fire_spread_variability), 4),
+        },
     }
 
     frames: List[Dict] = []
+    previous_burned_grid = np.zeros_like(sc.burned_grid[env_index].cpu().numpy(), dtype=bool)
 
     # Initial frame (post-reset, before any step)
     frames.append({
@@ -192,6 +206,7 @@ def export_trajectory(
         "agents":     [_agent_record(a, sc, env_index) for a in sc.world.agents],
         "survivors":  _survivor_records(sc, env_index),
         "fire_cells": _fire_cells(sc, env_index),
+        "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
         "smoke_cells": _smoke_cells(sc, env_index),
     })
 
@@ -203,6 +218,7 @@ def export_trajectory(
             "agents":     [_agent_record(a, sc, env_index) for a in sc.world.agents],
             "survivors":  _survivor_records(sc, env_index),
             "fire_cells": _fire_cells(sc, env_index),
+            "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
             "smoke_cells": _smoke_cells(sc, env_index),
         })
         if sc.done()[env_index].item():

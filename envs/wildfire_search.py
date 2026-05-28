@@ -72,9 +72,26 @@ class WildfireSearchScenario(BaseScenario):
         # Fire spread (cellular automata on a discrete grid overlay)
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 16)
         self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
-        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.04)
+        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.10)
+        self.fire_spread_variability = kwargs.pop("fire_spread_variability", 0.55)
+        self.fire_spotting_prob = kwargs.pop("fire_spotting_prob", 0.00012)
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
-        self.fire_step_interval  = kwargs.pop("fire_step_interval", 5)  # spread every N env steps
+        self.initial_fire_area_fraction = kwargs.pop("initial_fire_area_fraction", 0.025)
+        self.wildfire_area_fraction_range = kwargs.pop("wildfire_area_fraction_range", (0.20, 0.40))
+        if len(self.wildfire_area_fraction_range) != 2:
+            raise ValueError("wildfire_area_fraction_range must be (low, high)")
+        self.wildfire_area_fraction_range = (
+            max(0.0, min(float(self.wildfire_area_fraction_range[0]), 1.0)),
+            max(0.0, min(float(self.wildfire_area_fraction_range[1]), 1.0)),
+        )
+        if self.wildfire_area_fraction_range[1] < self.wildfire_area_fraction_range[0]:
+            raise ValueError("wildfire_area_fraction_range high must be >= low")
+        self.fire_burnout_min_updates = max(int(kwargs.pop("fire_burnout_min_updates", 5)), 1)
+        self.fire_burnout_max_updates = max(
+            int(kwargs.pop("fire_burnout_max_updates", 14)),
+            self.fire_burnout_min_updates,
+        )
+        self.fire_step_interval  = kwargs.pop("fire_step_interval", 3)  # spread every N env steps
         self.smoke_emission = kwargs.pop("smoke_emission", 0.18)
         self.smoke_decay = kwargs.pop("smoke_decay", 0.96)
         self.smoke_diffusion = kwargs.pop("smoke_diffusion", 0.16)
@@ -242,6 +259,14 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.bool, device=device,
         )
+        self.burned_grid = torch.zeros_like(self.fire_grid)
+        self.fire_age_grid = torch.zeros(
+            batch_dim, self.fire_grid_size, self.fire_grid_size,
+            dtype=torch.long, device=device,
+        )
+        self.fire_lifetime_grid = torch.zeros_like(self.fire_age_grid)
+        target_low, target_high = self.wildfire_area_fraction_range
+        self.fire_target_fraction = torch.empty(batch_dim, device=device).uniform_(target_low, target_high)
         self.smoke_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.float, device=device,
@@ -300,33 +325,33 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.fire_grid.zero_()
+            self.burned_grid.zero_()
+            self.fire_age_grid.zero_()
+            self.fire_lifetime_grid.zero_()
             self.smoke_grid.zero_()
             self.step_count.zero_()
+            target_low, target_high = self.wildfire_area_fraction_range
+            self.fire_target_fraction.uniform_(target_low, target_high)
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.fire_grid[env_index] = False
+            self.burned_grid[env_index] = False
+            self.fire_age_grid[env_index] = 0
+            self.fire_lifetime_grid[env_index] = 0
             self.smoke_grid[env_index] = 0.0
             self.step_count[env_index] = 0
+            target_low, target_high = self.wildfire_area_fraction_range
+            self.fire_target_fraction[env_index] = torch.empty(
+                (), device=self.fire_grid.device,
+            ).uniform_(target_low, target_high)
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
         for b in envs_to_seed:
             self._generate_terrain(b)
             self._seed_initial_fire(b, H, W)
-
-    def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
-        """Start fires on cells that have enough fuel to burn."""
-        fuel = self._fire_fuel_grid(env_index)
-        candidates = (fuel > 0.20).flatten().nonzero(as_tuple=False).flatten()
-        if candidates.numel() == 0:
-            candidates = torch.arange(height * width, device=self.fire_grid.device)
-        n_cells = min(int(self.initial_fire_cells), int(candidates.numel()))
-        if n_cells <= 0:
-            return
-        choice = candidates[torch.randperm(candidates.numel(), device=self.fire_grid.device)[:n_cells]]
-        self.fire_grid[env_index].view(-1)[choice] = True
 
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
@@ -356,6 +381,62 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ugv_travel_cost.zero_()
         else:
             self.step_ugv_travel_cost[env_index] = 0
+
+    def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
+        """Start a compact fire patch with resolution-independent physical area."""
+        fuel = self._fire_fuel_grid(env_index)
+        candidates = (fuel > 0.20).flatten().nonzero(as_tuple=False).flatten()
+        if candidates.numel() == 0:
+            candidates = torch.arange(height * width, device=self.fire_grid.device)
+        fractional_cells = int(round(height * width * float(self.initial_fire_area_fraction)))
+        n_cells = min(
+            max(self._scaled_area_cell_count(self.initial_fire_cells, min_cells=1), fractional_cells),
+            int(candidates.numel()),
+        )
+        if float(self.initial_fire_cells) > 0.0 and n_cells > 0:
+            seed = candidates[
+                torch.randint(candidates.numel(), (1,), device=self.fire_grid.device)
+            ].squeeze(0)
+            seed_y = torch.div(seed, width, rounding_mode="floor")
+            seed_x = seed % width
+            ys = torch.arange(height, device=self.fire_grid.device).view(height, 1)
+            xs = torch.arange(width, device=self.fire_grid.device).view(1, width)
+            dist2 = (xs - seed_x).float().square() + (ys - seed_y).float().square()
+            scores = torch.full(
+                (height * width,),
+                float("inf"),
+                device=self.fire_grid.device,
+            )
+            scores[candidates] = dist2.flatten()[candidates]
+            choice = torch.topk(scores, k=n_cells, largest=False).indices
+            self._ignite_fire_cells(self._cell_choice_mask(env_index, choice, height, width))
+
+    def _cell_choice_mask(
+        self,
+        env_index: int,
+        choice: Tensor,
+        height: int,
+        width: int,
+    ) -> Tensor:
+        mask = torch.zeros_like(self.fire_grid)
+        mask[env_index].view(height * width)[choice] = True
+        return mask
+
+    def _ignite_fire_cells(self, new_burns: Tensor) -> None:
+        """Mark cells as actively burning and assign each a random burn lifetime."""
+        if not bool(new_burns.any().item()):
+            return
+        random_lifetime = torch.randint(
+            self.fire_burnout_min_updates,
+            self.fire_burnout_max_updates + 1,
+            self.fire_lifetime_grid.shape,
+            device=self.fire_lifetime_grid.device,
+            dtype=self.fire_lifetime_grid.dtype,
+        )
+        self.fire_grid = self.fire_grid | new_burns
+        self.burned_grid = self.burned_grid | new_burns
+        self.fire_age_grid = torch.where(new_burns, torch.zeros_like(self.fire_age_grid), self.fire_age_grid)
+        self.fire_lifetime_grid = torch.where(new_burns, random_lifetime, self.fire_lifetime_grid)
 
     def _generate_terrain(self, env_index: int) -> None:
         """Create hills, vegetation regions, rocky barriers, and road corridors."""
@@ -487,6 +568,9 @@ class WildfireSearchScenario(BaseScenario):
     def _scaled_cell_count(self, cells_at_reference: float, min_cells: int = 1) -> int:
         return max(int(round(float(cells_at_reference) * self._grid_scale())), min_cells)
 
+    def _scaled_area_cell_count(self, cells_at_reference: float, min_cells: int = 1) -> int:
+        return max(int(round(float(cells_at_reference) * self._grid_scale() ** 2)), min_cells)
+
     def _refresh_mobility_layers(self, env_index: int) -> None:
         cover = self.land_cover_grid[env_index]
         slope = self.slope_grid[env_index]
@@ -531,9 +615,61 @@ class WildfireSearchScenario(BaseScenario):
         fire = self.fire_grid.float()
         neighbors = self._wind_weighted_neighbor_sum(fire)
         fuel = self._fire_fuel_grid()
-        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** (neighbors * fuel)
-        new_burns = (torch.rand_like(p_ignite) < p_ignite) & (fuel > 0.0)
-        self.fire_grid = self.fire_grid | new_burns
+        burnable = (fuel > 0.0) & ~self.burned_grid
+        affected_fraction = self.burned_grid.float().flatten(1).mean(dim=1).view(-1, 1, 1)
+        target_fraction = self.fire_target_fraction.view(-1, 1, 1).clamp_min(1e-6)
+        target_gap = ((target_fraction - affected_fraction) / target_fraction).clamp(0.0, 1.0)
+        random_rate = torch.exp(
+            torch.randn(
+                self.world.batch_dim, 1, 1,
+                device=self.fire_grid.device,
+            ) * self.fire_spread_variability
+        ).clamp(0.35, 2.25)
+        rate = neighbors * fuel * self._grid_scale() * random_rate * (0.15 + 2.35 * target_gap)
+        p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** rate.clamp_min(0.0)
+
+        smoke_spotting = self.smoke_grid > 0.08
+        p_spot = (
+            self.fire_spotting_prob
+            * self._grid_scale()
+            * random_rate
+            * target_gap
+            * fuel.clamp(0.0, 1.0)
+        )
+        new_burns = (
+            ((torch.rand_like(p_ignite) < p_ignite) | ((torch.rand_like(p_spot) < p_spot) & smoke_spotting))
+            & burnable
+        )
+        new_burns = self._cap_new_burns_to_target(new_burns)
+        self._ignite_fire_cells(new_burns)
+
+        self.fire_age_grid = torch.where(
+            self.fire_grid,
+            self.fire_age_grid + 1,
+            self.fire_age_grid,
+        )
+        burned_out = self.fire_grid & (self.fire_age_grid >= self.fire_lifetime_grid.clamp_min(1))
+        self.fire_grid = self.fire_grid & ~burned_out
+
+    def _cap_new_burns_to_target(self, new_burns: Tensor) -> Tensor:
+        """Keep the affected wildfire area near the sampled scenario target."""
+        total_cells = self.fire_grid_size * self.fire_grid_size
+        capped = new_burns.clone()
+        for b in range(self.world.batch_dim):
+            target_cells = int(round(float(self.fire_target_fraction[b]) * total_cells))
+            remaining = target_cells - int(self.burned_grid[b].sum().item())
+            if remaining <= 0:
+                capped[b] = False
+                continue
+            choices = capped[b].flatten().nonzero(as_tuple=False).flatten()
+            if choices.numel() > remaining:
+                keep = choices[
+                    torch.randperm(choices.numel(), device=choices.device)[:remaining]
+                ]
+                mask = torch.zeros_like(capped[b])
+                mask.view(-1)[keep] = True
+                capped[b] = mask
+        return capped
 
     def _update_smoke(self) -> None:
         """Emit smoke from burning cells, then diffuse, drift, and decay."""
@@ -956,6 +1092,8 @@ class WildfireSearchScenario(BaseScenario):
             "n_found":   self.found_survivors.sum(dim=1).float(),
             "n_scouted": self.scouted_survivors.sum(dim=1).float(),
             "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
+            "n_burned":  self.burned_grid.flatten(1).sum(dim=1).float(),
+            "affected_fraction": self.burned_grid.float().flatten(1).mean(dim=1),
             "ugv_step_travel_cost": self.step_ugv_travel_cost.sum(dim=1),
             "mean_drone_altitude": mean_drone_altitude,
         }
