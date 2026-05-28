@@ -23,6 +23,7 @@ import math
 from typing import Callable, Dict, List
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from vmas.simulator.core import Agent, Landmark, Sphere, World
@@ -119,7 +120,9 @@ class WildfireSearchScenario(BaseScenario):
         self.terrain_hills = kwargs.pop("terrain_hills", 4)
         self.terrain_elevation_scale = kwargs.pop("terrain_elevation_scale", 0.30)
         self.terrain_road_width = kwargs.pop("terrain_road_width", 1)
+        self.terrain_road_width_world = kwargs.pop("terrain_road_width_world", 0.035)
         self.terrain_house_footprint = kwargs.pop("terrain_house_footprint", 2)
+        self.terrain_house_size = kwargs.pop("terrain_house_size", 0.065)
         self.max_ground_slope = kwargs.pop("max_ground_slope", 0.70)
         self.slope_cost_weight = kwargs.pop("slope_cost_weight", 2.0)
         self.slope_speed_weight = kwargs.pop("slope_speed_weight", 1.5)
@@ -451,13 +454,12 @@ class WildfireSearchScenario(BaseScenario):
             (LAND_ROCK, self.terrain_rock_patches),
         ):
             for _ in range(n_patches):
-                cx = int(torch.randint(size, (1,), device=grid.device).item())
-                cy = int(torch.randint(size, (1,), device=grid.device).item())
-                rx = int(torch.randint(1, radius + 1, (1,), device=grid.device).item())
-                ry = int(torch.randint(1, radius + 1, (1,), device=grid.device).item())
-                ys = torch.arange(size, device=grid.device).view(-1, 1)
-                xs = torch.arange(size, device=grid.device).view(1, -1)
-                patch = ((xs - cx) / rx) ** 2 + ((ys - cy) / ry) ** 2 <= 1.0
+                patch = self._organic_patch_mask(
+                    size=size,
+                    radius=max(radius, 2),
+                    device=grid.device,
+                    compactness=0.60 if land_type == LAND_ROCK else 0.48,
+                )
                 grid[patch] = land_type
 
         self._generate_elevation(env_index)
@@ -465,6 +467,44 @@ class WildfireSearchScenario(BaseScenario):
         self._generate_obstacles(env_index)
         self._clear_entity_staging_areas(env_index)
         self._refresh_mobility_layers(env_index)
+
+    def _smoothed_random_field(self, size: int, device: torch.device, passes: int = 3) -> Tensor:
+        field = torch.rand(size, size, device=device)
+        for _ in range(passes):
+            padded = torch.zeros(size + 2, size + 2, device=device)
+            padded[1:-1, 1:-1] = field
+            field = (
+                padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:]
+                + padded[1:-1, :-2] + padded[1:-1, 1:-1] + padded[1:-1, 2:]
+                + padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
+            ) / 9.0
+        field -= field.min()
+        return field / field.max().clamp_min(1e-6)
+
+    def _organic_patch_mask(
+        self,
+        size: int,
+        radius: int,
+        device: torch.device,
+        compactness: float,
+    ) -> Tensor:
+        ys = torch.arange(size, device=device).view(-1, 1)
+        xs = torch.arange(size, device=device).view(1, -1)
+        cx = torch.rand((), device=device) * (size - 1)
+        cy = torch.rand((), device=device) * (size - 1)
+        lobes = int(torch.randint(4, 8, (1,), device=device).item())
+        score = torch.zeros(size, size, device=device)
+        for _ in range(lobes):
+            lx = (cx + torch.randn((), device=device) * radius * 0.55).clamp(0, size - 1)
+            ly = (cy + torch.randn((), device=device) * radius * 0.55).clamp(0, size - 1)
+            sx = torch.rand((), device=device) * radius * 0.45 + radius * 0.35
+            sy = torch.rand((), device=device) * radius * 0.45 + radius * 0.35
+            amp = torch.rand((), device=device) * 0.55 + 0.75
+            score += amp * torch.exp(-(((xs - lx) / sx) ** 2 + ((ys - ly) / sy) ** 2) / 2.0)
+        score += 0.35 * self._smoothed_random_field(size, device, passes=2)
+        score -= score.min()
+        score /= score.max().clamp_min(1e-6)
+        return score > compactness
 
     def _generate_elevation(self, env_index: int) -> None:
         """Blend smooth Gaussian hills and derive a slope raster."""
@@ -491,27 +531,63 @@ class WildfireSearchScenario(BaseScenario):
         self.slope_grid[env_index] = torch.sqrt(grade_x.square() + grade_y.square())
 
     def _paint_roads(self, env_index: int) -> None:
-        """Lay two traversable winding access tracks across the landscape."""
+        """Lay irregular access tracks between map edges and a small junction."""
         grid = self.land_cover_grid[env_index]
         size = self.fire_grid_size
-        scale = self._grid_scale()
-        width = self._scaled_cell_count(self.terrain_road_width, min_cells=0)
-        wiggle_cells = max(1.0, 1.5 * scale)
-        wiggle_frequency = 0.35 / max(scale, 1e-6)
-        phase = float(torch.rand((), device=grid.device).item()) * 6.283
-        x_mid = int(torch.randint(size // 3, max(2 * size // 3, size // 3 + 1),
-                                  (1,), device=grid.device).item())
-        y_mid = int(torch.randint(size // 3, max(2 * size // 3, size // 3 + 1),
-                                  (1,), device=grid.device).item())
-        for i in range(size):
-            offset = int(round(wiggle_cells * math.sin(phase + i * wiggle_frequency)))
-            x = max(0, min(size - 1, x_mid + offset))
-            y = max(0, min(size - 1, y_mid + offset))
-            grid[i, max(0, x - width): min(size, x + width + 1)] = LAND_ROAD
-            grid[max(0, y - width): min(size, y + width + 1), i] = LAND_ROAD
+        width = self._world_length_to_cells(self.terrain_road_width_world)
+        junction = (
+            float(torch.rand((), device=grid.device).item()) * size * 0.30 + size * 0.35,
+            float(torch.rand((), device=grid.device).item()) * size * 0.30 + size * 0.35,
+        )
+        edge_points = [
+            (0.0, float(torch.randint(size // 5, max(4 * size // 5, size // 5 + 1), (1,), device=grid.device).item())),
+            (float(size - 1), float(torch.randint(size // 5, max(4 * size // 5, size // 5 + 1), (1,), device=grid.device).item())),
+            (float(torch.randint(size // 5, max(4 * size // 5, size // 5 + 1), (1,), device=grid.device).item()), 0.0),
+            (float(torch.randint(size // 5, max(4 * size // 5, size // 5 + 1), (1,), device=grid.device).item()), float(size - 1)),
+        ]
+        order = torch.randperm(len(edge_points), device=grid.device).tolist()
+        for idx in order[:3]:
+            self._paint_road_path(grid, [edge_points[idx], junction], max(width, 1))
+
+    def _paint_road_path(self, grid: Tensor, endpoints: List[tuple[float, float]], width: int) -> None:
+        size = self.fire_grid_size
+        device = grid.device
+        p0, p1 = endpoints
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        length = max(math.hypot(dx, dy), 1.0)
+        n_midpoints = max(2, int(length / max(size * 0.20, 1.0)))
+        normal = (-dy / length, dx / length)
+        waypoints = [p0]
+        for i in range(1, n_midpoints + 1):
+            t = i / (n_midpoints + 1)
+            base_x = p0[0] + dx * t
+            base_y = p0[1] + dy * t
+            wobble = (float(torch.rand((), device=device).item()) - 0.5) * size * 0.18
+            waypoints.append((
+                max(0.0, min(size - 1.0, base_x + normal[0] * wobble)),
+                max(0.0, min(size - 1.0, base_y + normal[1] * wobble)),
+            ))
+        waypoints.append(p1)
+
+        ys = torch.arange(size, device=device).view(-1, 1).float()
+        xs = torch.arange(size, device=device).view(1, -1).float()
+        mask = torch.zeros(size, size, dtype=torch.bool, device=device)
+        edge_noise = self._smoothed_random_field(size, device, passes=2)
+        for a, b in zip(waypoints[:-1], waypoints[1:]):
+            ax, ay = a
+            bx, by = b
+            vx, vy = bx - ax, by - ay
+            denom = max(vx * vx + vy * vy, 1e-6)
+            t = (((xs - ax) * vx + (ys - ay) * vy) / denom).clamp(0.0, 1.0)
+            closest_x = ax + t * vx
+            closest_y = ay + t * vy
+            dist = torch.sqrt((xs - closest_x).square() + (ys - closest_y).square())
+            local_width = width * (0.75 + 0.55 * edge_noise)
+            mask |= dist <= local_width
+        grid[mask] = LAND_ROAD
 
     def _generate_obstacles(self, env_index: int) -> None:
-        """Place tree canopy on forest cells and compact house footprints."""
+        """Place tree canopy and road-adjacent buildings."""
         cover = self.land_cover_grid[env_index]
         objects = self.obstacle_type_grid[env_index]
         heights = self.obstacle_height_grid[env_index]
@@ -523,44 +599,65 @@ class WildfireSearchScenario(BaseScenario):
         heights[forest] = tree_low + torch.rand_like(heights[forest]) * (tree_high - tree_low)
 
         size = self.fire_grid_size
-        footprint_cells = min(
-            self._scaled_cell_count(self.terrain_house_footprint, min_cells=1),
-            max(size - 2, 1),
-        )
+        road = cover == LAND_ROAD
+        road_buffer = self._dilate_mask(road, self._scaled_cell_count(2, min_cells=1))
+        candidates = road_buffer & (cover == LAND_OPEN)
+        if not bool(candidates.any().item()):
+            candidates = cover == LAND_OPEN
+        house_cells = max(1, self._world_length_to_cells(self.terrain_house_size))
         house_low, house_high = self.house_height_range
         for _ in range(self.terrain_houses):
-            x_high = max(size - footprint_cells, 2)
-            y_high = max(size - footprint_cells, 2)
-            x = int(torch.randint(1, x_high, (1,), device=cover.device).item())
-            y = int(torch.randint(1, y_high, (1,), device=cover.device).item())
-            footprint_cover = cover[y:y + footprint_cells, x:x + footprint_cells]
-            buildable = (
-                (footprint_cover == LAND_OPEN)
-                | (footprint_cover == LAND_BRUSH)
-                | (footprint_cover == LAND_FOREST)
-            )
-            if not buildable.any():
+            possible = candidates.flatten().nonzero(as_tuple=False).flatten()
+            if possible.numel() == 0:
+                break
+            center = possible[
+                torch.randint(possible.numel(), (1,), device=cover.device)
+            ].squeeze(0)
+            cy = int(torch.div(center, size, rounding_mode="floor").item())
+            cx = int((center % size).item())
+            width = max(1, int(round(house_cells * (0.75 + float(torch.rand((), device=cover.device).item()) * 0.7))))
+            height = max(1, int(round(house_cells * (0.70 + float(torch.rand((), device=cover.device).item()) * 0.6))))
+            x0 = max(0, cx - width // 2)
+            x1 = min(size, x0 + width)
+            y0 = max(0, cy - height // 2)
+            y1 = min(size, y0 + height)
+            x0 = max(0, x1 - width)
+            y0 = max(0, y1 - height)
+            footprint_cover = cover[y0:y1, x0:x1]
+            buildable = footprint_cover == LAND_OPEN
+            if not bool(buildable.any().item()):
                 continue
             footprint_cover[buildable] = LAND_OPEN
-            objects[y:y + footprint_cells, x:x + footprint_cells][buildable] = OBJECT_HOUSE
+            local_objects = objects[y0:y1, x0:x1]
+            local_objects[buildable] = OBJECT_HOUSE
             house_height = float(
                 (house_low + torch.rand((), device=cover.device) * (house_high - house_low)).item(),
             )
-            heights[y:y + footprint_cells, x:x + footprint_cells][buildable] = house_height
+            local_heights = heights[y0:y1, x0:x1]
+            local_heights[buildable] = house_height
+            candidates[max(0, y0 - height): min(size, y1 + height), max(0, x0 - width): min(size, x1 + width)] = False
 
     def _clear_entity_staging_areas(self, env_index: int) -> None:
-        """Ensure survivor locations and ground starts are accessible clearings."""
-        clear_radius = self._scaled_cell_count(1, min_cells=1)
+        """Ensure survivor locations and ground starts have small organic clearings."""
+        clear_radius = max(
+            self._world_length_to_cells(max(self.agent_radius, self.survivor_radius) * 2.4),
+            2,
+        )
+        size = self.fire_grid_size
+        device = self.fire_grid.device
+        yy = torch.arange(size, device=device).view(-1, 1)
+        xx = torch.arange(size, device=device).view(1, -1)
         entities = self._survivors + self.world.agents[self.n_drones:]
         for entity in entities:
             gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
-            ys = slice(max(y - clear_radius, 0), min(y + clear_radius + 1, self.fire_grid_size))
-            xs = slice(max(x - clear_radius, 0), min(x + clear_radius + 1, self.fire_grid_size))
-            self.land_cover_grid[env_index, ys, xs] = LAND_OPEN
-            self.slope_grid[env_index, ys, xs] = 0.0
-            self.obstacle_type_grid[env_index, ys, xs] = OBJECT_NONE
-            self.obstacle_height_grid[env_index, ys, xs] = 0.0
+            dist = torch.sqrt((xx - x).float().square() + (yy - y).float().square())
+            noise = self._smoothed_random_field(size, device, passes=2)
+            mask = dist <= clear_radius * (0.82 + 0.30 * noise)
+            self.land_cover_grid[env_index][mask] = LAND_OPEN
+            self.slope_grid[env_index][mask] *= 0.35
+            self.obstacle_type_grid[env_index][mask] = OBJECT_NONE
+            self.obstacle_height_grid[env_index][mask] = 0.0
 
     def _grid_scale(self) -> float:
         return self.fire_grid_size / max(float(self.terrain_reference_grid_size), 1.0)
@@ -570,6 +667,21 @@ class WildfireSearchScenario(BaseScenario):
 
     def _scaled_area_cell_count(self, cells_at_reference: float, min_cells: int = 1) -> int:
         return max(int(round(float(cells_at_reference) * self._grid_scale() ** 2)), min_cells)
+
+    def _world_length_to_cells(self, length: float, min_cells: int = 1) -> int:
+        return max(int(round(float(length) / (2.0 * self.x_semidim) * self.fire_grid_size)), min_cells)
+
+    def _dilate_mask(self, mask: Tensor, radius: int) -> Tensor:
+        if radius <= 0:
+            return mask
+        kernel = 2 * radius + 1
+        dilated = F.max_pool2d(
+            mask.float().unsqueeze(0).unsqueeze(0),
+            kernel_size=kernel,
+            stride=1,
+            padding=radius,
+        )
+        return dilated.squeeze(0).squeeze(0) > 0
 
     def _refresh_mobility_layers(self, env_index: int) -> None:
         cover = self.land_cover_grid[env_index]
