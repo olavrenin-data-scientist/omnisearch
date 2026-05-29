@@ -82,9 +82,13 @@ class WildfireSearchScenario(BaseScenario):
         # Fire spread (cellular automata on a discrete grid overlay)
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 16)
         self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
-        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.10)
+        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.065)
         self.fire_spread_variability = kwargs.pop("fire_spread_variability", 0.55)
-        self.fire_spotting_prob = kwargs.pop("fire_spotting_prob", 0.00012)
+        self.fire_spotting_prob = kwargs.pop("fire_spotting_prob", 0.00008)
+        self.fire_wind_spread_weight = max(float(kwargs.pop("fire_wind_spread_weight", 1.25)), 0.0)
+        self.fire_slope_spread_weight = max(float(kwargs.pop("fire_slope_spread_weight", 1.65)), 0.0)
+        self.fire_moisture_damping = max(float(kwargs.pop("fire_moisture_damping", 1.15)), 0.0)
+        self.fire_intensity_decay = min(max(float(kwargs.pop("fire_intensity_decay", 0.82)), 0.0), 1.0)
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
         self.initial_fire_area_fraction = kwargs.pop("initial_fire_area_fraction", 0.025)
         self.wildfire_area_fraction_range = kwargs.pop("wildfire_area_fraction_range", (0.20, 0.40))
@@ -288,6 +292,7 @@ class WildfireSearchScenario(BaseScenario):
             dtype=torch.long, device=device,
         )
         self.fire_lifetime_grid = torch.zeros_like(self.fire_age_grid)
+        self.fire_intensity_grid = torch.zeros_like(self.fire_grid, dtype=torch.float)
         target_low, target_high = self.wildfire_area_fraction_range
         self.fire_target_fraction = torch.empty(batch_dim, device=device).uniform_(target_low, target_high)
         self.smoke_grid = torch.zeros(
@@ -360,6 +365,7 @@ class WildfireSearchScenario(BaseScenario):
             self.burned_grid.zero_()
             self.fire_age_grid.zero_()
             self.fire_lifetime_grid.zero_()
+            self.fire_intensity_grid.zero_()
             self.smoke_grid.zero_()
             self.step_count.zero_()
             target_low, target_high = self.wildfire_area_fraction_range
@@ -372,6 +378,7 @@ class WildfireSearchScenario(BaseScenario):
             self.burned_grid[env_index] = False
             self.fire_age_grid[env_index] = 0
             self.fire_lifetime_grid[env_index] = 0
+            self.fire_intensity_grid[env_index] = 0.0
             self.smoke_grid[env_index] = 0.0
             self.step_count[env_index] = 0
             target_low, target_high = self.wildfire_area_fraction_range
@@ -415,11 +422,13 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ugv_travel_cost[env_index] = 0
 
     def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
-        """Start a compact fire patch with resolution-independent physical area."""
+        """Start an irregular compact fire patch with resolution-independent area."""
         fuel = self._fire_fuel_grid(env_index)
         candidates = (fuel > 0.20).flatten().nonzero(as_tuple=False).flatten()
         if candidates.numel() == 0:
             candidates = torch.arange(height * width, device=self.fire_grid.device)
+        candidate_mask = torch.zeros(height * width, dtype=torch.bool, device=self.fire_grid.device)
+        candidate_mask[candidates] = True
         fractional_cells = int(round(height * width * float(self.initial_fire_area_fraction)))
         n_cells = min(
             max(self._scaled_area_cell_count(self.initial_fire_cells, min_cells=1), fractional_cells),
@@ -431,17 +440,40 @@ class WildfireSearchScenario(BaseScenario):
             ].squeeze(0)
             seed_y = torch.div(seed, width, rounding_mode="floor")
             seed_x = seed % width
-            ys = torch.arange(height, device=self.fire_grid.device).view(height, 1)
-            xs = torch.arange(width, device=self.fire_grid.device).view(1, width)
-            dist2 = (xs - seed_x).float().square() + (ys - seed_y).float().square()
-            scores = torch.full(
-                (height * width,),
-                float("inf"),
-                device=self.fire_grid.device,
-            )
-            scores[candidates] = dist2.flatten()[candidates]
+            scores = self._initial_fire_scores(seed_x, seed_y, fuel, height, width)
+            scores = torch.where(candidate_mask, scores, torch.full_like(scores, float("inf")))
             choice = torch.topk(scores, k=n_cells, largest=False).indices
             self._ignite_fire_cells(self._cell_choice_mask(env_index, choice, height, width))
+
+    def _initial_fire_scores(
+        self,
+        seed_x: Tensor,
+        seed_y: Tensor,
+        fuel: Tensor,
+        height: int,
+        width: int,
+    ) -> Tensor:
+        """Rank cells for a natural-looking ignition patch instead of a circle."""
+        device = self.fire_grid.device
+        ys = torch.arange(height, device=device).view(height, 1)
+        xs = torch.arange(width, device=device).view(1, width)
+        dx = (xs - seed_x).float()
+        dy = (ys - seed_y).float()
+
+        angle = torch.rand((), device=device) * (2.0 * math.pi)
+        stretch = 0.65 + torch.rand((), device=device) * 1.1
+        cos_a, sin_a = torch.cos(angle), torch.sin(angle)
+        rotated_x = cos_a * dx + sin_a * dy
+        rotated_y = -sin_a * dx + cos_a * dy
+        ellipse = (rotated_x / stretch).square() + (rotated_y * stretch).square()
+
+        texture = torch.rand(height, width, device=device)
+        for _ in range(3):
+            texture = 0.55 * texture + 0.45 * (self._neighbor_sum(texture.unsqueeze(0)).squeeze(0) / 4.0)
+        texture = (texture - texture.min()) / (texture.max() - texture.min()).clamp_min(1e-6)
+        fuel_bias = fuel.clamp(0.0, 1.5) / 1.5
+        ragged = ellipse * (0.72 + 0.55 * texture) - 0.40 * fuel_bias
+        return ragged.flatten()
 
     def _cell_choice_mask(
         self,
@@ -469,6 +501,12 @@ class WildfireSearchScenario(BaseScenario):
         self.burned_grid = self.burned_grid | new_burns
         self.fire_age_grid = torch.where(new_burns, torch.zeros_like(self.fire_age_grid), self.fire_age_grid)
         self.fire_lifetime_grid = torch.where(new_burns, random_lifetime, self.fire_lifetime_grid)
+        ignition_intensity = self._fire_intensity_potential() * (0.80 + 0.40 * torch.rand_like(self.fire_intensity_grid))
+        self.fire_intensity_grid = torch.where(
+            new_burns,
+            ignition_intensity.clamp(0.25, 1.0),
+            self.fire_intensity_grid,
+        )
 
     def _generate_terrain(self, env_index: int) -> None:
         """Load real terrain and clear small entity staging areas."""
@@ -648,9 +686,9 @@ class WildfireSearchScenario(BaseScenario):
         self._update_smoke()
 
     def _spread_fire(self) -> None:
-        fire = self.fire_grid.float()
-        neighbors = self._wind_weighted_neighbor_sum(fire)
+        exposure = self._directional_fire_exposure()
         fuel = self._fire_fuel_grid()
+        moisture_factor = torch.exp(-self.fire_moisture_damping * self.moisture_grid.clamp(0.0, 1.0))
         burnable = (fuel > 0.0) & ~self.burned_grid
         affected_fraction = self.burned_grid.float().flatten(1).mean(dim=1).view(-1, 1, 1)
         target_fraction = self.fire_target_fraction.view(-1, 1, 1).clamp_min(1e-6)
@@ -661,7 +699,15 @@ class WildfireSearchScenario(BaseScenario):
                 device=self.fire_grid.device,
             ) * self.fire_spread_variability
         ).clamp(0.35, 2.25)
-        rate = neighbors * fuel * self._grid_scale() * random_rate * (0.15 + 2.35 * target_gap)
+        target_boost = 0.35 + 1.05 * target_gap
+        rate = (
+            exposure
+            * fuel
+            * moisture_factor
+            * self._grid_scale()
+            * random_rate
+            * target_boost
+        )
         p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** rate.clamp_min(0.0)
 
         smoke_spotting = self.smoke_grid > 0.08
@@ -671,6 +717,7 @@ class WildfireSearchScenario(BaseScenario):
             * random_rate
             * target_gap
             * fuel.clamp(0.0, 1.0)
+            * moisture_factor
         )
         new_burns = (
             ((torch.rand_like(p_ignite) < p_ignite) | ((torch.rand_like(p_spot) < p_spot) & smoke_spotting))
@@ -684,8 +731,54 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_age_grid + 1,
             self.fire_age_grid,
         )
+        self._update_fire_intensity()
         burned_out = self.fire_grid & (self.fire_age_grid >= self.fire_lifetime_grid.clamp_min(1))
         self.fire_grid = self.fire_grid & ~burned_out
+        self.fire_intensity_grid = torch.where(
+            self.fire_grid,
+            self.fire_intensity_grid,
+            torch.zeros_like(self.fire_intensity_grid),
+        )
+
+    def _directional_fire_exposure(self) -> Tensor:
+        """Directional source exposure from burning cells into neighboring cells."""
+        source = self.fire_grid.float() * self.fire_intensity_grid.clamp(0.0, 1.0)
+        exposure = torch.zeros_like(self.fire_intensity_grid)
+        wind_x, wind_y = self._normalized_wind()
+        offsets = (
+            (-1, 0), (1, 0), (0, -1), (0, 1),
+            (-1, -1), (-1, 1), (1, -1), (1, 1),
+        )
+        for dx, dy in offsets:
+            distance = math.hypot(dx, dy)
+            direction_x = dx / distance
+            direction_y = dy / distance
+            wind_alignment = wind_x * direction_x + wind_y * direction_y
+            wind_factor = math.exp(self.fire_wind_spread_weight * self.wind_strength * wind_alignment)
+
+            shifted_source = self._shift_grid_no_wrap(source, dx, dy)
+            shifted_elevation = self._shift_grid_no_wrap(self.elevation_grid, dx, dy)
+            uphill_rise = (self.elevation_grid - shifted_elevation).clamp(-0.25, 0.25)
+            slope_factor = torch.exp(self.fire_slope_spread_weight * uphill_rise).clamp(0.45, 2.25)
+            exposure = exposure + shifted_source * wind_factor * slope_factor / distance
+        return exposure
+
+    def _update_fire_intensity(self) -> None:
+        """Evolve flame intensity from fuel, moisture, slope, and burn age."""
+        potential = self._fire_intensity_potential()
+        lifetime = self.fire_lifetime_grid.clamp_min(1).float()
+        age_fraction = (self.fire_age_grid.float() / lifetime).clamp(0.0, 1.0)
+        lifecycle = (1.0 - 0.65 * age_fraction).clamp(0.25, 1.0)
+        target_intensity = (potential * lifecycle).clamp(0.0, 1.0)
+        active_intensity = 0.58 * self.fire_intensity_grid + 0.42 * target_intensity
+        decayed_intensity = self.fire_intensity_grid * self.fire_intensity_decay
+        self.fire_intensity_grid = torch.where(self.fire_grid, active_intensity, decayed_intensity)
+
+    def _fire_intensity_potential(self) -> Tensor:
+        fuel = (self._fire_fuel_grid() / 1.5).clamp(0.0, 1.0)
+        moisture_factor = torch.exp(-0.75 * self.fire_moisture_damping * self.moisture_grid.clamp(0.0, 1.0))
+        slope_factor = (1.0 + 0.25 * self.slope_grid.clamp(0.0, 1.0)).clamp(1.0, 1.25)
+        return (0.15 + 0.85 * fuel * moisture_factor * slope_factor).clamp(0.0, 1.0)
 
     def _cap_new_burns_to_target(self, new_burns: Tensor) -> Tensor:
         """Keep the affected wildfire area near the sampled scenario target."""
@@ -711,7 +804,8 @@ class WildfireSearchScenario(BaseScenario):
         """Emit smoke from burning cells, then diffuse, drift, and decay."""
         smoke = self.smoke_grid * self.smoke_decay
         fuel = self._fire_fuel_grid()
-        smoke = smoke + self.fire_grid.float() * self.smoke_emission * fuel.clamp(0.0, 1.0)
+        flame_output = self.fire_grid.float() * self.fire_intensity_grid.clamp(0.15, 1.0)
+        smoke = smoke + flame_output * self.smoke_emission * fuel.clamp(0.0, 1.0)
         neighbor_mean = self._neighbor_sum(smoke) / 4.0
         smoke = smoke + self.smoke_diffusion * (neighbor_mean - smoke)
 
@@ -947,7 +1041,7 @@ class WildfireSearchScenario(BaseScenario):
         """Attenuate camera detections by smoke, flame glare, and heat shimmer."""
         path = self._sample_pair_paths(drone_pos, surv_pos, self.drone_perception_path_samples)
         smoke_path = self._grid_values_at_positions(self.smoke_grid, path)
-        fire_path = self._grid_values_at_positions(self.fire_grid, path).float()
+        fire_path = self._grid_values_at_positions(self.fire_intensity_grid, path)
 
         smoke_mean = smoke_path.mean(dim=-1)
         target_smoke = smoke_path[..., -1]
@@ -1216,6 +1310,7 @@ class WildfireSearchScenario(BaseScenario):
             "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
             "n_burned":  self.burned_grid.flatten(1).sum(dim=1).float(),
             "affected_fraction": self.burned_grid.float().flatten(1).mean(dim=1),
+            "mean_fire_intensity": self.fire_intensity_grid.flatten(1).mean(dim=1),
             "ugv_step_travel_cost": self.step_ugv_travel_cost.sum(dim=1),
             "mean_drone_altitude": mean_drone_altitude,
             "mean_drone_altitude_msl": mean_drone_altitude_msl,

@@ -35,7 +35,7 @@ JSON schema (one object per file):
           "step":       0,
           "agents":     [{ "name": "drone_0", "type": "drone",  "x": 0.1, "y": -0.5 }, ...],
           "survivors":  [{ "x": 0.3, "y": 0.2, "scouted": false, "found": false }, ...],
-          "fire_cells": [[gx, gy], ...]
+          "fire_cells": [[gx, gy, intensity], ...]
         },
         ...
       ]
@@ -87,10 +87,11 @@ def _survivor_records(scenario, env_index: int) -> List[dict]:
     return out
 
 
-def _fire_cells(scenario, env_index: int) -> List[List[int]]:
+def _fire_cells(scenario, env_index: int) -> List[List[float]]:
     grid = scenario.fire_grid[env_index].cpu().numpy()
+    intensity = scenario.fire_intensity_grid[env_index].cpu().numpy()
     ys, xs = (grid != 0).nonzero()
-    return [[int(x), int(y)] for x, y in zip(xs, ys)]
+    return [[int(x), int(y), round(float(intensity[y, x]), 4)] for x, y in zip(xs, ys)]
 
 
 def _burned_cells_added(scenario, env_index: int, previous_grid) -> List[List[int]]:
@@ -209,6 +210,10 @@ def export_trajectory(
             "affected_fraction_target": round(float(sc.fire_target_fraction[env_index]), 4),
             "spread_prob": round(float(sc.fire_spread_prob), 4),
             "spread_variability": round(float(sc.fire_spread_variability), 4),
+            "wind_spread_weight": round(float(sc.fire_wind_spread_weight), 4),
+            "slope_spread_weight": round(float(sc.fire_slope_spread_weight), 4),
+            "moisture_damping": round(float(sc.fire_moisture_damping), 4),
+            "intensity_decay": round(float(sc.fire_intensity_decay), 4),
         },
     }
 

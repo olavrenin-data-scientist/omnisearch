@@ -611,15 +611,18 @@ function syncActiveFireOverlay(state, meta, frame) {
   const s = state.fireScale;
   const ctx = state.fireCtx;
   ctx.clearRect(0, 0, state.fireCanvas.width, state.fireCanvas.height);
-  for (const [gx, gy] of frame.fire_cells ?? []) {
+  for (const cell of frame.fire_cells ?? []) {
+    const [gx, gy, rawIntensity = 1] = cell;
+    const intensity = Math.max(0.2, Math.min(1.0, rawIntensity));
     const x = gx * s;
     const y = (G - gy - 1) * s;
-    ctx.fillStyle = 'rgba(121, 24, 7, 0.62)';
+    ctx.fillStyle = `rgba(121, 24, 7, ${0.38 + 0.24 * intensity})`;
     ctx.fillRect(x, y, s, s);
-    ctx.fillStyle = 'rgba(232, 90, 24, 0.92)';
+    ctx.fillStyle = `rgba(232, 90, 24, ${0.60 + 0.32 * intensity})`;
     ctx.fillRect(x, y, s, s);
-    ctx.fillStyle = 'rgba(255, 221, 94, 0.92)';
-    ctx.fillRect(x + Math.floor(s / 2), y, Math.max(1, Math.ceil(s / 2)), Math.max(1, Math.ceil(s / 2)));
+    ctx.fillStyle = `rgba(255, 221, 94, ${0.45 + 0.47 * intensity})`;
+    const core = Math.max(1, Math.ceil(s * (0.35 + 0.35 * intensity)));
+    ctx.fillRect(x + s - core, y, core, core);
   }
   state.fireTexture.needsUpdate = true;
 }
