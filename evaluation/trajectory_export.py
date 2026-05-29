@@ -66,6 +66,8 @@ def _agent_record(agent, scenario, env_index: int) -> dict:
     if getattr(agent, "is_drone", False):
         drone_index = scenario.world.agents.index(agent)
         record["altitude"] = float(scenario.drone_altitude[env_index, drone_index])
+        record["altitude_agl"] = float(scenario.drone_altitude[env_index, drone_index])
+        record["altitude_msl"] = float(scenario.drone_altitude_msl[env_index, drone_index])
         record["altitude_level"] = int(scenario.drone_altitude_level[env_index, drone_index])
     return record
 
@@ -125,8 +127,11 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "obstacle_type": scenario.obstacle_type_grid[env_index].cpu().tolist(),
         "obstacle_height": rounded_rows(scenario.obstacle_height_grid[env_index]),
         "required_clearance": rounded_rows(scenario.required_clearance_grid[env_index]),
+        "required_clearance_agl": rounded_rows(scenario.required_clearance_grid[env_index]),
+        "required_clearance_msl": rounded_rows(scenario.required_clearance_msl_grid[env_index]),
         "obstacle_names": ["none", "tree", "house"],
         "drone_flight_levels": [round(float(v), 4) for v in scenario.drone_flight_levels.cpu().tolist()],
+        "drone_flight_level_reference": "AGL",
         "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
         "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range), 4),
         "drone_detection_quality": [

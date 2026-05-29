@@ -131,7 +131,7 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("land-cover cost and speed values must cover road/open/brush/forest/rock")
 
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
-        # flight level. Higher flight clears structures but worsens sensing.
+        # AGL flight level. MSL altitude is derived from local terrain elevation.
         drone_flight_levels = kwargs.pop("drone_flight_levels", (0.18, 0.40, 0.70))
         drone_detection_quality = kwargs.pop(
             "drone_detection_quality",
@@ -275,6 +275,7 @@ class WildfireSearchScenario(BaseScenario):
         self.obstacle_type_grid = torch.zeros_like(self.land_cover_grid)
         self.obstacle_height_grid = torch.zeros_like(self.elevation_grid)
         self.required_clearance_grid = torch.zeros_like(self.elevation_grid)
+        self.required_clearance_msl_grid = torch.zeros_like(self.elevation_grid)
         self.traversable_grid = torch.ones_like(self.fire_grid)
         self.mobility_cost_grid = torch.ones_like(self.elevation_grid)
         self.speed_multiplier_grid = torch.ones_like(self.elevation_grid)
@@ -288,7 +289,10 @@ class WildfireSearchScenario(BaseScenario):
             drone_cover_detection_factors, dtype=torch.float, device=device,
         )
         self.drone_energy_costs = torch.tensor(drone_energy_costs, dtype=torch.float, device=device)
+        # Compatibility note: drone_altitude is altitude above ground level
+        # (AGL). Absolute MSL altitude is tracked separately.
         self.drone_altitude = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.drone_altitude_msl = torch.zeros(batch_dim, self.n_drones, device=device)
         self.drone_altitude_level = torch.zeros(batch_dim, self.n_drones, dtype=torch.long, device=device)
         self.step_drone_climb = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
@@ -531,11 +535,13 @@ class WildfireSearchScenario(BaseScenario):
         cost = self.land_cover_cost_values[cover] * (1.0 + self.slope_cost_weight * slope)
         speed = self.land_cover_speed_values[cover] / (1.0 + self.slope_speed_weight * slope)
         self.required_clearance_grid[env_index] = (
-            self.elevation_grid[env_index] + self.obstacle_height_grid[env_index]
-            + self.drone_safety_clearance
+            self.obstacle_height_grid[env_index] + self.drone_safety_clearance
+        )
+        self.required_clearance_msl_grid[env_index] = (
+            self.elevation_grid[env_index] + self.required_clearance_grid[env_index]
         )
         if self.required_clearance_grid[env_index].max() > self.drone_flight_levels.max():
-            raise ValueError("highest drone_flight_levels entry must clear generated terrain and obstacles")
+            raise ValueError("highest drone_flight_levels entry must clear generated obstacles plus safety margin")
         self.traversable_grid[env_index] = traversable
         self.mobility_cost_grid[env_index] = cost
         self.speed_multiplier_grid[env_index] = torch.where(
@@ -894,7 +900,7 @@ class WildfireSearchScenario(BaseScenario):
         end_pos: Tensor,
         env_indices: Tensor | None = None,
     ) -> None:
-        """Select the lowest flight level that clears each crossed cell."""
+        """Select the lowest AGL flight level that clears crossed obstacles."""
         path = self._sample_path(start_pos, end_pos)
         required = self._grid_values_at_positions(
             self.required_clearance_grid, path, env_indices,
@@ -904,16 +910,19 @@ class WildfireSearchScenario(BaseScenario):
         selected = torch.where(
             fits.any(dim=-1), selected, torch.full_like(selected, self.drone_flight_levels.numel() - 1),
         )
+        end_ground_msl = self._grid_values_at_positions(self.elevation_grid, end_pos, env_indices)
         if env_indices is None:
-            previous = self.drone_altitude.clone()
+            previous_msl = self.drone_altitude_msl.clone()
             self.drone_altitude_level = selected
             self.drone_altitude = self.drone_flight_levels[selected]
-            self.step_drone_climb = (self.drone_altitude - previous).abs()
+            self.drone_altitude_msl = end_ground_msl + self.drone_altitude
+            self.step_drone_climb = (self.drone_altitude_msl - previous_msl).abs()
         else:
-            previous = self.drone_altitude[env_indices].clone()
+            previous_msl = self.drone_altitude_msl[env_indices].clone()
             self.drone_altitude_level[env_indices] = selected
             self.drone_altitude[env_indices] = self.drone_flight_levels[selected]
-            self.step_drone_climb[env_indices] = (self.drone_altitude[env_indices] - previous).abs()
+            self.drone_altitude_msl[env_indices] = end_ground_msl + self.drone_altitude[env_indices]
+            self.step_drone_climb[env_indices] = (self.drone_altitude_msl[env_indices] - previous_msl).abs()
 
     def _soft_blocked_ground_position(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
         """Slide or shorten blocked UGV moves instead of freezing in place."""
@@ -1013,7 +1022,7 @@ class WildfireSearchScenario(BaseScenario):
         return (density / 9.0).unsqueeze(-1)
 
     def _local_terrain_features(self, agent: Agent) -> Tensor:
-        """Expose mobility cost, blocked masks, and air-clearance requirements."""
+        """Expose mobility cost, blocked masks, and AGL air-clearance requirements."""
         pos = agent.state.pos
         gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
             1, self.fire_grid_size - 2
@@ -1076,6 +1085,11 @@ class WildfireSearchScenario(BaseScenario):
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
         )
+        mean_drone_altitude_msl = (
+            self.drone_altitude_msl.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
+        )
         return {
             "n_found":   self.found_survivors.sum(dim=1).float(),
             "n_scouted": self.scouted_survivors.sum(dim=1).float(),
@@ -1084,6 +1098,7 @@ class WildfireSearchScenario(BaseScenario):
             "affected_fraction": self.burned_grid.float().flatten(1).mean(dim=1),
             "ugv_step_travel_cost": self.step_ugv_travel_cost.sum(dim=1),
             "mean_drone_altitude": mean_drone_altitude,
+            "mean_drone_altitude_msl": mean_drone_altitude_msl,
         }
 
 
