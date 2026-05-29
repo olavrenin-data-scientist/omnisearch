@@ -146,6 +146,16 @@ class WildfireSearchScenario(BaseScenario):
         if len(drone_cover_detection_factors) != 5:
             raise ValueError("drone_cover_detection_factors must cover road/open/brush/forest/rock")
         self.drone_smoke_detection_factor = kwargs.pop("drone_smoke_detection_factor", 0.55)
+        self.drone_perception_path_samples = max(int(kwargs.pop("drone_perception_path_samples", 8)), 2)
+        self.drone_smoke_extinction = max(float(kwargs.pop("drone_smoke_extinction", 1.4)), 0.0)
+        self.drone_fire_glare_penalty = min(
+            max(float(kwargs.pop("drone_fire_glare_penalty", 0.35)), 0.0),
+            1.0,
+        )
+        self.drone_heat_distortion_penalty = min(
+            max(float(kwargs.pop("drone_heat_distortion_penalty", 0.20)), 0.0),
+            1.0,
+        )
         self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.20)
         self.drone_safety_clearance = kwargs.pop("drone_safety_clearance", 0.03)
         self.r_drone_climb_cost = kwargs.pop("r_drone_climb_cost", -0.02)
@@ -786,8 +796,9 @@ class WildfireSearchScenario(BaseScenario):
         surv_pos  = torch.stack([s.state.pos for s in self._survivors], dim=1)    # [B, S, 2]
         dists = torch.cdist(agent_pos, surv_pos)                                  # [B, A, S]
 
+        drone_pos = agent_pos[:, :self.n_drones, :]
         drone_dists = dists[:, :self.n_drones, :]
-        drone_seen = self._drone_survivor_detections(drone_dists, surv_pos)
+        drone_seen = self._drone_survivor_detections(drone_dists, drone_pos, surv_pos)
         seen_by_drone       = drone_seen.any(dim=1)
         within_confirm      = dists < self.detection_range
         confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
@@ -832,7 +843,12 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
             agent.scenario_reward = r
 
-    def _drone_survivor_detections(self, drone_dists: Tensor, surv_pos: Tensor) -> Tensor:
+    def _drone_survivor_detections(
+        self,
+        drone_dists: Tensor,
+        drone_pos: Tensor,
+        surv_pos: Tensor,
+    ) -> Tensor:
         """Stochastic drone scouting from camera footprint and scene quality."""
         if self.n_drones == 0:
             return torch.zeros(
@@ -849,12 +865,33 @@ class WildfireSearchScenario(BaseScenario):
         b_idx = torch.arange(self.world.batch_dim, device=surv_pos.device).view(-1, 1).expand_as(gx)
         survivor_cover = self.land_cover_grid[b_idx, gy, gx]
         cover_factor = self.drone_cover_detection_factors[survivor_cover].unsqueeze(1)
-        smoke = self.smoke_grid[b_idx, gy, gx].unsqueeze(1)
-        smoke_factor = 1.0 - smoke * (1.0 - self.drone_smoke_detection_factor)
+        fire_smoke_factor = self._drone_fire_smoke_visibility_factor(drone_pos, surv_pos)
         altitude_quality = self.drone_detection_quality[self.drone_altitude_level].unsqueeze(-1)
 
-        probability = (altitude_quality * distance_factor * cover_factor * smoke_factor).clamp(0.0, 1.0)
+        probability = (altitude_quality * distance_factor * cover_factor * fire_smoke_factor).clamp(0.0, 1.0)
         return visible & (torch.rand_like(probability) < probability)
+
+    def _drone_fire_smoke_visibility_factor(self, drone_pos: Tensor, surv_pos: Tensor) -> Tensor:
+        """Attenuate camera detections by smoke, flame glare, and heat shimmer."""
+        path = self._sample_pair_paths(drone_pos, surv_pos, self.drone_perception_path_samples)
+        smoke_path = self._grid_values_at_positions(self.smoke_grid, path)
+        fire_path = self._grid_values_at_positions(self.fire_grid, path).float()
+
+        smoke_mean = smoke_path.mean(dim=-1)
+        target_smoke = smoke_path[..., -1]
+        smoke_load = 0.65 * smoke_mean + 0.35 * target_smoke
+        smoke_factor = torch.exp(-self.drone_smoke_extinction * smoke_load)
+        smoke_floor = torch.full_like(smoke_factor, float(self.drone_smoke_detection_factor))
+        smoke_factor = torch.maximum(smoke_factor, smoke_floor)
+
+        target_fire_density = self._local_fire_density_at_positions(surv_pos).unsqueeze(1)
+        fire_path_mean = fire_path.mean(dim=-1)
+        fire_path_max = fire_path.amax(dim=-1)
+        glare_load = torch.maximum(fire_path_max, target_fire_density)
+        glare_factor = 1.0 - self.drone_fire_glare_penalty * glare_load
+        heat_factor = 1.0 - self.drone_heat_distortion_penalty * fire_path_mean
+
+        return (smoke_factor * glare_factor.clamp(0.0, 1.0) * heat_factor.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 
     def _agents_in_fire(self, agents: List[Agent]) -> Tensor:
         if len(agents) == 0:
@@ -889,6 +926,12 @@ class WildfireSearchScenario(BaseScenario):
         samples = max(int(self.terrain_path_samples), 2)
         alpha = torch.linspace(0.0, 1.0, samples, device=start_pos.device).view(1, 1, -1, 1)
         return start_pos.unsqueeze(2) + (end_pos - start_pos).unsqueeze(2) * alpha
+
+    def _sample_pair_paths(self, start_pos: Tensor, end_pos: Tensor, samples: int) -> Tensor:
+        alpha = torch.linspace(0.0, 1.0, max(int(samples), 2), device=start_pos.device)
+        start = start_pos.unsqueeze(2).unsqueeze(3)
+        end = end_pos.unsqueeze(1).unsqueeze(3)
+        return start + (end - start) * alpha.view(1, 1, 1, -1, 1)
 
     def _path_is_traversable(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
         path = self._sample_path(start_pos, end_pos)
@@ -1008,18 +1051,23 @@ class WildfireSearchScenario(BaseScenario):
 
     def _local_fire_density(self, agent: Agent) -> Tensor:
         pos = agent.state.pos
+        return self._local_fire_density_at_positions(pos).unsqueeze(-1)
+
+    def _local_fire_density_at_positions(self, pos: Tensor) -> Tensor:
         gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
             1, self.fire_grid_size - 2
         ).long()
         gy = ((pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
             1, self.fire_grid_size - 2
         ).long()
-        b_idx = torch.arange(self.world.batch_dim, device=pos.device)
-        density = torch.zeros(self.world.batch_dim, device=pos.device)
+        b_idx = torch.arange(self.world.batch_dim, device=pos.device).view(
+            (pos.shape[0],) + (1,) * (gx.ndim - 1)
+        ).expand_as(gx)
+        density = torch.zeros_like(gx, dtype=torch.float)
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
                 density = density + self.fire_grid[b_idx, gy + dy, gx + dx].float()
-        return (density / 9.0).unsqueeze(-1)
+        return density / 9.0
 
     def _local_terrain_features(self, agent: Agent) -> Tensor:
         """Expose mobility cost, blocked masks, and AGL air-clearance requirements."""
