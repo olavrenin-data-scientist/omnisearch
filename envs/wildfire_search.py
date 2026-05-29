@@ -1016,12 +1016,32 @@ class WildfireSearchScenario(BaseScenario):
         surv_pos: Tensor,
     ) -> Tensor:
         """Stochastic drone scouting from camera footprint and scene quality."""
-        if self.n_drones == 0:
-            return torch.zeros(
-                self.world.batch_dim, 0, self.n_survivors,
-                dtype=torch.bool, device=self.fire_grid.device,
-            )
+        components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
+        probability = components["probability"]
+        return torch.rand_like(probability) < probability
 
+    def _drone_detection_components(
+        self,
+        drone_dists: Tensor,
+        drone_pos: Tensor,
+        surv_pos: Tensor,
+    ) -> Dict[str, Tensor]:
+        """Deterministic factors behind stochastic drone survivor detection."""
+        if self.n_drones == 0:
+            shape = (self.world.batch_dim, 0, self.n_survivors)
+            probability = torch.zeros(shape, dtype=torch.float, device=self.fire_grid.device)
+            return {
+                "probability": probability,
+                "visible": torch.zeros(shape, dtype=torch.bool, device=self.fire_grid.device),
+                "footprint": torch.zeros(self.world.batch_dim, 0, dtype=torch.float, device=self.fire_grid.device),
+                "distance_factor": probability,
+                "cover_factor": probability,
+                "fire_smoke_factor": probability,
+                "altitude_quality": probability,
+                "survivor_cover": torch.zeros(
+                    self.world.batch_dim, self.n_survivors, dtype=torch.long, device=self.fire_grid.device,
+                ),
+            }
         footprint = self._drone_camera_ranges().unsqueeze(-1)
         visible = drone_dists <= footprint
         normalized_distance = (drone_dists / footprint.clamp_min(1e-6)).clamp(0.0, 1.0)
@@ -1035,7 +1055,67 @@ class WildfireSearchScenario(BaseScenario):
         altitude_quality = self.drone_detection_quality[self.drone_altitude_level].unsqueeze(-1)
 
         probability = (altitude_quality * distance_factor * cover_factor * fire_smoke_factor).clamp(0.0, 1.0)
-        return visible & (torch.rand_like(probability) < probability)
+        probability = torch.where(visible, probability, torch.zeros_like(probability))
+        return {
+            "probability": probability,
+            "visible": visible,
+            "footprint": footprint.squeeze(-1),
+            "distance_factor": distance_factor,
+            "cover_factor": cover_factor.expand(-1, self.n_drones, -1),
+            "fire_smoke_factor": fire_smoke_factor,
+            "altitude_quality": altitude_quality.expand(-1, -1, self.n_survivors),
+            "survivor_cover": survivor_cover,
+        }
+
+    def drone_perception_debug(self, env_index: int = 0) -> List[Dict]:
+        """Frame-level drone camera footprint and detection probabilities for visualization."""
+        if self.n_drones == 0 or self.n_survivors == 0:
+            return []
+
+        def scalar(value: Tensor) -> float:
+            return round(float(value.detach().cpu().item()), 4)
+
+        with torch.no_grad():
+            drone_agents = self.world.agents[:self.n_drones]
+            drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
+            surv_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
+            drone_dists = torch.cdist(drone_pos, surv_pos)
+            components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
+
+            records: List[Dict] = []
+            for drone_idx, agent in enumerate(drone_agents):
+                pos = drone_pos[env_index, drone_idx]
+                record = {
+                    "name": agent.name,
+                    "x": scalar(pos[X]),
+                    "y": scalar(pos[Y]),
+                    "footprint": scalar(components["footprint"][env_index, drone_idx]),
+                    "altitude_agl": scalar(self.drone_altitude[env_index, drone_idx]),
+                    "altitude_msl": scalar(self.drone_altitude_msl[env_index, drone_idx]),
+                    "altitude_level": int(self.drone_altitude_level[env_index, drone_idx].detach().cpu().item()),
+                    "survivors": [],
+                }
+                for survivor_idx, survivor in enumerate(self._survivors):
+                    survivor_pos = survivor.state.pos[env_index]
+                    record["survivors"].append({
+                        "index": survivor_idx,
+                        "x": scalar(survivor_pos[X]),
+                        "y": scalar(survivor_pos[Y]),
+                        "distance": scalar(drone_dists[env_index, drone_idx, survivor_idx]),
+                        "visible": bool(components["visible"][env_index, drone_idx, survivor_idx].detach().cpu().item()),
+                        "probability": scalar(components["probability"][env_index, drone_idx, survivor_idx]),
+                        "distance_factor": scalar(components["distance_factor"][env_index, drone_idx, survivor_idx]),
+                        "cover_factor": scalar(components["cover_factor"][env_index, drone_idx, survivor_idx]),
+                        "fire_smoke_factor": scalar(
+                            components["fire_smoke_factor"][env_index, drone_idx, survivor_idx],
+                        ),
+                        "altitude_quality": scalar(
+                            components["altitude_quality"][env_index, drone_idx, survivor_idx],
+                        ),
+                        "land_cover": int(components["survivor_cover"][env_index, survivor_idx].detach().cpu().item()),
+                    })
+                records.append(record)
+            return records
 
     def _drone_fire_smoke_visibility_factor(self, drone_pos: Tensor, surv_pos: Tensor) -> Tensor:
         """Attenuate camera detections by smoke, flame glare, and heat shimmer."""

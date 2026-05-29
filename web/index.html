@@ -91,7 +91,9 @@
   footer button:hover { border-color: var(--accent); }
   footer input[type="range"] { flex: 1; accent-color: var(--accent); }
   footer .step { color: var(--muted); font-size: 13px; min-width: 90px; }
-  footer .speed { color: var(--muted); font-size: 13px; }
+  footer .speed, footer .toggle { color: var(--muted); font-size: 13px; }
+  footer .toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  footer input[type="checkbox"] { accent-color: var(--accent); }
 </style>
 
 <!-- Import map: use esm.sh CDN so we need no build step -->
@@ -115,7 +117,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
-const APP_VERSION = 'water-render-v2';
+const APP_VERSION = 'perception-overlay-v1';
 
 // ---------------------------------------------------------------------
 // Trajectory discovery — list strategies by sniffing trajectories/index.json
@@ -185,6 +187,9 @@ const COLORS = {
   fire_inner:          0xfacc15,   // yellow hot core
   smoke:               0xcbd5e1,   // pale gray-blue
   water:               0x2563eb,   // ocean / water
+  perception:          0x60a5fa,   // drone camera footprint
+  perception_low:      0xfbbf24,   // low detection probability
+  perception_high:     0x22c55e,   // high detection probability
 };
 const TERRAIN_COLORS = [
   0xb59665,  // road
@@ -419,6 +424,68 @@ function makeSmokeMesh(size, intensity) {
   mesh.userData.baseOp = opacity;
   mesh.userData.phase = intensity * Math.PI * 2;
   return mesh;
+}
+
+function probabilityColor(probability) {
+  const p = Math.max(0, Math.min(1, probability ?? 0));
+  const color = new THREE.Color(COLORS.perception_low);
+  color.lerp(new THREE.Color(COLORS.perception_high), p);
+  return color;
+}
+
+function makeCameraFootprintMesh(radius) {
+  const g = new THREE.Group();
+  const fill = new THREE.Mesh(
+    new THREE.CircleGeometry(radius, 80),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.perception,
+      transparent: true,
+      opacity: 0.045,
+      depthWrite: false,
+    }),
+  );
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 0.985, radius * 1.015, 96),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.perception,
+      transparent: true,
+      opacity: 0.48,
+      depthWrite: false,
+    }),
+  );
+  g.add(fill, ring);
+  return g;
+}
+
+function renderPerceptionOverlay(state, frame) {
+  clearGroup(state.perceptionGroup);
+  const drones = frame.drone_perception ?? [];
+  for (const drone of drones) {
+    const footprint = Math.max(0, drone.footprint ?? 0);
+    if (footprint > 0) {
+      const mesh = makeCameraFootprintMesh(footprint);
+      mesh.position.set(drone.x, drone.y, -0.08);
+      state.perceptionGroup.add(mesh);
+    }
+
+    for (const survivor of drone.survivors ?? []) {
+      if (!survivor.visible || survivor.probability <= 0) continue;
+      const positions = new Float32Array([
+        drone.x, drone.y, -0.035,
+        survivor.x, survivor.y, -0.035,
+      ]);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: probabilityColor(survivor.probability),
+        transparent: true,
+        opacity: 0.18 + Math.min(0.70, survivor.probability * 0.70),
+      });
+      const line = new THREE.Line(geom, mat);
+      line.userData.isPerceptionLink = true;
+      state.perceptionGroup.add(line);
+    }
+  }
 }
 
 function makeTreeMesh(size, height) {
@@ -673,8 +740,8 @@ function syncSmokeOverlay(state, meta, frame) {
   state.smokeTexture.needsUpdate = true;
 }
 
-function renderFrame(state, frame, meta, histories, frames) {
-  const { fireGroup, smokeGroup, agentGroup, survGroup, trailGroup } = state;
+function renderFrame(state, frame, meta, histories, frames, showPerception) {
+  const { fireGroup, smokeGroup, agentGroup, survGroup, trailGroup, perceptionGroup } = state;
   if (state.terrainSource !== meta.terrain) {
     renderTerrain(state, meta);
     state.terrainSource = meta.terrain;
@@ -685,6 +752,7 @@ function renderFrame(state, frame, meta, histories, frames) {
   clearGroup(agentGroup);
   clearGroup(survGroup);
   clearGroup(trailGroup);
+  clearGroup(perceptionGroup);
 
   const agentRadius = meta.agent_radius ?? 0.04;
   const survivorRadius = meta.survivor_radius ?? 0.03;
@@ -741,6 +809,10 @@ function renderFrame(state, frame, meta, histories, frames) {
     }
     agentGroup.add(mesh);
   }
+
+  if (showPerception) {
+    renderPerceptionOverlay(state, frame);
+  }
 }
 
 // Animate per-RAF: propeller spin, layered fire flicker, scouted-survivor pulse.
@@ -795,7 +867,7 @@ function buildHistories(frames) {
   return out;
 }
 
-function useThree(meta, frame, histories, frames) {
+function useThree(meta, frame, histories, frames, showPerception) {
   const canvasRef = useRef(null);
   const stateRef = useRef(null);
 
@@ -812,12 +884,13 @@ function useThree(meta, frame, histories, frames) {
     const smokeGroup = new THREE.Group();  scene.add(smokeGroup);
     const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
     const trailGroup = new THREE.Group();  scene.add(trailGroup);
+    const perceptionGroup = new THREE.Group(); scene.add(perceptionGroup);
     const survGroup  = new THREE.Group();  scene.add(survGroup);
     const agentGroup = new THREE.Group();  scene.add(agentGroup);
 
     stateRef.current = {
       renderer, scene, camera, terrainGroup, burnedGroup, fireGroup, smokeGroup, obstacleGroup,
-      trailGroup, agentGroup, survGroup,
+      trailGroup, perceptionGroup, agentGroup, survGroup,
       terrainSource: null, burnedSource: null, burnedStep: -1,
     };
 
@@ -847,8 +920,8 @@ function useThree(meta, frame, histories, frames) {
   // Render frame whenever frame or meta changes
   useEffect(() => {
     if (!stateRef.current || !frame || !meta || !histories) return;
-    renderFrame(stateRef.current, frame, meta, histories, frames);
-  }, [meta, frame, histories, frames]);
+    renderFrame(stateRef.current, frame, meta, histories, frames, showPerception);
+  }, [meta, frame, histories, frames, showPerception]);
 
   return canvasRef;
 }
@@ -884,6 +957,8 @@ function Legend() {
   const items = [
     ['tri',    '#4a90ff', 'Drone'],
     ['square', '#14b8a6', 'Ground robot'],
+    ['circle', '#60a5fa', 'Drone camera footprint'],
+    ['square', '#22c55e', 'Detection probability link'],
     ['circle', '#ff3838', 'Survivor (unscouted)'],
     ['circle', '#fbbf24', 'Survivor (scouted)'],
     ['circle', '#84cc16', 'Survivor (confirmed)'],
@@ -932,6 +1007,17 @@ function MetricsPanel({ meta, frame }) {
     ['Episode length',       fmt(m.n_steps, ' steps')],
   ];
   const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
+  const perception = frame?.drone_perception ?? [];
+  const perceptionRows = perception.map(d => {
+    const visible = (d.survivors ?? []).filter(s => s.visible);
+    const best = visible.reduce((m, s) => Math.max(m, s.probability ?? 0), 0);
+    return {
+      name: d.name,
+      footprint: d.footprint ?? 0,
+      visible: visible.length,
+      best,
+    };
+  });
   return h('aside', null,
     h('div', { className: 'panel' },
       h('h2', null, 'Strategy'),
@@ -960,6 +1046,13 @@ function MetricsPanel({ meta, frame }) {
         h('span', { className: 'v' }, `${fmt(a.altitude_agl ?? a.altitude)} AGL / ${fmt(a.altitude_msl ?? a.altitude)} MSL`),
       )),
     ),
+    perceptionRows.length > 0 && h('div', { className: 'panel' },
+      h('h2', null, 'Drone perception'),
+      perceptionRows.map(row => h('div', { key: row.name, className: 'metric' },
+        h('span', { className: 'k' }, `${row.name} · r ${fmt(row.footprint)}`),
+        h('span', { className: 'v' }, `${row.visible} seen · p ${row.best.toFixed(2)}`),
+      )),
+    ),
   );
 }
 
@@ -967,6 +1060,7 @@ function App() {
   const [strategy, setStrategy] = useState(STRATEGY_NAMES[2]); // nearest_candidate
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [showPerception, setShowPerception] = useState(true);
 
   useEffect(() => {
     setData(null); setError(null);
@@ -1000,7 +1094,7 @@ function App() {
   };
 
   const frame = frames[step] ?? null;
-  const canvasRef = useThree(meta, frame, histories, frames);
+  const canvasRef = useThree(meta, frame, histories, frames, showPerception);
 
   return h(React.Fragment, null,
     h('header', null,
@@ -1039,6 +1133,14 @@ function App() {
         value: step, onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
       }),
       h('div', { className: 'step' }, `step ${step} / ${Math.max(0, frames.length - 1)}`),
+      h('label', { className: 'toggle' },
+        h('input', {
+          type: 'checkbox',
+          checked: showPerception,
+          onChange: e => setShowPerception(e.target.checked),
+        }),
+        'perception',
+      ),
       h('div', { className: 'speed' },
         'speed: ',
         h('select', {
