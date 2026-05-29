@@ -232,3 +232,8 @@ results/*
 *.mp4
 # Web app trajectory exports (regenerated via scripts/export_trajectories.py)
 web/trajectories/
+
+# Downloaded/geocoded terrain cache artifacts
+data/terrain_cache/
+data/source_cache/
+cache/

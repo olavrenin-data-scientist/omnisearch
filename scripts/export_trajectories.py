@@ -46,6 +46,15 @@ def main():
         default=16,
         help="Fire/terrain grid resolution. Try 32 for a finer map.",
     )
+    p.add_argument(
+        "--terrain-source",
+        choices=("real",),
+        default="real",
+        help="Terrain backend. Only cached real terrain is supported.",
+    )
+    p.add_argument("--terrain-place", default="Malibu Creek State Park, California")
+    p.add_argument("--terrain-cache-dir", default=str(ROOT / "data" / "terrain_cache"))
+    p.add_argument("--terrain-cache-path", default=None)
     args = p.parse_args()
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
@@ -56,11 +65,16 @@ def main():
     print(f" Output: {_display_path(out_dir)}")
     print(f" Steps:  {args.steps}")
     print(f" Grid:   {args.grid_size}x{args.grid_size}")
+    print(f" Terrain:{args.terrain_source}")
     print("-" * 60)
 
     scenario_kwargs = {
         "max_steps": args.steps,
         "fire_grid_size": args.grid_size,
+        "terrain_source": args.terrain_source,
+        "terrain_place": args.terrain_place,
+        "terrain_cache_dir": args.terrain_cache_dir,
+        "terrain_cache_path": args.terrain_cache_path,
     }
 
     for name, cls in BASELINES.items():
