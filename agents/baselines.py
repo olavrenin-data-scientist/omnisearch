@@ -27,11 +27,11 @@ queries; the policy interface stays the same.
 from __future__ import annotations
 
 import math
-import heapq
 from typing import Callable, List
 
 import torch
 
+from agents.pathfinding import find_ground_route
 from envs.wildfire_search import WildfireSearchScenario, X, Y
 
 
@@ -100,49 +100,6 @@ def _nearest_traversable_cell(sc: WildfireSearchScenario, env_index: int, gx: in
     return None
 
 
-def _astar_grid_path(
-    traversable: torch.Tensor,
-    cost: torch.Tensor,
-    start: tuple[int, int],
-    goal: tuple[int, int],
-) -> List[tuple[int, int]]:
-    size = traversable.shape[0]
-    trav_rows = traversable.cpu().tolist()
-    cost_rows = cost.detach().cpu().tolist()
-    sx, sy = start
-    gx, gy = goal
-    frontier = [(0.0, sx, sy)]
-    came_from: dict[tuple[int, int], tuple[int, int] | None] = {(sx, sy): None}
-    best = {(sx, sy): 0.0}
-    neighbors = (
-        (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-        (-1, -1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (1, 1, 1.414),
-    )
-    while frontier:
-        _, x, y = heapq.heappop(frontier)
-        if (x, y) == (gx, gy):
-            break
-        for dx, dy, step_len in neighbors:
-            nx, ny = x + dx, y + dy
-            if not (0 <= nx < size and 0 <= ny < size) or not trav_rows[ny][nx]:
-                continue
-            new_cost = best[(x, y)] + step_len * (cost_rows[y][x] + cost_rows[ny][nx]) * 0.5
-            if new_cost < best.get((nx, ny), float("inf")):
-                best[(nx, ny)] = new_cost
-                heuristic = math.hypot(gx - nx, gy - ny)
-                heapq.heappush(frontier, (new_cost + heuristic, nx, ny))
-                came_from[(nx, ny)] = (x, y)
-    if (gx, gy) not in came_from:
-        return []
-    current = (gx, gy)
-    path = [current]
-    while came_from[current] is not None:
-        current = came_from[current]
-        path.append(current)
-    path.reverse()
-    return path
-
-
 def _route_ground_waypoints(
     sc: WildfireSearchScenario,
     ground_index: int,
@@ -179,7 +136,12 @@ def _route_ground_waypoints(
         if not path:
             route_cost = sc.mobility_cost_grid[b].clone()
             route_cost = route_cost + sc.fire_grid[b].float() * GROUND_ROUTE_FIRE_PENALTY
-            path = _astar_grid_path(sc.traversable_grid[b], route_cost, start, goal)
+            path = find_ground_route(
+                traversable=sc.traversable_grid[b],
+                movement_cost=route_cost,
+                start=start,
+                goal=goal,
+            )
             if route_cache is not None:
                 route_cache[ground_index][int(b)] = {
                     "step": step,
