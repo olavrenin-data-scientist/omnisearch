@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from terrain.usgs_osm_builder import build_real_terrain_cache
+from scripts.terrain_3d_plot import generate_terrain_3d_html
 
 
 def _display_path(path: Path) -> Path:
@@ -81,6 +82,28 @@ def main() -> None:
         action="store_true",
         help="Rebuild the final .npz even when a matching terrain cache exists.",
     )
+    p.add_argument(
+        "--skip-3d-plot",
+        action="store_true",
+        help="Do not generate the companion interactive Plotly terrain HTML.",
+    )
+    p.add_argument(
+        "--eda-dir",
+        default=str(ROOT / "results" / "eda"),
+        help="Directory for generated EDA artifacts such as the 3D terrain HTML.",
+    )
+    p.add_argument("--terrain-3d-out", default=None, help="Optional explicit terrain 3D .html output path.")
+    p.add_argument("--terrain-3d-vertical-exaggeration", type=float, default=4.0)
+    p.add_argument(
+        "--terrain-3d-color-by",
+        choices=("land_cover", "elevation", "slope", "fuel_density", "moisture", "rockiness"),
+        default="land_cover",
+    )
+    p.add_argument(
+        "--terrain-3d-no-flatten-water",
+        action="store_true",
+        help="Keep cached water elevations instead of drawing water as a flat low plane in the 3D plot.",
+    )
     args = p.parse_args()
 
     if args.grid_size < 8:
@@ -124,6 +147,22 @@ def main() -> None:
     metadata_path = path.with_suffix(".metadata.json")
     if metadata_path.exists():
         print(f"Metadata: {_display_path(metadata_path)}")
+    terrain_3d_path = None
+    if not args.skip_3d_plot:
+        terrain_3d_path = Path(args.terrain_3d_out) if args.terrain_3d_out else (
+            Path(args.eda_dir) / f"{path.stem}_3d.html"
+        )
+        try:
+            generate_terrain_3d_html(
+                terrain_cache=path,
+                out=terrain_3d_path,
+                vertical_exaggeration=args.terrain_3d_vertical_exaggeration,
+                color_by=args.terrain_3d_color_by,
+                flatten_water=not args.terrain_3d_no_flatten_water,
+            )
+            print(f"3D terrain: {_display_path(terrain_3d_path)}")
+        except Exception as exc:
+            print(f"Warning: could not generate 3D terrain HTML: {exc}")
     print()
     print("Use it with:")
     print(
@@ -131,6 +170,8 @@ def main() -> None:
         f"--grid-size {args.grid_size} --terrain-source real "
         f"--terrain-cache-path {_display_path(path)}"
     )
+    if terrain_3d_path is not None:
+        print(f"Open 3D terrain with: open {_display_path(terrain_3d_path)}")
 
 
 if __name__ == "__main__":
