@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 from zipfile import ZipFile
 import hashlib
+import json
 import re
 import time
 
@@ -55,16 +57,30 @@ def ensure_landfire_geotiff(
     cache_dir = Path(source_cache_dir) / "landfire" / cache_key
     zip_path = cache_dir / "landfire.zip"
     tif_path = cache_dir / "landfire.tif"
+    metadata_path = cache_dir / "landfire.metadata.json"
+    base_metadata = _base_landfire_metadata(
+        bbox=bbox,
+        cache_key=cache_key,
+        cache_dir=cache_dir,
+        zip_path=zip_path,
+        tif_path=tif_path,
+        layer_list=layer_list,
+        resample_resolution=resample_resolution,
+        output_projection=output_projection,
+        email_provided=email is not None,
+    )
     if tif_path.exists() and not force_download:
+        _write_json_if_missing(metadata_path, base_metadata)
         return tif_path
     cache_dir.mkdir(parents=True, exist_ok=True)
+    download_metadata = {}
     if not zip_path.exists() or force_download:
         if not email:
             raise ValueError(
                 "LANDFIRE LFPS requires a requestor email. Pass "
                 "--landfire-email or set LANDFIRE_EMAIL."
             )
-        _download_lfps_zip(
+        download_metadata = _download_lfps_zip(
             bbox=bbox,
             layer_list=layer_list,
             email=email,
@@ -75,7 +91,28 @@ def ensure_landfire_geotiff(
             poll_interval_s=poll_interval_s,
         )
     _extract_first_geotiff(zip_path, tif_path)
+    metadata = dict(base_metadata)
+    metadata.update(download_metadata)
+    metadata["extracted_at"] = _utc_now()
+    _write_json(metadata_path, metadata)
     return tif_path
+
+
+def read_landfire_source_metadata(geotiff_path: str | Path) -> dict:
+    """Return source metadata written next to a cached LANDFIRE GeoTIFF."""
+
+    metadata_path = Path(geotiff_path).with_name("landfire.metadata.json")
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, ValueError):
+        return {
+            "provider": "LANDFIRE",
+            "geotiff_path": str(geotiff_path),
+            "metadata_path": str(metadata_path),
+        }
+    if isinstance(metadata, dict):
+        return metadata
+    return {"provider": "LANDFIRE", "geotiff_path": str(geotiff_path)}
 
 
 def has_cached_landfire_source(
@@ -185,9 +222,10 @@ def _download_lfps_zip(
     zip_path: Path,
     timeout_s: int,
     poll_interval_s: float,
-) -> None:
+) -> dict:
     import requests
 
+    submitted_at = _utc_now()
     params = {
         "Email": email,
         "Layer_List": layer_list,
@@ -248,6 +286,15 @@ def _download_lfps_zip(
     except Exception as exc:
         raise RuntimeError(f"Could not download completed LANDFIRE LFPS result from {download_url}.") from exc
     zip_path.write_bytes(download.content)
+    return {
+        "submitted_at": submitted_at,
+        "downloaded_at": _utc_now(),
+        "job_id": str(job_id),
+        "job_status": str(job_status),
+        "download_url": str(download_url),
+        "status_payload_keys": sorted(str(key) for key in status_payload.keys()),
+        "zip_size_bytes": int(zip_path.stat().st_size),
+    }
 
 
 def _json_or_raise(response, context: str) -> dict:
@@ -312,6 +359,48 @@ def _extract_first_geotiff(zip_path: Path, tif_path: Path) -> None:
                 if not chunk:
                     break
                 dst.write(chunk)
+
+
+def _base_landfire_metadata(
+    *,
+    bbox: Sequence[float],
+    cache_key: str,
+    cache_dir: Path,
+    zip_path: Path,
+    tif_path: Path,
+    layer_list: str,
+    resample_resolution: int,
+    output_projection: str | None,
+    email_provided: bool,
+) -> dict:
+    return {
+        "provider": "LANDFIRE LFPS",
+        "api_base": LFPS_API_BASE,
+        "cache_key": cache_key,
+        "cache_dir": str(cache_dir),
+        "bbox": [float(v) for v in bbox],
+        "layer_list": [name.strip() for name in layer_list.split(";") if name.strip()],
+        "resample_resolution_m": int(max(resample_resolution, 31)),
+        "output_projection": output_projection,
+        "zip_path": str(zip_path),
+        "geotiff_path": str(tif_path),
+        "metadata_path": str(cache_dir / "landfire.metadata.json"),
+        "email_provided": bool(email_provided),
+    }
+
+
+def _write_json_if_missing(path: Path, metadata: dict) -> None:
+    if path.exists():
+        return
+    _write_json(path, metadata)
+
+
+def _write_json(path: Path, metadata: dict) -> None:
+    path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _landfire_cache_key(
