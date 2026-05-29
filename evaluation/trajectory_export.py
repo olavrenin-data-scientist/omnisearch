@@ -22,6 +22,7 @@ JSON schema (one object per file):
           "slope":         [[0.2, ...], ...],
           "traversable":   [[true, ...], ...],
           "movement_cost": [[1.0, ...], ...],
+          "speed_multiplier": [[1.0, ...], ...],
           "obstacle_type": [[0, 1, 0, ...], ...],
           "obstacle_height": [[0.0, 0.2, ...], ...]
         },
@@ -35,7 +36,14 @@ JSON schema (one object per file):
           "step":       0,
           "agents":     [{ "name": "drone_0", "type": "drone",  "x": 0.1, "y": -0.5 }, ...],
           "survivors":  [{ "x": 0.3, "y": 0.2, "scouted": false, "found": false }, ...],
-          "fire_cells": [[gx, gy, intensity], ...]
+          "fire_cells": [[gx, gy, intensity], ...],
+          "drone_perception": [
+            {
+              "name": "drone_0",
+              "footprint": 0.11,
+              "survivors": [{ "index": 0, "visible": true, "probability": 0.72, ... }]
+            }
+          ]
         },
         ...
       ]
@@ -124,6 +132,7 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "rockiness": rounded_rows(scenario.rockiness_grid[env_index]),
         "traversable": scenario.traversable_grid[env_index].cpu().tolist(),
         "movement_cost": rounded_rows(scenario.mobility_cost_grid[env_index]),
+        "speed_multiplier": rounded_rows(scenario.speed_multiplier_grid[env_index]),
         "cover_names": ["road", "open", "brush", "forest", "rock", "water"],
         "obstacle_type": scenario.obstacle_type_grid[env_index].cpu().tolist(),
         "obstacle_height": rounded_rows(scenario.obstacle_height_grid[env_index]),
@@ -228,6 +237,7 @@ def export_trajectory(
         "fire_cells": _fire_cells(sc, env_index),
         "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
         "smoke_cells": _smoke_cells(sc, env_index),
+        "drone_perception": sc.drone_perception_debug(env_index),
     })
 
     for step in range(1, n_steps + 1):
@@ -240,6 +250,7 @@ def export_trajectory(
             "fire_cells": _fire_cells(sc, env_index),
             "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
             "smoke_cells": _smoke_cells(sc, env_index),
+            "drone_perception": sc.drone_perception_debug(env_index),
         })
         if sc.done()[env_index].item():
             break

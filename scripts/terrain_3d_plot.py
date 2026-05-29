@@ -5,6 +5,11 @@ Example:
     python scripts/terrain_3d_plot.py \
       --terrain-cache data/terrain_cache/big_sur_128.npz \
       --out results/eda/big_sur_3d.html
+
+    python scripts/terrain_3d_plot.py \
+      --terrain-cache data/terrain_cache/big_sur_128.npz \
+      --trajectory web/trajectories/lawnmower.json \
+      --out results/eda/big_sur_lawnmower_3d.html
 """
 
 from __future__ import annotations
@@ -24,13 +29,16 @@ if str(ROOT) not in sys.path:
 
 LAND_COVER_NAMES = ["road", "open", "brush", "forest", "rock", "water"]
 LAND_COVER_COLORS = ["#b59665", "#47783d", "#315a2e", "#203d24", "#555963", "#2563eb"]
+DRONE_FLIGHT_COLORS = ["#3b82f6", "#22d3ee", "#a855f7", "#f59e0b", "#ef4444", "#10b981"]
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--terrain-cache", required=True, help="Path to a terrain .npz cache.")
+    p.add_argument("--trajectory", default=None, help="Optional trajectory JSON with drone flight paths.")
     p.add_argument("--out", default="results/eda/terrain_3d.html", help="Output .html path.")
     p.add_argument("--vertical-exaggeration", type=float, default=4.0)
+    p.add_argument("--flight-stride", type=int, default=1, help="Use every Nth trajectory frame for flight paths.")
     p.add_argument(
         "--color-by",
         choices=("land_cover", "elevation", "slope", "fuel_density", "moisture", "rockiness"),
@@ -50,9 +58,11 @@ def main() -> None:
 
     generate_terrain_3d_html(
         terrain_cache=Path(args.terrain_cache),
+        trajectory=Path(args.trajectory) if args.trajectory else None,
         out=Path(args.out),
         vertical_exaggeration=float(args.vertical_exaggeration),
         color_by=args.color_by,
+        flight_stride=max(int(args.flight_stride), 1),
         flatten_water=not args.no_flatten_water,
         show_obstacles=not args.hide_obstacles,
     )
@@ -62,19 +72,24 @@ def generate_terrain_3d_html(
     *,
     terrain_cache: Path,
     out: Path,
+    trajectory: Path | None = None,
     vertical_exaggeration: float = 4.0,
     color_by: str = "land_cover",
+    flight_stride: int = 1,
     flatten_water: bool = True,
     show_obstacles: bool = True,
 ) -> Path:
     cache_path = Path(terrain_cache)
     out_path = Path(out)
     terrain = _load_cache(cache_path)
+    trajectory_payload = _load_trajectory(Path(trajectory)) if trajectory is not None else None
     html = _build_html(
         terrain=terrain,
+        trajectory=trajectory_payload,
         title=cache_path.name,
         vertical_exaggeration=float(vertical_exaggeration),
         color_by=color_by,
+        flight_stride=max(int(flight_stride), 1),
         flatten_water=flatten_water,
         show_obstacles=show_obstacles,
     )
@@ -99,12 +114,26 @@ def _load_cache(path: Path) -> dict:
     return terrain
 
 
+def _load_trajectory(path: Path) -> dict:
+    if not path.exists():
+        raise SystemExit(f"trajectory not found: {path}")
+    with path.open("r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if not isinstance(payload.get("metadata"), dict):
+        raise SystemExit(f"trajectory is missing metadata: {path}")
+    if not isinstance(payload.get("frames"), list):
+        raise SystemExit(f"trajectory is missing frames: {path}")
+    return payload
+
+
 def _build_html(
     *,
     terrain: dict,
+    trajectory: dict | None,
     title: str,
     vertical_exaggeration: float,
     color_by: str,
+    flight_stride: int,
     flatten_water: bool,
     show_obstacles: bool,
 ) -> str:
@@ -118,8 +147,11 @@ def _build_html(
     z = z * max(vertical_exaggeration, 0.0)
 
     grid_size = z.shape[0]
-    x = np.linspace(-1.0, 1.0, grid_size)
-    y = np.linspace(-1.0, 1.0, grid_size)
+    world = _trajectory_world(trajectory)
+    x_semidim = world.get("x_semidim", 1.0)
+    y_semidim = world.get("y_semidim", 1.0)
+    x = np.linspace(-x_semidim, x_semidim, grid_size)
+    y = np.linspace(-y_semidim, y_semidim, grid_size)
     surface_color = _surface_color(terrain, color_by)
     surface = {
         "type": "surface",
@@ -138,21 +170,26 @@ def _build_html(
     traces = [surface]
     if show_obstacles:
         traces.extend(_obstacle_traces(terrain, x, y, z))
+    if trajectory is not None:
+        traces.extend(_drone_flight_traces(trajectory, vertical_exaggeration, flight_stride))
 
     land_cells = int(np.count_nonzero(land_cover != 5))
     water_cells = int(np.count_nonzero(land_cover == 5))
     source = terrain.get("source", title)
+    strategy = _trajectory_strategy(trajectory)
+    flight_subtitle = f"<br>drone flight: {strategy}" if strategy else ""
     layout = {
         "title": {
             "text": (
                 f"{title} - 3D terrain ({color_by})"
-                f"<br><sup>{source}<br>land cells: {land_cells}, water cells: {water_cells}</sup>"
+                f"<br><sup>{source}{flight_subtitle}"
+                f"<br>land cells: {land_cells}, water cells: {water_cells}</sup>"
             )
         },
         "scene": {
             "xaxis": {"title": "world x"},
             "yaxis": {"title": "world y"},
-            "zaxis": {"title": f"elevation x {vertical_exaggeration:g}"},
+            "zaxis": {"title": f"height x {vertical_exaggeration:g}"},
             "aspectmode": "manual",
             "aspectratio": {"x": 1.0, "y": 1.0, "z": 0.35},
             "camera": {"eye": {"x": 1.35, "y": -1.55, "z": 0.85}},
@@ -240,6 +277,111 @@ def _obstacle_traces(terrain: dict, x: np.ndarray, y: np.ndarray, z: np.ndarray)
             "marker": {"size": size, "color": color, "opacity": 0.86},
         })
     return traces
+
+
+def _drone_flight_traces(trajectory: dict, vertical_exaggeration: float, flight_stride: int) -> list[dict]:
+    frames = trajectory.get("frames", [])
+    scale = max(float(vertical_exaggeration), 0.0)
+    paths: dict[str, dict[str, list[float]]] = {}
+
+    for frame_index, frame in enumerate(frames):
+        if frame_index % flight_stride != 0 and frame_index != len(frames) - 1:
+            continue
+        step = int(frame.get("step", frame_index))
+        for agent in frame.get("agents", []):
+            if agent.get("type") != "drone":
+                continue
+            name = str(agent.get("name", f"drone_{len(paths)}"))
+            altitude_msl = agent.get("altitude_msl", agent.get("altitude", 0.0))
+            altitude_agl = agent.get("altitude_agl", agent.get("altitude", 0.0))
+            paths.setdefault(name, {"x": [], "y": [], "z": [], "step": [], "msl": [], "agl": []})
+            paths[name]["x"].append(float(agent.get("x", 0.0)))
+            paths[name]["y"].append(float(agent.get("y", 0.0)))
+            paths[name]["z"].append(float(altitude_msl) * scale)
+            paths[name]["step"].append(float(step))
+            paths[name]["msl"].append(float(altitude_msl))
+            paths[name]["agl"].append(float(altitude_agl))
+
+    traces = []
+    for index, (name, path) in enumerate(sorted(paths.items())):
+        if len(path["x"]) < 2:
+            continue
+        color = DRONE_FLIGHT_COLORS[index % len(DRONE_FLIGHT_COLORS)]
+        traces.append({
+            "type": "scatter3d",
+            "mode": "lines+markers",
+            "name": f"{name} flight",
+            "x": _round_list(np.asarray(path["x"])),
+            "y": _round_list(np.asarray(path["y"])),
+            "z": _round_list(np.asarray(path["z"])),
+            "customdata": [
+                [int(step), round(msl, 4), round(agl, 4)]
+                for step, msl, agl in zip(path["step"], path["msl"], path["agl"])
+            ],
+            "line": {"color": color, "width": 6},
+            "marker": {"size": 2.2, "color": color, "opacity": 0.92},
+            "hovertemplate": (
+                f"{_escape_html(name)}"
+                "<br>step=%{customdata[0]}"
+                "<br>x=%{x:.3f}<br>y=%{y:.3f}"
+                "<br>altitude MSL=%{customdata[1]:.3f}"
+                "<br>altitude AGL=%{customdata[2]:.3f}<extra></extra>"
+            ),
+        })
+        traces.extend(_flight_endpoint_traces(name, path, color))
+    return traces
+
+
+def _flight_endpoint_traces(name: str, path: dict[str, list[float]], color: str) -> list[dict]:
+    return [
+        {
+            "type": "scatter3d",
+            "mode": "markers",
+            "name": f"{name} start",
+            "x": [round(float(path["x"][0]), 5)],
+            "y": [round(float(path["y"][0]), 5)],
+            "z": [round(float(path["z"][0]), 5)],
+            "marker": {"size": 5.5, "color": "#ffffff", "line": {"color": color, "width": 2}},
+            "showlegend": False,
+            "hovertemplate": f"{_escape_html(name)} start<extra></extra>",
+        },
+        {
+            "type": "scatter3d",
+            "mode": "markers",
+            "name": f"{name} end",
+            "x": [round(float(path["x"][-1]), 5)],
+            "y": [round(float(path["y"][-1]), 5)],
+            "z": [round(float(path["z"][-1]), 5)],
+            "marker": {"size": 6.5, "color": color, "symbol": "diamond"},
+            "showlegend": False,
+            "hovertemplate": f"{_escape_html(name)} end<extra></extra>",
+        },
+    ]
+
+
+def _trajectory_world(trajectory: dict | None) -> dict[str, float]:
+    if trajectory is None:
+        return {"x_semidim": 1.0, "y_semidim": 1.0}
+    world = trajectory.get("metadata", {}).get("world", {})
+    return {
+        "x_semidim": float(world.get("x_semidim", 1.0)),
+        "y_semidim": float(world.get("y_semidim", 1.0)),
+    }
+
+
+def _trajectory_strategy(trajectory: dict | None) -> str | None:
+    if trajectory is None:
+        return None
+    metadata = trajectory.get("metadata", {})
+    strategy = metadata.get("strategy")
+    seed = metadata.get("seed")
+    steps = metadata.get("actual_n_steps", metadata.get("n_steps"))
+    pieces = [str(strategy)] if strategy else []
+    if seed is not None:
+        pieces.append(f"seed {seed}")
+    if steps is not None:
+        pieces.append(f"{steps} steps")
+    return ", ".join(pieces) if pieces else "trajectory"
 
 
 def _finite(array: np.ndarray) -> np.ndarray:
