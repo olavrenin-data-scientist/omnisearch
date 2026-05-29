@@ -1,7 +1,7 @@
 """Build real-terrain caches from USGS 3DEP and OpenStreetMap.
 
 The output format is the ``.npz`` schema consumed by ``terrain.real_terrain``.
-USGS provides bare-earth elevation; OpenStreetMap provides roads/buildings.
+USGS provides bare-earth elevation; OpenStreetMap provides roads/buildings/water.
 Vegetation fields remain derived placeholders until a fuel/land-cover source
 such as LANDFIRE or NLCD is added.
 """
@@ -22,6 +22,7 @@ from .real_terrain import (
     LAND_OPEN,
     LAND_ROAD,
     LAND_ROCK,
+    LAND_WATER,
     OBJECT_HOUSE,
     OBJECT_NONE,
     OBJECT_TREE,
@@ -40,6 +41,12 @@ USGS_3DEP_EXPORT_IMAGE_URL = (
     "https://elevation.nationalmap.gov/arcgis/rest/services/"
     "3DEPElevation/ImageServer/exportImage"
 )
+
+OSM_WATER_TAGS = {
+    "natural": ["water", "bay", "strait", "coastline"],
+    "water": True,
+    "waterway": ["riverbank", "dock"],
+}
 
 
 def build_real_terrain_cache(
@@ -171,24 +178,34 @@ def build_real_terrain_cache(
     transform = from_bounds(*projected_bounds, grid_size, grid_size)
     roads = _osm_features_from_bbox(ox, bbox, {"highway": True})
     buildings = _osm_features_from_bbox(ox, bbox, {"building": True})
+    water = _osm_features_from_bbox(ox, bbox, OSM_WATER_TAGS)
 
+    water_mask = _rasterize_water(water, dem_grid, projected_bounds, transform, grid_size, rasterize)
     road_mask = _rasterize_roads(roads, projected_bounds, transform, grid_size, road_width_m, rasterize)
     building_mask = _rasterize_buildings(buildings, projected_bounds, transform, grid_size, rasterize)
+    road_mask = road_mask & ~water_mask
+    building_mask = building_mask & ~water_mask
 
+    land_cover[water_mask] = LAND_WATER
     land_cover[road_mask] = LAND_ROAD
+    moisture[water_mask] = 1.0
+    fuel_density[water_mask] = 0.0
+    rockiness[water_mask] = 0.0
+    slope[water_mask] = 0.0
     obstacle_type = np.full((grid_size, grid_size), OBJECT_NONE, dtype=np.int64)
     obstacle_height = np.zeros((grid_size, grid_size), dtype=np.float32)
     if landfire is not None:
         canopy_mask, tree_mask, canopy_height = _landfire_canopy_obstacles(landfire)
+        canopy_mask = canopy_mask & ~water_mask
         obstacle_height[canopy_mask] = canopy_height[canopy_mask]
-        obstacle_type[tree_mask & ~road_mask] = OBJECT_TREE
+        obstacle_type[tree_mask & ~road_mask & ~water_mask] = OBJECT_TREE
     buildable_buildings = building_mask & ~road_mask
     obstacle_type[buildable_buildings] = OBJECT_HOUSE
     obstacle_height[buildable_buildings] = float(building_height)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     source = source_note or (
-        f"USGS 3DEP DEM {dem_resolution_m}m + OpenStreetMap; "
+        f"USGS 3DEP DEM {dem_resolution_m}m + OpenStreetMap roads/buildings/water; "
         f"fuel_source={fuel_source}; place={place!r}; "
         f"bbox={tuple(round(v, 6) for v in bbox)}"
     )
@@ -217,8 +234,10 @@ def build_real_terrain_cache(
         ox=ox,
         road_count=0 if roads is None else int(len(roads)),
         building_count=0 if buildings is None else int(len(buildings)),
+        water_count=0 if water is None else int(len(water)),
         road_mask=road_mask,
         building_mask=building_mask,
+        water_mask=water_mask,
         land_cover=land_cover,
         obstacle_type=obstacle_type,
     )
@@ -271,13 +290,15 @@ def _build_cache_metadata(
     ox,
     road_count: int,
     building_count: int,
+    water_count: int,
     road_mask: np.ndarray,
     building_mask: np.ndarray,
+    water_mask: np.ndarray,
     land_cover: np.ndarray,
     obstacle_type: np.ndarray,
 ) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "builder": "terrain.usgs_osm_builder.build_real_terrain_cache",
         "cache_path": str(out_path),
@@ -317,10 +338,12 @@ def _build_cache_metadata(
                 "tags": {
                     "roads": {"highway": True},
                     "buildings": {"building": True},
+                    "water": OSM_WATER_TAGS,
                 },
                 "timeout_s": int(osm_timeout),
                 "road_feature_count": int(road_count),
                 "building_feature_count": int(building_count),
+                "water_feature_count": int(water_count),
             },
             "landfire": landfire_source_metadata if fuel_source == "landfire" else None,
         },
@@ -338,6 +361,7 @@ def _build_cache_metadata(
             "obstacle_type_counts": _value_counts(obstacle_type),
             "road_cell_count": int(np.count_nonzero(road_mask)),
             "building_cell_count": int(np.count_nonzero(building_mask)),
+            "water_cell_count": int(np.count_nonzero(water_mask)),
         },
     }
 
@@ -356,7 +380,11 @@ def _cache_matches_options(path: Path, *, fuel_source: str, landfire_layer_list:
         with np.load(path, allow_pickle=False) as data:
             cached_fuel_source = str(data["fuel_source"].item()) if "fuel_source" in data else "derived"
             cached_layers = str(data["landfire_layer_list"].item()) if "landfire_layer_list" in data else ""
+            metadata = json.loads(str(data["metadata_json"].item())) if "metadata_json" in data else {}
+            schema_version = int(metadata.get("schema_version", 0)) if isinstance(metadata, dict) else 0
     except Exception:
+        return False
+    if schema_version < 2:
         return False
     if cached_fuel_source != fuel_source:
         return False
@@ -591,6 +619,123 @@ def _rasterize_buildings(
         return np.zeros((grid_size, grid_size), dtype=bool)
     buildings = buildings[buildings.geometry.notna()].to_crs("EPSG:3857")
     return _rasterize_geometry(buildings.geometry, projected_bounds, transform, grid_size, rasterize)
+
+
+def _rasterize_water(
+    water,
+    dem_grid: np.ndarray,
+    projected_bounds: tuple[float, float, float, float],
+    transform,
+    grid_size: int,
+    rasterize,
+) -> np.ndarray:
+    if water is None or len(water) == 0:
+        return np.zeros((grid_size, grid_size), dtype=bool)
+    water = water[water.geometry.notna()].to_crs("EPSG:3857")
+    if len(water) == 0:
+        return np.zeros((grid_size, grid_size), dtype=bool)
+
+    polygon_geometries = []
+    coastline_geometries = []
+    for _, row in water.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        if _is_polygonal_geometry(geom):
+            polygon_geometries.append(geom)
+        elif _is_coastline_feature(row) and _is_linear_geometry(geom):
+            coastline_geometries.append(geom)
+
+    water_mask = _rasterize_geometry(polygon_geometries, projected_bounds, transform, grid_size, rasterize)
+    if coastline_geometries:
+        water_mask = water_mask | _rasterize_coastline_ocean(
+            coastline_geometries,
+            dem_grid,
+            projected_bounds,
+            transform,
+            grid_size,
+            rasterize,
+        )
+    return water_mask
+
+
+def _is_polygonal_geometry(geom) -> bool:
+    return geom.geom_type in {"Polygon", "MultiPolygon"}
+
+
+def _is_linear_geometry(geom) -> bool:
+    return geom.geom_type in {"LineString", "MultiLineString"}
+
+
+def _is_coastline_feature(row) -> bool:
+    return str(row.get("natural", "")).lower() == "coastline"
+
+
+def _rasterize_coastline_ocean(
+    coastline_geometries,
+    dem_grid: np.ndarray,
+    projected_bounds: tuple[float, float, float, float],
+    transform,
+    grid_size: int,
+    rasterize,
+) -> np.ndarray:
+    try:
+        from shapely.geometry import box
+        from shapely.ops import split, unary_union
+    except ImportError:
+        return np.zeros((grid_size, grid_size), dtype=bool)
+
+    west_m, south_m, east_m, north_m = projected_bounds
+    bounds_polygon = box(west_m, south_m, east_m, north_m)
+    try:
+        linework = unary_union(list(coastline_geometries))
+        pieces = split(bounds_polygon, linework)
+    except Exception:
+        return np.zeros((grid_size, grid_size), dtype=bool)
+
+    polygons = [
+        geom for geom in _iter_geometries(pieces)
+        if geom.geom_type == "Polygon" and not geom.is_empty and geom.area > 0
+    ]
+    if len(polygons) < 2:
+        return np.zeros((grid_size, grid_size), dtype=bool)
+
+    best_mask = None
+    best_score = float("inf")
+    for polygon in polygons:
+        cell_mask = _rasterize_geometry([polygon], projected_bounds, transform, grid_size, rasterize)
+        if not cell_mask.any():
+            continue
+        elevations = np.asarray(dem_grid[cell_mask], dtype=np.float32)
+        elevations = elevations[np.isfinite(elevations)]
+        elevation_score = float(np.percentile(elevations, 75)) if elevations.size else 0.0
+        edge_bonus = _edge_contact_fraction(cell_mask)
+        area_bonus = float(np.count_nonzero(cell_mask)) / float(cell_mask.size)
+        score = elevation_score - edge_bonus - area_bonus
+        if score < best_score:
+            best_score = score
+            best_mask = cell_mask
+
+    if best_mask is None:
+        return np.zeros((grid_size, grid_size), dtype=bool)
+    return best_mask
+
+
+def _iter_geometries(geometry):
+    if hasattr(geometry, "geoms"):
+        yield from geometry.geoms
+    else:
+        yield geometry
+
+
+def _edge_contact_fraction(mask: np.ndarray) -> float:
+    edge_contacts = (
+        int(np.count_nonzero(mask[0, :]))
+        + int(np.count_nonzero(mask[-1, :]))
+        + int(np.count_nonzero(mask[:, 0]))
+        + int(np.count_nonzero(mask[:, -1]))
+    )
+    return edge_contacts / max(float(mask.shape[0] * 2 + mask.shape[1] * 2), 1.0)
 
 
 def _rasterize_geometry(

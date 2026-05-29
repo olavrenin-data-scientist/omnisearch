@@ -18,7 +18,7 @@ import re
 import numpy as np
 
 
-LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK = range(5)
+LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK, LAND_WATER = range(6)
 OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE = range(3)
 
 
@@ -150,7 +150,7 @@ def _require_grid(data: np.lib.npyio.NpzFile, name: str, grid_size: int) -> np.n
 
 
 def _sanitize(terrain: RealTerrainMap) -> RealTerrainMap:
-    land_cover = np.clip(np.nan_to_num(terrain.land_cover, nan=LAND_OPEN), LAND_ROAD, LAND_ROCK).astype(np.int64)
+    land_cover = np.clip(np.nan_to_num(terrain.land_cover, nan=LAND_OPEN), LAND_ROAD, LAND_WATER).astype(np.int64)
     obstacle_type = np.clip(
         np.nan_to_num(terrain.obstacle_type, nan=OBJECT_NONE),
         OBJECT_NONE,
