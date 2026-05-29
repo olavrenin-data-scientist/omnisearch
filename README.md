@@ -58,7 +58,7 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install torch torchvision
 pip install vmas torchrl benchmarl ultralytics "pettingzoo[mpe]"
-pip install wandb tensorboard tqdm hydra-core omegaconf matplotlib seaborn pandas numpy pyyaml scipy
+pip install wandb tensorboard tqdm hydra-core omegaconf matplotlib seaborn pandas numpy pyyaml scipy networkx
 pip install pytest black ruff ipykernel jupyter nbformat nbconvert "moviepy<2.0.0"
 
 # 4. (Optional) register the kernel for Jupyter / IDE notebooks
