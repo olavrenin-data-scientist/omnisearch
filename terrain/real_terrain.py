@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 import hashlib
+import json
 import re
 
 import numpy as np
@@ -34,6 +35,7 @@ class RealTerrainMap:
     obstacle_type: np.ndarray
     obstacle_height: np.ndarray
     source: str
+    metadata: dict
 
 
 def load_real_terrain(
@@ -91,20 +93,50 @@ def _default_cache_path(
 
 
 def _load_npz(path: Path, grid_size: int) -> RealTerrainMap:
-    data = np.load(path, allow_pickle=False)
-    source = str(data["source"].item()) if "source" in data else f"cache:{path}"
-    terrain = RealTerrainMap(
-        land_cover=_require_grid(data, "land_cover", grid_size).astype(np.int64),
-        elevation=_require_grid(data, "elevation", grid_size).astype(np.float32),
-        slope=_require_grid(data, "slope", grid_size).astype(np.float32),
-        moisture=_require_grid(data, "moisture", grid_size).astype(np.float32),
-        fuel_density=_require_grid(data, "fuel_density", grid_size).astype(np.float32),
-        rockiness=_require_grid(data, "rockiness", grid_size).astype(np.float32),
-        obstacle_type=_require_grid(data, "obstacle_type", grid_size).astype(np.int64),
-        obstacle_height=_require_grid(data, "obstacle_height", grid_size).astype(np.float32),
-        source=source,
-    )
+    with np.load(path, allow_pickle=False) as data:
+        source = str(data["source"].item()) if "source" in data else f"cache:{path}"
+        metadata = _load_metadata(data, path)
+        terrain = RealTerrainMap(
+            land_cover=_require_grid(data, "land_cover", grid_size).astype(np.int64),
+            elevation=_require_grid(data, "elevation", grid_size).astype(np.float32),
+            slope=_require_grid(data, "slope", grid_size).astype(np.float32),
+            moisture=_require_grid(data, "moisture", grid_size).astype(np.float32),
+            fuel_density=_require_grid(data, "fuel_density", grid_size).astype(np.float32),
+            rockiness=_require_grid(data, "rockiness", grid_size).astype(np.float32),
+            obstacle_type=_require_grid(data, "obstacle_type", grid_size).astype(np.int64),
+            obstacle_height=_require_grid(data, "obstacle_height", grid_size).astype(np.float32),
+            source=source,
+            metadata=metadata,
+        )
     return _sanitize(terrain)
+
+
+def _load_metadata(data: np.lib.npyio.NpzFile, path: Path) -> dict:
+    metadata: dict = {}
+    if "metadata_json" in data:
+        try:
+            embedded = json.loads(str(data["metadata_json"].item()))
+            if isinstance(embedded, dict):
+                metadata.update(embedded)
+        except (TypeError, ValueError):
+            metadata["metadata_warning"] = "embedded metadata_json could not be decoded"
+
+    sidecar_path = _metadata_sidecar_path(path)
+    if sidecar_path.exists():
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+            if isinstance(sidecar, dict):
+                metadata.update(sidecar)
+        except (OSError, ValueError):
+            metadata["metadata_warning"] = f"sidecar metadata could not be decoded: {sidecar_path}"
+
+    metadata.setdefault("cache_path", str(path))
+    metadata.setdefault("metadata_path", str(sidecar_path))
+    return metadata
+
+
+def _metadata_sidecar_path(path: Path) -> Path:
+    return path.with_suffix(".metadata.json")
 
 
 def _require_grid(data: np.lib.npyio.NpzFile, name: str, grid_size: int) -> np.ndarray:
@@ -134,9 +166,9 @@ def _sanitize(terrain: RealTerrainMap) -> RealTerrainMap:
         obstacle_type=obstacle_type,
         obstacle_height=np.clip(np.nan_to_num(terrain.obstacle_height, nan=0.0), 0.0, None).astype(np.float32),
         source=terrain.source,
+        metadata=dict(terrain.metadata),
     )
 
 
 def _finite01ish(array: np.ndarray) -> np.ndarray:
     return np.clip(np.nan_to_num(array, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0).astype(np.float32)
-

@@ -297,6 +297,7 @@ class WildfireSearchScenario(BaseScenario):
         self._pre_step_drone_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.terrain_source_description = ["real"] * batch_dim
+        self.terrain_source_metadata = [{} for _ in range(batch_dim)]
 
         # Per-agent reward buffers (filled in _compute_step_rewards)
         for agent in world.agents:
@@ -486,6 +487,7 @@ class WildfireSearchScenario(BaseScenario):
             terrain.obstacle_height, dtype=torch.float, device=device,
         )
         self.terrain_source_description[env_index] = terrain.source
+        self.terrain_source_metadata[env_index] = dict(terrain.metadata)
 
     def _clear_entity_staging_areas(self, env_index: int) -> None:
         """Ensure survivor locations and ground starts have small organic clearings."""

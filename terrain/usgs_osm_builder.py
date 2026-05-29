@@ -8,9 +8,11 @@ such as LANDFIRE or NLCD is added.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 import hashlib
+import json
 
 import numpy as np
 
@@ -30,6 +32,7 @@ from .landfire_client import (
     ensure_landfire_geotiff,
     has_cached_landfire_source,
     read_landfire_grid,
+    read_landfire_source_metadata,
 )
 
 
@@ -131,6 +134,7 @@ def build_real_terrain_cache(
     seed = int(hashlib.sha1(f"{bbox}:{grid_size}:{dem_resolution_m}".encode("utf-8")).hexdigest()[:8], 16)
     moisture, fuel_density, rockiness = _derived_surface_fields(elevation, slope_norm, seed)
     landfire = None
+    landfire_source_metadata = None
     if fuel_source == "landfire":
         landfire_tif = ensure_landfire_geotiff(
             bbox=bbox,
@@ -143,6 +147,7 @@ def build_real_terrain_cache(
             poll_interval_s=landfire_poll_interval_s,
             force_download=landfire_force_download,
         )
+        landfire_source_metadata = read_landfire_source_metadata(landfire_tif)
         landfire = read_landfire_grid(
             geotiff_path=landfire_tif,
             projected_bounds=projected_bounds,
@@ -187,6 +192,37 @@ def build_real_terrain_cache(
         f"fuel_source={fuel_source}; place={place!r}; "
         f"bbox={tuple(round(v, 6) for v in bbox)}"
     )
+    metadata_path = _cache_metadata_path(out_path)
+    metadata = _build_cache_metadata(
+        out_path=out_path,
+        metadata_path=metadata_path,
+        place=place,
+        bbox=bbox,
+        grid_size=grid_size,
+        dem_resolution_m=dem_resolution_m,
+        terrain_elevation_scale=terrain_elevation_scale,
+        road_width_m=road_width_m,
+        building_height=building_height,
+        osm_timeout=osm_timeout,
+        fuel_source=fuel_source,
+        source_cache_dir=source_cache_dir,
+        landfire_layer_list=landfire_layer_list,
+        landfire_resample_resolution=landfire_resample_resolution,
+        landfire_output_projection=landfire_output_projection,
+        landfire_source_metadata=landfire_source_metadata,
+        source_note=source_note,
+        source=source,
+        projected_bounds=projected_bounds,
+        cell_size_m=cell_size_m,
+        ox=ox,
+        road_count=0 if roads is None else int(len(roads)),
+        building_count=0 if buildings is None else int(len(buildings)),
+        road_mask=road_mask,
+        building_mask=building_mask,
+        land_cover=land_cover,
+        obstacle_type=obstacle_type,
+    )
+    metadata_json = json.dumps(metadata, sort_keys=True)
     np.savez_compressed(
         out_path,
         land_cover=land_cover,
@@ -204,8 +240,115 @@ def build_real_terrain_cache(
         projected_bounds=np.asarray(projected_bounds, dtype=np.float64),
         fuel_source=np.asarray(fuel_source),
         landfire_layer_list=np.asarray(landfire_layer_list if fuel_source == "landfire" else ""),
+        metadata_json=np.asarray(metadata_json),
     )
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
     return out_path
+
+
+def _build_cache_metadata(
+    *,
+    out_path: Path,
+    metadata_path: Path,
+    place: str,
+    bbox: Sequence[float],
+    grid_size: int,
+    dem_resolution_m: int,
+    terrain_elevation_scale: float,
+    road_width_m: float,
+    building_height: float,
+    osm_timeout: int,
+    fuel_source: str,
+    source_cache_dir: str | Path,
+    landfire_layer_list: str,
+    landfire_resample_resolution: int,
+    landfire_output_projection: str | None,
+    landfire_source_metadata: dict | None,
+    source_note: str | None,
+    source: str,
+    projected_bounds: Sequence[float],
+    cell_size_m: float,
+    ox,
+    road_count: int,
+    building_count: int,
+    road_mask: np.ndarray,
+    building_mask: np.ndarray,
+    land_cover: np.ndarray,
+    obstacle_type: np.ndarray,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "builder": "terrain.usgs_osm_builder.build_real_terrain_cache",
+        "cache_path": str(out_path),
+        "metadata_path": str(metadata_path),
+        "source_description": source,
+        "source_note": source_note,
+        "parameters": {
+            "place": place,
+            "bbox": [float(v) for v in bbox],
+            "grid_size": int(grid_size),
+            "requested_dem_resolution_m": int(dem_resolution_m),
+            "terrain_elevation_scale": float(terrain_elevation_scale),
+            "road_width_m": float(road_width_m),
+            "building_height": float(building_height),
+            "fuel_source": fuel_source,
+            "source_cache_dir": str(source_cache_dir),
+        },
+        "inputs": {
+            "usgs_3dep": {
+                "provider": "USGS 3DEP",
+                "endpoint": USGS_3DEP_EXPORT_IMAGE_URL,
+                "bbox": [float(v) for v in bbox],
+                "bbox_crs": "EPSG:4326",
+                "image_crs": "EPSG:3857",
+                "pixel_type": "F32",
+                "interpolation": "RSP_BilinearInterpolation",
+                "grid_size": [int(grid_size), int(grid_size)],
+                "projected_bounds": [float(v) for v in projected_bounds],
+                "projected_crs": "EPSG:3857",
+                "cell_size_m": float(cell_size_m),
+            },
+            "openstreetmap": {
+                "provider": "OpenStreetMap",
+                "client": "osmnx",
+                "client_version": getattr(ox, "__version__", None),
+                "bbox": [float(v) for v in bbox],
+                "tags": {
+                    "roads": {"highway": True},
+                    "buildings": {"building": True},
+                },
+                "timeout_s": int(osm_timeout),
+                "road_feature_count": int(road_count),
+                "building_feature_count": int(building_count),
+            },
+            "landfire": landfire_source_metadata if fuel_source == "landfire" else None,
+        },
+        "fuel": {
+            "source": fuel_source,
+            "derived_seed": int(hashlib.sha1(f"{bbox}:{grid_size}:{dem_resolution_m}".encode("utf-8")).hexdigest()[:8], 16),
+            "landfire_layer_list": [
+                name.strip() for name in landfire_layer_list.split(";") if name.strip()
+            ] if fuel_source == "landfire" else [],
+            "landfire_resample_resolution_m": int(max(landfire_resample_resolution, 31)),
+            "landfire_output_projection": landfire_output_projection,
+        },
+        "outputs": {
+            "land_cover_counts": _value_counts(land_cover),
+            "obstacle_type_counts": _value_counts(obstacle_type),
+            "road_cell_count": int(np.count_nonzero(road_mask)),
+            "building_cell_count": int(np.count_nonzero(building_mask)),
+        },
+    }
+
+
+def _cache_metadata_path(path: Path) -> Path:
+    return path.with_suffix(".metadata.json")
+
+
+def _value_counts(array: np.ndarray) -> dict[str, int]:
+    values, counts = np.unique(array, return_counts=True)
+    return {str(int(value)): int(count) for value, count in zip(values, counts)}
 
 
 def _cache_matches_options(path: Path, *, fuel_source: str, landfire_layer_list: str) -> bool:

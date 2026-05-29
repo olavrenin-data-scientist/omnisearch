@@ -121,6 +121,9 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
 
     print(f"Wrote: {_display_path(path)}")
+    metadata_path = path.with_suffix(".metadata.json")
+    if metadata_path.exists():
+        print(f"Metadata: {_display_path(metadata_path)}")
     print()
     print("Use it with:")
     print(
