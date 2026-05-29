@@ -1,0 +1,7 @@
+# Optional dependencies for scripts/build_real_terrain_cache.py
+osmnx
+rasterio
+geopandas
+shapely
+pyproj
+requests

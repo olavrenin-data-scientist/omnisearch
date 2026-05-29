@@ -110,6 +110,8 @@ def _terrain_record(scenario, env_index: int) -> dict:
         return [[round(float(v), 4) for v in row] for row in tensor.cpu().tolist()]
 
     return {
+        "source": getattr(scenario, "terrain_source", "real"),
+        "source_description": getattr(scenario, "terrain_source_description", ["real"])[env_index],
         "land_cover": scenario.land_cover_grid[env_index].cpu().tolist(),
         "elevation": rounded_rows(scenario.elevation_grid[env_index]),
         "slope": rounded_rows(scenario.slope_grid[env_index]),

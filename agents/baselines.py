@@ -39,7 +39,9 @@ from envs.wildfire_search import WildfireSearchScenario, X, Y
 # agent, in the same order as env.agents. WildfireSearchScenario's
 # actions are 2D continuous in [-1, 1] (a force vector).
 
-GROUND_LOOKAHEAD = 0.14
+# Immediate collision check for the next UGV action. This should stay close to
+# one physical step; long-horizon obstacle avoidance is handled by A* routing.
+GROUND_LOOKAHEAD = 0.045
 GROUND_ROUTE_WAYPOINT_CELLS = 10
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
