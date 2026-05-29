@@ -712,8 +712,9 @@ function renderFrame(state, frame, meta, histories, frames) {
   // --- Agents (compound quadcopters / rovers) ---
   const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
   for (const a of frame.agents) {
+    const altitudeAgl = a.altitude_agl ?? a.altitude ?? 0;
     const mesh = a.type === 'drone'
-      ? makeDroneMesh(agentRadius, a.altitude, maxAltitude)
+      ? makeDroneMesh(agentRadius, altitudeAgl, maxAltitude)
       : makeGroundMesh(agentRadius);
     mesh.position.set(a.x, a.y, 0.05);
     // Heading: rotate ground robots to face their direction of travel,
@@ -937,7 +938,7 @@ function MetricsPanel({ meta, frame }) {
       h('h2', null, 'Drone flight altitude'),
       drones.map(a => h('div', { key: a.name, className: 'metric' },
         h('span', { className: 'k' }, a.name),
-        h('span', { className: 'v' }, fmt(a.altitude)),
+        h('span', { className: 'v' }, `${fmt(a.altitude_agl ?? a.altitude)} AGL / ${fmt(a.altitude_msl ?? a.altitude)} MSL`),
       )),
     ),
   );
