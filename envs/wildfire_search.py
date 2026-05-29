@@ -36,8 +36,18 @@ X, Y = 0, 1
 
 # Land-cover types stored in land_cover_grid. Terrain affects ground robots;
 # drones fly above it but observe the map to coordinate ground routes.
-LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK = range(5)
+LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK, LAND_WATER = range(6)
 OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE = range(3)
+
+
+def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
+    """Accept legacy 5-class configs and append the water class default."""
+    values = tuple(float(v) for v in values)
+    if len(values) == 5:
+        return values + (float(water_value),)
+    if len(values) == 6:
+        return values
+    raise ValueError(f"{name} must cover road/open/brush/forest/rock or road/open/brush/forest/rock/water")
 
 
 class WildfireSearchScenario(BaseScenario):
@@ -95,10 +105,12 @@ class WildfireSearchScenario(BaseScenario):
         self.smoke_emission = kwargs.pop("smoke_emission", 0.18)
         self.smoke_decay = kwargs.pop("smoke_decay", 0.96)
         self.smoke_diffusion = kwargs.pop("smoke_diffusion", 0.16)
-        land_cover_fire_fuel = kwargs.pop("land_cover_fire_fuel", (0.05, 0.40, 1.10, 1.35, 0.0))
+        land_cover_fire_fuel = _land_cover_values(
+            kwargs.pop("land_cover_fire_fuel", (0.05, 0.40, 1.10, 1.35, 0.0, 0.0)),
+            water_value=0.0,
+            name="land_cover_fire_fuel",
+        )
         object_fire_fuel = kwargs.pop("object_fire_fuel", (0.0, 0.25, 1.00))
-        if len(land_cover_fire_fuel) != 5:
-            raise ValueError("land_cover_fire_fuel must cover road/open/brush/forest/rock")
         if len(object_fire_fuel) != 3:
             raise ValueError("object_fire_fuel must cover none/tree/house")
         wind_direction = kwargs.pop("wind_direction", kwargs.pop("smoke_wind", (1, 0)))
@@ -125,10 +137,16 @@ class WildfireSearchScenario(BaseScenario):
         self.slope_cost_weight = kwargs.pop("slope_cost_weight", 2.0)
         self.slope_speed_weight = kwargs.pop("slope_speed_weight", 1.5)
         self.terrain_path_samples = kwargs.pop("terrain_path_samples", 6)
-        land_cover_costs = kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0))
-        land_cover_speeds = kwargs.pop("land_cover_speeds", (1.0, 0.9, 0.65, 0.45, 0.0))
-        if len(land_cover_costs) != 5 or len(land_cover_speeds) != 5:
-            raise ValueError("land-cover cost and speed values must cover road/open/brush/forest/rock")
+        land_cover_costs = _land_cover_values(
+            kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0, 8.0)),
+            water_value=8.0,
+            name="land_cover_costs",
+        )
+        land_cover_speeds = _land_cover_values(
+            kwargs.pop("land_cover_speeds", (1.0, 0.9, 0.65, 0.45, 0.0, 0.0)),
+            water_value=0.0,
+            name="land_cover_speeds",
+        )
 
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
         # AGL flight level. MSL altitude is derived from local terrain elevation.
@@ -141,10 +159,13 @@ class WildfireSearchScenario(BaseScenario):
         if not (len(drone_flight_levels) == len(drone_detection_quality) == len(drone_energy_costs)):
             raise ValueError("drone flight levels, detection quality, and energy costs must align")
         drone_cover_detection_factors = kwargs.pop(
-            "drone_cover_detection_factors", (1.0, 1.0, 0.72, 0.45, 0.35),
+            "drone_cover_detection_factors", (1.0, 1.0, 0.72, 0.45, 0.35, 0.95),
         )
-        if len(drone_cover_detection_factors) != 5:
-            raise ValueError("drone_cover_detection_factors must cover road/open/brush/forest/rock")
+        drone_cover_detection_factors = _land_cover_values(
+            drone_cover_detection_factors,
+            water_value=0.95,
+            name="drone_cover_detection_factors",
+        )
         self.drone_smoke_detection_factor = kwargs.pop("drone_smoke_detection_factor", 0.55)
         self.drone_perception_path_samples = max(int(kwargs.pop("drone_perception_path_samples", 8)), 2)
         self.drone_smoke_extinction = max(float(kwargs.pop("drone_smoke_extinction", 1.4)), 0.0)
@@ -452,6 +473,7 @@ class WildfireSearchScenario(BaseScenario):
     def _generate_terrain(self, env_index: int) -> None:
         """Load real terrain and clear small entity staging areas."""
         self._load_real_terrain(env_index)
+        self._relocate_land_entities_to_valid_cells(env_index)
         self._clear_entity_staging_areas(env_index)
         self._refresh_mobility_layers(env_index)
 
@@ -518,11 +540,61 @@ class WildfireSearchScenario(BaseScenario):
             gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
             dist = torch.sqrt((xx - x).float().square() + (yy - y).float().square())
-            mask = dist <= clear_radius
+            mask = (dist <= clear_radius) & (self.land_cover_grid[env_index] != LAND_WATER)
             self.land_cover_grid[env_index][mask] = LAND_OPEN
             self.slope_grid[env_index][mask] *= 0.35
             self.obstacle_type_grid[env_index][mask] = OBJECT_NONE
             self.obstacle_height_grid[env_index][mask] = 0.0
+
+    def _relocate_land_entities_to_valid_cells(self, env_index: int) -> None:
+        """Move survivors and UGV starts off water or blocked terrain after map load."""
+        candidates = self._land_entity_candidate_mask(env_index)
+        if not bool(candidates.any().item()):
+            return
+
+        size = self.fire_grid_size
+        device = self.fire_grid.device
+        yy, xx = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
+        available = candidates.clone()
+        entities = self._survivors + self.world.agents[self.n_drones:]
+        for entity in entities:
+            gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
+            x, y = int(gx.item()), int(gy.item())
+            if bool(candidates[y, x].item()):
+                available[y, x] = False
+                continue
+
+            search_mask = available if bool(available.any().item()) else candidates
+            dist2 = (xx - x).float().square() + (yy - y).float().square()
+            dist2 = torch.where(search_mask, dist2, torch.full_like(dist2, float("inf")))
+            best = int(dist2.flatten().argmin().item())
+            new_y, new_x = divmod(best, size)
+            new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
+            all_pos = entity.state.pos.clone()
+            all_pos[env_index] = new_pos
+            entity.set_pos(all_pos, batch_index=None)
+            available[new_y, new_x] = False
+
+    def _land_entity_candidate_mask(self, env_index: int) -> Tensor:
+        cover = self.land_cover_grid[env_index]
+        objects = self.obstacle_type_grid[env_index]
+        slope = self.slope_grid[env_index]
+        road = cover == LAND_ROAD
+        return (
+            (cover != LAND_WATER)
+            & (cover != LAND_ROCK)
+            & (objects == OBJECT_NONE)
+            & ((slope <= self.max_ground_slope) | road)
+        )
+
+    def _grid_cell_center_to_world(self, gx: int, gy: int, *, device: torch.device) -> Tensor:
+        x = ((float(gx) + 0.5) / self.fire_grid_size) * (2.0 * self.x_semidim) - self.x_semidim
+        y = ((float(gy) + 0.5) / self.fire_grid_size) * (2.0 * self.y_semidim) - self.y_semidim
+        return torch.tensor([x, y], dtype=torch.float, device=device)
 
     def _grid_scale(self) -> float:
         return self.fire_grid_size / max(float(self.terrain_reference_grid_size), 1.0)
@@ -539,7 +611,7 @@ class WildfireSearchScenario(BaseScenario):
         objects = self.obstacle_type_grid[env_index]
         road = cover == LAND_ROAD
         traversable = (
-            (cover != LAND_ROCK) & (objects == OBJECT_NONE)
+            (cover != LAND_WATER) & (cover != LAND_ROCK) & (objects == OBJECT_NONE)
             & ((slope <= self.max_ground_slope) | road)
         )
         cost = self.land_cover_cost_values[cover] * (1.0 + self.slope_cost_weight * slope)

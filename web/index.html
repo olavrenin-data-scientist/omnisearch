@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <title>OmniSearch — Strategy Viewer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Cache-Control" content="no-store" />
 <style>
   :root {
     --bg:        #0e1118;
@@ -114,6 +115,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
+const APP_VERSION = 'water-render-v2';
 
 // ---------------------------------------------------------------------
 // Trajectory discovery — list strategies by sniffing trajectories/index.json
@@ -182,6 +184,7 @@ const COLORS = {
   fire_outer:          0xf06e1e,   // orange
   fire_inner:          0xfacc15,   // yellow hot core
   smoke:               0xcbd5e1,   // pale gray-blue
+  water:               0x2563eb,   // ocean / water
 };
 const TERRAIN_COLORS = [
   0xb59665,  // road
@@ -189,6 +192,7 @@ const TERRAIN_COLORS = [
   0x315a2e,  // brush
   0x203d24,  // forest
   0x555963,  // rock
+  COLORS.water,
 ];
 const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
 const VIEW_PADDING = 1.15;
@@ -483,7 +487,9 @@ function renderTerrain(state, meta) {
       } else if (cover === 0) {
         color.lerp(new THREE.Color(0xc5a56f), Math.min(0.25, coarseNoise * 0.25));
       }
-      const shade = 0.78 + elevation * 1.05 - slope * 0.42 + (fineNoise - 0.5) * 0.16 + (coarseNoise - 0.5) * 0.10;
+      const shade = cover === 5
+        ? 1.0
+        : 0.78 + elevation * 1.05 - slope * 0.42 + (fineNoise - 0.5) * 0.16 + (coarseNoise - 0.5) * 0.10;
       color.multiplyScalar(Math.max(0.48, Math.min(1.28, shade)));
       const objectType = terrain.obstacle_type?.[gy]?.[gx] ?? OBJECT_NONE;
       const objectHeight = terrain.obstacle_height?.[gy]?.[gx] ?? 0;
@@ -882,6 +888,7 @@ function Legend() {
     ['square', '#315a2e', 'Brush'],
     ['square', '#203d24', 'Forest'],
     ['square', '#555963', 'Rock / blocked'],
+    ['square', '#2563eb', 'Water / ocean'],
     ['circle', '#1d5128', 'Tree canopy'],
     ['square', '#a34d3d', 'House'],
     ['square', '#2b211b', 'Burned / post-fire'],
@@ -902,6 +909,13 @@ function Legend() {
 
 function MetricsPanel({ meta, frame }) {
   const m = meta?.metrics ?? {};
+  const landCover = meta?.terrain?.land_cover ?? [];
+  const waterCells = landCover.reduce(
+    (total, row) => total + row.reduce((n, cover) => n + (cover === 5 ? 1 : 0), 0),
+    0,
+  );
+  const totalTerrainCells = landCover.reduce((total, row) => total + row.length, 0);
+  const waterPct = totalTerrainCells > 0 ? (100 * waterCells / totalTerrainCells).toFixed(1) : '0.0';
   const fmt = (v, suffix='') => {
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
     return (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(2) : v) + suffix;
@@ -922,6 +936,8 @@ function MetricsPanel({ meta, frame }) {
         meta?.strategy ?? '—'),
       h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
         `seed ${meta?.seed ?? '—'} · ${meta?.n_drones} drones + ${meta?.n_ground} ground · ${meta?.n_survivors} survivors`),
+      h('div', { style: { color: 'var(--muted)', fontSize: 12, marginTop: 6 } },
+        `viewer ${APP_VERSION} · water cells ${waterCells} (${waterPct}%)`),
     ),
     h('div', { className: 'panel' },
       h('h2', null, 'Legend'),
@@ -987,6 +1003,7 @@ function App() {
     h('header', null,
       h('h1', null, 'OmniSearch · Strategy Viewer'),
       h('div', { className: 'meta' }, runLabel),
+      h('div', { className: 'meta' }, APP_VERSION),
       h('div', { style: { flex: 1 } }),
       h('label', null,
         'Strategy: ',

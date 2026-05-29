@@ -123,7 +123,7 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "rockiness": rounded_rows(scenario.rockiness_grid[env_index]),
         "traversable": scenario.traversable_grid[env_index].cpu().tolist(),
         "movement_cost": rounded_rows(scenario.mobility_cost_grid[env_index]),
-        "cover_names": ["road", "open", "brush", "forest", "rock"],
+        "cover_names": ["road", "open", "brush", "forest", "rock", "water"],
         "obstacle_type": scenario.obstacle_type_grid[env_index].cpu().tolist(),
         "obstacle_height": rounded_rows(scenario.obstacle_height_grid[env_index]),
         "required_clearance": rounded_rows(scenario.required_clearance_grid[env_index]),
