@@ -32,7 +32,7 @@ from typing import Callable, List
 import torch
 
 from agents.pathfinding import find_ground_route
-from envs.wildfire_search import WildfireSearchScenario, X, Y
+from envs.wildfire_search import LAND_ROCK, LAND_WATER, WildfireSearchScenario, X, Y
 
 
 # Each policy returns a list of (B, action_dim) action tensors, one per
@@ -55,6 +55,11 @@ GROUND_RECOVERY_ANGLES = (
     -math.pi / 2,
     math.pi,
 )
+DRONE_LANE_SPACING_FACTOR = 1.5
+DRONE_LANE_MIN_SPACING = 0.08
+DRONE_WAYPOINT_TOLERANCE = 0.08
+DRONE_CRUISE_ACTION = 0.95
+DRONE_TURN_ACTION = 0.75
 
 
 def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
@@ -266,8 +271,9 @@ class RandomPolicy:
 # ----------------------------------------------------------------------
 class LawnmowerPolicy:
     """
-    Drones execute a deterministic horizontal serpentine sweep that
-    eventually covers the whole map.
+    Drones execute workload-balanced boustrophedon coverage over searchable
+    terrain. Water/ocean and rock cells do not contribute search workload,
+    and each lane is trimmed to the land segment it covers.
 
     Ground robots head to the nearest *scouted* survivor (using the
     scenario's `scouted_survivors` mask). If no survivor has been
@@ -278,14 +284,9 @@ class LawnmowerPolicy:
         self.scenario: WildfireSearchScenario = env.scenario
         self.t = 0
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
-        # Each drone gets a y-band — distribute them vertically
-        self.drone_band_y = self._drone_band_ys(self.scenario.n_drones)
-
-    @staticmethod
-    def _drone_band_ys(n: int) -> List[float]:
-        if n == 1:
-            return [0.0]
-        return [(-0.7 + 1.4 * i / (n - 1)) for i in range(n)]
+        self.drone_waypoints: list[list[list[tuple[float, float]]]] | None = None
+        self.drone_waypoint_index: torch.Tensor | None = None
+        self.drone_plan_signature: tuple | None = None
 
     def __call__(self, env) -> List[torch.Tensor]:
         sc = self.scenario
@@ -293,15 +294,8 @@ class LawnmowerPolicy:
         device = sc.fire_grid.device
         out: List[torch.Tensor] = []
 
-        # ---- Drones: serpentine x-sweep, y-band fixed per drone ----
-        period = 80  # steps for one half-cycle
-        phase = (self.t // period) % 2
-        x_target = +0.9 if phase == 0 else -0.9
-        for i in range(sc.n_drones):
-            pos = sc.world.agents[i].state.pos  # (B, 2)
-            dx = (x_target - pos[:, X]).clamp(-1.0, 1.0)
-            dy = (self.drone_band_y[i] - pos[:, Y]).clamp(-1.0, 1.0)
-            out.append(torch.stack([dx, dy], dim=-1))
+        # ---- Drones: land-aware, workload-balanced lawnmower coverage ----
+        out.extend(self._drone_lawnmower_actions())
 
         # ---- Ground robots: split up across scouted survivors ----
         scouted = sc.scouted_survivors        # (B, S) bool
@@ -318,6 +312,195 @@ class LawnmowerPolicy:
 
         self.t += 1
         return out
+
+    def _drone_lawnmower_actions(self) -> List[torch.Tensor]:
+        sc = self.scenario
+        B = sc.world.batch_dim
+        device = sc.fire_grid.device
+        self._ensure_drone_lawnmower_plans()
+        if sc.n_drones == 0:
+            return []
+
+        assert self.drone_waypoints is not None
+        assert self.drone_waypoint_index is not None
+
+        actions: List[torch.Tensor] = []
+        for drone_idx in range(sc.n_drones):
+            pos = sc.world.agents[drone_idx].state.pos
+            action = torch.zeros(B, 2, device=device)
+            for b in range(B):
+                waypoints = self.drone_waypoints[b][drone_idx]
+                if not waypoints:
+                    continue
+                wp_idx = int(self.drone_waypoint_index[b, drone_idx].item())
+                wp_idx = min(wp_idx, len(waypoints) - 1)
+                target = torch.tensor(waypoints[wp_idx], dtype=torch.float, device=device)
+                delta = target - pos[b]
+                distance = float(delta.norm().item())
+                if distance <= DRONE_WAYPOINT_TOLERANCE:
+                    wp_idx = (wp_idx + 1) % len(waypoints)
+                    self.drone_waypoint_index[b, drone_idx] = wp_idx
+                    target = torch.tensor(waypoints[wp_idx], dtype=torch.float, device=device)
+                    delta = target - pos[b]
+                    distance = float(delta.norm().item())
+                direction = delta / delta.norm().clamp_min(1e-6)
+                cruise = DRONE_TURN_ACTION if distance <= 2.0 * DRONE_WAYPOINT_TOLERANCE else DRONE_CRUISE_ACTION
+                action[b] = (direction * cruise).clamp(-1.0, 1.0)
+            actions.append(action)
+        return actions
+
+    def _ensure_drone_lawnmower_plans(self) -> None:
+        sc = self.scenario
+        B = sc.world.batch_dim
+        if sc.n_drones == 0:
+            return
+        footprint = self._search_footprint()
+        lane_spacing = max(footprint * DRONE_LANE_SPACING_FACTOR, DRONE_LANE_MIN_SPACING)
+        land_counts = tuple(
+            int(((sc.land_cover_grid[b] != LAND_WATER) & (sc.land_cover_grid[b] != LAND_ROCK)).sum().item())
+            for b in range(B)
+        )
+        signature = (
+            B,
+            sc.n_drones,
+            sc.fire_grid_size,
+            round(float(sc.x_semidim), 4),
+            round(float(sc.y_semidim), 4),
+            round(float(lane_spacing), 4),
+            land_counts,
+        )
+        reset_detected = int(sc.step_count.max().item()) == 0 and self.t > 0
+        if self.drone_plan_signature == signature and not reset_detected:
+            return
+
+        plans: list[list[list[tuple[float, float]]]] = []
+        for b in range(B):
+            lanes = self._search_lanes_for_env(b, lane_spacing, footprint)
+            blocks = self._balanced_lane_blocks(lanes, sc.n_drones)
+            env_plans = []
+            for drone_idx, block in enumerate(blocks):
+                start_pos = sc.world.agents[drone_idx].state.pos[b]
+                env_plans.append(self._waypoints_for_lane_block(block, start_pos))
+            plans.append(env_plans)
+
+        self.drone_waypoints = plans
+        self.drone_waypoint_index = torch.zeros(B, sc.n_drones, dtype=torch.long, device=sc.fire_grid.device)
+        self.drone_plan_signature = signature
+
+    def _search_footprint(self) -> float:
+        sc = self.scenario
+        min_altitude = float(sc.drone_flight_levels.min().item())
+        return max(min_altitude * sc.drone_camera_half_angle_tan, DRONE_LANE_MIN_SPACING / DRONE_LANE_SPACING_FACTOR)
+
+    def _search_lanes_for_env(self, env_index: int, lane_spacing: float, footprint: float) -> list[dict]:
+        sc = self.scenario
+        size = sc.fire_grid_size
+        device = sc.fire_grid.device
+        margin = max(float(sc.agent_radius), 0.02)
+        x_min_world = -float(sc.x_semidim) + margin
+        x_max_world = float(sc.x_semidim) - margin
+        y_min_world = -float(sc.y_semidim) + margin
+        y_max_world = float(sc.y_semidim) - margin
+        span_y = max(y_max_world - y_min_world, 1e-6)
+        n_lanes = max(1, int(math.ceil(span_y / lane_spacing)) + 1)
+        lane_ys = torch.linspace(y_min_world, y_max_world, n_lanes, device=device)
+
+        cell_w = 2.0 * float(sc.x_semidim) / size
+        cell_h = 2.0 * float(sc.y_semidim) / size
+        cell_xs = torch.linspace(
+            -float(sc.x_semidim) + 0.5 * cell_w,
+            float(sc.x_semidim) - 0.5 * cell_w,
+            size,
+            device=device,
+        )
+        cell_ys = torch.linspace(
+            -float(sc.y_semidim) + 0.5 * cell_h,
+            float(sc.y_semidim) - 0.5 * cell_h,
+            size,
+            device=device,
+        )
+        cover = sc.land_cover_grid[env_index]
+        searchable = (cover != LAND_WATER) & (cover != LAND_ROCK)
+        lanes: list[dict] = []
+        for lane_y in lane_ys:
+            y_mask = (cell_ys - lane_y).abs() <= lane_spacing * 0.5
+            lane_mask = searchable & y_mask.view(size, 1)
+            weight = int(lane_mask.sum().item())
+            if weight <= 0:
+                continue
+            x_used = lane_mask.any(dim=0)
+            used_indices = x_used.nonzero(as_tuple=False).flatten()
+            land_x_min = float(cell_xs[int(used_indices.min().item())].item())
+            land_x_max = float(cell_xs[int(used_indices.max().item())].item())
+            segment_margin = max(0.5 * footprint, 0.5 * cell_w)
+            lanes.append({
+                "y": float(lane_y.item()),
+                "x_min": max(x_min_world, land_x_min - segment_margin),
+                "x_max": min(x_max_world, land_x_max + segment_margin),
+                "weight": float(weight),
+            })
+        if lanes:
+            return lanes
+        return [{
+            "y": float(y.item()),
+            "x_min": x_min_world,
+            "x_max": x_max_world,
+            "weight": 1.0,
+        } for y in lane_ys]
+
+    @staticmethod
+    def _balanced_lane_blocks(lanes: list[dict], n_drones: int) -> list[list[dict]]:
+        if n_drones <= 0:
+            return []
+        blocks: list[list[dict]] = []
+        start = 0
+        remaining_weight = sum(lane["weight"] for lane in lanes)
+        for drone_idx in range(n_drones):
+            remaining_drones = n_drones - drone_idx
+            if start >= len(lanes):
+                blocks.append([])
+                continue
+            if remaining_drones == 1:
+                blocks.append(lanes[start:])
+                break
+            max_end = len(lanes) - (remaining_drones - 1)
+            target = remaining_weight / remaining_drones if remaining_drones > 0 else remaining_weight
+            acc = 0.0
+            end = start
+            while end < max_end:
+                next_acc = acc + lanes[end]["weight"]
+                if end > start and abs(next_acc - target) > abs(acc - target):
+                    break
+                acc = next_acc
+                end += 1
+            if end == start:
+                acc = lanes[end]["weight"]
+                end += 1
+            blocks.append(lanes[start:end])
+            remaining_weight -= acc
+            start = end
+        while len(blocks) < n_drones:
+            blocks.append([])
+        return blocks
+
+    @staticmethod
+    def _waypoints_for_lane_block(
+        lanes: list[dict],
+        start_pos: torch.Tensor,
+    ) -> list[tuple[float, float]]:
+        if not lanes:
+            return []
+        first_lane = lanes[0]
+        left_start = torch.tensor([first_lane["x_min"], first_lane["y"]], device=start_pos.device)
+        right_start = torch.tensor([first_lane["x_max"], first_lane["y"]], device=start_pos.device)
+        start_left = bool((start_pos - left_start).norm().item() <= (start_pos - right_start).norm().item())
+        waypoints: list[tuple[float, float]] = []
+        for idx, lane in enumerate(lanes):
+            left = (float(lane["x_min"]), float(lane["y"]))
+            right = (float(lane["x_max"]), float(lane["y"]))
+            first, second = (left, right) if (idx % 2 == 0) == start_left else (right, left)
+            waypoints.extend((first, second))
+        return waypoints
 
 
 # ----------------------------------------------------------------------
