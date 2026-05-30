@@ -68,11 +68,14 @@ from evaluation.mission_metrics import EpisodeRecorder
 
 def _agent_record(agent, scenario, env_index: int) -> dict:
     pos = agent.state.pos[env_index]
+    comms_up_t = getattr(agent, "comms_up", None)
+    comms_up = bool(comms_up_t[env_index].item()) if comms_up_t is not None else True
     record = {
-        "name": agent.name,
-        "type": "drone" if getattr(agent, "is_drone", False) else "ground",
-        "x":    float(pos[X]),
-        "y":    float(pos[Y]),
+        "name":     agent.name,
+        "type":     "drone" if getattr(agent, "is_drone", False) else "ground",
+        "x":        float(pos[X]),
+        "y":        float(pos[Y]),
+        "comms_up": comms_up,
     }
     if getattr(agent, "is_drone", False):
         drone_index = scenario.world.agents.index(agent)
