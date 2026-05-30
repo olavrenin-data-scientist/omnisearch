@@ -179,8 +179,18 @@ def main():
                 "values":  metrics,
             })
 
-    # Mann-Whitney U: within each algo, dropout=base vs each higher dropout
+    # Compute degradation ratio relative to d=0.0 baseline per algorithm.
+    # ratio = mean(d) / mean(d=0) — comparable across algorithms even when
+    # absolute metrics are not (BenchMARL vs HARL report different scales).
     base_dropout = args.dropouts[0]
+    for entry in summary:
+        base = next(s["mean"] for s in summary
+                    if s["algo"] == entry["algo"] and s["dropout"] == base_dropout)
+        entry["degradation_ratio"] = (
+            round(entry["mean"] / base, 4) if base and base == base else float("nan")
+        )
+
+    # Mann-Whitney U: within each algo, dropout=base vs each higher dropout
     sig_results: list[dict] = []
     for algo in args.algos:
         base_vals = next(s["values"] for s in summary
@@ -198,9 +208,11 @@ def main():
                 "significant_05": (p == p) and (p < 0.05),
             })
 
-    # Print summary table
+    # Print summary table — absolute values
     print(f"\n{'=' * 78}")
     print(f" SUMMARY  (mean ± std across {args.seeds} seeds)")
+    print(f" NOTE: absolute values are NOT comparable across algorithms")
+    print(f"       (BenchMARL and HARL report on different scales)")
     print(f"{'=' * 78}")
     print(f" {'algo':6s} " + " ".join(f"{'d='+str(d):>14s}" for d in args.dropouts))
     for algo in args.algos:
@@ -208,6 +220,19 @@ def main():
         for dropout in args.dropouts:
             s = next(x for x in summary if x["algo"] == algo and x["dropout"] == dropout)
             row += f"   {s['mean']:+5.2f} ± {s['std']:.2f}"
+        print(row)
+
+    # Print degradation ratio table — comparable across algorithms
+    print(f"\n{'=' * 78}")
+    print(f" DEGRADATION  (ratio vs d={base_dropout} baseline — comparable across algos)")
+    print(f"{'=' * 78}")
+    print(f" {'algo':6s} " + " ".join(f"{'d='+str(d):>8s}" for d in args.dropouts))
+    for algo in args.algos:
+        row = f" {algo:6s} "
+        for dropout in args.dropouts:
+            s = next(x for x in summary if x["algo"] == algo and x["dropout"] == dropout)
+            r = s["degradation_ratio"]
+            row += f"   {r:6.1%}" if r == r else "      nan"
         print(row)
 
     # Print significance table
