@@ -24,7 +24,8 @@ JSON schema (one object per file):
           "movement_cost": [[1.0, ...], ...],
           "speed_multiplier": [[1.0, ...], ...],
           "obstacle_type": [[0, 1, 0, ...], ...],
-          "obstacle_height": [[0.0, 0.2, ...], ...]
+          "obstacle_height": [[0.0, 0.002, ...], ...],
+          "sim_units_per_meter": 0.0004
         },
         "n_drones":        3,
         "n_ground":        2,
@@ -34,7 +35,9 @@ JSON schema (one object per file):
       "frames": [
         {
           "step":       0,
-          "agents":     [{ "name": "drone_0", "type": "drone",  "x": 0.1, "y": -0.5 }, ...],
+          "agents":     [{ "name": "drone_0", "type": "drone",  "x": 0.1, "y": -0.5,
+                           "altitude_agl": 0.2, "altitude_msl": 0.4,
+                           "target_altitude_agl": 0.24 }, ...],
           "survivors":  [{ "x": 0.3, "y": 0.2, "scouted": false, "found": false }, ...],
           "fire_cells": [[gx, gy, intensity], ...],
           "drone_perception": [
@@ -76,6 +79,7 @@ def _agent_record(agent, scenario, env_index: int) -> dict:
         record["altitude"] = float(scenario.drone_altitude[env_index, drone_index])
         record["altitude_agl"] = float(scenario.drone_altitude[env_index, drone_index])
         record["altitude_msl"] = float(scenario.drone_altitude_msl[env_index, drone_index])
+        record["target_altitude_agl"] = float(scenario.drone_target_altitude[env_index, drone_index])
         record["altitude_level"] = int(scenario.drone_altitude_level[env_index, drone_index])
     return record
 
@@ -140,10 +144,23 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "required_clearance_agl": rounded_rows(scenario.required_clearance_grid[env_index]),
         "required_clearance_msl": rounded_rows(scenario.required_clearance_msl_grid[env_index]),
         "obstacle_names": ["none", "tree", "house"],
-        "drone_flight_levels": [round(float(v), 4) for v in scenario.drone_flight_levels.cpu().tolist()],
+        "drone_flight_levels": [
+            round(float(v), 6) for v in scenario.drone_flight_levels_by_env[env_index].cpu().tolist()
+        ],
+        "drone_flight_levels_m": [
+            round(float(v) / max(float(scenario.terrain_sim_units_per_meter[env_index]), 1e-12), 2)
+            for v in scenario.drone_flight_levels_by_env[env_index].cpu().tolist()
+        ],
+        "drone_altitude_model": "continuous_agl_rate_limited",
         "drone_flight_level_reference": "AGL",
+        "drone_climb_rate": round(float(scenario.drone_climb_rate), 4),
+        "drone_descent_rate": round(float(scenario.drone_descent_rate), 4),
+        "drone_altitude_release_margin": round(float(scenario.drone_altitude_release_margin), 4),
+        "drone_safety_clearance": round(float(scenario.drone_safety_clearance_by_env[env_index]), 6),
+        "drone_safety_clearance_m": round(float(scenario.drone_safety_clearance_m), 4),
+        "sim_units_per_meter": round(float(scenario.terrain_sim_units_per_meter[env_index]), 8),
         "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
-        "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range), 4),
+        "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range_by_env[env_index]), 6),
         "drone_detection_quality": [
             round(float(v), 4) for v in scenario.drone_detection_quality.cpu().tolist()
         ],

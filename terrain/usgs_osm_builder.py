@@ -48,6 +48,8 @@ OSM_WATER_TAGS = {
     "waterway": ["riverbank", "dock"],
 }
 
+DEFAULT_BUILDING_HEIGHT_M = 7.0
+
 
 def build_real_terrain_cache(
     *,
@@ -59,7 +61,8 @@ def build_real_terrain_cache(
     dem_resolution_m: int = 10,
     terrain_elevation_scale: float = 0.30,
     road_width_m: float = 8.0,
-    building_height: float = 0.10,
+    building_height_m: float = DEFAULT_BUILDING_HEIGHT_M,
+    building_height: float | None = None,
     osm_timeout: int = 180,
     fuel_source: str = "derived",
     source_cache_dir: str | Path = "data/source_cache",
@@ -81,6 +84,7 @@ def build_real_terrain_cache(
         raise ValueError("bbox must be (west, south, east, north)")
     if fuel_source not in {"derived", "landfire"}:
         raise ValueError("fuel_source must be 'derived' or 'landfire'")
+    building_height_m = max(float(building_height_m), 0.0)
 
     deps = _import_geospatial_dependencies()
     ox = deps["osmnx"]
@@ -108,6 +112,8 @@ def build_real_terrain_cache(
         out_path,
         fuel_source=fuel_source,
         landfire_layer_list=landfire_layer_list,
+        building_height_m=building_height_m,
+        building_height_sim=building_height,
     ):
         return out_path
     if (
@@ -133,6 +139,16 @@ def build_real_terrain_cache(
         bbox=bbox,
         grid_size=grid_size,
     )
+    sim_units_per_meter = _sim_units_per_meter(projected_bounds)
+    meters_per_world_unit = 1.0 / max(sim_units_per_meter, 1e-12)
+    if building_height is None:
+        building_height_sim = _meters_to_sim_units(building_height_m, sim_units_per_meter)
+        building_height_source = "meters"
+    else:
+        # Backward-compatible escape hatch for old callers that supplied a
+        # normalized simulation height directly.
+        building_height_sim = max(float(building_height), 0.0)
+        building_height_source = "legacy_sim_units"
 
     elevation = _normalize(dem_grid) * float(terrain_elevation_scale)
     slope = _slope_m_per_m(dem_grid, cell_size_m)
@@ -195,13 +211,13 @@ def build_real_terrain_cache(
     obstacle_type = np.full((grid_size, grid_size), OBJECT_NONE, dtype=np.int64)
     obstacle_height = np.zeros((grid_size, grid_size), dtype=np.float32)
     if landfire is not None:
-        canopy_mask, tree_mask, canopy_height = _landfire_canopy_obstacles(landfire)
+        canopy_mask, tree_mask, canopy_height = _landfire_canopy_obstacles(landfire, sim_units_per_meter)
         canopy_mask = canopy_mask & ~water_mask
         obstacle_height[canopy_mask] = canopy_height[canopy_mask]
         obstacle_type[tree_mask & ~road_mask & ~water_mask] = OBJECT_TREE
     buildable_buildings = building_mask & ~road_mask
     obstacle_type[buildable_buildings] = OBJECT_HOUSE
-    obstacle_height[buildable_buildings] = float(building_height)
+    obstacle_height[buildable_buildings] = float(building_height_sim)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     source = source_note or (
@@ -219,7 +235,9 @@ def build_real_terrain_cache(
         dem_resolution_m=dem_resolution_m,
         terrain_elevation_scale=terrain_elevation_scale,
         road_width_m=road_width_m,
-        building_height=building_height,
+        building_height_m=building_height_m,
+        building_height_sim=building_height_sim,
+        building_height_source=building_height_source,
         osm_timeout=osm_timeout,
         fuel_source=fuel_source,
         source_cache_dir=source_cache_dir,
@@ -231,6 +249,8 @@ def build_real_terrain_cache(
         source=source,
         projected_bounds=projected_bounds,
         cell_size_m=cell_size_m,
+        sim_units_per_meter=sim_units_per_meter,
+        meters_per_world_unit=meters_per_world_unit,
         ox=ox,
         road_count=0 if roads is None else int(len(roads)),
         building_count=0 if buildings is None else int(len(buildings)),
@@ -257,6 +277,11 @@ def build_real_terrain_cache(
         dem_resolution_m=np.asarray(dem_resolution_m, dtype=np.int32),
         projected_crs=np.asarray("EPSG:3857"),
         projected_bounds=np.asarray(projected_bounds, dtype=np.float64),
+        cell_size_m=np.asarray(cell_size_m, dtype=np.float32),
+        sim_units_per_meter=np.asarray(sim_units_per_meter, dtype=np.float32),
+        meters_per_world_unit=np.asarray(meters_per_world_unit, dtype=np.float32),
+        building_height_m=np.asarray(building_height_m, dtype=np.float32),
+        building_height_sim=np.asarray(building_height_sim, dtype=np.float32),
         fuel_source=np.asarray(fuel_source),
         landfire_layer_list=np.asarray(landfire_layer_list if fuel_source == "landfire" else ""),
         metadata_json=np.asarray(metadata_json),
@@ -275,7 +300,9 @@ def _build_cache_metadata(
     dem_resolution_m: int,
     terrain_elevation_scale: float,
     road_width_m: float,
-    building_height: float,
+    building_height_m: float,
+    building_height_sim: float,
+    building_height_source: str,
     osm_timeout: int,
     fuel_source: str,
     source_cache_dir: str | Path,
@@ -287,6 +314,8 @@ def _build_cache_metadata(
     source: str,
     projected_bounds: Sequence[float],
     cell_size_m: float,
+    sim_units_per_meter: float,
+    meters_per_world_unit: float,
     ox,
     road_count: int,
     building_count: int,
@@ -298,7 +327,7 @@ def _build_cache_metadata(
     obstacle_type: np.ndarray,
 ) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "builder": "terrain.usgs_osm_builder.build_real_terrain_cache",
         "cache_path": str(out_path),
@@ -312,9 +341,17 @@ def _build_cache_metadata(
             "requested_dem_resolution_m": int(dem_resolution_m),
             "terrain_elevation_scale": float(terrain_elevation_scale),
             "road_width_m": float(road_width_m),
-            "building_height": float(building_height),
+            "building_height_m": float(building_height_m),
+            "building_height_sim": float(building_height_sim),
+            "building_height_source": building_height_source,
             "fuel_source": fuel_source,
             "source_cache_dir": str(source_cache_dir),
+        },
+        "units": {
+            "horizontal": "simulation world units, with x/y spanning roughly [-1, 1]",
+            "vertical": "normalized simulation units",
+            "sim_units_per_meter": float(sim_units_per_meter),
+            "meters_per_world_unit": float(meters_per_world_unit),
         },
         "inputs": {
             "usgs_3dep": {
@@ -329,6 +366,8 @@ def _build_cache_metadata(
                 "projected_bounds": [float(v) for v in projected_bounds],
                 "projected_crs": "EPSG:3857",
                 "cell_size_m": float(cell_size_m),
+                "sim_units_per_meter": float(sim_units_per_meter),
+                "meters_per_world_unit": float(meters_per_world_unit),
             },
             "openstreetmap": {
                 "provider": "OpenStreetMap",
@@ -375,21 +414,57 @@ def _value_counts(array: np.ndarray) -> dict[str, int]:
     return {str(int(value)): int(count) for value, count in zip(values, counts)}
 
 
-def _cache_matches_options(path: Path, *, fuel_source: str, landfire_layer_list: str) -> bool:
+def _sim_units_per_meter(projected_bounds: Sequence[float]) -> float:
+    west_m, south_m, east_m, north_m = (float(v) for v in projected_bounds)
+    width_m = abs(east_m - west_m)
+    height_m = abs(north_m - south_m)
+    max_extent_m = max(width_m, height_m, 1e-6)
+    return 2.0 / max_extent_m
+
+
+def _meters_to_sim_units(meters: float, sim_units_per_meter: float) -> float:
+    return max(float(meters), 0.0) * float(sim_units_per_meter)
+
+
+def _cache_matches_options(
+    path: Path,
+    *,
+    fuel_source: str,
+    landfire_layer_list: str,
+    building_height_m: float,
+    building_height_sim: float | None,
+) -> bool:
     try:
         with np.load(path, allow_pickle=False) as data:
             cached_fuel_source = str(data["fuel_source"].item()) if "fuel_source" in data else "derived"
             cached_layers = str(data["landfire_layer_list"].item()) if "landfire_layer_list" in data else ""
             metadata = json.loads(str(data["metadata_json"].item())) if "metadata_json" in data else {}
             schema_version = int(metadata.get("schema_version", 0)) if isinstance(metadata, dict) else 0
+            params = metadata.get("parameters", {}) if isinstance(metadata, dict) else {}
     except Exception:
         return False
-    if schema_version < 2:
+    if schema_version < 3:
         return False
     if cached_fuel_source != fuel_source:
         return False
     if fuel_source == "landfire" and cached_layers != landfire_layer_list:
         return False
+    if building_height_sim is None:
+        cached_building_height_m = params.get("building_height_m")
+        try:
+            height_matches = abs(float(cached_building_height_m) - float(building_height_m)) <= 1e-6
+        except (TypeError, ValueError):
+            height_matches = False
+        if not height_matches:
+            return False
+    else:
+        cached_building_height_sim = params.get("building_height_sim")
+        try:
+            height_matches = abs(float(cached_building_height_sim) - float(building_height_sim)) <= 1e-6
+        except (TypeError, ValueError):
+            height_matches = False
+        if not height_matches:
+            return False
     return True
 
 
@@ -538,14 +613,13 @@ def _landfire_cover_masks(
     return forest & ~no_fuel, brush & ~no_fuel
 
 
-def _landfire_canopy_obstacles(landfire) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _landfire_canopy_obstacles(landfire, sim_units_per_meter: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     canopy_cover = np.nan_to_num(landfire.canopy_cover, nan=0.0)
     canopy_height_m = np.nan_to_num(landfire.canopy_height_m, nan=0.0)
     if float(canopy_height_m.max(initial=0.0)) <= 1e-6:
         canopy_height_m = canopy_cover / 100.0 * 24.0
     canopy_mask = (canopy_cover >= 20.0) & (canopy_height_m >= 1.0)
-    height_norm = np.clip(canopy_height_m / 35.0, 0.0, 1.0)
-    sim_height = (0.04 + 0.20 * height_norm).astype(np.float32)
+    sim_height = np.clip(canopy_height_m, 0.0, 70.0).astype(np.float32) * float(sim_units_per_meter)
 
     # Tree trunks/very dense crowns are physical UGV blockers; ordinary canopy
     # still contributes to drone clearance through obstacle_height.

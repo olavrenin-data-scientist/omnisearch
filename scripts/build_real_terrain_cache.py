@@ -49,7 +49,18 @@ def main() -> None:
     p.add_argument("--out", default=None, help="Optional explicit .npz output path.")
     p.add_argument("--dem-resolution-m", type=int, default=10)
     p.add_argument("--road-width-m", type=float, default=8.0)
-    p.add_argument("--building-height", type=float, default=0.10)
+    p.add_argument(
+        "--building-height-m",
+        type=float,
+        default=7.0,
+        help="Average building obstacle height in meters; converted to simulation units in the cache.",
+    )
+    p.add_argument(
+        "--building-height",
+        type=float,
+        default=None,
+        help="Deprecated: normalized simulation building height. Prefer --building-height-m.",
+    )
     p.add_argument("--osm-timeout", type=int, default=180)
     p.add_argument(
         "--fuel-source",
@@ -93,7 +104,7 @@ def main() -> None:
         help="Directory for generated EDA artifacts such as the 3D terrain HTML.",
     )
     p.add_argument("--terrain-3d-out", default=None, help="Optional explicit terrain 3D .html output path.")
-    p.add_argument("--terrain-3d-vertical-exaggeration", type=float, default=4.0)
+    p.add_argument("--terrain-3d-vertical-exaggeration", type=float, default=1.0)
     p.add_argument(
         "--terrain-3d-color-by",
         choices=("land_cover", "elevation", "slope", "fuel_density", "moisture", "rockiness"),
@@ -115,6 +126,10 @@ def main() -> None:
         print(f"BBox:           {tuple(args.bbox)}")
     print(f"Grid:           {args.grid_size}x{args.grid_size}")
     print(f"DEM resolution: {args.dem_resolution_m} m")
+    if args.building_height is None:
+        print(f"Building h:     {args.building_height_m:g} m")
+    else:
+        print(f"Building h:     {args.building_height:g} sim units (deprecated)")
     print(f"Fuel source:    {args.fuel_source}")
     print("-" * 60)
 
@@ -127,6 +142,7 @@ def main() -> None:
             out=args.out,
             dem_resolution_m=args.dem_resolution_m,
             road_width_m=args.road_width_m,
+            building_height_m=args.building_height_m,
             building_height=args.building_height,
             osm_timeout=args.osm_timeout,
             fuel_source=args.fuel_source,
