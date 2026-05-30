@@ -199,7 +199,7 @@ class WildfireSearchScenario(BaseScenario):
         self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
 
         # Episode
-        self.max_steps = kwargs.pop("max_steps", 200)
+        self.max_steps = kwargs.pop("max_steps", 500)
 
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)
@@ -208,6 +208,8 @@ class WildfireSearchScenario(BaseScenario):
         self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.001)
         self.r_fire_penalty   = kwargs.pop("r_fire_penalty", -1.0)
         self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.05)
+        self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
+        self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -363,6 +365,8 @@ class WildfireSearchScenario(BaseScenario):
         self._pre_step_ground_pos = torch.zeros_like(self._prev_ground_pos)
         self._pre_step_drone_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
+        self.prev_drone_dist  = torch.full((batch_dim, self.n_drones),  float("inf"), device=device)
+        self.prev_ground_dist = torch.full((batch_dim, self.n_ground), float("inf"), device=device)
         self.terrain_source_description = ["real"] * batch_dim
         self.terrain_source_metadata = [{} for _ in range(batch_dim)]
 
@@ -395,6 +399,8 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_intensity_grid.zero_()
             self.smoke_grid.zero_()
             self.step_count.zero_()
+            self.prev_drone_dist.fill_(float("inf"))
+            self.prev_ground_dist.fill_(float("inf"))
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
@@ -406,6 +412,8 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_intensity_grid[env_index] = 0.0
             self.smoke_grid[env_index] = 0.0
             self.step_count[env_index] = 0
+            self.prev_drone_dist[env_index]  = float("inf")
+            self.prev_ground_dist[env_index] = float("inf")
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
@@ -1042,6 +1050,42 @@ class WildfireSearchScenario(BaseScenario):
         self.scouted_survivors = self.scouted_survivors | newly_scouted
         self.found_survivors   = self.found_survivors   | newly_found
 
+        # Dense potential-based shaping (Ng et al. 1999): α · (prev_dist − curr_dist)
+        # Drones: target = unscouted survivors
+        INF = float("inf")
+        unscouted = ~self.scouted_survivors
+        drone_d = torch.where(
+            unscouted.unsqueeze(1),
+            dists[:, :self.n_drones, :],
+            torch.full_like(dists[:, :self.n_drones, :], INF),
+        )
+        curr_drone_dist, _ = drone_d.min(dim=2)
+        all_scouted = ~unscouted.any(dim=1, keepdim=True)
+        prev_known = ~torch.isinf(self.prev_drone_dist) & ~all_scouted
+        drone_shaping = torch.where(
+            prev_known,
+            (self.prev_drone_dist - curr_drone_dist) * self.r_drone_shaping,
+            torch.zeros_like(curr_drone_dist),
+        )
+        self.prev_drone_dist = curr_drone_dist
+
+        # Ground robots: target = scouted-but-unconfirmed survivors
+        unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
+        ground_d = torch.where(
+            unconfirmed_scouted.unsqueeze(1),
+            dists[:, self.n_drones:, :],
+            torch.full_like(dists[:, self.n_drones:, :], INF),
+        )
+        curr_ground_dist, _ = ground_d.min(dim=2)
+        all_done = ~unconfirmed_scouted.any(dim=1, keepdim=True)
+        prev_known = ~torch.isinf(self.prev_ground_dist) & ~all_done
+        ground_shaping = torch.where(
+            prev_known,
+            (self.prev_ground_dist - curr_ground_dist) * self.r_ground_shaping,
+            torch.zeros_like(curr_ground_dist),
+        )
+        self.prev_ground_dist = curr_ground_dist
+
         team_reward = (
             newly_found.float().sum(dim=1) * self.r_found_survivor
             + self.r_time_penalty
@@ -1069,11 +1113,13 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + scout_per_drone[:, i] * self.r_drone_scout
                 r = r - self.drone_energy_cost[:, i]
                 r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
+                r = r + drone_shaping[:, i]
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
                 r = r + ground_in_fire[:, g].float() * self.r_fire_penalty
                 r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
+                r = r + ground_shaping[:, g]
             agent.scenario_reward = r
 
     def _drone_survivor_detections(
