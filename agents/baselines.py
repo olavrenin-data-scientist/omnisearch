@@ -133,10 +133,11 @@ def _route_ground_waypoints(
         target_id = int(target_indices[b].item())
         path = []
         if cache_entry is not None:
-            still_fresh = step - cache_entry["step"] < GROUND_ROUTE_REPLAN_STEPS
+            step_went_backward = step < cache_entry["step"]
+            still_fresh = (step - cache_entry["step"]) < GROUND_ROUTE_REPLAN_STEPS
             same_target = cache_entry["target_id"] == target_id
             same_goal = cache_entry["goal"] == goal
-            if still_fresh and same_target and same_goal:
+            if not step_went_backward and still_fresh and same_target and same_goal:
                 path = cache_entry["path"]
         if not path:
             route_cost = sc.mobility_cost_grid[b].clone()
@@ -283,6 +284,7 @@ class LawnmowerPolicy:
     def __init__(self, env):
         self.scenario: WildfireSearchScenario = env.scenario
         self.t = 0
+        self._prev_step_max = -1
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
         self.drone_waypoints: list[list[list[tuple[float, float]]]] | None = None
         self.drone_waypoint_index: torch.Tensor | None = None
@@ -369,7 +371,12 @@ class LawnmowerPolicy:
             round(float(lane_spacing), 4),
             land_counts,
         )
-        reset_detected = int(sc.step_count.max().item()) == 0 and self.t > 0
+        cur_step_max = int(sc.step_count.max().item())
+        reset_detected = cur_step_max < self._prev_step_max
+        self._prev_step_max = cur_step_max
+        if reset_detected:
+            for cache in self.ground_route_cache:
+                cache.clear()
         if self.drone_plan_signature == signature and not reset_detected:
             return
 
@@ -566,11 +573,19 @@ class HighestConfidencePolicy:
             device=self.scenario.fire_grid.device,
         )
         self.t = 0
+        self._prev_step_max = -1
         self._lawnmower = LawnmowerPolicy(env)
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
 
     def __call__(self, env) -> List[torch.Tensor]:
         sc = self.scenario
+        cur_step_max = int(sc.step_count.max().item())
+        if cur_step_max < self._prev_step_max:
+            self.scout_step.fill_(-1)
+            for cache in self.ground_route_cache:
+                cache.clear()
+        self._prev_step_max = cur_step_max
+
         newly_scouted = sc.scouted_survivors & (self.scout_step < 0)
         self.scout_step = torch.where(
             newly_scouted,
@@ -580,11 +595,14 @@ class HighestConfidencePolicy:
 
         actions = self._lawnmower(env)
 
-        # Replace ground actions to use freshest unassigned scouted targets.
+        # Replace ground actions with freshest unassigned scouted targets.
+        # Unassigned ground robots fall back to random (not lawnmower) so they
+        # explore rather than follow an aerial coverage path.
         found = sc.found_survivors
         targetable = (self.scout_step >= 0) & ~found
+        random_actions = env.get_random_actions()
         fallback = [
-            actions[sc.n_drones + gi]
+            random_actions[sc.n_drones + gi]
             for gi in range(sc.n_ground)
         ]
         coordinated = _coordinated_ground_actions(
