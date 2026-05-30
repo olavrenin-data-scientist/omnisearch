@@ -146,7 +146,7 @@ class WildfireSearchScenario(BaseScenario):
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
         # continuous AGL altitude. MSL altitude is derived from local terrain elevation.
         # Meter-based anchors are converted to sim units after loading terrain metadata.
-        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (30.0, 60.0, 90.0))
+        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (500.0, 750.0, 1000.0))
         drone_flight_levels_override = kwargs.pop("drone_flight_levels", None)
         drone_flight_levels = (
             tuple(float(v) for v in drone_flight_levels_override)
@@ -1614,11 +1614,25 @@ class WildfireSearchScenario(BaseScenario):
 
 
 if __name__ == "__main__":
+    import argparse
     from vmas import render_interactively
+    p = argparse.ArgumentParser()
+    p.add_argument("--terrain-cache-path", default="data/terrain_cache/malibu_128.npz")
+    p.add_argument("--terrain-place", default="Malibu Creek State Park, California")
+    p.add_argument("--n-drones",    type=int, default=3)
+    p.add_argument("--n-ground",    type=int, default=2)
+    p.add_argument("--n-survivors", type=int, default=5)
+    p.add_argument("--grid-size",   type=int, default=128)
+    p.add_argument("--comms-dropout", type=float, default=0.0)
+    args = p.parse_args()
     render_interactively(
         WildfireSearchScenario(),
         control_two_agents=True,
-        n_drones=3,
-        n_ground=2,
-        n_survivors=5,
+        n_drones=args.n_drones,
+        n_ground=args.n_ground,
+        n_survivors=args.n_survivors,
+        fire_grid_size=args.grid_size,
+        comms_dropout=args.comms_dropout,
+        terrain_cache_path=args.terrain_cache_path,
+        terrain_place=args.terrain_place,
     )
