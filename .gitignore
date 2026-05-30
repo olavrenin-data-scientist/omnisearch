@@ -237,3 +237,6 @@ web/trajectories/
 data/terrain_cache/
 data/source_cache/
 cache/
+
+# Local Claude Code config and agent context (machine-specific)
+.claude/
