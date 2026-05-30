@@ -56,7 +56,7 @@ In one sentence: **VMAS = where things happen. MAPPO / IPPO / HAPPO = how polici
 | Layer | Tool | Notes |
 |---|---|---|
 | Multi-agent sim | [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator) | 2D, CPU-vectorized, fast |
-| Fire spread | Cellular automata over a 16×16 grid | SimFire compatible (needs Python 3.9–3.10) |
+| Fire spread | Cellular automata over a 128×128 grid | SimFire compatible (needs Python 3.9–3.10) |
 | MARL training | [BenchMARL](https://github.com/facebookresearch/BenchMARL) (MAPPO, IPPO) + [HARL](https://github.com/PKU-MARL/HARL) (HAPPO) | All three algorithms train on the same `WildfireSearchScenario` |
 | Detection (stretch) | [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) with `classes=[0]` | Person = COCO class 0 |
 | Experiment tracking | [Weights & Biases](https://wandb.ai) | Optional; pass `loggers=["wandb"]` |

@@ -1,6 +1,6 @@
 # OmniSearch Notebooks
 
-Four notebooks, each verifying a distinct layer of the system. Each one is
+Five notebooks, each verifying a distinct layer of the system. Each one is
 self-contained and writes embedded outputs (plots, tables) back in place when
 executed — so you can run once and then read the results in your IDE without
 re-executing.
@@ -11,8 +11,9 @@ re-executing.
 | 02 | [02_detection_pipeline.ipynb](02_detection_pipeline.ipynb) | Fire → YOLOv8 person → alert pipeline | ~10 s |
 | 03 | [03_sweep_results.ipynb](03_sweep_results.ipynb) | Visualise the comms-dropout sweep results | ~2 s |
 | 04 | [04_closed_loop.ipynb](04_closed_loop.ipynb) | Closed loop — sim → synthetic UAV view → detection | ~12 s |
+| 05 | [05_baseline_comparison.ipynb](05_baseline_comparison.ipynb) | Per-metric bars + per-metric winners across baselines | ~2 s |
 
-Prerequisites for all four:
+Prerequisites for all five:
 
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
@@ -223,6 +224,37 @@ to produce a loadable model.
 
 ---
 
+## 05 — Baseline Comparison
+
+**File:** [05_baseline_comparison.ipynb](05_baseline_comparison.ipynb)
+
+Loads the most recent `results/baseline_comparison_*.json` produced by
+[`scripts/compare_baselines.py`](../scripts/compare_baselines.py) and shows
+per-strategy results across the **six mission-level metrics** from the
+project plan.
+
+**Prerequisite:**
+
+```bash
+python scripts/compare_baselines.py --seeds 3 --steps 200
+```
+
+This runs the four hand-coded coordination strategies (`random`,
+`lawnmower`, `nearest_candidate`, `highest_confidence`) on the
+`WildfireSearchScenario` and records survivor_recall, time_to_verification,
+false_positive_trips, hazard_exposure, ugv_travel_cost per run.
+
+**What the notebook produces:**
+
+1. **Mean ± std table** per strategy across all metrics.
+2. **Per-metric bar charts** (one chart per metric, strategies on x-axis).
+3. **Winners table** — which strategy scores best on each metric.
+
+Trained MAPPO/IPPO/HAPPO checkpoints plug into the same harness via a policy
+wrapper once checkpoint loaders are wired into `compare_baselines.py`.
+
+---
+
 ## Running everything in order
 
 Headless batch (useful for CI or quick "does it all still work" smoke checks):
@@ -238,6 +270,10 @@ python scripts/comms_dropout_sweep.py
 jupyter nbconvert --to notebook --execute --inplace notebooks/03_sweep_results.ipynb
 
 jupyter nbconvert --to notebook --execute --inplace notebooks/04_closed_loop.ipynb
+
+# 05 requires baseline comparison output to exist
+python scripts/compare_baselines.py --seeds 3 --steps 200
+jupyter nbconvert --to notebook --execute --inplace notebooks/05_baseline_comparison.ipynb
 ```
 
 Total wall time: ~60 s on a typical Mac laptop (CPU). The sweep dominates.
