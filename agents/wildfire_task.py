@@ -54,7 +54,7 @@ class WildfireVmasClass(VmasClass):
 
     def max_steps(self, env: EnvBase) -> int:
         # Used by BenchMARL to size the rollout buffer.
-        return self.config.get("max_steps", 200)
+        return self.config.get("max_steps", 500)
 
 
 class WildfireTask(Task):
@@ -69,7 +69,7 @@ class WildfireTask(Task):
 
 # Default scenario kwargs for a small/fast smoke training run.
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "max_steps":          200,
+    "max_steps":          500,
     "n_drones":             3,
     "n_ground":             2,
     "n_survivors":          5,
@@ -118,6 +118,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "r_fire_penalty":    -1.0,
     "r_ground_travel_cost": -0.05,
     "r_drone_climb_cost": -0.02,
+    "r_drone_shaping":    0.05,
+    "r_ground_shaping":   0.10,
 }
 
 

@@ -233,7 +233,6 @@ def export_trajectory(
         "agent_radius":   round(float(sc.agent_radius), 4),
         "survivor_radius": round(float(sc.survivor_radius), 4),
         "fire_model": {
-            "affected_fraction_target": round(float(sc.fire_target_fraction[env_index]), 4),
             "spread_prob": round(float(sc.fire_spread_prob), 4),
             "spread_variability": round(float(sc.fire_spread_variability), 4),
             "wind_spread_weight": round(float(sc.fire_wind_spread_weight), 4),
