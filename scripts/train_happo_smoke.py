@@ -1,31 +1,33 @@
 """
-Smoke training: HAPPO on the WildfireSearchScenario via HARL.
+HAPPO training on the WildfireSearchScenario via HARL.
 
 HARL doesn't ship a VMAS interface, so this script:
 
-  1. Imports our HARL-compatible adapter (agents/harl_env.py)
-  2. Monkey-patches HARL's env registry to recognise env_name="wildfire"
-  3. Registers a minimal logger so HARL's runner doesn't fall over
-  4. Constructs algo_args + env_args at SMOKE budget (very small)
-  5. Runs HARL's OnPolicyHARunner — that's the HAPPO/HATRPO runner
+  1. Monkey-patches HARL's env registry to recognise env_name="wildfire"
+  2. Registers a minimal logger so HARL's runner doesn't fall over
+  3. Builds algo_args + env_args from CLI flags
+  4. Runs HARL's OnPolicyHARunner
 
-The smoke budget is intentionally tiny (~30 s wall on CPU): two short
-episodes, one rollout thread, two ppo epochs. The success criterion is
-"HAPPO trained without crashing and the actor + critic updated at least
-once." Tune the values in build_args() for a real research run.
+Budgets:
+  smoke    (default)    ~2 000 steps, episode_length=150  ≈ 5-10 s on CPU
+  research (--research)  80 000 steps, episode_length=500  ≈ minutes on CPU
 
 Run from repo root:
 
     python scripts/train_happo_smoke.py
+    python scripts/train_happo_smoke.py --research
+    python scripts/train_happo_smoke.py --num-env-steps 20000 --comms-dropout 0.3
+    python scripts/train_happo_smoke.py --entropy-coef 0.05 --seed 42
 
 Prerequisite: HARL must be installed in the active venv:
 
-    git clone https://github.com/PKU-MARL/HARL  ../HARL
+    git clone https://github.com/PKU-MARL/HARL ../HARL
     pip install -e ../HARL
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import sys
 import time
@@ -88,7 +90,6 @@ def _register_wildfire_with_harl():
     envs_tools.make_render_env = make_render_env
     envs_tools.get_num_agents  = get_num_agents
 
-    # Patch task-name lookup (run-dir + tensorboard tag use this)
     _orig_task = configs_tools.get_task_name
     def get_task_name(env_name, env_args):
         if env_name == "wildfire":
@@ -96,7 +97,6 @@ def _register_wildfire_with_harl():
         return _orig_task(env_name, env_args)
     configs_tools.get_task_name = get_task_name
 
-    # Minimal logger — HARL looks up LOGGER_REGISTRY[args["env"]]
     class WildfireLogger(BaseLogger):
         def get_task_name(self):
             return "wildfire_search"
@@ -105,31 +105,39 @@ def _register_wildfire_with_harl():
 
 
 # ----------------------------------------------------------------------
-# Step 2 — build smoke-budget args
+# Step 2 — build HARL args from CLI parameters
 # ----------------------------------------------------------------------
-def build_args():
+def build_args(
+    num_env_steps:  int,
+    episode_length: int,
+    seed:           int,
+    comms_dropout:  float,
+    entropy_coef:   float,
+    exp_name:       str,
+    n_rollout_threads: int = 1,
+) -> tuple[dict, dict, dict]:
     args = {
-        "algo":      "happo",
-        "env":       "wildfire",
-        "exp_name":  "happo_smoke",
+        "algo":        "happo",
+        "env":         "wildfire",
+        "exp_name":    exp_name,
         "load_config": "",
     }
 
     algo_args = {
-        "seed":   {"seed_specify": True, "seed": 1},
+        "seed":   {"seed_specify": True, "seed": seed},
         "device": {
             "cuda": False, "cuda_deterministic": True, "torch_threads": 4,
         },
         "train": {
-            "n_rollout_threads":     1,
-            "num_env_steps":         2_000,    # smoke
-            "episode_length":        100,
-            "log_interval":          1,
-            "eval_interval":         1,
-            "use_valuenorm":         True,
-            "use_linear_lr_decay":   False,
+            "n_rollout_threads":      n_rollout_threads,
+            "num_env_steps":          num_env_steps,
+            "episode_length":         episode_length,
+            "log_interval":           1,
+            "eval_interval":          1,
+            "use_valuenorm":          True,
+            "use_linear_lr_decay":    False,
             "use_proper_time_limits": True,
-            "model_dir":             None,
+            "model_dir":              None,
         },
         "eval": {
             "use_eval":               False,
@@ -137,84 +145,124 @@ def build_args():
             "eval_episodes":          2,
         },
         "render": {
-            "use_render":     False,
+            "use_render":      False,
             "render_episodes": 1,
         },
         "model": {
-            "hidden_sizes":  [128, 128],
-            "activation_func": "relu",
-            "use_feature_normalization": True,
-            "initialization_method": "orthogonal_",
-            "gain":          0.01,
+            "hidden_sizes":               [128, 128],
+            "activation_func":            "relu",
+            "use_feature_normalization":  True,
+            "initialization_method":      "orthogonal_",
+            "gain":                       0.01,
             "use_naive_recurrent_policy": False,
             "use_recurrent_policy":       False,
-            "recurrent_n":   1,
-            "data_chunk_length": 10,
-            "lr":            5e-4,
-            "critic_lr":     5e-4,
-            "opti_eps":      1e-5,
-            "weight_decay":  0,
-            "std_x_coef":    1,
-            "std_y_coef":    0.5,
+            "recurrent_n":                1,
+            "data_chunk_length":          10,
+            "lr":                         5e-4,
+            "critic_lr":                  5e-4,
+            "opti_eps":                   1e-5,
+            "weight_decay":               0,
+            "std_x_coef":                 1,
+            "std_y_coef":                 0.5,
         },
         "algo": {
-            "ppo_epoch":         2,
-            "critic_epoch":      2,
-            "use_clipped_value_loss": True,
-            "clip_param":        0.2,
-            "actor_num_mini_batch":  1,
-            "critic_num_mini_batch": 1,
-            "entropy_coef":      0.01,
-            "value_loss_coef":   1,
-            "use_max_grad_norm": True,
-            "max_grad_norm":     10.0,
-            "use_gae":           True,
-            "gamma":             0.99,
-            "gae_lambda":        0.95,
-            "use_huber_loss":    True,
+            "ppo_epoch":               2,
+            "critic_epoch":            2,
+            "use_clipped_value_loss":  True,
+            "clip_param":              0.2,
+            "actor_num_mini_batch":    1,
+            "critic_num_mini_batch":   1,
+            "entropy_coef":            entropy_coef,
+            "value_loss_coef":         1,
+            "use_max_grad_norm":       True,
+            "max_grad_norm":           10.0,
+            "use_gae":                 True,
+            "gamma":                   0.99,
+            "gae_lambda":              0.95,
+            "use_huber_loss":          True,
             "use_policy_active_masks": True,
-            "huber_delta":       10.0,
-            "action_aggregation": "prod",
-            "share_param":       False,
-            "fixed_order":       False,
+            "huber_delta":             10.0,
+            "action_aggregation":      "prod",
+            "share_param":             False,
+            "fixed_order":             False,
         },
         "logger": {
-            "log_dir":  str(ROOT / "results" / "harl_runs"),
+            "log_dir": str(ROOT / "results" / "harl_runs"),
         },
     }
 
     env_args = {
-        "max_cycles":      100,
-        "scenario_kwargs": {"max_steps": 100, "n_drones": 3, "n_ground": 2},
+        "max_cycles":      episode_length,
+        "scenario_kwargs": {
+            "max_steps":     episode_length,
+            "n_drones":      3,
+            "n_ground":      2,
+            "comms_dropout": comms_dropout,
+        },
     }
 
     return args, algo_args, env_args
 
 
 # ----------------------------------------------------------------------
-# Step 3 — drive HARL's HAPPO runner
+# Step 3 — CLI + main
 # ----------------------------------------------------------------------
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--research",       action="store_true",
+                   help="Larger budget: 80k steps, episode_length=500 (minutes on CPU).")
+    p.add_argument("--num-env-steps",  type=int,   default=None,
+                   help="Total env steps override (default: 2000 smoke / 80000 research).")
+    p.add_argument("--episode-length", type=int,   default=None,
+                   help="Episode length override (default: 150 smoke / 500 research).")
+    p.add_argument("--seed",           type=int,   default=1)
+    p.add_argument("--comms-dropout",  type=float, default=0.0,
+                   help="Per-step prob each agent's comms are dropped (default: 0.0).")
+    p.add_argument("--entropy-coef",   type=float, default=0.01,
+                   help="Higher (0.05+) encourages exploration — helps break "
+                        "the drones-at-corners action-saturation pathology.")
+    p.add_argument("--exp-name",       default="happo_smoke")
+    args = p.parse_args()
+
+    if args.research:
+        num_env_steps  = args.num_env_steps  or 80_000
+        episode_length = args.episode_length or 500
+    else:
+        num_env_steps  = args.num_env_steps  or 2_000
+        episode_length = args.episode_length or 150
+
     print("=" * 60)
-    print(" OmniSearch — HAPPO smoke training (HARL)")
+    print(f" OmniSearch — HAPPO ({'RESEARCH' if args.research else 'SMOKE'})")
+    print(f" num_env_steps:  {num_env_steps}")
+    print(f" episode_length: {episode_length}")
+    print(f" seed:           {args.seed}")
+    print(f" comms_dropout:  {args.comms_dropout}")
+    print(f" entropy_coef:   {args.entropy_coef}")
+    print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
 
     _register_wildfire_with_harl()
     from harl.runners.on_policy_ha_runner import OnPolicyHARunner
 
-    args, algo_args, env_args = build_args()
-    print(f" total env steps:   {algo_args['train']['num_env_steps']}")
-    print(f" episode length:    {algo_args['train']['episode_length']}")
-    print(f" rollout threads:   {algo_args['train']['n_rollout_threads']}")
-    print(f" output dir:        {algo_args['logger']['log_dir']}")
+    harl_args, algo_args, env_args = build_args(
+        num_env_steps  = num_env_steps,
+        episode_length = episode_length,
+        seed           = args.seed,
+        comms_dropout  = args.comms_dropout,
+        entropy_coef   = args.entropy_coef,
+        exp_name       = args.exp_name,
+    )
+    print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
 
     t0 = time.time()
-    runner = OnPolicyHARunner(args, algo_args, env_args)
+    runner = OnPolicyHARunner(harl_args, algo_args, env_args)
     runner.run()
     runner.close()
+
     print("-" * 60)
-    print(f" HAPPO smoke complete in {time.time() - t0:.1f}s")
+    print(f" HAPPO training complete in {time.time() - t0:.1f}s")
+    print(f" Checkpoints saved to: {algo_args['logger']['log_dir']}")
     print("=" * 60)
 
 
