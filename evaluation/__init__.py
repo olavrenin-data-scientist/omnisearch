@@ -6,21 +6,25 @@ from .mission_metrics import (
     evaluate_policy,
     degradation_resilience_ratio,
 )
+from .trajectory_export import export_trajectory
 
 __all__ = [
-    "UAVRenderer",
-    "render_uav_view",
-    "ClosedLoopRun",
-    "run_closed_loop",
+    # Always available — no heavy dependencies
     "EpisodeRecorder",
     "MissionMetrics",
     "evaluate_policy",
     "degradation_resilience_ratio",
+    "export_trajectory",
+    # Lazy — loaded on first access to avoid pulling in YOLO/perception deps
+    "UAVRenderer",
+    "render_uav_view",
+    "ClosedLoopRun",
+    "run_closed_loop",
 ]
 
 
 def __getattr__(name):
-    """Avoid importing YOLO dependencies for metrics-only evaluation runs."""
+    """Lazy-load perception modules so metrics-only runs don't require YOLO."""
     if name in {"UAVRenderer", "render_uav_view"}:
         from .sim_renderer import UAVRenderer, render_uav_view
         return {"UAVRenderer": UAVRenderer, "render_uav_view": render_uav_view}[name]
