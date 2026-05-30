@@ -50,7 +50,7 @@ DROPOUTS = [0.0, 0.2, 0.5, 0.8]
 # Per-algorithm training functions
 # ----------------------------------------------------------------------
 def _run_benchmarl(algo_name: str, seed: int, comms_dropout: float,
-                   frames_per_iter: int, iters: int) -> dict:
+                   frames_per_iter: int, iters: int, max_steps: int) -> dict:
     from benchmarl.algorithms import IppoConfig, MappoConfig
     from benchmarl.experiment import Experiment
     from benchmarl.models.mlp import MlpConfig
@@ -59,7 +59,7 @@ def _run_benchmarl(algo_name: str, seed: int, comms_dropout: float,
 
     cfg = smoke_config(iters=iters, frames_per_batch=frames_per_iter)
     algo_cfg = {"mappo": MappoConfig, "ippo": IppoConfig}[algo_name].get_from_yaml()
-    task = make_wildfire_task(comms_dropout=comms_dropout, max_steps=150)
+    task = make_wildfire_task(comms_dropout=comms_dropout, max_steps=max_steps)
 
     t0 = time.time()
     exp = Experiment(
@@ -73,12 +73,13 @@ def _run_benchmarl(algo_name: str, seed: int, comms_dropout: float,
     return {"metric": float(exp.mean_return), "wall_sec": round(time.time() - t0, 2)}
 
 
-def _run_happo(seed: int, comms_dropout: float, num_env_steps: int) -> dict:
+def _run_happo(seed: int, comms_dropout: float, num_env_steps: int, max_steps: int) -> dict:
     from agents.harl_runner import train_happo
     r = train_happo(
         seed              = seed,
         num_env_steps     = num_env_steps,
         comms_dropout     = comms_dropout,
+        max_steps         = max_steps,
         n_rollout_threads = 8,
         exp_name          = f"happo_d{int(comms_dropout*100)}_s{seed}",
     )
@@ -86,12 +87,15 @@ def _run_happo(seed: int, comms_dropout: float, num_env_steps: int) -> dict:
 
 
 def run_cell(algo: str, seed: int, dropout: float, budgets: dict) -> dict:
+    max_steps = budgets["max_steps"]
     if algo in ("mappo", "ippo"):
         return _run_benchmarl(algo, seed, dropout,
                               frames_per_iter=budgets["frames_per_iter"],
-                              iters=budgets["iters"])
+                              iters=budgets["iters"],
+                              max_steps=max_steps)
     if algo == "happo":
-        return _run_happo(seed, dropout, num_env_steps=budgets["num_env_steps"])
+        return _run_happo(seed, dropout, num_env_steps=budgets["num_env_steps"],
+                          max_steps=max_steps)
     raise ValueError(f"Unknown algo: {algo}")
 
 
@@ -125,12 +129,17 @@ def main():
     parser.add_argument("--dropouts", nargs="+", type=float, default=DROPOUTS)
     parser.add_argument("--research", action="store_true",
                         help="Bigger budget per cell (slower)")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Episode length override (default: 150 smoke / 500 research)")
     args = parser.parse_args()
 
     if args.research:
-        budgets = {"frames_per_iter": 6_000, "iters": 50, "num_env_steps": 80_000}
+        budgets = {"frames_per_iter": 6_000, "iters": 50, "num_env_steps": 80_000, "max_steps": 500}
     else:
-        budgets = {"frames_per_iter": 2_000, "iters": 3,  "num_env_steps": 8_000}
+        budgets = {"frames_per_iter": 2_000, "iters": 3,  "num_env_steps": 8_000,  "max_steps": 150}
+
+    if args.max_steps is not None:
+        budgets["max_steps"] = args.max_steps
 
     n_cells = len(args.algos) * len(args.dropouts) * args.seeds
     print("=" * 78)
@@ -138,6 +147,7 @@ def main():
     print(f" algos:    {args.algos}")
     print(f" dropouts: {args.dropouts}")
     print(f" seeds:    {args.seeds}   (total cells: {n_cells})")
+    print(f" max_steps:{budgets['max_steps']}")
     print("=" * 78)
 
     cells: list[dict] = []
