@@ -37,7 +37,7 @@ def main() -> None:
     p.add_argument("--terrain-cache", required=True, help="Path to a terrain .npz cache.")
     p.add_argument("--trajectory", default=None, help="Optional trajectory JSON with drone flight paths.")
     p.add_argument("--out", default="results/eda/terrain_3d.html", help="Output .html path.")
-    p.add_argument("--vertical-exaggeration", type=float, default=4.0)
+    p.add_argument("--vertical-exaggeration", type=float, default=1.0)
     p.add_argument("--flight-stride", type=int, default=1, help="Use every Nth trajectory frame for flight paths.")
     p.add_argument(
         "--color-by",
@@ -52,7 +52,7 @@ def main() -> None:
     p.add_argument(
         "--hide-obstacles",
         action="store_true",
-        help="Do not overlay tree/house obstacle markers.",
+        help="Do not overlay tree canopy markers and house footprint/roof meshes.",
     )
     args = p.parse_args()
 
@@ -73,7 +73,7 @@ def generate_terrain_3d_html(
     terrain_cache: Path,
     out: Path,
     trajectory: Path | None = None,
-    vertical_exaggeration: float = 4.0,
+    vertical_exaggeration: float = 1.0,
     color_by: str = "land_cover",
     flight_stride: int = 1,
     flatten_water: bool = True,
@@ -169,7 +169,7 @@ def _build_html(
     }
     traces = [surface]
     if show_obstacles:
-        traces.extend(_obstacle_traces(terrain, x, y, z))
+        traces.extend(_obstacle_traces(terrain, x, y, z, vertical_exaggeration))
     if trajectory is not None:
         traces.extend(_drone_flight_traces(trajectory, vertical_exaggeration, flight_stride))
 
@@ -189,7 +189,7 @@ def _build_html(
         "scene": {
             "xaxis": {"title": "world x"},
             "yaxis": {"title": "world y"},
-            "zaxis": {"title": f"height x {vertical_exaggeration:g}"},
+            "zaxis": {"title": _z_axis_title(vertical_exaggeration)},
             "aspectmode": "manual",
             "aspectratio": {"x": 1.0, "y": 1.0, "z": 0.35},
             "camera": {"eye": {"x": 1.35, "y": -1.55, "z": 0.85}},
@@ -252,31 +252,178 @@ def _colorbar(color_by: str) -> dict:
     }
 
 
-def _obstacle_traces(terrain: dict, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> list[dict]:
+def _obstacle_traces(
+    terrain: dict,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    vertical_exaggeration: float,
+) -> list[dict]:
     obstacle_type = terrain.get("obstacle_type")
     obstacle_height = terrain.get("obstacle_height")
     if obstacle_type is None or obstacle_height is None:
         return []
 
     traces = []
-    for value, name, color, size in (
-        (1, "tree canopy", "#1d5128", 2.8),
-        (2, "house", "#a34d3d", 3.6),
-    ):
-        ys, xs = (obstacle_type == value).nonzero()
-        if len(xs) == 0:
-            continue
-        marker_z = z[ys, xs] + np.maximum(obstacle_height[ys, xs], 0.02)
-        traces.append({
-            "type": "scatter3d",
-            "mode": "markers",
-            "name": name,
-            "x": _round_list(x[xs]),
-            "y": _round_list(y[ys]),
-            "z": _round_list(marker_z),
-            "marker": {"size": size, "color": color, "opacity": 0.86},
-        })
+    height_scale = max(float(vertical_exaggeration), 0.0)
+    tree_trace = _tree_canopy_trace(obstacle_type, obstacle_height, x, y, z, height_scale)
+    if tree_trace is not None:
+        traces.append(tree_trace)
+    traces.extend(_house_mesh_traces(obstacle_type, obstacle_height, x, y, z, height_scale))
     return traces
+
+
+def _tree_canopy_trace(
+    obstacle_type: np.ndarray,
+    obstacle_height: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    height_scale: float,
+) -> dict | None:
+    ys, xs = (obstacle_type == 1).nonzero()
+    if len(xs) == 0:
+        return None
+
+    marker_z = z[ys, xs] + np.maximum(obstacle_height[ys, xs] * height_scale, 0.02 * height_scale)
+    return {
+        "type": "scatter3d",
+        "mode": "markers",
+        "name": "tree canopy",
+        "x": _round_list(x[xs]),
+        "y": _round_list(y[ys]),
+        "z": _round_list(marker_z),
+        "marker": {"size": 2.8, "color": "#1d5128", "opacity": 0.82},
+        "hovertemplate": "tree canopy<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.3f}<extra></extra>",
+    }
+
+
+def _house_mesh_traces(
+    obstacle_type: np.ndarray,
+    obstacle_height: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    height_scale: float,
+) -> list[dict]:
+    house_mask = obstacle_type == 2
+    if not np.any(house_mask):
+        return []
+
+    x_edges = _cell_edges(x)
+    y_edges = _cell_edges(y)
+    base_lift = 0.0002 * height_scale
+    min_roof_height = 0.0008 * height_scale
+    house_height = np.maximum(obstacle_height * height_scale, min_roof_height)
+
+    footprints = _empty_mesh()
+    roofs = _empty_mesh()
+    walls = _empty_mesh()
+    for row, col in np.argwhere(house_mask):
+        x0 = float(x_edges[col])
+        x1 = float(x_edges[col + 1])
+        y0 = float(y_edges[row])
+        y1 = float(y_edges[row + 1])
+        base_z = float(z[row, col] + base_lift)
+        roof_z = float(base_z + house_height[row, col])
+
+        _add_horizontal_quad(footprints, x0, x1, y0, y1, base_z)
+        _add_horizontal_quad(roofs, x0, x1, y0, y1, roof_z)
+        _add_exposed_house_walls(walls, house_mask, row, col, x0, x1, y0, y1, base_z, roof_z)
+
+    traces = []
+    if footprints["x"]:
+        traces.append(_mesh_trace(footprints, "house footprints", "#6f342c", 0.46))
+    if walls["x"]:
+        traces.append(_mesh_trace(walls, "house walls", "#8e493e", 0.74))
+    if roofs["x"]:
+        traces.append(_mesh_trace(roofs, "house roofs", "#b45a48", 0.90))
+    return traces
+
+
+def _cell_edges(coords: np.ndarray) -> np.ndarray:
+    coords = np.asarray(coords, dtype=float)
+    if len(coords) == 0:
+        return np.asarray([0.0, 1.0], dtype=float)
+    if len(coords) == 1:
+        return np.asarray([coords[0] - 0.5, coords[0] + 0.5], dtype=float)
+    mids = 0.5 * (coords[:-1] + coords[1:])
+    first = coords[0] - (mids[0] - coords[0])
+    last = coords[-1] + (coords[-1] - mids[-1])
+    return np.concatenate(([first], mids, [last]))
+
+
+def _empty_mesh() -> dict[str, list[float] | list[int]]:
+    return {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []}
+
+
+def _add_horizontal_quad(mesh: dict, x0: float, x1: float, y0: float, y1: float, z_value: float) -> None:
+    start = len(mesh["x"])
+    mesh["x"].extend([x0, x1, x1, x0])
+    mesh["y"].extend([y0, y0, y1, y1])
+    mesh["z"].extend([z_value, z_value, z_value, z_value])
+    mesh["i"].extend([start, start])
+    mesh["j"].extend([start + 1, start + 2])
+    mesh["k"].extend([start + 2, start + 3])
+
+
+def _add_exposed_house_walls(
+    mesh: dict,
+    house_mask: np.ndarray,
+    row: int,
+    col: int,
+    x0: float,
+    x1: float,
+    y0: float,
+    y1: float,
+    base_z: float,
+    roof_z: float,
+) -> None:
+    max_row, max_col = house_mask.shape[0] - 1, house_mask.shape[1] - 1
+    if row == 0 or not house_mask[row - 1, col]:
+        _add_vertical_quad(mesh, x0, x1, y0, y0, base_z, roof_z)
+    if row == max_row or not house_mask[row + 1, col]:
+        _add_vertical_quad(mesh, x1, x0, y1, y1, base_z, roof_z)
+    if col == 0 or not house_mask[row, col - 1]:
+        _add_vertical_quad(mesh, x0, x0, y1, y0, base_z, roof_z)
+    if col == max_col or not house_mask[row, col + 1]:
+        _add_vertical_quad(mesh, x1, x1, y0, y1, base_z, roof_z)
+
+
+def _add_vertical_quad(
+    mesh: dict,
+    x0: float,
+    x1: float,
+    y0: float,
+    y1: float,
+    base_z: float,
+    roof_z: float,
+) -> None:
+    start = len(mesh["x"])
+    mesh["x"].extend([x0, x1, x1, x0])
+    mesh["y"].extend([y0, y1, y1, y0])
+    mesh["z"].extend([base_z, base_z, roof_z, roof_z])
+    mesh["i"].extend([start, start])
+    mesh["j"].extend([start + 1, start + 2])
+    mesh["k"].extend([start + 2, start + 3])
+
+
+def _mesh_trace(mesh: dict, name: str, color: str, opacity: float) -> dict:
+    return {
+        "type": "mesh3d",
+        "name": name,
+        "x": _round_list(np.asarray(mesh["x"], dtype=float)),
+        "y": _round_list(np.asarray(mesh["y"], dtype=float)),
+        "z": _round_list(np.asarray(mesh["z"], dtype=float)),
+        "i": mesh["i"],
+        "j": mesh["j"],
+        "k": mesh["k"],
+        "color": color,
+        "opacity": opacity,
+        "flatshading": True,
+        "lighting": {"ambient": 0.65, "diffuse": 0.72, "roughness": 0.88, "specular": 0.06},
+        "hovertemplate": f"{name}<br>x=%{{x:.2f}}<br>y=%{{y:.2f}}<br>z=%{{z:.3f}}<extra></extra>",
+    }
 
 
 def _drone_flight_traces(trajectory: dict, vertical_exaggeration: float, flight_stride: int) -> list[dict]:
@@ -382,6 +529,12 @@ def _trajectory_strategy(trajectory: dict | None) -> str | None:
     if steps is not None:
         pieces.append(f"{steps} steps")
     return ", ".join(pieces) if pieces else "trajectory"
+
+
+def _z_axis_title(vertical_exaggeration: float) -> str:
+    if abs(float(vertical_exaggeration) - 1.0) < 1e-6:
+        return "height (true scale)"
+    return f"height x {vertical_exaggeration:g}"
 
 
 def _finite(array: np.ndarray) -> np.ndarray:

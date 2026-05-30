@@ -80,7 +80,7 @@ class WildfireSearchScenario(BaseScenario):
         self.detection_range    = kwargs.pop("detection_range", 0.10)   # ground confirm radius
 
         # Fire spread (cellular automata on a discrete grid overlay)
-        self.fire_grid_size      = kwargs.pop("fire_grid_size", 16)
+        self.fire_grid_size      = kwargs.pop("fire_grid_size", 128)
         self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
         self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.065)
         self.fire_spread_variability = kwargs.pop("fire_spread_variability", 0.55)
@@ -91,15 +91,6 @@ class WildfireSearchScenario(BaseScenario):
         self.fire_intensity_decay = min(max(float(kwargs.pop("fire_intensity_decay", 0.82)), 0.0), 1.0)
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
         self.initial_fire_area_fraction = kwargs.pop("initial_fire_area_fraction", 0.025)
-        self.wildfire_area_fraction_range = kwargs.pop("wildfire_area_fraction_range", (0.20, 0.40))
-        if len(self.wildfire_area_fraction_range) != 2:
-            raise ValueError("wildfire_area_fraction_range must be (low, high)")
-        self.wildfire_area_fraction_range = (
-            max(0.0, min(float(self.wildfire_area_fraction_range[0]), 1.0)),
-            max(0.0, min(float(self.wildfire_area_fraction_range[1]), 1.0)),
-        )
-        if self.wildfire_area_fraction_range[1] < self.wildfire_area_fraction_range[0]:
-            raise ValueError("wildfire_area_fraction_range high must be >= low")
         self.fire_burnout_min_updates = max(int(kwargs.pop("fire_burnout_min_updates", 5)), 1)
         self.fire_burnout_max_updates = max(
             int(kwargs.pop("fire_burnout_max_updates", 14)),
@@ -153,8 +144,15 @@ class WildfireSearchScenario(BaseScenario):
         )
 
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
-        # AGL flight level. MSL altitude is derived from local terrain elevation.
-        drone_flight_levels = kwargs.pop("drone_flight_levels", (0.18, 0.40, 0.70))
+        # continuous AGL altitude. MSL altitude is derived from local terrain elevation.
+        # Meter-based anchors are converted to sim units after loading terrain metadata.
+        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (30.0, 60.0, 90.0))
+        drone_flight_levels_override = kwargs.pop("drone_flight_levels", None)
+        drone_flight_levels = (
+            tuple(float(v) for v in drone_flight_levels_override)
+            if drone_flight_levels_override is not None
+            else tuple(float(v) for v in drone_flight_levels_m)
+        )
         drone_detection_quality = kwargs.pop(
             "drone_detection_quality",
             kwargs.pop("drone_detection_factors", (0.95, 0.75, 0.55)),
@@ -162,6 +160,10 @@ class WildfireSearchScenario(BaseScenario):
         drone_energy_costs = kwargs.pop("drone_energy_costs", (0.0, 0.002, 0.006))
         if not (len(drone_flight_levels) == len(drone_detection_quality) == len(drone_energy_costs)):
             raise ValueError("drone flight levels, detection quality, and energy costs must align")
+        if len(drone_flight_levels) < 2:
+            raise ValueError("drone_flight_levels must contain at least two values for continuous interpolation")
+        self.drone_flight_levels_sim_override = drone_flight_levels_override is not None
+        self.drone_flight_levels_m = tuple(max(float(v), 0.0) for v in drone_flight_levels_m)
         drone_cover_detection_factors = kwargs.pop(
             "drone_cover_detection_factors", (1.0, 1.0, 0.72, 0.45, 0.35, 0.95),
         )
@@ -182,7 +184,14 @@ class WildfireSearchScenario(BaseScenario):
             1.0,
         )
         self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.20)
-        self.drone_safety_clearance = kwargs.pop("drone_safety_clearance", 0.03)
+        self.drone_safety_clearance_sim_override = kwargs.pop("drone_safety_clearance", None)
+        self.drone_safety_clearance_m = max(float(kwargs.pop("drone_safety_clearance_m", 15.0)), 0.0)
+        self.drone_climb_rate = max(float(kwargs.pop("drone_climb_rate", 0.035)), 0.0)
+        self.drone_descent_rate = max(float(kwargs.pop("drone_descent_rate", 0.020)), 0.0)
+        self.drone_climb_rate_m = max(float(kwargs.pop("drone_climb_rate_m", 10.0)), 0.0)
+        self.drone_descent_rate_m = max(float(kwargs.pop("drone_descent_rate_m", 8.0)), 0.0)
+        self.drone_altitude_release_margin_m = max(float(kwargs.pop("drone_altitude_release_margin_m", 10.0)), 0.0)
+        self.drone_altitude_release_margin = max(float(kwargs.pop("drone_altitude_release_margin", 0.04)), 0.0)
         self.r_drone_climb_cost = kwargs.pop("r_drone_climb_cost", -0.02)
         self.drone_sensor_max_range = float(max(drone_flight_levels) * self.drone_camera_half_angle_tan)
 
@@ -293,8 +302,6 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.fire_lifetime_grid = torch.zeros_like(self.fire_age_grid)
         self.fire_intensity_grid = torch.zeros_like(self.fire_grid, dtype=torch.float)
-        target_low, target_high = self.wildfire_area_fraction_range
-        self.fire_target_fraction = torch.empty(batch_dim, device=device).uniform_(target_low, target_high)
         self.smoke_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.float, device=device,
@@ -312,6 +319,21 @@ class WildfireSearchScenario(BaseScenario):
         self.obstacle_height_grid = torch.zeros_like(self.elevation_grid)
         self.required_clearance_grid = torch.zeros_like(self.elevation_grid)
         self.required_clearance_msl_grid = torch.zeros_like(self.elevation_grid)
+        initial_clearance = (
+            0.03 if self.drone_safety_clearance_sim_override is None
+            else max(float(self.drone_safety_clearance_sim_override), 0.0)
+        )
+        self.drone_safety_clearance_by_env = torch.full(
+            (batch_dim,), initial_clearance, dtype=torch.float, device=device,
+        )
+        self.terrain_sim_units_per_meter = torch.zeros(batch_dim, dtype=torch.float, device=device)
+        self.drone_safety_clearance = initial_clearance
+        self.drone_flight_levels_by_env = torch.tensor(
+            drone_flight_levels, dtype=torch.float, device=device,
+        ).view(1, -1).repeat(batch_dim, 1)
+        self.drone_min_altitude_by_env = self.drone_flight_levels_by_env[:, 0].clone()
+        self.drone_max_altitude_by_env = self.drone_flight_levels_by_env[:, -1].clone()
+        self.drone_sensor_max_range_by_env = self.drone_max_altitude_by_env * self.drone_camera_half_angle_tan
         self.traversable_grid = torch.ones_like(self.fire_grid)
         self.mobility_cost_grid = torch.ones_like(self.elevation_grid)
         self.speed_multiplier_grid = torch.ones_like(self.elevation_grid)
@@ -325,11 +347,16 @@ class WildfireSearchScenario(BaseScenario):
             drone_cover_detection_factors, dtype=torch.float, device=device,
         )
         self.drone_energy_costs = torch.tensor(drone_energy_costs, dtype=torch.float, device=device)
+        self.drone_min_altitude = float(self.drone_flight_levels.min().item())
+        self.drone_max_altitude = float(self.drone_flight_levels.max().item())
         # Compatibility note: drone_altitude is altitude above ground level
         # (AGL). Absolute MSL altitude is tracked separately.
         self.drone_altitude = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.drone_target_altitude = torch.zeros(batch_dim, self.n_drones, device=device)
         self.drone_altitude_msl = torch.zeros(batch_dim, self.n_drones, device=device)
         self.drone_altitude_level = torch.zeros(batch_dim, self.n_drones, dtype=torch.long, device=device)
+        self.drone_altitude_quality = torch.ones(batch_dim, self.n_drones, device=device)
+        self.drone_energy_cost = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_drone_climb = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
         self._prev_ground_pos = torch.zeros(batch_dim, self.n_ground, 2, device=device)
@@ -368,8 +395,6 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_intensity_grid.zero_()
             self.smoke_grid.zero_()
             self.step_count.zero_()
-            target_low, target_high = self.wildfire_area_fraction_range
-            self.fire_target_fraction.uniform_(target_low, target_high)
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
@@ -381,10 +406,6 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_intensity_grid[env_index] = 0.0
             self.smoke_grid[env_index] = 0.0
             self.step_count[env_index] = 0
-            target_low, target_high = self.wildfire_area_fraction_range
-            self.fire_target_fraction[env_index] = torch.empty(
-                (), device=self.fire_grid.device,
-            ).uniform_(target_low, target_high)
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
@@ -397,14 +418,12 @@ class WildfireSearchScenario(BaseScenario):
             drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
             if env_index is None:
                 self._pre_step_drone_pos = drone_pos.clone()
-                self._update_drone_altitudes(drone_pos, drone_pos)
+                self._initialize_drone_altitudes(drone_pos)
                 self.step_drone_climb.zero_()
             else:
                 self._pre_step_drone_pos[env_index] = drone_pos[env_index]
                 one = torch.tensor([env_index], device=drone_pos.device)
-                self._update_drone_altitudes(
-                    drone_pos[env_index:env_index + 1], drone_pos[env_index:env_index + 1], one,
-                )
+                self._initialize_drone_altitudes(drone_pos[env_index:env_index + 1], one)
                 self.step_drone_climb[env_index] = 0
 
         ground_agents = self.world.agents[self.n_drones:]
@@ -509,10 +528,9 @@ class WildfireSearchScenario(BaseScenario):
         )
 
     def _generate_terrain(self, env_index: int) -> None:
-        """Load real terrain and clear small entity staging areas."""
+        """Load real terrain and place land entities on feasible cells."""
         self._load_real_terrain(env_index)
         self._relocate_land_entities_to_valid_cells(env_index)
-        self._clear_entity_staging_areas(env_index)
         self._refresh_mobility_layers(env_index)
 
     def _load_real_terrain(self, env_index: int) -> None:
@@ -562,31 +580,71 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.terrain_source_description[env_index] = terrain.source
         self.terrain_source_metadata[env_index] = dict(terrain.metadata)
+        sim_units_per_meter = self._terrain_sim_units_per_meter(terrain.metadata)
+        self.terrain_sim_units_per_meter[env_index] = sim_units_per_meter
+        self._refresh_drone_unit_conversions(env_index, sim_units_per_meter)
+        if self.drone_safety_clearance_sim_override is None and sim_units_per_meter > 0.0:
+            clearance = self.drone_safety_clearance_m * sim_units_per_meter
+        else:
+            clearance = self.drone_safety_clearance_by_env[env_index].item()
+        self.drone_safety_clearance_by_env[env_index] = max(float(clearance), 0.0)
+        self.drone_safety_clearance = float(self.drone_safety_clearance_by_env.mean().item())
 
-    def _clear_entity_staging_areas(self, env_index: int) -> None:
-        """Ensure survivor locations and ground starts have small organic clearings."""
-        clear_radius = max(
-            self._world_length_to_cells(max(self.agent_radius, self.survivor_radius) * 2.4),
-            2,
+    def _refresh_drone_unit_conversions(self, env_index: int, sim_units_per_meter: float) -> None:
+        if not self.drone_flight_levels_sim_override and sim_units_per_meter > 0.0:
+            levels = torch.tensor(
+                self.drone_flight_levels_m,
+                dtype=torch.float,
+                device=self.drone_flight_levels_by_env.device,
+            ) * float(sim_units_per_meter)
+            self.drone_flight_levels_by_env[env_index] = levels
+            self.drone_flight_levels = self.drone_flight_levels_by_env[env_index]
+            self.drone_min_altitude_by_env[env_index] = levels.min()
+            self.drone_max_altitude_by_env[env_index] = levels.max()
+            self.drone_sensor_max_range_by_env[env_index] = levels.max() * self.drone_camera_half_angle_tan
+            self.drone_climb_rate = self.drone_climb_rate_m * float(sim_units_per_meter)
+            self.drone_descent_rate = self.drone_descent_rate_m * float(sim_units_per_meter)
+            self.drone_altitude_release_margin = self.drone_altitude_release_margin_m * float(sim_units_per_meter)
+        else:
+            levels = self.drone_flight_levels_by_env[env_index]
+            self.drone_flight_levels = levels
+            self.drone_min_altitude_by_env[env_index] = levels.min()
+            self.drone_max_altitude_by_env[env_index] = levels.max()
+            self.drone_sensor_max_range_by_env[env_index] = levels.max() * self.drone_camera_half_angle_tan
+
+        self.drone_min_altitude = float(self.drone_min_altitude_by_env[env_index].item())
+        self.drone_max_altitude = float(self.drone_max_altitude_by_env[env_index].item())
+        self.drone_sensor_max_range = float(self.drone_sensor_max_range_by_env[env_index].item())
+
+    def _terrain_sim_units_per_meter(self, metadata: dict) -> float:
+        """Return the terrain cache's vertical/horizontal simulation conversion."""
+        candidates = (
+            metadata.get("units", {}).get("sim_units_per_meter"),
+            metadata.get("inputs", {}).get("usgs_3dep", {}).get("sim_units_per_meter"),
         )
-        size = self.fire_grid_size
-        device = self.fire_grid.device
-        yy = torch.arange(size, device=device).view(-1, 1)
-        xx = torch.arange(size, device=device).view(1, -1)
-        entities = self._survivors + self.world.agents[self.n_drones:]
-        for entity in entities:
-            gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
-            x, y = int(gx.item()), int(gy.item())
-            dist = torch.sqrt((xx - x).float().square() + (yy - y).float().square())
-            mask = (dist <= clear_radius) & (self.land_cover_grid[env_index] != LAND_WATER)
-            self.land_cover_grid[env_index][mask] = LAND_OPEN
-            self.slope_grid[env_index][mask] *= 0.35
-            self.obstacle_type_grid[env_index][mask] = OBJECT_NONE
-            self.obstacle_height_grid[env_index][mask] = 0.0
+        for value in candidates:
+            try:
+                value_f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value_f > 0.0:
+                return value_f
+
+        bounds = metadata.get("inputs", {}).get("usgs_3dep", {}).get("projected_bounds")
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            west_m, south_m, east_m, north_m = (float(v) for v in bounds)
+            extent_m = max(abs(east_m - west_m), abs(north_m - south_m), 1e-6)
+            return 2.0 / extent_m
+
+        cell_size_m = metadata.get("inputs", {}).get("usgs_3dep", {}).get("cell_size_m")
+        try:
+            return 2.0 / max(float(cell_size_m) * float(self.fire_grid_size), 1e-6)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _relocate_land_entities_to_valid_cells(self, env_index: int) -> None:
-        """Move survivors and UGV starts off water or blocked terrain after map load."""
-        candidates = self._land_entity_candidate_mask(env_index)
+        """Move survivors and UGV starts onto feasible terrain without editing it."""
+        candidates = self._land_entity_spawn_candidate_mask(env_index)
         if not bool(candidates.any().item()):
             return
 
@@ -629,6 +687,43 @@ class WildfireSearchScenario(BaseScenario):
             & ((slope <= self.max_ground_slope) | road)
         )
 
+    def _land_entity_spawn_candidate_mask(self, env_index: int) -> Tensor:
+        """Prefer locally navigable land cells while preserving the real terrain grid."""
+        candidates = self._land_entity_candidate_mask(env_index)
+        if not bool(candidates.any().item()):
+            return candidates
+
+        radius = max(
+            self._world_length_to_cells(max(self.agent_radius, self.survivor_radius) * 1.4),
+            1,
+        )
+        local_count = self._local_true_count(candidates, radius)
+        window_area = float((2 * radius + 1) ** 2)
+        min_count = max(3.0, window_area * 0.35)
+        preferred = candidates & (local_count >= min_count)
+        return preferred if bool(preferred.any().item()) else candidates
+
+    @staticmethod
+    def _local_true_count(mask: Tensor, radius: int) -> Tensor:
+        """Count true cells in a square neighborhood without wrapping at edges."""
+        if radius <= 0:
+            return mask.float()
+        height, width = mask.shape
+        count = torch.zeros(mask.shape, dtype=torch.float, device=mask.device)
+        values = mask.float()
+        for dy in range(-radius, radius + 1):
+            src_y0 = max(0, -dy)
+            src_y1 = min(height, height - dy)
+            dst_y0 = max(0, dy)
+            dst_y1 = min(height, height + dy)
+            for dx in range(-radius, radius + 1):
+                src_x0 = max(0, -dx)
+                src_x1 = min(width, width - dx)
+                dst_x0 = max(0, dx)
+                dst_x1 = min(width, width + dx)
+                count[dst_y0:dst_y1, dst_x0:dst_x1] += values[src_y0:src_y1, src_x0:src_x1]
+        return count
+
     def _grid_cell_center_to_world(self, gx: int, gy: int, *, device: torch.device) -> Tensor:
         x = ((float(gx) + 0.5) / self.fire_grid_size) * (2.0 * self.x_semidim) - self.x_semidim
         y = ((float(gy) + 0.5) / self.fire_grid_size) * (2.0 * self.y_semidim) - self.y_semidim
@@ -654,13 +749,12 @@ class WildfireSearchScenario(BaseScenario):
         )
         cost = self.land_cover_cost_values[cover] * (1.0 + self.slope_cost_weight * slope)
         speed = self.land_cover_speed_values[cover] / (1.0 + self.slope_speed_weight * slope)
-        self.required_clearance_grid[env_index] = (
-            self.obstacle_height_grid[env_index] + self.drone_safety_clearance
-        )
+        clearance = self.drone_safety_clearance_by_env[env_index]
+        self.required_clearance_grid[env_index] = self.obstacle_height_grid[env_index] + clearance
         self.required_clearance_msl_grid[env_index] = (
             self.elevation_grid[env_index] + self.required_clearance_grid[env_index]
         )
-        if self.required_clearance_grid[env_index].max() > self.drone_flight_levels.max():
+        if self.required_clearance_grid[env_index].max() > self.drone_max_altitude_by_env[env_index]:
             raise ValueError("highest drone_flight_levels entry must clear generated obstacles plus safety margin")
         self.traversable_grid[env_index] = traversable
         self.mobility_cost_grid[env_index] = cost
@@ -690,23 +784,18 @@ class WildfireSearchScenario(BaseScenario):
         fuel = self._fire_fuel_grid()
         moisture_factor = torch.exp(-self.fire_moisture_damping * self.moisture_grid.clamp(0.0, 1.0))
         burnable = (fuel > 0.0) & ~self.burned_grid
-        affected_fraction = self.burned_grid.float().flatten(1).mean(dim=1).view(-1, 1, 1)
-        target_fraction = self.fire_target_fraction.view(-1, 1, 1).clamp_min(1e-6)
-        target_gap = ((target_fraction - affected_fraction) / target_fraction).clamp(0.0, 1.0)
         random_rate = torch.exp(
             torch.randn(
                 self.world.batch_dim, 1, 1,
                 device=self.fire_grid.device,
             ) * self.fire_spread_variability
         ).clamp(0.35, 2.25)
-        target_boost = 0.35 + 1.05 * target_gap
         rate = (
             exposure
             * fuel
             * moisture_factor
             * self._grid_scale()
             * random_rate
-            * target_boost
         )
         p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** rate.clamp_min(0.0)
 
@@ -715,7 +804,6 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_spotting_prob
             * self._grid_scale()
             * random_rate
-            * target_gap
             * fuel.clamp(0.0, 1.0)
             * moisture_factor
         )
@@ -723,7 +811,6 @@ class WildfireSearchScenario(BaseScenario):
             ((torch.rand_like(p_ignite) < p_ignite) | ((torch.rand_like(p_spot) < p_spot) & smoke_spotting))
             & burnable
         )
-        new_burns = self._cap_new_burns_to_target(new_burns)
         self._ignite_fire_cells(new_burns)
 
         self.fire_age_grid = torch.where(
@@ -779,26 +866,6 @@ class WildfireSearchScenario(BaseScenario):
         moisture_factor = torch.exp(-0.75 * self.fire_moisture_damping * self.moisture_grid.clamp(0.0, 1.0))
         slope_factor = (1.0 + 0.25 * self.slope_grid.clamp(0.0, 1.0)).clamp(1.0, 1.25)
         return (0.15 + 0.85 * fuel * moisture_factor * slope_factor).clamp(0.0, 1.0)
-
-    def _cap_new_burns_to_target(self, new_burns: Tensor) -> Tensor:
-        """Keep the affected wildfire area near the sampled scenario target."""
-        total_cells = self.fire_grid_size * self.fire_grid_size
-        capped = new_burns.clone()
-        for b in range(self.world.batch_dim):
-            target_cells = int(round(float(self.fire_target_fraction[b]) * total_cells))
-            remaining = target_cells - int(self.burned_grid[b].sum().item())
-            if remaining <= 0:
-                capped[b] = False
-                continue
-            choices = capped[b].flatten().nonzero(as_tuple=False).flatten()
-            if choices.numel() > remaining:
-                keep = choices[
-                    torch.randperm(choices.numel(), device=choices.device)[:remaining]
-                ]
-                mask = torch.zeros_like(capped[b])
-                mask.view(-1)[keep] = True
-                capped[b] = mask
-        return capped
 
     def _update_smoke(self) -> None:
         """Emit smoke from burning cells, then diffuse, drift, and decay."""
@@ -1000,7 +1067,7 @@ class WildfireSearchScenario(BaseScenario):
             r = team_reward.clone()
             if agent.is_drone:
                 r = r + scout_per_drone[:, i] * self.r_drone_scout
-                r = r - self.drone_energy_costs[self.drone_altitude_level[:, i]]
+                r = r - self.drone_energy_cost[:, i]
                 r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
             else:
                 g = i - self.n_drones
@@ -1052,7 +1119,7 @@ class WildfireSearchScenario(BaseScenario):
         survivor_cover = self.land_cover_grid[b_idx, gy, gx]
         cover_factor = self.drone_cover_detection_factors[survivor_cover].unsqueeze(1)
         fire_smoke_factor = self._drone_fire_smoke_visibility_factor(drone_pos, surv_pos)
-        altitude_quality = self.drone_detection_quality[self.drone_altitude_level].unsqueeze(-1)
+        altitude_quality = self.drone_altitude_quality.unsqueeze(-1)
 
         probability = (altitude_quality * distance_factor * cover_factor * fire_smoke_factor).clamp(0.0, 1.0)
         probability = torch.where(visible, probability, torch.zeros_like(probability))
@@ -1189,29 +1256,131 @@ class WildfireSearchScenario(BaseScenario):
         end_pos: Tensor,
         env_indices: Tensor | None = None,
     ) -> None:
-        """Select the lowest AGL flight level that clears crossed obstacles."""
+        """Move continuous AGL altitude toward safe path clearance."""
         path = self._sample_path(start_pos, end_pos)
         required = self._grid_values_at_positions(
             self.required_clearance_grid, path, env_indices,
         ).amax(dim=-1)
-        fits = self.drone_flight_levels.view(1, 1, -1) >= required.unsqueeze(-1)
-        selected = fits.to(torch.int64).argmax(dim=-1)
-        selected = torch.where(
-            fits.any(dim=-1), selected, torch.full_like(selected, self.drone_flight_levels.numel() - 1),
+        min_altitude, max_altitude = self._drone_altitude_bounds(required.shape, required.device, env_indices)
+        target = required.clamp(
+            min=min_altitude,
+            max=max_altitude,
         )
         end_ground_msl = self._grid_values_at_positions(self.elevation_grid, end_pos, env_indices)
+
         if env_indices is None:
             previous_msl = self.drone_altitude_msl.clone()
-            self.drone_altitude_level = selected
-            self.drone_altitude = self.drone_flight_levels[selected]
+            self.drone_target_altitude = target
+            self.drone_altitude = self._smooth_altitude_step(
+                current=self.drone_altitude,
+                target=target,
+                env_indices=env_indices,
+            )
+            self._refresh_drone_altitude_bins()
             self.drone_altitude_msl = end_ground_msl + self.drone_altitude
             self.step_drone_climb = (self.drone_altitude_msl - previous_msl).abs()
         else:
             previous_msl = self.drone_altitude_msl[env_indices].clone()
-            self.drone_altitude_level[env_indices] = selected
-            self.drone_altitude[env_indices] = self.drone_flight_levels[selected]
+            self.drone_target_altitude[env_indices] = target
+            self.drone_altitude[env_indices] = self._smooth_altitude_step(
+                current=self.drone_altitude[env_indices],
+                target=target,
+                env_indices=env_indices,
+            )
+            self._refresh_drone_altitude_bins(env_indices)
             self.drone_altitude_msl[env_indices] = end_ground_msl + self.drone_altitude[env_indices]
             self.step_drone_climb[env_indices] = (self.drone_altitude_msl[env_indices] - previous_msl).abs()
+
+    def _initialize_drone_altitudes(
+        self,
+        drone_pos: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> None:
+        """Place drones at the continuous safe altitude for reset without a climb spike."""
+        required = self._grid_values_at_positions(
+            self.required_clearance_grid, drone_pos.unsqueeze(2), env_indices,
+        ).squeeze(-1)
+        min_altitude, max_altitude = self._drone_altitude_bounds(required.shape, required.device, env_indices)
+        altitude = required.clamp(
+            min=min_altitude,
+            max=max_altitude,
+        )
+        ground_msl = self._grid_values_at_positions(self.elevation_grid, drone_pos, env_indices)
+        if env_indices is None:
+            self.drone_target_altitude = altitude
+            self.drone_altitude = altitude
+            self.drone_altitude_msl = ground_msl + altitude
+            self._refresh_drone_altitude_bins()
+        else:
+            self.drone_target_altitude[env_indices] = altitude
+            self.drone_altitude[env_indices] = altitude
+            self.drone_altitude_msl[env_indices] = ground_msl + altitude
+            self._refresh_drone_altitude_bins(env_indices)
+
+    def _smooth_altitude_step(
+        self,
+        current: Tensor,
+        target: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> Tensor:
+        """Rate-limit vertical motion and avoid low/medium chatter."""
+        min_altitude, max_altitude = self._drone_altitude_bounds(current.shape, current.device, env_indices)
+        hold_height = torch.where(
+            current > target,
+            torch.maximum(current - self.drone_altitude_release_margin, min_altitude),
+            target,
+        )
+        desired = torch.maximum(target, hold_height)
+        delta = desired - current
+        climb = torch.full_like(delta, self.drone_climb_rate)
+        descent = torch.full_like(delta, self.drone_descent_rate)
+        step = torch.where(delta >= 0.0, torch.minimum(delta, climb), torch.maximum(delta, -descent))
+        return torch.minimum(torch.maximum(current + step, min_altitude), max_altitude)
+
+    def _refresh_drone_altitude_bins(self, env_indices: Tensor | None = None) -> None:
+        altitude = self.drone_altitude if env_indices is None else self.drone_altitude[env_indices]
+        levels = self.drone_flight_levels_by_env if env_indices is None else self.drone_flight_levels_by_env[env_indices]
+        level, quality, energy = self._continuous_altitude_properties(altitude, levels)
+        if env_indices is None:
+            self.drone_altitude_level = level
+            self.drone_altitude_quality = quality
+            self.drone_energy_cost = energy
+        else:
+            self.drone_altitude_level[env_indices] = level
+            self.drone_altitude_quality[env_indices] = quality
+            self.drone_energy_cost[env_indices] = energy
+
+    def _drone_altitude_bounds(
+        self,
+        shape: torch.Size,
+        device: torch.device,
+        env_indices: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if env_indices is None:
+            min_altitude = self.drone_min_altitude_by_env.to(device=device).view(-1, 1)
+            max_altitude = self.drone_max_altitude_by_env.to(device=device).view(-1, 1)
+        else:
+            min_altitude = self.drone_min_altitude_by_env[env_indices].to(device=device).view(-1, 1)
+            max_altitude = self.drone_max_altitude_by_env[env_indices].to(device=device).view(-1, 1)
+        return min_altitude.expand(shape), max_altitude.expand(shape)
+
+    def _continuous_altitude_properties(self, altitude: Tensor, levels: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        if levels.ndim == 1:
+            levels = levels.view(*((1,) * altitude.ndim), -1).expand(*altitude.shape, -1)
+        elif levels.ndim == 2:
+            levels = levels.unsqueeze(1).expand(-1, altitude.shape[1], -1)
+        quality_values = self.drone_detection_quality
+        energy_values = self.drone_energy_costs
+        level_idx = (altitude.unsqueeze(-1) - levels).abs().argmin(dim=-1)
+        hi = (altitude.unsqueeze(-1) > levels).sum(dim=-1).clamp(max=levels.shape[-1] - 1)
+        lo = (hi - 1).clamp(min=0)
+        upper = levels.gather(-1, hi.unsqueeze(-1)).squeeze(-1)
+        lower = levels.gather(-1, lo.unsqueeze(-1)).squeeze(-1)
+        span = (upper - lower).clamp_min(1e-6)
+        weight = torch.where(hi == lo, torch.zeros_like(altitude), (altitude - lower) / span)
+        quality = quality_values[lo] + weight * (quality_values[hi] - quality_values[lo])
+        energy = energy_values[lo] + weight * (energy_values[hi] - energy_values[lo])
+        return level_idx.long(), quality, energy
 
     def _soft_blocked_ground_position(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
         """Slide or shorten blocked UGV moves instead of freezing in place."""
@@ -1280,10 +1449,8 @@ class WildfireSearchScenario(BaseScenario):
         own_pos    = agent.state.pos                # [B, 2]
         own_vel    = agent.state.vel                # [B, 2]
         if agent.is_drone:
-            lidar_obs = torch.full(
-                (self.world.batch_dim, self.n_lidar_rays),
-                self.drone_sensor_max_range,
-                device=self.fire_grid.device,
+            lidar_obs = self.drone_sensor_max_range_by_env.view(-1, 1).expand(
+                self.world.batch_dim, self.n_lidar_rays,
             )
         else:
             lidar_obs = agent.sensors[0].measure()     # [B, n_rays]
@@ -1337,15 +1504,15 @@ class WildfireSearchScenario(BaseScenario):
         blocked = torch.stack(nearby_blocked, dim=-1).float()
         clearance = torch.stack(nearby_clearance, dim=-1)
         normalized_costs = costs / self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1)
-        normalized_clearance = clearance / self.drone_flight_levels.max()
+        normalized_clearance = clearance / self.drone_max_altitude_by_env.unsqueeze(-1).clamp_min(1e-6)
         return torch.cat([normalized_costs, blocked, normalized_clearance], dim=-1)
 
     def _flight_state(self, agent: Agent) -> Tensor:
         state = torch.zeros(self.world.batch_dim, 2, device=self.fire_grid.device)
         if agent.is_drone:
             drone_idx = self.world.agents.index(agent)
-            state[:, 0] = self.drone_altitude[:, drone_idx] / self.drone_flight_levels.max()
-            state[:, 1] = self.drone_detection_quality[self.drone_altitude_level[:, drone_idx]]
+            state[:, 0] = self.drone_altitude[:, drone_idx] / self.drone_max_altitude_by_env.clamp_min(1e-6)
+            state[:, 1] = self.drone_altitude_quality[:, drone_idx]
         return state
 
     def _neighbor_observations(self, agent: Agent) -> Tensor:
