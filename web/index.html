@@ -124,7 +124,7 @@ const APP_VERSION = 'perception-overlay-v1';
 // or by trying a known list. We keep it simple: try a known list, fall
 // back to silent skip per missing file.
 // ---------------------------------------------------------------------
-const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence'];
+const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'happo_trained'];
 
 async function loadTrajectory(name) {
   const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
@@ -141,7 +141,8 @@ function setupScene(canvas, width, height) {
   renderer.setSize(width, height, false);
   renderer.setClearColor(0x0e1118, 1);
 
-  const camera = new THREE.OrthographicCamera(-VIEW_PADDING, VIEW_PADDING, VIEW_PADDING, -VIEW_PADDING, 0.1, 100);
+  // Frustum is set immediately by fitCameraToWorld; placeholders here.
+  const camera = new THREE.OrthographicCamera(0, 0, 0, 0, 0.1, 100);
   camera.position.set(0, 0, 10);
   camera.lookAt(0, 0, 0);
   fitCameraToWorld(camera, width, height);
@@ -433,6 +434,18 @@ function probabilityColor(probability) {
   return color;
 }
 
+function makeCommsIndicator(commsUp) {
+  // Small dot above the agent: green = radio up, red pulsing = dropped.
+  const color = commsUp ? 0x88ff88 : 0xff4444;
+  const mesh = new THREE.Mesh(
+    new THREE.CircleGeometry(0.018, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.92 }),
+  );
+  mesh.userData.isCommsIndicator = true;
+  mesh.userData.commsUp = commsUp;
+  return mesh;
+}
+
 function makeCameraFootprintMesh(radius) {
   const g = new THREE.Group();
   const fill = new THREE.Mesh(
@@ -680,7 +693,11 @@ function syncActiveFireOverlay(state, meta, frame) {
   ctx.clearRect(0, 0, state.fireCanvas.width, state.fireCanvas.height);
   for (const cell of frame.fire_cells ?? []) {
     const [gx, gy, rawIntensity = 1] = cell;
-    const intensity = Math.max(0.2, Math.min(1.0, rawIntensity));
+    // Per-cell spatial noise (stable hash of position) breaks visual uniformity
+    // so neighbouring cells don't all pulse identically.
+    const noise = Math.abs(Math.sin(gx * 127.1 + gy * 311.7) * 43758.5453 % 1);
+    const cellVar = 0.78 + 0.22 * noise;   // 0.78 – 1.00 per cell
+    const intensity = Math.max(0.2, Math.min(1.0, rawIntensity * cellVar));
     const x = gx * s;
     const y = (G - gy - 1) * s;
     ctx.fillStyle = `rgba(121, 24, 7, ${0.38 + 0.24 * intensity})`;
@@ -808,6 +825,13 @@ function renderFrame(state, frame, meta, histories, frames, showPerception) {
       }
     }
     agentGroup.add(mesh);
+
+    // Comms indicator dot — only shown when comms_dropout > 0 in the trajectory.
+    if (a.comms_up !== undefined) {
+      const dot = makeCommsIndicator(a.comms_up);
+      dot.position.set(a.x + agentRadius * 1.2, a.y + agentRadius * 1.2, 0.12);
+      agentGroup.add(dot);
+    }
   }
 
   if (showPerception) {
@@ -845,6 +869,14 @@ function tickAnimation(state, t) {
       const phase = obj.userData.phase || 0;
       const baseOp = obj.userData.baseOp || 0.2;
       obj.material.opacity = Math.max(0.04, baseOp * (0.85 + 0.15 * Math.sin(t * 2.5 + phase)));
+    }
+  });
+  state.agentGroup.traverse(obj => {
+    if (obj.userData?.isCommsIndicator && !obj.userData.commsUp) {
+      // Pulse red dot when comms are dropped to draw attention.
+      const s = 1 + 0.35 * Math.sin(t * 10);
+      obj.scale.set(s, s, 1);
+      obj.material.opacity = 0.55 + 0.45 * Math.abs(Math.sin(t * 10));
     }
   });
   state.survGroup.traverse(obj => {
@@ -957,8 +989,10 @@ function Legend() {
   const items = [
     ['tri',    '#4a90ff', 'Drone'],
     ['square', '#14b8a6', 'Ground robot'],
+    ['circle', '#88ff88', 'Comms up'],
+    ['circle', '#ff4444', 'Comms dropped'],
     ['circle', '#60a5fa', 'Drone camera footprint'],
-    ['square', '#22c55e', 'Detection probability link'],
+    ['gradient', '#fbbf24:#22c55e', 'Detection link (amber=low → green=high)'],
     ['circle', '#ff3838', 'Survivor (unscouted)'],
     ['circle', '#fbbf24', 'Survivor (scouted)'],
     ['circle', '#84cc16', 'Survivor (confirmed)'],
@@ -973,15 +1007,22 @@ function Legend() {
     ['square', '#f06e1e', 'Fire'],
   ];
   return h('div', { id: 'legend' },
-    items.map(([shape, c, label]) =>
-      h('div', { key: label, className: 'item' },
-        h('span', {
-          className: `swatch ${shape}`,
-          style: { background: shape === 'tri' ? 'transparent' : c, '--swatch-color': c },
-        }),
+    items.map(([shape, c, label]) => {
+      let swatchStyle;
+      if (shape === 'tri') {
+        swatchStyle = { background: 'transparent', '--swatch-color': c };
+      } else if (shape === 'gradient') {
+        const [from, to] = c.split(':');
+        swatchStyle = { background: `linear-gradient(to right, ${from}, ${to})`, borderRadius: '2px' };
+      } else {
+        swatchStyle = { background: c, '--swatch-color': c };
+      }
+      const cls = shape === 'gradient' ? 'swatch square' : `swatch ${shape}`;
+      return h('div', { key: label, className: 'item' },
+        h('span', { className: cls, style: swatchStyle }),
         label,
-      ),
-    ),
+      );
+    }),
   );
 }
 
@@ -1120,7 +1161,9 @@ function App() {
           },
         }, error, h('br'), h('br'),
           h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
-            'Run `python scripts/export_trajectories.py` first.'),
+            strategy === 'happo_trained'
+              ? 'Run `python scripts/train_happo_smoke.py` then `python scripts/export_trajectories.py` first.'
+              : 'Run `python scripts/export_trajectories.py` first.'),
         ),
       ),
       h(MetricsPanel, { meta, frame }),
