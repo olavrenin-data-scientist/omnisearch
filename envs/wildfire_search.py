@@ -1572,7 +1572,10 @@ class WildfireSearchScenario(BaseScenario):
         rel = torch.cat(deltas, dim=-1)
         if self.comms_dropout > 0:
             keep = (torch.rand_like(rel[..., :1]) > self.comms_dropout).float()
+            agent.comms_up = keep[..., 0].bool()
             rel = rel * keep
+        else:
+            agent.comms_up = torch.ones(self.world.batch_dim, dtype=torch.bool, device=rel.device)
         return rel
 
     # ------------------------------------------------------------------
