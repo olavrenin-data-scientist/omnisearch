@@ -121,6 +121,7 @@ const TERRAIN_COLORS = [
   0x555963,  // rock
   0x2563eb,  // water
 ];
+const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
 
 function cellNoise(gx, gy, seed = 0) {
   const n = Math.sin(gx * 127.1 + gy * 311.7 + seed * 74.7) * 43758.5453;
@@ -246,6 +247,131 @@ function buildTerrainMesh(meta) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   return { mesh, geo };
+}
+
+// ---------------------------------------------------------------------
+// House obstacles — static terrain layer built from obstacle_type/height.
+// Matches scripts/terrain_3d_plot.py: footprints, exposed walls, and roofs.
+// ---------------------------------------------------------------------
+function emptyMeshParts() {
+  return { positions: [], indices: [] };
+}
+
+function addQuad(mesh, corners) {
+  const start = mesh.positions.length / 3;
+  for (const [x, y, z] of corners) {
+    mesh.positions.push(x, y, z);
+  }
+  mesh.indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
+}
+
+function addHorizontalQuad(mesh, x0, x1, y0, y1, z) {
+  addQuad(mesh, [
+    [x0, y0, z],
+    [x1, y0, z],
+    [x1, y1, z],
+    [x0, y1, z],
+  ]);
+}
+
+function addVerticalQuad(mesh, x0, x1, y0, y1, baseZ, roofZ) {
+  addQuad(mesh, [
+    [x0, y0, baseZ],
+    [x1, y1, baseZ],
+    [x1, y1, roofZ],
+    [x0, y0, roofZ],
+  ]);
+}
+
+function addExposedHouseWalls(mesh, houseMask, row, col, x0, x1, y0, y1, baseZ, roofZ) {
+  const maxRow = houseMask.length - 1;
+  const maxCol = houseMask[row].length - 1;
+  if (row === 0 || !houseMask[row - 1]?.[col]) {
+    addVerticalQuad(mesh, x0, x1, y0, y0, baseZ, roofZ);
+  }
+  if (row === maxRow || !houseMask[row + 1]?.[col]) {
+    addVerticalQuad(mesh, x1, x0, y1, y1, baseZ, roofZ);
+  }
+  if (col === 0 || !houseMask[row]?.[col - 1]) {
+    addVerticalQuad(mesh, x0, x0, y1, y0, baseZ, roofZ);
+  }
+  if (col === maxCol || !houseMask[row]?.[col + 1]) {
+    addVerticalQuad(mesh, x1, x1, y0, y1, baseZ, roofZ);
+  }
+}
+
+function makeMeshFromParts(parts, material) {
+  if (!parts.positions.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(parts.positions, 3));
+  geo.setIndex(parts.indices);
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function buildHouseMeshes(meta) {
+  const terrain = meta?.terrain;
+  if (!terrain?.obstacle_type || !terrain?.obstacle_height || !terrain?.elevation) return [];
+
+  const G = meta.fire_grid_size;
+  const obstacleType = terrain.obstacle_type;
+  const obstacleHeight = terrain.obstacle_height;
+  const houseMask = obstacleType.map(row => row.map(v => v === OBJECT_HOUSE));
+  if (!houseMask.some(row => row.some(Boolean))) return [];
+
+  const cellW = 2 / G;
+  const baseLift = 0.0002 * HEIGHT_SCALE;
+  const minRoofHeight = 0.0008 * HEIGHT_SCALE;
+  const footprints = emptyMeshParts();
+  const walls = emptyMeshParts();
+  const roofs = emptyMeshParts();
+
+  for (let gy = 0; gy < G; gy++) {
+    for (let gx = 0; gx < G; gx++) {
+      if (!houseMask[gy]?.[gx]) continue;
+      const x0 = gx * cellW - 1;
+      const x1 = (gx + 1) * cellW - 1;
+      const y0 = gy * cellW - 1;
+      const y1 = (gy + 1) * cellW - 1;
+      const cx = (gx + 0.5) * cellW - 1;
+      const cy = (gy + 0.5) * cellW - 1;
+      const baseZ = terrainElevAt(cx, cy, terrain.elevation, G) + baseLift;
+      const houseHeight = Math.max((obstacleHeight[gy]?.[gx] ?? 0) * HEIGHT_SCALE, minRoofHeight);
+      const roofZ = baseZ + houseHeight;
+
+      addHorizontalQuad(footprints, x0, x1, y0, y1, baseZ);
+      addHorizontalQuad(roofs, x0, x1, y0, y1, roofZ);
+      addExposedHouseWalls(walls, houseMask, gy, gx, x0, x1, y0, y1, baseZ, roofZ);
+    }
+  }
+
+  const footprintMat = new THREE.MeshLambertMaterial({
+    color: 0x6f342c,
+    transparent: true,
+    opacity: 0.46,
+    side: THREE.DoubleSide,
+  });
+  const wallMat = new THREE.MeshLambertMaterial({
+    color: 0x8e493e,
+    transparent: true,
+    opacity: 0.74,
+    side: THREE.DoubleSide,
+  });
+  const roofMat = new THREE.MeshLambertMaterial({
+    color: 0xb45a48,
+    transparent: true,
+    opacity: 0.90,
+    side: THREE.DoubleSide,
+  });
+
+  return [
+    makeMeshFromParts(footprints, footprintMat),
+    makeMeshFromParts(walls, wallMat),
+    makeMeshFromParts(roofs, roofMat),
+  ].filter(Boolean);
 }
 
 // ---------------------------------------------------------------------
@@ -702,6 +828,7 @@ function setup3DScene(canvas, width, height) {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   const camera = new THREE.PerspectiveCamera(50, width / height, 0.001, 100);
+  camera.up.set(0, 0, 1); // Z-up: matches terrain (XY plane, elevation in Z)
   camera.position.set(0, -2.0, 2.0);
   camera.lookAt(0, 0, 0.5);
 
@@ -711,7 +838,8 @@ function setup3DScene(canvas, width, height) {
   controls.dampingFactor = 0.08;
   controls.minDistance = 0.3;
   controls.maxDistance = 8;
-  controls.maxPolarAngle = Math.PI / 2 - 0.02; // prevent flipping under terrain
+  controls.minPolarAngle = 0.05;           // prevent straight-down gimbal lock
+  controls.maxPolarAngle = Math.PI * 0.75; // allow ground-level and slightly upward views
   controls.update();
 
   const scene = new THREE.Scene();
@@ -857,6 +985,7 @@ function useThree3D(meta, frame, frames, histories) {
     const { renderer, scene, camera, controls } = setup3DScene(canvas, rect.width, rect.height);
 
     const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
+    const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
     const burnedGroup  = new THREE.Group(); scene.add(burnedGroup);
     const fireGroup    = new THREE.Group(); scene.add(fireGroup);
     const smokeGroup   = new THREE.Group(); scene.add(smokeGroup);
@@ -869,7 +998,7 @@ function useThree3D(meta, frame, frames, histories) {
 
     stateRef.current = {
       renderer, scene, camera, controls,
-      terrainGroup, burnedGroup, fireGroup, smokeGroup,
+      terrainGroup, obstacleGroup, burnedGroup, fireGroup, smokeGroup,
       trailGroup, survGroup, agentGroup,
       placeholder,
       terrainSource: null, burnedStep: -1, burnedSource: null,
@@ -958,12 +1087,16 @@ function useThree3D(meta, frame, frames, histories) {
     if (state.terrainSource === meta.terrain) return;
 
     clearGroup(state.terrainGroup);
+    clearGroup(state.obstacleGroup);
     clearGroup(state.burnedGroup);
 
     const G = meta.fire_grid_size;
     const built = buildTerrainMesh(meta);
     if (built) {
       state.terrainGroup.add(built.mesh);
+      for (const houseMesh of buildHouseMeshes(meta)) {
+        state.obstacleGroup.add(houseMesh);
+      }
       // Build the scar mesh from the same displaced geometry
       const scar = buildBurnScarMesh(built.geo, G);
       state.burnedGroup.add(scar.mesh);
