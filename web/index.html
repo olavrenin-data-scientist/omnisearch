@@ -31,6 +31,12 @@
   }
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
   header .meta { color: var(--muted); font-size: 13px; }
+  header a.view3d {
+    color: var(--muted); font-size: 13px; text-decoration: none;
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 10px;
+  }
+  header a.view3d:hover { border-color: var(--accent); color: var(--text); }
   header select {
     background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 4px;
@@ -1150,6 +1156,7 @@ function App() {
           onChange: e => setStrategy(e.target.value),
         }, STRATEGY_NAMES.map(n => h('option', { key: n, value: n }, n))),
       ),
+      h('a', { className: 'view3d', href: './index3d.html' }, '3D Viewer →'),
     ),
     h('main', null,
       h('div', { id: 'scene-wrap' },
