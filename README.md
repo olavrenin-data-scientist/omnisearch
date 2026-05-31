@@ -125,6 +125,12 @@ python scripts/compare_baselines.py --seeds 3 --steps 200
 # Headline ablation: MAPPO × IPPO × HAPPO across 4 dropouts × N seeds
 python scripts/comms_dropout_sweep.py --seeds 3            # smoke (~7 min)
 
+# Build the terrain
+python scripts/build_real_terrain_cache.py \
+  --place "Malibu Creek State Park, California" \
+  --grid-size 128 \
+  --landfire-email your@email.com
+
 # Export trajectory JSONs for the web viewer — ~2 s
 python scripts/export_trajectories.py
 
