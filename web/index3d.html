@@ -503,18 +503,19 @@ function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
 }
 
 function prepareCrazyflieTemplate(gltf) {
-  const model = gltf.scene;
-  // glTF assets are Y-up; this viewer uses Z as terrain/elevation up.
-  model.rotation.x = Math.PI / 2;
-  model.updateMatrixWorld(true);
+  const source = gltf.scene;
+  // The Crazyflie asset is Y-up; rotate it into the viewer's Z-up world so
+  // the rotor plane is horizontal, like a real quadcopter in flight.
+  source.rotation.x = Math.PI / 2;
+  source.updateMatrixWorld(true);
 
-  const box = new THREE.Box3().setFromObject(model);
+  const box = new THREE.Box3().setFromObject(source);
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
-  model.position.x -= center.x;
-  model.position.y -= center.y;
-  model.position.z -= box.min.z;
-  model.traverse(obj => {
+  source.position.x -= center.x;
+  source.position.y -= center.y;
+  source.position.z -= box.min.z;
+  source.traverse(obj => {
     if (obj.isMesh) {
       obj.castShadow = true;
       obj.receiveShadow = true;
@@ -526,6 +527,8 @@ function prepareCrazyflieTemplate(gltf) {
     }
   });
 
+  const model = new THREE.Group();
+  model.add(source);
   const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
   return { model, normalizedSize };
 }
@@ -637,7 +640,7 @@ function makeCrazyflieDroneMesh(state, radius = 0.04, altitude = 0, maxAltitude 
   const targetSpan = radius * DRONE_MODEL_VISUAL_SCALE * (1 + altitudeScale * 0.12);
   const scale = targetSpan / (state.droneModelSize || 1);
   model.scale.setScalar(scale);
-  model.rotation.z = heading - Math.PI / 2;
+  model.rotation.z = heading + Math.PI / 2;
   model.position.z = radius * 0.12;
   g.add(model);
 
@@ -653,7 +656,7 @@ function makeSpotMiniGroundMesh(state, radius = 0.04, heading = 0) {
   const targetSpan = radius * GROUND_MODEL_VISUAL_SCALE;
   const scale = targetSpan / (state.groundModelSize || 1);
   model.scale.setScalar(scale);
-  model.rotation.z = heading;
+  model.rotation.z = heading + Math.PI / 2;
   model.position.z = radius * 0.02;
   g.add(model);
 
@@ -775,6 +778,7 @@ function makeSurvivorMesh(state, survivorState, radius = 0.03) {
     const targetSpan = radius * SURVIVOR_MODEL_VISUAL_SCALE;
     const scale = targetSpan / (state.survivorModelSize || 1);
     model.scale.setScalar(scale);
+    model.rotation.z = Math.PI / 2;
     model.position.z = radius * 0.02;
     g.add(model);
   } else {
