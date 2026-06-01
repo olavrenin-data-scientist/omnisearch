@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OmniSearch — Strategy Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Cache-Control" content="no-store" />
+<style>
+  :root {
+    --bg:        #0e1118;
+    --panel:     #151a23;
+    --border:    #1f2735;
+    --text:      #e6e9ef;
+    --muted:     #8b94a8;
+    --accent:    #5d82fa;
+    --good:      #88ff88;
+    --warn:      #ffaa00;
+    --danger:    #ff4444;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  }
+  #root { display: flex; flex-direction: column; height: 100vh; }
+  header {
+    display: flex; align-items: center; gap: 24px;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  header a.view3d {
+    color: var(--muted); font-size: 13px; text-decoration: none;
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 10px;
+  }
+  header a.view3d:hover { border-color: var(--accent); color: var(--text); }
+  header select {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 10px; font-size: 13px;
+  }
+  main { flex: 1; display: flex; min-height: 0; }
+  #scene-wrap {
+    flex: 1; position: relative; min-width: 0;
+    background: radial-gradient(circle at center, #1c2230 0%, var(--bg) 100%);
+  }
+  #scene { width: 100%; height: 100%; display: block; }
+  #legend {
+    font-size: 12px; color: var(--muted);
+    columns: 1;
+  }
+  #legend .item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 0; line-height: 1.25;
+  }
+  #legend .swatch {
+    display: inline-block; width: 14px; height: 14px;
+    flex: 0 0 14px;
+  }
+  #legend .swatch.circle { border-radius: 50%; }
+  #legend .swatch.square { border-radius: 2px; }
+  #legend .swatch.tri {
+    width: 0; height: 0;
+    background: transparent !important;
+    border-left:  7px solid transparent;
+    border-right: 7px solid transparent;
+    border-bottom: 12px solid var(--swatch-color);
+  }
+  aside {
+    width: 280px; border-left: 1px solid var(--border);
+    background: var(--panel); padding: 18px 18px 0; overflow-y: auto;
+  }
+  aside h2 {
+    margin: 0 0 6px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+  }
+  .metric {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .metric .k { color: var(--muted); font-size: 13px; }
+  .metric .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .panel { margin-bottom: 22px; }
+  footer {
+    display: flex; align-items: center; gap: 18px;
+    padding: 12px 22px; border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  footer button {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+  }
+  footer button:hover { border-color: var(--accent); }
+  footer input[type="range"] { flex: 1; accent-color: var(--accent); }
+  footer .step { color: var(--muted); font-size: 13px; min-width: 90px; }
+  footer .speed, footer .toggle { color: var(--muted); font-size: 13px; }
+  footer .toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  footer input[type="checkbox"] { accent-color: var(--accent); }
+</style>
+
+<!-- Import map: use esm.sh CDN so we need no build step -->
+<script type="importmap">
+{
+  "imports": {
+    "three":     "https://esm.sh/three@0.171.0",
+    "react":     "https://esm.sh/react@18.3.1",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
+import { createRoot } from 'react-dom/client';
+
+const h = React.createElement;
+const APP_VERSION = 'perception-overlay-v1';
+
+// ---------------------------------------------------------------------
+// Trajectory discovery — list strategies by sniffing trajectories/index.json
+// or by trying a known list. We keep it simple: try a known list, fall
+// back to silent skip per missing file.
+// ---------------------------------------------------------------------
+const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'happo_trained'];
+
+async function loadTrajectory(name) {
+  const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Failed to load ${name}: ${res.status}`);
+  return await res.json();
+}
+
+// ---------------------------------------------------------------------
+// Three.js scene — top-down ortho view of a [-1, 1] x [-1, 1] world
+// ---------------------------------------------------------------------
+function setupScene(canvas, width, height) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(width, height, false);
+  renderer.setClearColor(0x0e1118, 1);
+
+  // Frustum is set immediately by fitCameraToWorld; placeholders here.
+  const camera = new THREE.OrthographicCamera(0, 0, 0, 0, 0.1, 100);
+  camera.position.set(0, 0, 10);
+  camera.lookAt(0, 0, 0);
+  fitCameraToWorld(camera, width, height);
+
+  const scene = new THREE.Scene();
+
+  // Forest backdrop
+  const bg = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ color: 0x284e26 }),
+  );
+  bg.position.z = -0.5;
+  scene.add(bg);
+
+  return { renderer, scene, camera };
+}
+
+function clearGroup(group) {
+  while (group.children.length) {
+    const obj = group.children.pop();
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (obj.material.map) obj.material.map.dispose();
+      obj.material.dispose();
+    }
+  }
+}
+
+// --- Color palette (visually distinct, accessible) ---
+const COLORS = {
+  drone:               0x4a90ff,   // bright blue
+  drone_dark:          0x1a3a8a,   // dark frame
+  ground:              0x14b8a6,   // teal
+  ground_dark:         0x0f4f48,
+  wheel:               0x1a1f2e,
+  skin:                0xf0c896,
+  survivor_unscouted:  0xff3838,   // red
+  survivor_scouted:    0xfbbf24,   // amber
+  survivor_confirmed:  0x84cc16,   // lime
+  survivor_outline:    0xffffff,
+  burned:              0x2b211b,   // post-fire burn scar
+  fire_outer:          0xf06e1e,   // orange
+  fire_inner:          0xfacc15,   // yellow hot core
+  smoke:               0xcbd5e1,   // pale gray-blue
+  water:               0x2563eb,   // ocean / water
+  perception:          0x60a5fa,   // drone camera footprint
+  perception_low:      0xfbbf24,   // low detection probability
+  perception_high:     0x22c55e,   // high detection probability
+};
+const TERRAIN_COLORS = [
+  0xb59665,  // road
+  0x47783d,  // open
+  0x315a2e,  // brush
+  0x203d24,  // forest
+  0x555963,  // rock
+  COLORS.water,
+];
+const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
+const VIEW_PADDING = 1.15;
+
+function cellNoise(gx, gy, seed = 0) {
+  const n = Math.sin(gx * 127.1 + gy * 311.7 + seed * 74.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function fitCameraToWorld(camera, width, height) {
+  const aspect = width / height;
+  let halfW = VIEW_PADDING;
+  let halfH = VIEW_PADDING;
+  if (aspect >= 1) {
+    halfW = halfH * aspect;
+  } else {
+    halfH = halfW / aspect;
+  }
+  camera.left = -halfW;
+  camera.right = halfW;
+  camera.top = halfH;
+  camera.bottom = -halfH;
+  camera.updateProjectionMatrix();
+}
+
+// ---------------------------------------------------------------------
+// Entity factories — small Groups composed of primitive meshes so each
+// entity reads as the thing it represents from a top-down view.
+// Animated children are tagged via userData so the RAF loop can update
+// them (propeller spin, fire flicker) without rebuilding geometry.
+// ---------------------------------------------------------------------
+function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
+  const g = new THREE.Group();
+  const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.35, radius * 1.55, 28),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.drone, transparent: true, opacity: 0.18 + altitudeScale * 0.45,
+    }),
+  );
+  halo.position.z = -0.01;
+  g.add(halo);
+  // X-shaped frame (two crossed bars)
+  const armMat = new THREE.MeshBasicMaterial({ color: COLORS.drone_dark });
+  const arm1 = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2.5, radius * 0.18), armMat);
+  const arm2 = arm1.clone(); arm2.rotation.z = Math.PI / 2;
+  g.add(arm1, arm2);
+  // Central body
+  const body = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.45, 24),
+    new THREE.MeshBasicMaterial({ color: COLORS.drone }),
+  );
+  body.position.z = 0.02;
+  g.add(body);
+  // Four propellers at the tips of the X
+  const propMat = new THREE.MeshBasicMaterial({
+    color: 0xbcd0ff, transparent: true, opacity: 0.55,
+  });
+  for (const [dx, dy] of [[radius * 1.25, 0], [-radius * 1.25, 0], [0, radius * 1.25], [0, -radius * 1.25]]) {
+    const prop = new THREE.Mesh(
+      new THREE.PlaneGeometry(radius * 0.8, radius * 0.13),
+      propMat.clone(),
+    );
+    prop.position.set(dx, dy, 0.03);
+    prop.userData.isProp = true;
+    prop.userData.phase  = Math.random() * Math.PI; // desync drones
+    g.add(prop);
+  }
+  g.scale.setScalar(1 + altitudeScale * 0.25);
+  return g;
+}
+
+function makeGroundMesh(radius = 0.04) {
+  const g = new THREE.Group();
+  // Chassis
+  const chassis = new THREE.Mesh(
+    new THREE.PlaneGeometry(radius * 1.75, radius * 1.30),
+    new THREE.MeshBasicMaterial({ color: COLORS.ground }),
+  );
+  g.add(chassis);
+  // Wheel "stripes" along the sides
+  const wheelMat = new THREE.MeshBasicMaterial({ color: COLORS.wheel });
+  for (const dy of [radius * 0.60, -radius * 0.60]) {
+    const wheel = new THREE.Mesh(new THREE.PlaneGeometry(radius * 1.45, radius * 0.30), wheelMat);
+    wheel.position.set(0, dy, 0.01);
+    g.add(wheel);
+  }
+  // Sensor turret on top (a white dot)
+  const sensor = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.28, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  );
+  sensor.position.z = 0.02;
+  g.add(sensor);
+  // Antenna (small line forward)
+  const ant = new THREE.Mesh(
+    new THREE.PlaneGeometry(radius * 0.55, radius * 0.08),
+    new THREE.MeshBasicMaterial({ color: COLORS.ground_dark }),
+  );
+  ant.position.set(radius * 0.62, 0, 0.025);
+  g.add(ant);
+  return g;
+}
+
+function makeSurvivorMesh(survivorState, radius = 0.03) {
+  // Top-down human silhouette: head + torso + outstretched arms + legs.
+  // Clothing colour encodes detection state so the figure stays readable.
+  const stateColor = survivorState.found
+    ? COLORS.survivor_confirmed
+    : survivorState.scouted
+      ? COLORS.survivor_scouted
+      : COLORS.survivor_unscouted;
+  const g = new THREE.Group();
+
+  // State ring — outside the figure so it's visible over fire
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.45, radius * 1.75, 28),
+    new THREE.MeshBasicMaterial({ color: stateColor }),
+  );
+  ring.position.z = -0.02;
+  g.add(ring);
+
+  const clothingMat = new THREE.MeshBasicMaterial({ color: stateColor });
+
+  // Outstretched arms (horizontal bar — gives the human silhouette)
+  const arms = new THREE.Mesh(
+    new THREE.PlaneGeometry(radius * 1.75, radius * 0.27),
+    clothingMat,
+  );
+  arms.position.set(0, 0.002, 0.002);
+  g.add(arms);
+
+  // Torso (taller-than-wide ellipse)
+  const torso = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.47, 24),
+    clothingMat,
+  );
+  torso.scale.set(1.0, 1.8, 1);
+  torso.position.z = 0.005;
+  g.add(torso);
+
+  // Legs (two small rectangles below torso, dark pants)
+  const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
+  for (const dx of [-1, 1]) {
+    const leg = new THREE.Mesh(
+      new THREE.PlaneGeometry(radius * 0.27, radius * 0.53),
+      legMat,
+    );
+    leg.position.set(dx * radius * 0.27, -radius * 0.73, 0.003);
+    g.add(leg);
+  }
+
+  // Head (skin-tone, on top of torso)
+  const head = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.40, 24),
+    new THREE.MeshBasicMaterial({ color: COLORS.skin }),
+  );
+  head.position.set(0, radius * 0.67, 0.012);
+  g.add(head);
+
+  // Hair (small dark cap, hint of detail from above)
+  const hair = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.43, 20),
+    new THREE.MeshBasicMaterial({ color: 0x3a2412 }),
+  );
+  hair.scale.set(1, 0.65, 1);
+  hair.position.set(0, radius * 0.77, 0.011);
+  g.add(hair);
+
+  // Pulse the state ring if scouted-but-not-confirmed (call for attention)
+  if (survivorState.scouted && !survivorState.found) {
+    ring.userData.isPulse = true;
+  }
+  return g;
+}
+
+function makeFireMesh(size) {
+  // Layered circular flame: dark base → red → orange → amber → white-hot.
+  // Each layer flickers opacity + scale on its own phase so a fire cell
+  // looks like a real flame dancing, not a static coloured tile.
+  const g = new THREE.Group();
+  const layers = [
+    { color: 0x6b1206, r: 0.58, opacity: 0.45 },   // dark red base
+    { color: 0xa42208, r: 0.48, opacity: 0.70 },   // red
+    { color: 0xe85a18, r: 0.38, opacity: 0.85 },   // orange
+    { color: 0xf9ad22, r: 0.27, opacity: 0.93 },   // amber
+    { color: 0xfff0a8, r: 0.16, opacity: 0.90 },   // hot core
+  ];
+  for (let i = 0; i < layers.length; i++) {
+    const L = layers[i];
+    const mesh = new THREE.Mesh(
+      new THREE.CircleGeometry(size * L.r, 28),
+      new THREE.MeshBasicMaterial({
+        color: L.color, transparent: true, opacity: L.opacity,
+      }),
+    );
+    // Local z is just stacking order inside the fire group; the group
+    // itself is positioned at z = -0.3 in renderFrame, so we keep this
+    // small and positive to avoid sinking below the background plane.
+    mesh.position.z = i * 0.003;
+    mesh.userData.isFireLayer = true;
+    mesh.userData.phase       = Math.random() * Math.PI * 2;
+    mesh.userData.baseOp      = L.opacity;
+    // Outer layers wobble more; the hot core stays focused.
+    mesh.userData.wobble      = 0.18 - i * 0.028;
+    g.add(mesh);
+  }
+  return g;
+}
+
+function makeSmokeMesh(size, intensity) {
+  const opacity = Math.min(0.42, 0.08 + intensity * 0.34);
+  const mesh = new THREE.Mesh(
+    new THREE.CircleGeometry(size * (0.45 + intensity * 0.35), 24),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.smoke,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+    }),
+  );
+  mesh.scale.set(1.25, 0.85, 1);
+  mesh.userData.isSmoke = true;
+  mesh.userData.baseOp = opacity;
+  mesh.userData.phase = intensity * Math.PI * 2;
+  return mesh;
+}
+
+function probabilityColor(probability) {
+  const p = Math.max(0, Math.min(1, probability ?? 0));
+  const color = new THREE.Color(COLORS.perception_low);
+  color.lerp(new THREE.Color(COLORS.perception_high), p);
+  return color;
+}
+
+function makeCommsIndicator(commsUp) {
+  // Small dot above the agent: green = radio up, red pulsing = dropped.
+  const color = commsUp ? 0x88ff88 : 0xff4444;
+  const mesh = new THREE.Mesh(
+    new THREE.CircleGeometry(0.018, 12),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.92 }),
+  );
+  mesh.userData.isCommsIndicator = true;
+  mesh.userData.commsUp = commsUp;
+  return mesh;
+}
+
+function makeCameraFootprintMesh(radius) {
+  const g = new THREE.Group();
+  const fill = new THREE.Mesh(
+    new THREE.CircleGeometry(radius, 80),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.perception,
+      transparent: true,
+      opacity: 0.045,
+      depthWrite: false,
+    }),
+  );
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 0.985, radius * 1.015, 96),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.perception,
+      transparent: true,
+      opacity: 0.48,
+      depthWrite: false,
+    }),
+  );
+  g.add(fill, ring);
+  return g;
+}
+
+function renderPerceptionOverlay(state, frame) {
+  clearGroup(state.perceptionGroup);
+  const drones = frame.drone_perception ?? [];
+  for (const drone of drones) {
+    const footprint = Math.max(0, drone.footprint ?? 0);
+    if (footprint > 0) {
+      const mesh = makeCameraFootprintMesh(footprint);
+      mesh.position.set(drone.x, drone.y, -0.08);
+      state.perceptionGroup.add(mesh);
+    }
+
+    for (const survivor of drone.survivors ?? []) {
+      if (!survivor.visible || survivor.probability <= 0) continue;
+      const positions = new Float32Array([
+        drone.x, drone.y, -0.035,
+        survivor.x, survivor.y, -0.035,
+      ]);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: probabilityColor(survivor.probability),
+        transparent: true,
+        opacity: 0.18 + Math.min(0.70, survivor.probability * 0.70),
+      });
+      const line = new THREE.Line(geom, mat);
+      line.userData.isPerceptionLink = true;
+      state.perceptionGroup.add(line);
+    }
+  }
+}
+
+function makeTreeMesh(size, height) {
+  const g = new THREE.Group();
+  const canopy = new THREE.Mesh(
+    new THREE.CircleGeometry(size * 0.43, 18),
+    new THREE.MeshBasicMaterial({ color: height > 0.18 ? 0x133521 : 0x1d5128 }),
+  );
+  canopy.position.z = 0.012;
+  const crown = new THREE.Mesh(
+    new THREE.CircleGeometry(size * 0.25, 16),
+    new THREE.MeshBasicMaterial({ color: 0x316c34 }),
+  );
+  crown.position.set(-size * 0.08, size * 0.08, 0.018);
+  g.add(canopy, crown);
+  return g;
+}
+
+function makeHouseMesh(size, height) {
+  const g = new THREE.Group();
+  const walls = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * 0.78, size * 0.70),
+    new THREE.MeshBasicMaterial({ color: 0xd5bd93 }),
+  );
+  const roof = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * 0.86, size * 0.48),
+    new THREE.MeshBasicMaterial({ color: height > 0.11 ? 0x8b3b32 : 0xa34d3d }),
+  );
+  roof.position.set(0, size * 0.05, 0.014);
+  roof.rotation.z = Math.PI / 4;
+  g.add(walls, roof);
+  return g;
+}
+
+function renderTerrain(state, meta) {
+  clearGroup(state.terrainGroup);
+  clearGroup(state.obstacleGroup);
+  const terrain = meta?.terrain;
+  if (!terrain?.land_cover) return;
+  const G = meta.fire_grid_size;
+  const canvas = document.createElement('canvas');
+  canvas.width = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(G, G);
+  for (let gy = 0; gy < G; gy++) {
+    for (let gx = 0; gx < G; gx++) {
+      const cover = terrain.land_cover[gy][gx];
+      const elevation = terrain.elevation?.[gy]?.[gx] ?? 0;
+      const slope = terrain.slope?.[gy]?.[gx] ?? 0;
+      const moisture = terrain.moisture?.[gy]?.[gx] ?? 0.45;
+      const fuel = terrain.fuel_density?.[gy]?.[gx] ?? 0.45;
+      const rockiness = terrain.rockiness?.[gy]?.[gx] ?? 0.25;
+      const fineNoise = cellNoise(gx, gy, 2);
+      const coarseNoise = cellNoise(Math.floor(gx / 4), Math.floor(gy / 4), 9);
+      const color = new THREE.Color(TERRAIN_COLORS[cover] ?? TERRAIN_COLORS[1]);
+      if (cover === 1) {
+        color.lerp(new THREE.Color(0x667542), Math.max(0, 0.34 - moisture * 0.28));
+        color.lerp(new THREE.Color(0x356b42), Math.min(0.35, moisture * 0.30));
+      } else if (cover === 2) {
+        color.lerp(new THREE.Color(0x4f6b32), Math.min(0.32, fuel * 0.25 + fineNoise * 0.08));
+      } else if (cover === 3) {
+        color.lerp(new THREE.Color(0x14341f), Math.min(0.38, moisture * 0.28 + fuel * 0.12));
+      } else if (cover === 4) {
+        color.lerp(new THREE.Color(0x6b7079), Math.min(0.42, rockiness * 0.35));
+      } else if (cover === 0) {
+        color.lerp(new THREE.Color(0xc5a56f), Math.min(0.25, coarseNoise * 0.25));
+      }
+      const shade = cover === 5
+        ? 1.0
+        : 0.78 + elevation * 1.05 - slope * 0.42 + (fineNoise - 0.5) * 0.16 + (coarseNoise - 0.5) * 0.10;
+      color.multiplyScalar(Math.max(0.48, Math.min(1.28, shade)));
+      const objectType = terrain.obstacle_type?.[gy]?.[gx] ?? OBJECT_NONE;
+      const objectHeight = terrain.obstacle_height?.[gy]?.[gx] ?? 0;
+      if (objectType === OBJECT_TREE) {
+        color.set(objectHeight > 0.18 ? 0x133521 : 0x1d5128);
+        color.multiplyScalar(0.86 + coarseNoise * 0.20);
+      } else if (objectType === OBJECT_HOUSE) {
+        color.set(objectHeight > 0.11 ? 0x8b3b32 : 0xa34d3d);
+        color.multiplyScalar(0.90 + fineNoise * 0.12);
+      }
+      const pixelY = G - gy - 1;
+      const idx = (pixelY * G + gx) * 4;
+      image.data[idx + 0] = Math.round(color.r * 255);
+      image.data[idx + 1] = Math.round(color.g * 255);
+      image.data[idx + 2] = Math.round(color.b * 255);
+      image.data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  const terrainMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ map: texture }),
+  );
+  terrainMesh.position.z = -0.45;
+  state.terrainGroup.add(terrainMesh);
+}
+
+function resetBurnedOverlay(state, meta) {
+  clearGroup(state.burnedGroup);
+  const G = meta.fire_grid_size;
+  const canvas = document.createElement('canvas');
+  canvas.width = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, G, G);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.62 }),
+  );
+  mesh.position.z = -0.38;
+  state.burnedGroup.add(mesh);
+  state.burnedCanvas = canvas;
+  state.burnedCtx = ctx;
+  state.burnedTexture = texture;
+  state.burnedStep = -1;
+  state.burnedSource = meta.terrain;
+}
+
+function paintBurnedCells(state, meta, cells) {
+  if (!cells?.length) return;
+  const G = meta.fire_grid_size;
+  state.burnedCtx.fillStyle = 'rgba(43, 33, 27, 0.72)';
+  for (const [gx, gy] of cells) {
+    state.burnedCtx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.burnedTexture.needsUpdate = true;
+}
+
+function syncBurnedOverlay(state, meta, frame, frames) {
+  if (state.burnedSource !== meta.terrain || !state.burnedCanvas) {
+    resetBurnedOverlay(state, meta);
+  }
+  if (frame.step <= state.burnedStep) {
+    resetBurnedOverlay(state, meta);
+  }
+  const start = Math.max(0, state.burnedStep + 1);
+  for (let i = start; i <= frame.step && i < frames.length; i++) {
+    paintBurnedCells(state, meta, frames[i].burned_cells_added);
+  }
+  state.burnedStep = frame.step;
+}
+
+function resetActiveFireOverlay(state, meta) {
+  clearGroup(state.fireGroup);
+  const G = meta.fire_grid_size;
+  const scale = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = G * scale;
+  canvas.height = G * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    }),
+  );
+  mesh.position.z = -0.30;
+  mesh.userData.isFireOverlay = true;
+  mesh.userData.baseOp = 0.92;
+  state.fireGroup.add(mesh);
+  state.fireCanvas = canvas;
+  state.fireCtx = ctx;
+  state.fireTexture = texture;
+  state.fireSource = meta.terrain;
+  state.fireScale = scale;
+}
+
+function syncActiveFireOverlay(state, meta, frame) {
+  if (state.fireSource !== meta.terrain || !state.fireCanvas) {
+    resetActiveFireOverlay(state, meta);
+  }
+  const G = meta.fire_grid_size;
+  const s = state.fireScale;
+  const ctx = state.fireCtx;
+  ctx.clearRect(0, 0, state.fireCanvas.width, state.fireCanvas.height);
+  for (const cell of frame.fire_cells ?? []) {
+    const [gx, gy, rawIntensity = 1] = cell;
+    // Per-cell spatial noise (stable hash of position) breaks visual uniformity
+    // so neighbouring cells don't all pulse identically.
+    const noise = Math.abs(Math.sin(gx * 127.1 + gy * 311.7) * 43758.5453 % 1);
+    const cellVar = 0.78 + 0.22 * noise;   // 0.78 – 1.00 per cell
+    const intensity = Math.max(0.2, Math.min(1.0, rawIntensity * cellVar));
+    const x = gx * s;
+    const y = (G - gy - 1) * s;
+    ctx.fillStyle = `rgba(121, 24, 7, ${0.38 + 0.24 * intensity})`;
+    ctx.fillRect(x, y, s, s);
+    ctx.fillStyle = `rgba(232, 90, 24, ${0.60 + 0.32 * intensity})`;
+    ctx.fillRect(x, y, s, s);
+    ctx.fillStyle = `rgba(255, 221, 94, ${0.45 + 0.47 * intensity})`;
+    const core = Math.max(1, Math.ceil(s * (0.35 + 0.35 * intensity)));
+    ctx.fillRect(x + s - core, y, core, core);
+  }
+  state.fireTexture.needsUpdate = true;
+}
+
+function resetSmokeOverlay(state, meta) {
+  clearGroup(state.smokeGroup);
+  const G = meta.fire_grid_size;
+  const canvas = document.createElement('canvas');
+  canvas.width = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, G, G);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.78,
+      depthWrite: false,
+    }),
+  );
+  mesh.position.z = -0.10;
+  mesh.userData.isSmokeOverlay = true;
+  mesh.userData.baseOp = 0.78;
+  state.smokeGroup.add(mesh);
+  state.smokeCanvas = canvas;
+  state.smokeCtx = ctx;
+  state.smokeTexture = texture;
+  state.smokeSource = meta.terrain;
+}
+
+function syncSmokeOverlay(state, meta, frame) {
+  if (state.smokeSource !== meta.terrain || !state.smokeCanvas) {
+    resetSmokeOverlay(state, meta);
+  }
+  const G = meta.fire_grid_size;
+  const ctx = state.smokeCtx;
+  ctx.clearRect(0, 0, G, G);
+  for (const [gx, gy, intensity] of frame.smoke_cells ?? []) {
+    const alpha = Math.min(0.50, 0.05 + intensity * 0.42);
+    ctx.fillStyle = `rgba(203, 213, 225, ${alpha})`;
+    ctx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.smokeTexture.needsUpdate = true;
+}
+
+function renderFrame(state, frame, meta, histories, frames, showPerception) {
+  const { fireGroup, smokeGroup, agentGroup, survGroup, trailGroup, perceptionGroup } = state;
+  if (state.terrainSource !== meta.terrain) {
+    renderTerrain(state, meta);
+    state.terrainSource = meta.terrain;
+  }
+  syncBurnedOverlay(state, meta, frame, frames);
+  syncActiveFireOverlay(state, meta, frame);
+  syncSmokeOverlay(state, meta, frame);
+  clearGroup(agentGroup);
+  clearGroup(survGroup);
+  clearGroup(trailGroup);
+  clearGroup(perceptionGroup);
+
+  const agentRadius = meta.agent_radius ?? 0.04;
+  const survivorRadius = meta.survivor_radius ?? 0.03;
+
+  // --- Survivors (shoulders + head + state ring) ---
+  for (const s of frame.survivors) {
+    const mesh = makeSurvivorMesh(s, survivorRadius);
+    mesh.position.set(s.x, s.y, -0.05);
+    survGroup.add(mesh);
+  }
+
+  // --- Agent trails (last 25 positions, semi-transparent) ---
+  const TRAIL_LEN = 25;
+  for (const a of frame.agents) {
+    const hist = (histories[a.name] || []).slice(
+      Math.max(0, frame.step - TRAIL_LEN), frame.step + 1,
+    );
+    if (hist.length < 2) continue;
+    const positions = new Float32Array(hist.length * 3);
+    for (let i = 0; i < hist.length; i++) {
+      positions[i * 3 + 0] = hist[i][0];
+      positions[i * 3 + 1] = hist[i][1];
+      positions[i * 3 + 2] = -0.04;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: a.type === 'drone' ? COLORS.drone : COLORS.ground,
+      transparent: true, opacity: 0.55,
+    });
+    trailGroup.add(new THREE.Line(geom, mat));
+  }
+
+  // --- Agents (compound quadcopters / rovers) ---
+  const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
+  for (const a of frame.agents) {
+    const altitudeAgl = a.altitude_agl ?? a.altitude ?? 0;
+    const mesh = a.type === 'drone'
+      ? makeDroneMesh(agentRadius, altitudeAgl, maxAltitude)
+      : makeGroundMesh(agentRadius);
+    mesh.position.set(a.x, a.y, 0.05);
+    // Heading: rotate ground robots to face their direction of travel,
+    // based on the previous-step velocity from history.
+    if (a.type === 'ground' && histories[a.name]) {
+      const idx = frame.step;
+      const hist = histories[a.name];
+      if (idx > 0 && idx < hist.length) {
+        const [px, py] = hist[idx - 1];
+        const dx = a.x - px, dy = a.y - py;
+        if (Math.abs(dx) + Math.abs(dy) > 1e-4) {
+          mesh.rotation.z = Math.atan2(dy, dx);
+        }
+      }
+    }
+    agentGroup.add(mesh);
+
+    // Comms indicator dot — only shown when comms_dropout > 0 in the trajectory.
+    if (a.comms_up !== undefined) {
+      const dot = makeCommsIndicator(a.comms_up);
+      dot.position.set(a.x + agentRadius * 1.2, a.y + agentRadius * 1.2, 0.12);
+      agentGroup.add(dot);
+    }
+  }
+
+  if (showPerception) {
+    renderPerceptionOverlay(state, frame);
+  }
+}
+
+// Animate per-RAF: propeller spin, layered fire flicker, scouted-survivor pulse.
+function tickAnimation(state, t) {
+  state.agentGroup.traverse(obj => {
+    if (obj.userData?.isProp) {
+      obj.rotation.z = t * 18 + (obj.userData.phase || 0);
+    }
+  });
+  state.fireGroup.traverse(obj => {
+    if (obj.userData?.isFireOverlay) {
+      const baseOp = obj.userData.baseOp || 0.92;
+      obj.material.opacity = Math.max(0.45, baseOp * (0.90 + 0.10 * Math.sin(t * 8)));
+    } else if (obj.userData?.isFireLayer) {
+      const phase  = obj.userData.phase  || 0;
+      const baseOp = obj.userData.baseOp || 0.7;
+      const wobble = obj.userData.wobble || 0.1;
+      // Opacity flicker
+      obj.material.opacity = Math.max(0.05, baseOp * (0.7 + 0.3 * Math.sin(t * 8 + phase)));
+      // Scale wobble (more on the outer layers, less on the hot core)
+      const s = 1 + wobble * Math.sin(t * 11 + phase * 1.7);
+      obj.scale.set(s, s, 1);
+    }
+  });
+  state.smokeGroup.traverse(obj => {
+    if (obj.userData?.isSmokeOverlay) {
+      const baseOp = obj.userData.baseOp || 0.78;
+      obj.material.opacity = Math.max(0.45, baseOp * (0.92 + 0.08 * Math.sin(t * 2.5)));
+    } else if (obj.userData?.isSmoke) {
+      const phase = obj.userData.phase || 0;
+      const baseOp = obj.userData.baseOp || 0.2;
+      obj.material.opacity = Math.max(0.04, baseOp * (0.85 + 0.15 * Math.sin(t * 2.5 + phase)));
+    }
+  });
+  state.agentGroup.traverse(obj => {
+    if (obj.userData?.isCommsIndicator && !obj.userData.commsUp) {
+      // Pulse red dot when comms are dropped to draw attention.
+      const s = 1 + 0.35 * Math.sin(t * 10);
+      obj.scale.set(s, s, 1);
+      obj.material.opacity = 0.55 + 0.45 * Math.abs(Math.sin(t * 10));
+    }
+  });
+  state.survGroup.traverse(obj => {
+    if (obj.userData?.isPulse) {
+      const s = 1 + 0.1 * Math.sin(t * 6);
+      obj.scale.set(s, s, 1);
+    }
+  });
+}
+
+// Build per-agent position history from all frames (run once when data loads)
+function buildHistories(frames) {
+  const out = {};
+  for (const f of frames) {
+    for (const a of f.agents) {
+      if (!out[a.name]) out[a.name] = [];
+      out[a.name].push([a.x, a.y]);
+    }
+  }
+  return out;
+}
+
+function useThree(meta, frame, histories, frames, showPerception) {
+  const canvasRef = useRef(null);
+  const stateRef = useRef(null);
+
+  // Initial setup (once)
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const { renderer, scene, camera } = setupScene(canvas, rect.width, rect.height);
+
+    const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
+    const burnedGroup = new THREE.Group(); scene.add(burnedGroup);
+    const fireGroup  = new THREE.Group();  scene.add(fireGroup);
+    const smokeGroup = new THREE.Group();  scene.add(smokeGroup);
+    const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
+    const trailGroup = new THREE.Group();  scene.add(trailGroup);
+    const perceptionGroup = new THREE.Group(); scene.add(perceptionGroup);
+    const survGroup  = new THREE.Group();  scene.add(survGroup);
+    const agentGroup = new THREE.Group();  scene.add(agentGroup);
+
+    stateRef.current = {
+      renderer, scene, camera, terrainGroup, burnedGroup, fireGroup, smokeGroup, obstacleGroup,
+      trailGroup, perceptionGroup, agentGroup, survGroup,
+      terrainSource: null, burnedSource: null, burnedStep: -1,
+    };
+
+    let raf;
+    const t0 = performance.now();
+    const tick = () => {
+      const t = (performance.now() - t0) / 1000;
+      if (stateRef.current) tickAnimation(stateRef.current, t);
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+
+    const onResize = () => {
+      const r = canvas.parentElement.getBoundingClientRect();
+      renderer.setSize(r.width, r.height, false);
+      fitCameraToWorld(camera, r.width, r.height);
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
+      renderer.dispose();
+    };
+  }, []);
+
+  // Render frame whenever frame or meta changes
+  useEffect(() => {
+    if (!stateRef.current || !frame || !meta || !histories) return;
+    renderFrame(stateRef.current, frame, meta, histories, frames, showPerception);
+  }, [meta, frame, histories, frames, showPerception]);
+
+  return canvasRef;
+}
+
+// ---------------------------------------------------------------------
+// Playback hook
+// ---------------------------------------------------------------------
+function usePlayback(nFrames) {
+  const [step, setStep] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  const [speed, setSpeed] = useState(1);   // frames per tick (10 ticks/sec)
+
+  useEffect(() => {
+    if (!playing) return;
+    const id = setInterval(() => {
+      setStep(s => {
+        const next = s + speed;
+        if (next >= nFrames) { setPlaying(false); return nFrames - 1; }
+        return next;
+      });
+    }, 100);
+    return () => clearInterval(id);
+  }, [playing, speed, nFrames]);
+
+  return { step, setStep, playing, setPlaying, speed, setSpeed };
+}
+
+// ---------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------
+function Legend() {
+  // [shape, color, label]
+  const items = [
+    ['tri',    '#4a90ff', 'Drone'],
+    ['square', '#14b8a6', 'Ground robot'],
+    ['circle', '#88ff88', 'Comms up'],
+    ['circle', '#ff4444', 'Comms dropped'],
+    ['circle', '#60a5fa', 'Drone camera footprint'],
+    ['gradient', '#fbbf24:#22c55e', 'Detection link (amber=low → green=high)'],
+    ['circle', '#ff3838', 'Survivor (unscouted)'],
+    ['circle', '#fbbf24', 'Survivor (scouted)'],
+    ['circle', '#84cc16', 'Survivor (confirmed)'],
+    ['square', '#b59665', 'Access road'],
+    ['square', '#315a2e', 'Brush'],
+    ['square', '#203d24', 'Forest'],
+    ['square', '#555963', 'Rock / blocked'],
+    ['square', '#2563eb', 'Water / ocean'],
+    ['circle', '#1d5128', 'Tree canopy'],
+    ['square', '#a34d3d', 'House'],
+    ['square', '#2b211b', 'Burned / post-fire'],
+    ['square', '#f06e1e', 'Fire'],
+  ];
+  return h('div', { id: 'legend' },
+    items.map(([shape, c, label]) => {
+      let swatchStyle;
+      if (shape === 'tri') {
+        swatchStyle = { background: 'transparent', '--swatch-color': c };
+      } else if (shape === 'gradient') {
+        const [from, to] = c.split(':');
+        swatchStyle = { background: `linear-gradient(to right, ${from}, ${to})`, borderRadius: '2px' };
+      } else {
+        swatchStyle = { background: c, '--swatch-color': c };
+      }
+      const cls = shape === 'gradient' ? 'swatch square' : `swatch ${shape}`;
+      return h('div', { key: label, className: 'item' },
+        h('span', { className: cls, style: swatchStyle }),
+        label,
+      );
+    }),
+  );
+}
+
+function MetricsPanel({ meta, frame }) {
+  const m = meta?.metrics ?? {};
+  const landCover = meta?.terrain?.land_cover ?? [];
+  const waterCells = landCover.reduce(
+    (total, row) => total + row.reduce((n, cover) => n + (cover === 5 ? 1 : 0), 0),
+    0,
+  );
+  const totalTerrainCells = landCover.reduce((total, row) => total + row.length, 0);
+  const waterPct = totalTerrainCells > 0 ? (100 * waterCells / totalTerrainCells).toFixed(1) : '0.0';
+  const fmt = (v, suffix='') => {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(2) : v) + suffix;
+  };
+  const rows = [
+    ['Survivor recall',      fmt(m.survivor_recall)],
+    ['Time-to-verification', fmt(m.time_to_verification, ' steps')],
+    ['False-positive trips', fmt(m.false_positive_trips)],
+    ['Hazard exposure',      fmt(m.hazard_exposure, ' steps')],
+    ['UGV travel cost',      fmt(m.ugv_travel_cost)],
+    ['Episode length',       fmt(m.n_steps, ' steps')],
+  ];
+  const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
+  const perception = frame?.drone_perception ?? [];
+  const perceptionRows = perception.map(d => {
+    const visible = (d.survivors ?? []).filter(s => s.visible);
+    const best = visible.reduce((m, s) => Math.max(m, s.probability ?? 0), 0);
+    return {
+      name: d.name,
+      footprint: d.footprint ?? 0,
+      visible: visible.length,
+      best,
+    };
+  });
+  return h('aside', null,
+    h('div', { className: 'panel' },
+      h('h2', null, 'Strategy'),
+      h('div', { style: { fontSize: 20, fontWeight: 600, marginBottom: 4 } },
+        meta?.strategy ?? '—'),
+      h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
+        `seed ${meta?.seed ?? '—'} · ${meta?.n_drones} drones + ${meta?.n_ground} ground · ${meta?.n_survivors} survivors`),
+      h('div', { style: { color: 'var(--muted)', fontSize: 12, marginTop: 6 } },
+        `viewer ${APP_VERSION} · water cells ${waterCells} (${waterPct}%)`),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Legend'),
+      h(Legend),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Mission metrics (final)'),
+      rows.map(([k, v]) => h('div', { key: k, className: 'metric' },
+        h('span', { className: 'k' }, k),
+        h('span', { className: 'v' }, v),
+      )),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Drone flight altitude'),
+      drones.map(a => h('div', { key: a.name, className: 'metric' },
+        h('span', { className: 'k' }, a.name),
+        h('span', { className: 'v' }, `${fmt(a.altitude_agl ?? a.altitude)} AGL / ${fmt(a.altitude_msl ?? a.altitude)} MSL`),
+      )),
+    ),
+    perceptionRows.length > 0 && h('div', { className: 'panel' },
+      h('h2', null, 'Drone perception'),
+      perceptionRows.map(row => h('div', { key: row.name, className: 'metric' },
+        h('span', { className: 'k' }, `${row.name} · r ${fmt(row.footprint)}`),
+        h('span', { className: 'v' }, `${row.visible} seen · p ${row.best.toFixed(2)}`),
+      )),
+    ),
+  );
+}
+
+function App() {
+  const [strategy, setStrategy] = useState(STRATEGY_NAMES[2]); // nearest_candidate
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [showPerception, setShowPerception] = useState(true);
+
+  useEffect(() => {
+    setData(null); setError(null);
+    loadTrajectory(strategy)
+      .then(setData)
+      .catch(e => setError(e.message));
+  }, [strategy]);
+
+  const meta = data?.metadata;
+  const runLabel = meta
+    ? `Loaded: seed ${meta.seed} · ${meta.actual_n_steps ?? meta.n_steps} steps · ${meta.fire_grid_size}x${meta.fire_grid_size}`
+    : 'No trajectory loaded yet';
+  const frames = data?.frames ?? [];
+  const histories = useMemo(() => buildHistories(frames), [data]);
+  const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
+
+  // Reset playback whenever the user switches strategy (or trajectory reloads).
+  useEffect(() => {
+    setStep(0);
+    setPlaying(true);
+  }, [strategy]);
+
+  // Play button: if we're parked at the end, rewind first.
+  const onPlay = () => {
+    if (step >= frames.length - 1) {
+      setStep(0);
+      setPlaying(true);
+    } else {
+      setPlaying(p => !p);
+    }
+  };
+
+  const frame = frames[step] ?? null;
+  const canvasRef = useThree(meta, frame, histories, frames, showPerception);
+
+  return h(React.Fragment, null,
+    h('header', null,
+      h('h1', null, 'OmniSearch · Strategy Viewer'),
+      h('div', { className: 'meta' }, runLabel),
+      h('div', { className: 'meta' }, APP_VERSION),
+      h('div', { style: { flex: 1 } }),
+      h('label', null,
+        'Strategy: ',
+        h('select', {
+          value: strategy,
+          onChange: e => setStrategy(e.target.value),
+        }, STRATEGY_NAMES.map(n => h('option', { key: n, value: n }, n))),
+      ),
+      h('a', { className: 'view3d', href: './index.html' }, '3D Viewer →'),
+    ),
+    h('main', null,
+      h('div', { id: 'scene-wrap' },
+        h('canvas', { id: 'scene', ref: canvasRef }),
+        error && h('div', {
+          style: {
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            color: 'var(--danger)', fontFamily: 'monospace', padding: 30,
+          },
+        }, error, h('br'), h('br'),
+          h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
+            strategy === 'happo_trained'
+              ? 'Run `python scripts/train_happo_smoke.py` then `python scripts/export_trajectories.py` first.'
+              : 'Run `python scripts/export_trajectories.py` first.'),
+        ),
+      ),
+      h(MetricsPanel, { meta, frame }),
+    ),
+    h('footer', null,
+      h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
+      h('button', { onClick: onPlay }, playing ? 'Pause' : (step >= frames.length - 1 ? 'Replay' : 'Play')),
+      h('input', {
+        type: 'range', min: 0, max: Math.max(0, frames.length - 1),
+        value: step, onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
+      }),
+      h('div', { className: 'step' }, `step ${step} / ${Math.max(0, frames.length - 1)}`),
+      h('label', { className: 'toggle' },
+        h('input', {
+          type: 'checkbox',
+          checked: showPerception,
+          onChange: e => setShowPerception(e.target.checked),
+        }),
+        'perception',
+      ),
+      h('div', { className: 'speed' },
+        'speed: ',
+        h('select', {
+          value: speed, onChange: e => setSpeed(Number(e.target.value)),
+        }, [1, 2, 4, 8].map(s => h('option', { key: s, value: s }, `${s}×`))),
+      ),
+    ),
+  );
+}
+
+createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>

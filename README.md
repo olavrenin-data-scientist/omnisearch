@@ -255,7 +255,8 @@ omnisearch/
 ├── notebooks/                     # See notebooks/README.md
 ├── results/                       # Training artifacts (gitignored)
 └── web/                           # React + Three.js strategy viewer
-    ├── index.html
+    ├── index.html                 # 3D viewer (default)
+    ├── index2d.html               # 2D viewer
     └── README.md
 ```
 
