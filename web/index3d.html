@@ -103,12 +103,20 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
 const APP_VERSION = '3d-viewer-v1';
 const HEIGHT_SCALE = 3.0;
+const DRONE_MODEL_VISUAL_SCALE = 3.0;
+const GROUND_MODEL_VISUAL_SCALE = 1.8;
+const SURVIVOR_MODEL_VISUAL_SCALE = 3.8;
+const CRAZYFLIE_MODEL_URL = './assets/crazyflie.glb';
+const SPOT_MINI_MODEL_URL = './assets/spot_mini.glb';
+const HUMAN_MODEL_URL = './assets/human_1a.glb';
 
 // ---------------------------------------------------------------------
 // Constants (shared with 2D viewer palette)
@@ -440,6 +448,7 @@ function syncBurnedOverlay3D(state, meta, frame, frames) {
 const COLORS = {
   drone:               0x4a90ff,
   drone_dark:          0x1a3a8a,
+  drone_marker:        0xbfd7ff,
   ground:              0x14b8a6,
   ground_dark:         0x0f4f48,
   wheel:               0x1a1f2e,
@@ -452,10 +461,16 @@ const COLORS = {
 function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
   const g = new THREE.Group();
   const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
+  const markerBacking = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 1.72, 32),
+    new THREE.MeshBasicMaterial({ color: 0x071018, transparent: true, opacity: 0.42 }),
+  );
+  markerBacking.position.z = -0.018;
+  g.add(markerBacking);
   const halo = new THREE.Mesh(
-    new THREE.RingGeometry(radius * 1.35, radius * 1.55, 28),
+    new THREE.RingGeometry(radius * 1.34, radius * 1.78, 32),
     new THREE.MeshBasicMaterial({
-      color: COLORS.drone, transparent: true, opacity: 0.18 + altitudeScale * 0.45,
+      color: COLORS.drone_marker, transparent: true, opacity: 0.54 + altitudeScale * 0.32,
     }),
   );
   halo.position.z = -0.01;
@@ -484,6 +499,188 @@ function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
     g.add(prop);
   }
   g.scale.setScalar(1 + altitudeScale * 0.25);
+  return g;
+}
+
+function prepareCrazyflieTemplate(gltf) {
+  const model = gltf.scene;
+  // glTF assets are Y-up; this viewer uses Z as terrain/elevation up.
+  model.rotation.x = Math.PI / 2;
+  model.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(model);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  model.position.x -= center.x;
+  model.position.y -= center.y;
+  model.position.z -= box.min.z;
+  model.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    }
+    if ((obj.name || '').toLowerCase().includes('propeller')) {
+      obj.userData.isProp = true;
+      obj.userData.phase = Math.random() * Math.PI;
+      obj.userData.baseRotation = [obj.rotation.x, obj.rotation.y, obj.rotation.z];
+    }
+  });
+
+  const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
+  return { model, normalizedSize };
+}
+
+function loadCrazyflieTemplate() {
+  const loader = new GLTFLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(CRAZYFLIE_MODEL_URL, gltf => resolve(prepareCrazyflieTemplate(gltf)), undefined, reject);
+  });
+}
+
+function prepareSpotMiniTemplate(gltf) {
+  const source = gltf.scene;
+  // glTF assets are Y-up; this viewer uses Z as terrain/elevation up.
+  source.rotation.x = Math.PI / 2;
+  source.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(source);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  source.position.x -= center.x;
+  source.position.y -= center.y;
+  source.position.z -= box.min.z;
+  source.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+      if (obj.material) {
+        obj.material.side = THREE.DoubleSide;
+        if (obj.material.emissive) {
+          obj.material.emissive.set(0x10100a);
+          obj.material.emissiveIntensity = 0.08;
+        }
+        obj.material.needsUpdate = true;
+      }
+    }
+  });
+
+  const model = new THREE.Group();
+  model.add(source);
+  const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
+  return { model, normalizedSize };
+}
+
+function loadSpotMiniTemplate() {
+  const loader = new GLTFLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(SPOT_MINI_MODEL_URL, gltf => resolve(prepareSpotMiniTemplate(gltf)), undefined, reject);
+  });
+}
+
+function prepareHumanTemplate(gltf) {
+  const source = gltf.scene;
+  // Sketchfab/glTF assets are Y-up in Three; align with the viewer's Z-up terrain.
+  source.rotation.x = Math.PI / 2;
+  source.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(source);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  source.position.x -= center.x;
+  source.position.y -= center.y;
+  source.position.z -= box.min.z;
+  source.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+      if (obj.material) {
+        obj.material.side = THREE.DoubleSide;
+        obj.material.needsUpdate = true;
+      }
+    }
+  });
+
+  const model = new THREE.Group();
+  model.add(source);
+  const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
+  return { model, normalizedSize };
+}
+
+function loadHumanTemplate() {
+  const loader = new GLTFLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(HUMAN_MODEL_URL, gltf => resolve(prepareHumanTemplate(gltf)), undefined, reject);
+  });
+}
+
+function makeCrazyflieDroneMesh(state, radius = 0.04, altitude = 0, maxAltitude = 1, heading = 0) {
+  if (!state.droneModelTemplate) return null;
+
+  const g = new THREE.Group();
+  const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
+  const markerBacking = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 1.72, 32),
+    new THREE.MeshBasicMaterial({ color: 0x071018, transparent: true, opacity: 0.42 }),
+  );
+  markerBacking.position.z = -0.018;
+  g.add(markerBacking);
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.34, radius * 1.78, 32),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.drone_marker, transparent: true, opacity: 0.52 + altitudeScale * 0.30,
+    }),
+  );
+  halo.position.z = -0.012;
+  g.add(halo);
+
+  const model = state.droneModelTemplate.clone(true);
+  const targetSpan = radius * DRONE_MODEL_VISUAL_SCALE * (1 + altitudeScale * 0.12);
+  const scale = targetSpan / (state.droneModelSize || 1);
+  model.scale.setScalar(scale);
+  model.rotation.z = heading - Math.PI / 2;
+  model.position.z = radius * 0.12;
+  g.add(model);
+
+  g.userData.keepWorldOrientation = true;
+  return g;
+}
+
+function makeSpotMiniGroundMesh(state, radius = 0.04, heading = 0) {
+  if (!state.groundModelTemplate) return null;
+
+  const g = new THREE.Group();
+  const model = cloneSkeleton(state.groundModelTemplate);
+  const targetSpan = radius * GROUND_MODEL_VISUAL_SCALE;
+  const scale = targetSpan / (state.groundModelSize || 1);
+  model.scale.setScalar(scale);
+  model.rotation.z = heading;
+  model.position.z = radius * 0.02;
+  g.add(model);
+
+  g.userData.keepWorldOrientation = true;
+  return g;
+}
+
+function makeGroundBoxMesh(radius = 0.04, heading = 0) {
+  const g = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0xfacc15,
+    emissive: 0x4a3400,
+    emissiveIntensity: 0.18,
+    metalness: 0.05,
+    roughness: 0.48,
+  });
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(radius * 1.55, radius * 1.05, radius * 0.48),
+    bodyMat,
+  );
+  body.position.z = radius * 0.28;
+  body.rotation.z = heading;
+  body.castShadow = true;
+  body.receiveShadow = true;
+  g.add(body);
+
+  g.userData.keepWorldOrientation = true;
   return g;
 }
 
@@ -526,7 +723,39 @@ function makeCommsIndicator(commsUp) {
   return mesh;
 }
 
-function makeSurvivorMesh(survivorState, radius = 0.03) {
+function addFallbackSurvivorIcon(group, stateColor, radius) {
+  const icon = new THREE.Group();
+  icon.userData.isBillboard = true;
+  const clothingMat = new THREE.MeshBasicMaterial({ color: stateColor });
+  const arms = new THREE.Mesh(
+    new THREE.PlaneGeometry(radius * 1.75, radius * 0.27), clothingMat,
+  );
+  arms.position.set(0, 0.002, 0.002);
+  icon.add(arms);
+  const torso = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.47, 24), clothingMat,
+  );
+  torso.scale.set(1.0, 1.8, 1);
+  torso.position.z = 0.005;
+  icon.add(torso);
+  const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
+  for (const dx of [-1, 1]) {
+    const leg = new THREE.Mesh(
+      new THREE.PlaneGeometry(radius * 0.27, radius * 0.53), legMat,
+    );
+    leg.position.set(dx * radius * 0.27, -radius * 0.73, 0.003);
+    icon.add(leg);
+  }
+  const head = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.40, 24),
+    new THREE.MeshBasicMaterial({ color: COLORS.skin }),
+  );
+  head.position.set(0, radius * 0.67, 0.012);
+  icon.add(head);
+  group.add(icon);
+}
+
+function makeSurvivorMesh(state, survivorState, radius = 0.03) {
   const stateColor = survivorState.found
     ? COLORS.survivor_confirmed
     : survivorState.scouted
@@ -537,34 +766,21 @@ function makeSurvivorMesh(survivorState, radius = 0.03) {
     new THREE.RingGeometry(radius * 1.45, radius * 1.75, 28),
     new THREE.MeshBasicMaterial({ color: stateColor }),
   );
-  ring.position.z = -0.02;
+  ring.position.z = radius * 0.08;
+  ring.userData.isBillboard = true;
   g.add(ring);
-  const clothingMat = new THREE.MeshBasicMaterial({ color: stateColor });
-  const arms = new THREE.Mesh(
-    new THREE.PlaneGeometry(radius * 1.75, radius * 0.27), clothingMat,
-  );
-  arms.position.set(0, 0.002, 0.002);
-  g.add(arms);
-  const torso = new THREE.Mesh(
-    new THREE.CircleGeometry(radius * 0.47, 24), clothingMat,
-  );
-  torso.scale.set(1.0, 1.8, 1);
-  torso.position.z = 0.005;
-  g.add(torso);
-  const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
-  for (const dx of [-1, 1]) {
-    const leg = new THREE.Mesh(
-      new THREE.PlaneGeometry(radius * 0.27, radius * 0.53), legMat,
-    );
-    leg.position.set(dx * radius * 0.27, -radius * 0.73, 0.003);
-    g.add(leg);
+
+  if (state.survivorModelTemplate) {
+    const model = cloneSkeleton(state.survivorModelTemplate);
+    const targetSpan = radius * SURVIVOR_MODEL_VISUAL_SCALE;
+    const scale = targetSpan / (state.survivorModelSize || 1);
+    model.scale.setScalar(scale);
+    model.position.z = radius * 0.02;
+    g.add(model);
+  } else {
+    addFallbackSurvivorIcon(g, stateColor, radius);
   }
-  const head = new THREE.Mesh(
-    new THREE.CircleGeometry(radius * 0.40, 24),
-    new THREE.MeshBasicMaterial({ color: COLORS.skin }),
-  );
-  head.position.set(0, radius * 0.67, 0.012);
-  g.add(head);
+
   if (survivorState.scouted && !survivorState.found) {
     ring.userData.isPulse = true;
   }
@@ -578,9 +794,8 @@ function renderSurvivors3D(state, meta, frame) {
   const survivorRadius = meta.survivor_radius ?? 0.03;
   for (const s of (frame.survivors ?? [])) {
     const tz   = terrainElevAt(s.x, s.y, state.elevGrid, G);
-    const mesh = makeSurvivorMesh(s, survivorRadius);
+    const mesh = makeSurvivorMesh(state, s, survivorRadius);
     mesh.position.set(s.x, s.y, tz + 0.006);
-    mesh.userData.isBillboard = true;
     state.survGroup.add(mesh);
   }
 }
@@ -609,6 +824,18 @@ function buildHistories3D(frames) {
 // ---------------------------------------------------------------------
 const TRAIL_LEN = 30;
 const GROUND_SUBDIVISIONS = 6; // terrain samples per recorded segment for ground trails
+
+function headingFromHistory(xyHist, step, fallbackX, fallbackY) {
+  const current = xyHist[Math.min(step, xyHist.length - 1)] ?? [fallbackX, fallbackY];
+  for (let i = Math.min(step - 1, xyHist.length - 2); i >= 0; i--) {
+    const prev = xyHist[i];
+    if (!prev) continue;
+    const dx = current[0] - prev[0];
+    const dy = current[1] - prev[1];
+    if (Math.hypot(dx, dy) > 1e-4) return Math.atan2(dy, dx);
+  }
+  return 0;
+}
 
 function renderAgents3D(state, meta, frame, histories) {
   clearGroup(state.agentGroup);
@@ -682,11 +909,17 @@ function renderAgents3D(state, meta, frame, histories) {
       })));
     }
 
-    const mesh = a.type === 'drone'
-      ? makeDroneMesh(agentRadius, altAgl, maxAltitude)
-      : makeGroundMesh(agentRadius);
+    let mesh;
+    if (a.type === 'drone') {
+      const heading = headingFromHistory(histories.xy[a.name] ?? [], frame.step, a.x, a.y);
+      mesh = makeCrazyflieDroneMesh(state, agentRadius, altAgl, maxAltitude, heading)
+        ?? makeDroneMesh(agentRadius, altAgl, maxAltitude);
+    } else {
+      const heading = headingFromHistory(histories.xy[a.name] ?? [], frame.step, a.x, a.y);
+      mesh = makeSpotMiniGroundMesh(state, agentRadius, heading) ?? makeGroundBoxMesh(agentRadius, heading);
+    }
     mesh.position.set(a.x, a.y, az);
-    mesh.userData.isBillboard = true;
+    if (!mesh.userData.keepWorldOrientation) mesh.userData.isBillboard = true;
     state.agentGroup.add(mesh);
 
     if (a.comms_up !== undefined) {
@@ -976,6 +1209,7 @@ function MetricsPanel({ meta, frame }) {
 function useThree3D(meta, frame, frames, histories) {
   const canvasRef = useRef(null);
   const stateRef  = useRef(null);
+  const [agentAssetTick, setAgentAssetTick] = useState(0);
 
   // Initial setup (once)
   useEffect(() => {
@@ -1001,8 +1235,49 @@ function useThree3D(meta, frame, frames, histories) {
       terrainGroup, obstacleGroup, burnedGroup, fireGroup, smokeGroup,
       trailGroup, survGroup, agentGroup,
       placeholder,
+      droneModelTemplate: null, droneModelSize: 1, droneModelError: null,
+      groundModelTemplate: null, groundModelSize: 1, groundModelError: null,
+      survivorModelTemplate: null, survivorModelSize: 1, survivorModelError: null,
       terrainSource: null, burnedStep: -1, burnedSource: null,
     };
+
+    let alive = true;
+    loadCrazyflieTemplate()
+      .then(({ model, normalizedSize }) => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.droneModelTemplate = model;
+        stateRef.current.droneModelSize = normalizedSize;
+        setAgentAssetTick(tick => tick + 1);
+      })
+      .catch(err => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.droneModelError = err;
+        console.warn('Could not load Crazyflie model; using procedural drone marker.', err);
+      });
+    loadSpotMiniTemplate()
+      .then(({ model, normalizedSize }) => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.groundModelTemplate = model;
+        stateRef.current.groundModelSize = normalizedSize;
+        setAgentAssetTick(tick => tick + 1);
+      })
+      .catch(err => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.groundModelError = err;
+        console.warn('Could not load Spot Mini model; using yellow UGV box.', err);
+      });
+    loadHumanTemplate()
+      .then(({ model, normalizedSize }) => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.survivorModelTemplate = model;
+        stateRef.current.survivorModelSize = normalizedSize;
+        setAgentAssetTick(tick => tick + 1);
+      })
+      .catch(err => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.survivorModelError = err;
+        console.warn('Could not load human survivor model; using procedural survivor marker.', err);
+      });
 
     let raf;
     const t0 = performance.now();
@@ -1028,7 +1303,12 @@ function useThree3D(meta, frame, frames, histories) {
       if (s?.agentGroup) {
         s.agentGroup.traverse(obj => {
           if (obj.userData?.isProp) {
-            obj.rotation.z = t * 18 + (obj.userData.phase || 0);
+            const base = obj.userData.baseRotation;
+            if (base) {
+              obj.rotation.set(base[0], base[1], base[2] + t * 18 + (obj.userData.phase || 0));
+            } else {
+              obj.rotation.z = t * 18 + (obj.userData.phase || 0);
+            }
           }
         });
       }
@@ -1066,6 +1346,7 @@ function useThree3D(meta, frame, frames, histories) {
     window.addEventListener('resize', onResize);
 
     return () => {
+      alive = false;
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
       controls.dispose();
@@ -1136,7 +1417,7 @@ function useThree3D(meta, frame, frames, histories) {
     updateSmoke(state, meta, frame);
     if (histories) renderAgents3D(state, meta, frame, histories);
     renderSurvivors3D(state, meta, frame);
-  }, [meta, frame, frames, histories]);
+  }, [meta, frame, frames, histories, agentAssetTick]);
 
   return { canvasRef, stateRef };
 }
