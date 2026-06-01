@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>OmniSearch — Strategy Viewer</title>
+<title>OmniSearch — 3D Strategy Viewer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta http-equiv="Cache-Control" content="no-store" />
 <style>
@@ -25,18 +25,23 @@
   }
   #root { display: flex; flex-direction: column; height: 100vh; }
   header {
-    display: flex; align-items: center; gap: 24px;
+    display: flex; align-items: center; gap: 16px;
     padding: 14px 22px; border-bottom: 1px solid var(--border);
     background: var(--panel);
   }
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .badge {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+    background: var(--accent); color: #fff;
+    padding: 2px 7px; border-radius: 4px;
+  }
   header .meta { color: var(--muted); font-size: 13px; }
-  header a.view3d {
+  header a.back {
     color: var(--muted); font-size: 13px; text-decoration: none;
     border: 1px solid var(--border); border-radius: 4px;
     padding: 5px 10px;
   }
-  header a.view3d:hover { border-color: var(--accent); color: var(--text); }
+  header a.back:hover { border-color: var(--accent); color: var(--text); }
   header select {
     background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 4px;
@@ -45,32 +50,11 @@
   main { flex: 1; display: flex; min-height: 0; }
   #scene-wrap {
     flex: 1; position: relative; min-width: 0;
-    background: radial-gradient(circle at center, #1c2230 0%, var(--bg) 100%);
+    background: #0a0d14;
   }
   #scene { width: 100%; height: 100%; display: block; }
-  #legend {
-    font-size: 12px; color: var(--muted);
-    columns: 1;
-  }
-  #legend .item {
-    display: flex; align-items: center; gap: 8px;
-    padding: 4px 0; line-height: 1.25;
-  }
-  #legend .swatch {
-    display: inline-block; width: 14px; height: 14px;
-    flex: 0 0 14px;
-  }
-  #legend .swatch.circle { border-radius: 50%; }
-  #legend .swatch.square { border-radius: 2px; }
-  #legend .swatch.tri {
-    width: 0; height: 0;
-    background: transparent !important;
-    border-left:  7px solid transparent;
-    border-right: 7px solid transparent;
-    border-bottom: 12px solid var(--swatch-color);
-  }
   aside {
-    width: 280px; border-left: 1px solid var(--border);
+    width: 260px; border-left: 1px solid var(--border);
     background: var(--panel); padding: 18px 18px 0; overflow-y: auto;
   }
   aside h2 {
@@ -84,6 +68,7 @@
   .metric .k { color: var(--muted); font-size: 13px; }
   .metric .v { font-size: 18px; font-variant-numeric: tabular-nums; }
   .panel { margin-bottom: 22px; }
+  .hint { color: var(--muted); font-size: 11px; margin-top: 10px; line-height: 1.5; }
   footer {
     display: flex; align-items: center; gap: 18px;
     padding: 12px 22px; border-top: 1px solid var(--border);
@@ -97,19 +82,17 @@
   footer button:hover { border-color: var(--accent); }
   footer input[type="range"] { flex: 1; accent-color: var(--accent); }
   footer .step { color: var(--muted); font-size: 13px; min-width: 90px; }
-  footer .speed, footer .toggle { color: var(--muted); font-size: 13px; }
-  footer .toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-  footer input[type="checkbox"] { accent-color: var(--accent); }
+  footer .speed { color: var(--muted); font-size: 13px; }
 </style>
 
-<!-- Import map: use esm.sh CDN so we need no build step -->
 <script type="importmap">
 {
   "imports": {
-    "three":     "https://esm.sh/three@0.171.0",
-    "react":     "https://esm.sh/react@18.3.1",
-    "react-dom": "https://esm.sh/react-dom@18.3.1",
-    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+    "three":              "https://esm.sh/three@0.171.0",
+    "three/addons/":      "https://esm.sh/three@0.171.0/examples/jsm/",
+    "react":              "https://esm.sh/react@18.3.1",
+    "react-dom":          "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client":   "https://esm.sh/react-dom@18.3.1/client"
   }
 }
 </script>
@@ -119,147 +102,389 @@
 
 <script type="module">
 import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
-const APP_VERSION = 'perception-overlay-v1';
+const APP_VERSION = '3d-viewer-v1';
+const HEIGHT_SCALE = 3.0;
+const DRONE_MODEL_VISUAL_SCALE = 3.0;
+const GROUND_MODEL_VISUAL_SCALE = 1.8;
+const SURVIVOR_MODEL_VISUAL_SCALE = 3.8;
+const CRAZYFLIE_MODEL_URL = './assets/crazyflie.glb';
+const SPOT_MINI_MODEL_URL = './assets/spot_mini.glb';
+const HUMAN_MODEL_URL = './assets/human_1a.glb';
 
 // ---------------------------------------------------------------------
-// Trajectory discovery — list strategies by sniffing trajectories/index.json
-// or by trying a known list. We keep it simple: try a known list, fall
-// back to silent skip per missing file.
+// Constants (shared with 2D viewer palette)
 // ---------------------------------------------------------------------
-const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'happo_trained'];
-
-async function loadTrajectory(name) {
-  const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`Failed to load ${name}: ${res.status}`);
-  return await res.json();
-}
-
-// ---------------------------------------------------------------------
-// Three.js scene — top-down ortho view of a [-1, 1] x [-1, 1] world
-// ---------------------------------------------------------------------
-function setupScene(canvas, width, height) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(width, height, false);
-  renderer.setClearColor(0x0e1118, 1);
-
-  // Frustum is set immediately by fitCameraToWorld; placeholders here.
-  const camera = new THREE.OrthographicCamera(0, 0, 0, 0, 0.1, 100);
-  camera.position.set(0, 0, 10);
-  camera.lookAt(0, 0, 0);
-  fitCameraToWorld(camera, width, height);
-
-  const scene = new THREE.Scene();
-
-  // Forest backdrop
-  const bg = new THREE.Mesh(
-    new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({ color: 0x284e26 }),
-  );
-  bg.position.z = -0.5;
-  scene.add(bg);
-
-  return { renderer, scene, camera };
-}
-
-function clearGroup(group) {
-  while (group.children.length) {
-    const obj = group.children.pop();
-    if (obj.geometry) obj.geometry.dispose();
-    if (obj.material) {
-      if (obj.material.map) obj.material.map.dispose();
-      obj.material.dispose();
-    }
-  }
-}
-
-// --- Color palette (visually distinct, accessible) ---
-const COLORS = {
-  drone:               0x4a90ff,   // bright blue
-  drone_dark:          0x1a3a8a,   // dark frame
-  ground:              0x14b8a6,   // teal
-  ground_dark:         0x0f4f48,
-  wheel:               0x1a1f2e,
-  skin:                0xf0c896,
-  survivor_unscouted:  0xff3838,   // red
-  survivor_scouted:    0xfbbf24,   // amber
-  survivor_confirmed:  0x84cc16,   // lime
-  survivor_outline:    0xffffff,
-  burned:              0x2b211b,   // post-fire burn scar
-  fire_outer:          0xf06e1e,   // orange
-  fire_inner:          0xfacc15,   // yellow hot core
-  smoke:               0xcbd5e1,   // pale gray-blue
-  water:               0x2563eb,   // ocean / water
-  perception:          0x60a5fa,   // drone camera footprint
-  perception_low:      0xfbbf24,   // low detection probability
-  perception_high:     0x22c55e,   // high detection probability
-};
 const TERRAIN_COLORS = [
   0xb59665,  // road
   0x47783d,  // open
   0x315a2e,  // brush
   0x203d24,  // forest
   0x555963,  // rock
-  COLORS.water,
+  0x2563eb,  // water
 ];
 const OBJECT_NONE = 0, OBJECT_TREE = 1, OBJECT_HOUSE = 2;
-const VIEW_PADDING = 1.15;
 
 function cellNoise(gx, gy, seed = 0) {
   const n = Math.sin(gx * 127.1 + gy * 311.7 + seed * 74.7) * 43758.5453;
   return n - Math.floor(n);
 }
 
-function fitCameraToWorld(camera, width, height) {
-  const aspect = width / height;
-  let halfW = VIEW_PADDING;
-  let halfH = VIEW_PADDING;
-  if (aspect >= 1) {
-    halfW = halfH * aspect;
-  } else {
-    halfH = halfW / aspect;
-  }
-  camera.left = -halfW;
-  camera.right = halfW;
-  camera.top = halfH;
-  camera.bottom = -halfH;
-  camera.updateProjectionMatrix();
+// ---------------------------------------------------------------------
+// Trajectory loading
+// ---------------------------------------------------------------------
+const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'happo_trained'];
+
+async function loadTrajectory(name) {
+  const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Failed to load ${name}: ${res.status}`);
+  return res.json();
 }
 
 // ---------------------------------------------------------------------
-// Entity factories — small Groups composed of primitive meshes so each
-// entity reads as the thing it represents from a top-down view.
-// Animated children are tagged via userData so the RAF loop can update
-// them (propeller spin, fire flicker) without rebuilding geometry.
+// Geometry helpers
 // ---------------------------------------------------------------------
+function clearGroup(group) {
+  while (group.children.length) {
+    const obj = group.children.pop();
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+      else obj.material.dispose();
+    }
+  }
+}
+
+// Bilinear interpolation of elevation at world coords (wx, wy) ∈ [-1,1].
+// Returns the scaled Z value to use for mesh.position.z.
+function terrainElevAt(wx, wy, elevGrid, G) {
+  const u = (wx + 1) / 2 * (G - 1);  // fractional grid column
+  const v = (wy + 1) / 2 * (G - 1);  // fractional grid row (south=0)
+  const gx0 = Math.max(0, Math.min(G - 2, Math.floor(u)));
+  const gy0 = Math.max(0, Math.min(G - 2, Math.floor(v)));
+  const gx1 = gx0 + 1;
+  const gy1 = gy0 + 1;
+  const tx = u - gx0;
+  const ty = v - gy0;
+  const e00 = elevGrid[gy0][gx0];
+  const e10 = elevGrid[gy0][gx1];
+  const e01 = elevGrid[gy1][gx0];
+  const e11 = elevGrid[gy1][gx1];
+  const e = e00 * (1 - tx) * (1 - ty) + e10 * tx * (1 - ty)
+          + e01 * (1 - tx) * ty       + e11 * tx * ty;
+  return e * HEIGHT_SCALE;
+}
+
+// ---------------------------------------------------------------------
+// Terrain mesh — PlaneGeometry with per-vertex elevation displacement
+// and land-cover vertex colours (MeshLambertMaterial for lighting).
+// ---------------------------------------------------------------------
+function buildTerrainMesh(meta) {
+  const terrain = meta?.terrain;
+  if (!terrain?.elevation || !terrain?.land_cover) return null;
+
+  const G = meta.fire_grid_size;
+  const elevGrid  = terrain.elevation;
+  const coverGrid = terrain.land_cover;
+  const slopeGrid = terrain.slope       ?? [];
+  const moistGrid = terrain.moisture    ?? [];
+  const fuelGrid  = terrain.fuel_density ?? [];
+  const rockGrid  = terrain.rockiness   ?? [];
+
+  const geo = new THREE.PlaneGeometry(2, 2, G - 1, G - 1);
+  const pos    = geo.attributes.position;
+  const colors = new Float32Array(G * G * 3);
+
+  for (let i = 0; i < pos.count; i++) {
+    // PlaneGeometry: row 0 = top (+y world), col 0 = left (-x world)
+    const col = i % G;
+    const row = Math.floor(i / G);
+    // Elevation grid: gy=0 = south (-y world), so invert row
+    const gx = col;
+    const gy = (G - 1) - row;
+
+    // --- vertex displacement ---
+    pos.setZ(i, elevGrid[gy][gx] * HEIGHT_SCALE);
+
+    // --- vertex colour (same logic as 2D renderTerrain) ---
+    const cover     = coverGrid[gy]?.[gx] ?? 1;
+    const elevation = elevGrid[gy][gx];
+    const slope     = slopeGrid[gy]?.[gx] ?? 0;
+    const moisture  = moistGrid[gy]?.[gx] ?? 0.45;
+    const fuel      = fuelGrid[gy]?.[gx]  ?? 0.45;
+    const rockiness = rockGrid[gy]?.[gx]  ?? 0.25;
+    const fineNoise   = cellNoise(gx, gy, 2);
+    const coarseNoise = cellNoise(Math.floor(gx / 4), Math.floor(gy / 4), 9);
+
+    const color = new THREE.Color(TERRAIN_COLORS[cover] ?? TERRAIN_COLORS[1]);
+    if (cover === 1) {       // open
+      color.lerp(new THREE.Color(0x667542), Math.max(0, 0.34 - moisture * 0.28));
+      color.lerp(new THREE.Color(0x356b42), Math.min(0.35, moisture * 0.30));
+    } else if (cover === 2) { // brush
+      color.lerp(new THREE.Color(0x4f6b32), Math.min(0.32, fuel * 0.25 + fineNoise * 0.08));
+    } else if (cover === 3) { // forest
+      color.lerp(new THREE.Color(0x14341f), Math.min(0.38, moisture * 0.28 + fuel * 0.12));
+    } else if (cover === 4) { // rock
+      color.lerp(new THREE.Color(0x6b7079), Math.min(0.42, rockiness * 0.35));
+    } else if (cover === 0) { // road
+      color.lerp(new THREE.Color(0xc5a56f), Math.min(0.25, coarseNoise * 0.25));
+    }
+
+    const shade = cover === 5
+      ? 1.0
+      : 0.78 + elevation * 1.05 - slope * 0.42
+        + (fineNoise - 0.5) * 0.16 + (coarseNoise - 0.5) * 0.10;
+    color.multiplyScalar(Math.max(0.48, Math.min(1.28, shade)));
+
+    colors[i * 3 + 0] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+  }
+
+  pos.needsUpdate = true;
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals(); // re-derive normals after displacement
+
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.receiveShadow = true;
+  return { mesh, geo };
+}
+
+// ---------------------------------------------------------------------
+// House obstacles — static terrain layer built from obstacle_type/height.
+// Matches scripts/terrain_3d_plot.py: footprints, exposed walls, and roofs.
+// ---------------------------------------------------------------------
+function emptyMeshParts() {
+  return { positions: [], indices: [] };
+}
+
+function addQuad(mesh, corners) {
+  const start = mesh.positions.length / 3;
+  for (const [x, y, z] of corners) {
+    mesh.positions.push(x, y, z);
+  }
+  mesh.indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
+}
+
+function addHorizontalQuad(mesh, x0, x1, y0, y1, z) {
+  addQuad(mesh, [
+    [x0, y0, z],
+    [x1, y0, z],
+    [x1, y1, z],
+    [x0, y1, z],
+  ]);
+}
+
+function addVerticalQuad(mesh, x0, x1, y0, y1, baseZ, roofZ) {
+  addQuad(mesh, [
+    [x0, y0, baseZ],
+    [x1, y1, baseZ],
+    [x1, y1, roofZ],
+    [x0, y0, roofZ],
+  ]);
+}
+
+function addExposedHouseWalls(mesh, houseMask, row, col, x0, x1, y0, y1, baseZ, roofZ) {
+  const maxRow = houseMask.length - 1;
+  const maxCol = houseMask[row].length - 1;
+  if (row === 0 || !houseMask[row - 1]?.[col]) {
+    addVerticalQuad(mesh, x0, x1, y0, y0, baseZ, roofZ);
+  }
+  if (row === maxRow || !houseMask[row + 1]?.[col]) {
+    addVerticalQuad(mesh, x1, x0, y1, y1, baseZ, roofZ);
+  }
+  if (col === 0 || !houseMask[row]?.[col - 1]) {
+    addVerticalQuad(mesh, x0, x0, y1, y0, baseZ, roofZ);
+  }
+  if (col === maxCol || !houseMask[row]?.[col + 1]) {
+    addVerticalQuad(mesh, x1, x1, y0, y1, baseZ, roofZ);
+  }
+}
+
+function makeMeshFromParts(parts, material) {
+  if (!parts.positions.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(parts.positions, 3));
+  geo.setIndex(parts.indices);
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function buildHouseMeshes(meta) {
+  const terrain = meta?.terrain;
+  if (!terrain?.obstacle_type || !terrain?.obstacle_height || !terrain?.elevation) return [];
+
+  const G = meta.fire_grid_size;
+  const obstacleType = terrain.obstacle_type;
+  const obstacleHeight = terrain.obstacle_height;
+  const houseMask = obstacleType.map(row => row.map(v => v === OBJECT_HOUSE));
+  if (!houseMask.some(row => row.some(Boolean))) return [];
+
+  const cellW = 2 / G;
+  const baseLift = 0.0002 * HEIGHT_SCALE;
+  const minRoofHeight = 0.0008 * HEIGHT_SCALE;
+  const footprints = emptyMeshParts();
+  const walls = emptyMeshParts();
+  const roofs = emptyMeshParts();
+
+  for (let gy = 0; gy < G; gy++) {
+    for (let gx = 0; gx < G; gx++) {
+      if (!houseMask[gy]?.[gx]) continue;
+      const x0 = gx * cellW - 1;
+      const x1 = (gx + 1) * cellW - 1;
+      const y0 = gy * cellW - 1;
+      const y1 = (gy + 1) * cellW - 1;
+      const cx = (gx + 0.5) * cellW - 1;
+      const cy = (gy + 0.5) * cellW - 1;
+      const baseZ = terrainElevAt(cx, cy, terrain.elevation, G) + baseLift;
+      const houseHeight = Math.max((obstacleHeight[gy]?.[gx] ?? 0) * HEIGHT_SCALE, minRoofHeight);
+      const roofZ = baseZ + houseHeight;
+
+      addHorizontalQuad(footprints, x0, x1, y0, y1, baseZ);
+      addHorizontalQuad(roofs, x0, x1, y0, y1, roofZ);
+      addExposedHouseWalls(walls, houseMask, gy, gx, x0, x1, y0, y1, baseZ, roofZ);
+    }
+  }
+
+  const footprintMat = new THREE.MeshLambertMaterial({
+    color: 0x6f342c,
+    transparent: true,
+    opacity: 0.46,
+    side: THREE.DoubleSide,
+  });
+  const wallMat = new THREE.MeshLambertMaterial({
+    color: 0x8e493e,
+    transparent: true,
+    opacity: 0.74,
+    side: THREE.DoubleSide,
+  });
+  const roofMat = new THREE.MeshLambertMaterial({
+    color: 0xb45a48,
+    transparent: true,
+    opacity: 0.90,
+    side: THREE.DoubleSide,
+  });
+
+  return [
+    makeMeshFromParts(footprints, footprintMat),
+    makeMeshFromParts(walls, wallMat),
+    makeMeshFromParts(roofs, roofMat),
+  ].filter(Boolean);
+}
+
+// ---------------------------------------------------------------------
+// Burned scar overlay — cloned terrain geometry + canvas texture
+// ---------------------------------------------------------------------
+function buildBurnScarMesh(displGeo, G) {
+  const geo = displGeo.clone();
+  const pos = geo.attributes.position;
+  // Nudge every vertex up slightly to avoid z-fighting with the terrain mesh
+  for (let i = 0; i < pos.count; i++) {
+    pos.setZ(i, pos.getZ(i) + 0.002);
+  }
+  pos.needsUpdate = true;
+
+  const canvas = document.createElement('canvas');
+  canvas.width  = G;
+  canvas.height = G;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, G, G);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+
+  const mesh = new THREE.Mesh(
+    geo,
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.65 }),
+  );
+  return { mesh, canvas, ctx, texture };
+}
+
+function resetBurnedOverlay3D(state, meta) {
+  const G = meta.fire_grid_size;
+  state.burnedCtx.clearRect(0, 0, G, G);
+  state.burnedTexture.needsUpdate = true;
+  state.burnedStep   = -1;
+  state.burnedSource = meta.terrain;
+}
+
+function paintBurnedCells3D(state, meta, cells) {
+  if (!cells?.length) return;
+  const G = meta.fire_grid_size;
+  state.burnedCtx.fillStyle = 'rgba(43, 33, 27, 0.72)';
+  for (const [gx, gy] of cells) {
+    // UV origin is bottom-left in Three.js PlaneGeometry → flip Y
+    state.burnedCtx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.burnedTexture.needsUpdate = true;
+}
+
+function syncBurnedOverlay3D(state, meta, frame, frames) {
+  if (!state.burnedCtx) return;
+  if (state.burnedSource !== meta.terrain) resetBurnedOverlay3D(state, meta);
+  if (frame.step <= state.burnedStep)      resetBurnedOverlay3D(state, meta);
+  const start = Math.max(0, state.burnedStep + 1);
+  for (let i = start; i <= frame.step && i < frames.length; i++) {
+    paintBurnedCells3D(state, meta, frames[i].burned_cells_added);
+  }
+  state.burnedStep = frame.step;
+}
+
+// ---------------------------------------------------------------------
+// Agent colours and mesh factories (copied from 2D viewer)
+// ---------------------------------------------------------------------
+const COLORS = {
+  drone:               0x4a90ff,
+  drone_dark:          0x1a3a8a,
+  drone_marker:        0xbfd7ff,
+  ground:              0x14b8a6,
+  ground_dark:         0x0f4f48,
+  wheel:               0x1a1f2e,
+  skin:                0xf0c896,
+  survivor_unscouted:  0xff3838,
+  survivor_scouted:    0xfbbf24,
+  survivor_confirmed:  0x84cc16,
+};
+
 function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
   const g = new THREE.Group();
   const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
+  const markerBacking = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 1.72, 32),
+    new THREE.MeshBasicMaterial({ color: 0x071018, transparent: true, opacity: 0.42 }),
+  );
+  markerBacking.position.z = -0.018;
+  g.add(markerBacking);
   const halo = new THREE.Mesh(
-    new THREE.RingGeometry(radius * 1.35, radius * 1.55, 28),
+    new THREE.RingGeometry(radius * 1.34, radius * 1.78, 32),
     new THREE.MeshBasicMaterial({
-      color: COLORS.drone, transparent: true, opacity: 0.18 + altitudeScale * 0.45,
+      color: COLORS.drone_marker, transparent: true, opacity: 0.54 + altitudeScale * 0.32,
     }),
   );
   halo.position.z = -0.01;
   g.add(halo);
-  // X-shaped frame (two crossed bars)
   const armMat = new THREE.MeshBasicMaterial({ color: COLORS.drone_dark });
   const arm1 = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2.5, radius * 0.18), armMat);
   const arm2 = arm1.clone(); arm2.rotation.z = Math.PI / 2;
   g.add(arm1, arm2);
-  // Central body
   const body = new THREE.Mesh(
     new THREE.CircleGeometry(radius * 0.45, 24),
     new THREE.MeshBasicMaterial({ color: COLORS.drone }),
   );
   body.position.z = 0.02;
   g.add(body);
-  // Four propellers at the tips of the X
   const propMat = new THREE.MeshBasicMaterial({
     color: 0xbcd0ff, transparent: true, opacity: 0.55,
   });
@@ -269,37 +494,218 @@ function makeDroneMesh(radius = 0.04, altitude = 0, maxAltitude = 1) {
       propMat.clone(),
     );
     prop.position.set(dx, dy, 0.03);
-    prop.userData.isProp = true;
-    prop.userData.phase  = Math.random() * Math.PI; // desync drones
+    prop.userData.isProp  = true;
+    prop.userData.phase   = Math.random() * Math.PI;
     g.add(prop);
   }
   g.scale.setScalar(1 + altitudeScale * 0.25);
   return g;
 }
 
+function prepareCrazyflieTemplate(gltf) {
+  const source = gltf.scene;
+  // The Crazyflie asset is Y-up; rotate it into the viewer's Z-up world so
+  // the rotor plane is horizontal, like a real quadcopter in flight.
+  source.rotation.x = Math.PI / 2;
+  source.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(source);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  source.position.x -= center.x;
+  source.position.y -= center.y;
+  source.position.z -= box.min.z;
+  source.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    }
+    if ((obj.name || '').toLowerCase().includes('propeller')) {
+      obj.userData.isProp = true;
+      obj.userData.phase = Math.random() * Math.PI;
+      obj.userData.baseRotation = [obj.rotation.x, obj.rotation.y, obj.rotation.z];
+    }
+  });
+
+  const model = new THREE.Group();
+  model.add(source);
+  const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
+  return { model, normalizedSize };
+}
+
+function loadCrazyflieTemplate() {
+  const loader = new GLTFLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(CRAZYFLIE_MODEL_URL, gltf => resolve(prepareCrazyflieTemplate(gltf)), undefined, reject);
+  });
+}
+
+function prepareSpotMiniTemplate(gltf) {
+  const source = gltf.scene;
+  // glTF assets are Y-up; this viewer uses Z as terrain/elevation up.
+  source.rotation.x = Math.PI / 2;
+  source.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(source);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  source.position.x -= center.x;
+  source.position.y -= center.y;
+  source.position.z -= box.min.z;
+  source.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+      if (obj.material) {
+        obj.material.side = THREE.DoubleSide;
+        if (obj.material.emissive) {
+          obj.material.emissive.set(0x10100a);
+          obj.material.emissiveIntensity = 0.08;
+        }
+        obj.material.needsUpdate = true;
+      }
+    }
+  });
+
+  const model = new THREE.Group();
+  model.add(source);
+  const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
+  return { model, normalizedSize };
+}
+
+function loadSpotMiniTemplate() {
+  const loader = new GLTFLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(SPOT_MINI_MODEL_URL, gltf => resolve(prepareSpotMiniTemplate(gltf)), undefined, reject);
+  });
+}
+
+function prepareHumanTemplate(gltf) {
+  const source = gltf.scene;
+  // Sketchfab/glTF assets are Y-up in Three; align with the viewer's Z-up terrain.
+  source.rotation.x = Math.PI / 2;
+  source.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(source);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  source.position.x -= center.x;
+  source.position.y -= center.y;
+  source.position.z -= box.min.z;
+  source.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+      if (obj.material) {
+        obj.material.side = THREE.DoubleSide;
+        obj.material.needsUpdate = true;
+      }
+    }
+  });
+
+  const model = new THREE.Group();
+  model.add(source);
+  const normalizedSize = Math.max(size.x, size.y, size.z, 1e-6);
+  return { model, normalizedSize };
+}
+
+function loadHumanTemplate() {
+  const loader = new GLTFLoader();
+  return new Promise((resolve, reject) => {
+    loader.load(HUMAN_MODEL_URL, gltf => resolve(prepareHumanTemplate(gltf)), undefined, reject);
+  });
+}
+
+function makeCrazyflieDroneMesh(state, radius = 0.04, altitude = 0, maxAltitude = 1, heading = 0) {
+  if (!state.droneModelTemplate) return null;
+
+  const g = new THREE.Group();
+  const altitudeScale = maxAltitude > 0 ? altitude / maxAltitude : 0;
+  const markerBacking = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 1.72, 32),
+    new THREE.MeshBasicMaterial({ color: 0x071018, transparent: true, opacity: 0.42 }),
+  );
+  markerBacking.position.z = -0.018;
+  g.add(markerBacking);
+  const halo = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.34, radius * 1.78, 32),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.drone_marker, transparent: true, opacity: 0.52 + altitudeScale * 0.30,
+    }),
+  );
+  halo.position.z = -0.012;
+  g.add(halo);
+
+  const model = state.droneModelTemplate.clone(true);
+  const targetSpan = radius * DRONE_MODEL_VISUAL_SCALE * (1 + altitudeScale * 0.12);
+  const scale = targetSpan / (state.droneModelSize || 1);
+  model.scale.setScalar(scale);
+  model.rotation.z = heading + Math.PI / 2;
+  model.position.z = radius * 0.12;
+  g.add(model);
+
+  g.userData.keepWorldOrientation = true;
+  return g;
+}
+
+function makeSpotMiniGroundMesh(state, radius = 0.04, heading = 0) {
+  if (!state.groundModelTemplate) return null;
+
+  const g = new THREE.Group();
+  const model = cloneSkeleton(state.groundModelTemplate);
+  const targetSpan = radius * GROUND_MODEL_VISUAL_SCALE;
+  const scale = targetSpan / (state.groundModelSize || 1);
+  model.scale.setScalar(scale);
+  model.rotation.z = heading + Math.PI / 2;
+  model.position.z = radius * 0.02;
+  g.add(model);
+
+  g.userData.keepWorldOrientation = true;
+  return g;
+}
+
+function makeGroundBoxMesh(radius = 0.04, heading = 0) {
+  const g = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0xfacc15,
+    emissive: 0x4a3400,
+    emissiveIntensity: 0.18,
+    metalness: 0.05,
+    roughness: 0.48,
+  });
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(radius * 1.55, radius * 1.05, radius * 0.48),
+    bodyMat,
+  );
+  body.position.z = radius * 0.28;
+  body.rotation.z = heading;
+  body.castShadow = true;
+  body.receiveShadow = true;
+  g.add(body);
+
+  g.userData.keepWorldOrientation = true;
+  return g;
+}
+
 function makeGroundMesh(radius = 0.04) {
   const g = new THREE.Group();
-  // Chassis
   const chassis = new THREE.Mesh(
     new THREE.PlaneGeometry(radius * 1.75, radius * 1.30),
     new THREE.MeshBasicMaterial({ color: COLORS.ground }),
   );
   g.add(chassis);
-  // Wheel "stripes" along the sides
   const wheelMat = new THREE.MeshBasicMaterial({ color: COLORS.wheel });
   for (const dy of [radius * 0.60, -radius * 0.60]) {
     const wheel = new THREE.Mesh(new THREE.PlaneGeometry(radius * 1.45, radius * 0.30), wheelMat);
     wheel.position.set(0, dy, 0.01);
     g.add(wheel);
   }
-  // Sensor turret on top (a white dot)
   const sensor = new THREE.Mesh(
     new THREE.CircleGeometry(radius * 0.28, 16),
     new THREE.MeshBasicMaterial({ color: 0xffffff }),
   );
   sensor.position.z = 0.02;
   g.add(sensor);
-  // Antenna (small line forward)
   const ant = new THREE.Mesh(
     new THREE.PlaneGeometry(radius * 0.55, radius * 0.08),
     new THREE.MeshBasicMaterial({ color: COLORS.ground_dark }),
@@ -309,139 +715,7 @@ function makeGroundMesh(radius = 0.04) {
   return g;
 }
 
-function makeSurvivorMesh(survivorState, radius = 0.03) {
-  // Top-down human silhouette: head + torso + outstretched arms + legs.
-  // Clothing colour encodes detection state so the figure stays readable.
-  const stateColor = survivorState.found
-    ? COLORS.survivor_confirmed
-    : survivorState.scouted
-      ? COLORS.survivor_scouted
-      : COLORS.survivor_unscouted;
-  const g = new THREE.Group();
-
-  // State ring — outside the figure so it's visible over fire
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(radius * 1.45, radius * 1.75, 28),
-    new THREE.MeshBasicMaterial({ color: stateColor }),
-  );
-  ring.position.z = -0.02;
-  g.add(ring);
-
-  const clothingMat = new THREE.MeshBasicMaterial({ color: stateColor });
-
-  // Outstretched arms (horizontal bar — gives the human silhouette)
-  const arms = new THREE.Mesh(
-    new THREE.PlaneGeometry(radius * 1.75, radius * 0.27),
-    clothingMat,
-  );
-  arms.position.set(0, 0.002, 0.002);
-  g.add(arms);
-
-  // Torso (taller-than-wide ellipse)
-  const torso = new THREE.Mesh(
-    new THREE.CircleGeometry(radius * 0.47, 24),
-    clothingMat,
-  );
-  torso.scale.set(1.0, 1.8, 1);
-  torso.position.z = 0.005;
-  g.add(torso);
-
-  // Legs (two small rectangles below torso, dark pants)
-  const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
-  for (const dx of [-1, 1]) {
-    const leg = new THREE.Mesh(
-      new THREE.PlaneGeometry(radius * 0.27, radius * 0.53),
-      legMat,
-    );
-    leg.position.set(dx * radius * 0.27, -radius * 0.73, 0.003);
-    g.add(leg);
-  }
-
-  // Head (skin-tone, on top of torso)
-  const head = new THREE.Mesh(
-    new THREE.CircleGeometry(radius * 0.40, 24),
-    new THREE.MeshBasicMaterial({ color: COLORS.skin }),
-  );
-  head.position.set(0, radius * 0.67, 0.012);
-  g.add(head);
-
-  // Hair (small dark cap, hint of detail from above)
-  const hair = new THREE.Mesh(
-    new THREE.CircleGeometry(radius * 0.43, 20),
-    new THREE.MeshBasicMaterial({ color: 0x3a2412 }),
-  );
-  hair.scale.set(1, 0.65, 1);
-  hair.position.set(0, radius * 0.77, 0.011);
-  g.add(hair);
-
-  // Pulse the state ring if scouted-but-not-confirmed (call for attention)
-  if (survivorState.scouted && !survivorState.found) {
-    ring.userData.isPulse = true;
-  }
-  return g;
-}
-
-function makeFireMesh(size) {
-  // Layered circular flame: dark base → red → orange → amber → white-hot.
-  // Each layer flickers opacity + scale on its own phase so a fire cell
-  // looks like a real flame dancing, not a static coloured tile.
-  const g = new THREE.Group();
-  const layers = [
-    { color: 0x6b1206, r: 0.58, opacity: 0.45 },   // dark red base
-    { color: 0xa42208, r: 0.48, opacity: 0.70 },   // red
-    { color: 0xe85a18, r: 0.38, opacity: 0.85 },   // orange
-    { color: 0xf9ad22, r: 0.27, opacity: 0.93 },   // amber
-    { color: 0xfff0a8, r: 0.16, opacity: 0.90 },   // hot core
-  ];
-  for (let i = 0; i < layers.length; i++) {
-    const L = layers[i];
-    const mesh = new THREE.Mesh(
-      new THREE.CircleGeometry(size * L.r, 28),
-      new THREE.MeshBasicMaterial({
-        color: L.color, transparent: true, opacity: L.opacity,
-      }),
-    );
-    // Local z is just stacking order inside the fire group; the group
-    // itself is positioned at z = -0.3 in renderFrame, so we keep this
-    // small and positive to avoid sinking below the background plane.
-    mesh.position.z = i * 0.003;
-    mesh.userData.isFireLayer = true;
-    mesh.userData.phase       = Math.random() * Math.PI * 2;
-    mesh.userData.baseOp      = L.opacity;
-    // Outer layers wobble more; the hot core stays focused.
-    mesh.userData.wobble      = 0.18 - i * 0.028;
-    g.add(mesh);
-  }
-  return g;
-}
-
-function makeSmokeMesh(size, intensity) {
-  const opacity = Math.min(0.42, 0.08 + intensity * 0.34);
-  const mesh = new THREE.Mesh(
-    new THREE.CircleGeometry(size * (0.45 + intensity * 0.35), 24),
-    new THREE.MeshBasicMaterial({
-      color: COLORS.smoke,
-      transparent: true,
-      opacity,
-      depthWrite: false,
-    }),
-  );
-  mesh.scale.set(1.25, 0.85, 1);
-  mesh.userData.isSmoke = true;
-  mesh.userData.baseOp = opacity;
-  mesh.userData.phase = intensity * Math.PI * 2;
-  return mesh;
-}
-
-function probabilityColor(probability) {
-  const p = Math.max(0, Math.min(1, probability ?? 0));
-  const color = new THREE.Color(COLORS.perception_low);
-  color.lerp(new THREE.Color(COLORS.perception_high), p);
-  return color;
-}
-
 function makeCommsIndicator(commsUp) {
-  // Small dot above the agent: green = radio up, red pulsing = dropped.
   const color = commsUp ? 0x88ff88 : 0xff4444;
   const mesh = new THREE.Mesh(
     new THREE.CircleGeometry(0.018, 12),
@@ -452,525 +726,501 @@ function makeCommsIndicator(commsUp) {
   return mesh;
 }
 
-function makeCameraFootprintMesh(radius) {
-  const g = new THREE.Group();
-  const fill = new THREE.Mesh(
-    new THREE.CircleGeometry(radius, 80),
-    new THREE.MeshBasicMaterial({
-      color: COLORS.perception,
-      transparent: true,
-      opacity: 0.045,
-      depthWrite: false,
-    }),
+function addFallbackSurvivorIcon(group, stateColor, radius) {
+  const icon = new THREE.Group();
+  icon.userData.isBillboard = true;
+  const clothingMat = new THREE.MeshBasicMaterial({ color: stateColor });
+  const arms = new THREE.Mesh(
+    new THREE.PlaneGeometry(radius * 1.75, radius * 0.27), clothingMat,
   );
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(radius * 0.985, radius * 1.015, 96),
-    new THREE.MeshBasicMaterial({
-      color: COLORS.perception,
-      transparent: true,
-      opacity: 0.48,
-      depthWrite: false,
-    }),
+  arms.position.set(0, 0.002, 0.002);
+  icon.add(arms);
+  const torso = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.47, 24), clothingMat,
   );
-  g.add(fill, ring);
-  return g;
-}
-
-function renderPerceptionOverlay(state, frame) {
-  clearGroup(state.perceptionGroup);
-  const drones = frame.drone_perception ?? [];
-  for (const drone of drones) {
-    const footprint = Math.max(0, drone.footprint ?? 0);
-    if (footprint > 0) {
-      const mesh = makeCameraFootprintMesh(footprint);
-      mesh.position.set(drone.x, drone.y, -0.08);
-      state.perceptionGroup.add(mesh);
-    }
-
-    for (const survivor of drone.survivors ?? []) {
-      if (!survivor.visible || survivor.probability <= 0) continue;
-      const positions = new Float32Array([
-        drone.x, drone.y, -0.035,
-        survivor.x, survivor.y, -0.035,
-      ]);
-      const geom = new THREE.BufferGeometry();
-      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      const mat = new THREE.LineBasicMaterial({
-        color: probabilityColor(survivor.probability),
-        transparent: true,
-        opacity: 0.18 + Math.min(0.70, survivor.probability * 0.70),
-      });
-      const line = new THREE.Line(geom, mat);
-      line.userData.isPerceptionLink = true;
-      state.perceptionGroup.add(line);
-    }
-  }
-}
-
-function makeTreeMesh(size, height) {
-  const g = new THREE.Group();
-  const canopy = new THREE.Mesh(
-    new THREE.CircleGeometry(size * 0.43, 18),
-    new THREE.MeshBasicMaterial({ color: height > 0.18 ? 0x133521 : 0x1d5128 }),
-  );
-  canopy.position.z = 0.012;
-  const crown = new THREE.Mesh(
-    new THREE.CircleGeometry(size * 0.25, 16),
-    new THREE.MeshBasicMaterial({ color: 0x316c34 }),
-  );
-  crown.position.set(-size * 0.08, size * 0.08, 0.018);
-  g.add(canopy, crown);
-  return g;
-}
-
-function makeHouseMesh(size, height) {
-  const g = new THREE.Group();
-  const walls = new THREE.Mesh(
-    new THREE.PlaneGeometry(size * 0.78, size * 0.70),
-    new THREE.MeshBasicMaterial({ color: 0xd5bd93 }),
-  );
-  const roof = new THREE.Mesh(
-    new THREE.PlaneGeometry(size * 0.86, size * 0.48),
-    new THREE.MeshBasicMaterial({ color: height > 0.11 ? 0x8b3b32 : 0xa34d3d }),
-  );
-  roof.position.set(0, size * 0.05, 0.014);
-  roof.rotation.z = Math.PI / 4;
-  g.add(walls, roof);
-  return g;
-}
-
-function renderTerrain(state, meta) {
-  clearGroup(state.terrainGroup);
-  clearGroup(state.obstacleGroup);
-  const terrain = meta?.terrain;
-  if (!terrain?.land_cover) return;
-  const G = meta.fire_grid_size;
-  const canvas = document.createElement('canvas');
-  canvas.width = G;
-  canvas.height = G;
-  const ctx = canvas.getContext('2d');
-  const image = ctx.createImageData(G, G);
-  for (let gy = 0; gy < G; gy++) {
-    for (let gx = 0; gx < G; gx++) {
-      const cover = terrain.land_cover[gy][gx];
-      const elevation = terrain.elevation?.[gy]?.[gx] ?? 0;
-      const slope = terrain.slope?.[gy]?.[gx] ?? 0;
-      const moisture = terrain.moisture?.[gy]?.[gx] ?? 0.45;
-      const fuel = terrain.fuel_density?.[gy]?.[gx] ?? 0.45;
-      const rockiness = terrain.rockiness?.[gy]?.[gx] ?? 0.25;
-      const fineNoise = cellNoise(gx, gy, 2);
-      const coarseNoise = cellNoise(Math.floor(gx / 4), Math.floor(gy / 4), 9);
-      const color = new THREE.Color(TERRAIN_COLORS[cover] ?? TERRAIN_COLORS[1]);
-      if (cover === 1) {
-        color.lerp(new THREE.Color(0x667542), Math.max(0, 0.34 - moisture * 0.28));
-        color.lerp(new THREE.Color(0x356b42), Math.min(0.35, moisture * 0.30));
-      } else if (cover === 2) {
-        color.lerp(new THREE.Color(0x4f6b32), Math.min(0.32, fuel * 0.25 + fineNoise * 0.08));
-      } else if (cover === 3) {
-        color.lerp(new THREE.Color(0x14341f), Math.min(0.38, moisture * 0.28 + fuel * 0.12));
-      } else if (cover === 4) {
-        color.lerp(new THREE.Color(0x6b7079), Math.min(0.42, rockiness * 0.35));
-      } else if (cover === 0) {
-        color.lerp(new THREE.Color(0xc5a56f), Math.min(0.25, coarseNoise * 0.25));
-      }
-      const shade = cover === 5
-        ? 1.0
-        : 0.78 + elevation * 1.05 - slope * 0.42 + (fineNoise - 0.5) * 0.16 + (coarseNoise - 0.5) * 0.10;
-      color.multiplyScalar(Math.max(0.48, Math.min(1.28, shade)));
-      const objectType = terrain.obstacle_type?.[gy]?.[gx] ?? OBJECT_NONE;
-      const objectHeight = terrain.obstacle_height?.[gy]?.[gx] ?? 0;
-      if (objectType === OBJECT_TREE) {
-        color.set(objectHeight > 0.18 ? 0x133521 : 0x1d5128);
-        color.multiplyScalar(0.86 + coarseNoise * 0.20);
-      } else if (objectType === OBJECT_HOUSE) {
-        color.set(objectHeight > 0.11 ? 0x8b3b32 : 0xa34d3d);
-        color.multiplyScalar(0.90 + fineNoise * 0.12);
-      }
-      const pixelY = G - gy - 1;
-      const idx = (pixelY * G + gx) * 4;
-      image.data[idx + 0] = Math.round(color.r * 255);
-      image.data[idx + 1] = Math.round(color.g * 255);
-      image.data[idx + 2] = Math.round(color.b * 255);
-      image.data[idx + 3] = 255;
-    }
-  }
-  ctx.putImageData(image, 0, 0);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearFilter;
-  texture.generateMipmaps = false;
-  const terrainMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({ map: texture }),
-  );
-  terrainMesh.position.z = -0.45;
-  state.terrainGroup.add(terrainMesh);
-}
-
-function resetBurnedOverlay(state, meta) {
-  clearGroup(state.burnedGroup);
-  const G = meta.fire_grid_size;
-  const canvas = document.createElement('canvas');
-  canvas.width = G;
-  canvas.height = G;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, G, G);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.generateMipmaps = false;
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.62 }),
-  );
-  mesh.position.z = -0.38;
-  state.burnedGroup.add(mesh);
-  state.burnedCanvas = canvas;
-  state.burnedCtx = ctx;
-  state.burnedTexture = texture;
-  state.burnedStep = -1;
-  state.burnedSource = meta.terrain;
-}
-
-function paintBurnedCells(state, meta, cells) {
-  if (!cells?.length) return;
-  const G = meta.fire_grid_size;
-  state.burnedCtx.fillStyle = 'rgba(43, 33, 27, 0.72)';
-  for (const [gx, gy] of cells) {
-    state.burnedCtx.fillRect(gx, G - gy - 1, 1, 1);
-  }
-  state.burnedTexture.needsUpdate = true;
-}
-
-function syncBurnedOverlay(state, meta, frame, frames) {
-  if (state.burnedSource !== meta.terrain || !state.burnedCanvas) {
-    resetBurnedOverlay(state, meta);
-  }
-  if (frame.step <= state.burnedStep) {
-    resetBurnedOverlay(state, meta);
-  }
-  const start = Math.max(0, state.burnedStep + 1);
-  for (let i = start; i <= frame.step && i < frames.length; i++) {
-    paintBurnedCells(state, meta, frames[i].burned_cells_added);
-  }
-  state.burnedStep = frame.step;
-}
-
-function resetActiveFireOverlay(state, meta) {
-  clearGroup(state.fireGroup);
-  const G = meta.fire_grid_size;
-  const scale = 2;
-  const canvas = document.createElement('canvas');
-  canvas.width = G * scale;
-  canvas.height = G * scale;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.generateMipmaps = false;
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      opacity: 0.92,
-      depthWrite: false,
-    }),
-  );
-  mesh.position.z = -0.30;
-  mesh.userData.isFireOverlay = true;
-  mesh.userData.baseOp = 0.92;
-  state.fireGroup.add(mesh);
-  state.fireCanvas = canvas;
-  state.fireCtx = ctx;
-  state.fireTexture = texture;
-  state.fireSource = meta.terrain;
-  state.fireScale = scale;
-}
-
-function syncActiveFireOverlay(state, meta, frame) {
-  if (state.fireSource !== meta.terrain || !state.fireCanvas) {
-    resetActiveFireOverlay(state, meta);
-  }
-  const G = meta.fire_grid_size;
-  const s = state.fireScale;
-  const ctx = state.fireCtx;
-  ctx.clearRect(0, 0, state.fireCanvas.width, state.fireCanvas.height);
-  for (const cell of frame.fire_cells ?? []) {
-    const [gx, gy, rawIntensity = 1] = cell;
-    // Per-cell spatial noise (stable hash of position) breaks visual uniformity
-    // so neighbouring cells don't all pulse identically.
-    const noise = Math.abs(Math.sin(gx * 127.1 + gy * 311.7) * 43758.5453 % 1);
-    const cellVar = 0.78 + 0.22 * noise;   // 0.78 – 1.00 per cell
-    const intensity = Math.max(0.2, Math.min(1.0, rawIntensity * cellVar));
-    const x = gx * s;
-    const y = (G - gy - 1) * s;
-    ctx.fillStyle = `rgba(121, 24, 7, ${0.38 + 0.24 * intensity})`;
-    ctx.fillRect(x, y, s, s);
-    ctx.fillStyle = `rgba(232, 90, 24, ${0.60 + 0.32 * intensity})`;
-    ctx.fillRect(x, y, s, s);
-    ctx.fillStyle = `rgba(255, 221, 94, ${0.45 + 0.47 * intensity})`;
-    const core = Math.max(1, Math.ceil(s * (0.35 + 0.35 * intensity)));
-    ctx.fillRect(x + s - core, y, core, core);
-  }
-  state.fireTexture.needsUpdate = true;
-}
-
-function resetSmokeOverlay(state, meta) {
-  clearGroup(state.smokeGroup);
-  const G = meta.fire_grid_size;
-  const canvas = document.createElement('canvas');
-  canvas.width = G;
-  canvas.height = G;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, G, G);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearFilter;
-  texture.generateMipmaps = false;
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      opacity: 0.78,
-      depthWrite: false,
-    }),
-  );
-  mesh.position.z = -0.10;
-  mesh.userData.isSmokeOverlay = true;
-  mesh.userData.baseOp = 0.78;
-  state.smokeGroup.add(mesh);
-  state.smokeCanvas = canvas;
-  state.smokeCtx = ctx;
-  state.smokeTexture = texture;
-  state.smokeSource = meta.terrain;
-}
-
-function syncSmokeOverlay(state, meta, frame) {
-  if (state.smokeSource !== meta.terrain || !state.smokeCanvas) {
-    resetSmokeOverlay(state, meta);
-  }
-  const G = meta.fire_grid_size;
-  const ctx = state.smokeCtx;
-  ctx.clearRect(0, 0, G, G);
-  for (const [gx, gy, intensity] of frame.smoke_cells ?? []) {
-    const alpha = Math.min(0.50, 0.05 + intensity * 0.42);
-    ctx.fillStyle = `rgba(203, 213, 225, ${alpha})`;
-    ctx.fillRect(gx, G - gy - 1, 1, 1);
-  }
-  state.smokeTexture.needsUpdate = true;
-}
-
-function renderFrame(state, frame, meta, histories, frames, showPerception) {
-  const { fireGroup, smokeGroup, agentGroup, survGroup, trailGroup, perceptionGroup } = state;
-  if (state.terrainSource !== meta.terrain) {
-    renderTerrain(state, meta);
-    state.terrainSource = meta.terrain;
-  }
-  syncBurnedOverlay(state, meta, frame, frames);
-  syncActiveFireOverlay(state, meta, frame);
-  syncSmokeOverlay(state, meta, frame);
-  clearGroup(agentGroup);
-  clearGroup(survGroup);
-  clearGroup(trailGroup);
-  clearGroup(perceptionGroup);
-
-  const agentRadius = meta.agent_radius ?? 0.04;
-  const survivorRadius = meta.survivor_radius ?? 0.03;
-
-  // --- Survivors (shoulders + head + state ring) ---
-  for (const s of frame.survivors) {
-    const mesh = makeSurvivorMesh(s, survivorRadius);
-    mesh.position.set(s.x, s.y, -0.05);
-    survGroup.add(mesh);
-  }
-
-  // --- Agent trails (last 25 positions, semi-transparent) ---
-  const TRAIL_LEN = 25;
-  for (const a of frame.agents) {
-    const hist = (histories[a.name] || []).slice(
-      Math.max(0, frame.step - TRAIL_LEN), frame.step + 1,
+  torso.scale.set(1.0, 1.8, 1);
+  torso.position.z = 0.005;
+  icon.add(torso);
+  const legMat = new THREE.MeshBasicMaterial({ color: 0x2a2f3b });
+  for (const dx of [-1, 1]) {
+    const leg = new THREE.Mesh(
+      new THREE.PlaneGeometry(radius * 0.27, radius * 0.53), legMat,
     );
-    if (hist.length < 2) continue;
-    const positions = new Float32Array(hist.length * 3);
-    for (let i = 0; i < hist.length; i++) {
-      positions[i * 3 + 0] = hist[i][0];
-      positions[i * 3 + 1] = hist[i][1];
-      positions[i * 3 + 2] = -0.04;
-    }
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const mat = new THREE.LineBasicMaterial({
-      color: a.type === 'drone' ? COLORS.drone : COLORS.ground,
-      transparent: true, opacity: 0.55,
-    });
-    trailGroup.add(new THREE.Line(geom, mat));
+    leg.position.set(dx * radius * 0.27, -radius * 0.73, 0.003);
+    icon.add(leg);
+  }
+  const head = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.40, 24),
+    new THREE.MeshBasicMaterial({ color: COLORS.skin }),
+  );
+  head.position.set(0, radius * 0.67, 0.012);
+  icon.add(head);
+  group.add(icon);
+}
+
+function makeSurvivorMesh(state, survivorState, radius = 0.03) {
+  const stateColor = survivorState.found
+    ? COLORS.survivor_confirmed
+    : survivorState.scouted
+      ? COLORS.survivor_scouted
+      : COLORS.survivor_unscouted;
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 1.45, radius * 1.75, 28),
+    new THREE.MeshBasicMaterial({ color: stateColor }),
+  );
+  ring.position.z = radius * 0.08;
+  ring.userData.isBillboard = true;
+  g.add(ring);
+
+  if (state.survivorModelTemplate) {
+    const model = cloneSkeleton(state.survivorModelTemplate);
+    const targetSpan = radius * SURVIVOR_MODEL_VISUAL_SCALE;
+    const scale = targetSpan / (state.survivorModelSize || 1);
+    model.scale.setScalar(scale);
+    model.rotation.z = Math.PI / 2;
+    model.position.z = radius * 0.02;
+    g.add(model);
+  } else {
+    addFallbackSurvivorIcon(g, stateColor, radius);
   }
 
-  // --- Agents (compound quadcopters / rovers) ---
-  const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
-  for (const a of frame.agents) {
-    const altitudeAgl = a.altitude_agl ?? a.altitude ?? 0;
-    const mesh = a.type === 'drone'
-      ? makeDroneMesh(agentRadius, altitudeAgl, maxAltitude)
-      : makeGroundMesh(agentRadius);
-    mesh.position.set(a.x, a.y, 0.05);
-    // Heading: rotate ground robots to face their direction of travel,
-    // based on the previous-step velocity from history.
-    if (a.type === 'ground' && histories[a.name]) {
-      const idx = frame.step;
-      const hist = histories[a.name];
-      if (idx > 0 && idx < hist.length) {
-        const [px, py] = hist[idx - 1];
-        const dx = a.x - px, dy = a.y - py;
-        if (Math.abs(dx) + Math.abs(dy) > 1e-4) {
-          mesh.rotation.z = Math.atan2(dy, dx);
-        }
-      }
-    }
-    agentGroup.add(mesh);
-
-    // Comms indicator dot — only shown when comms_dropout > 0 in the trajectory.
-    if (a.comms_up !== undefined) {
-      const dot = makeCommsIndicator(a.comms_up);
-      dot.position.set(a.x + agentRadius * 1.2, a.y + agentRadius * 1.2, 0.12);
-      agentGroup.add(dot);
-    }
+  if (survivorState.scouted && !survivorState.found) {
+    ring.userData.isPulse = true;
   }
+  return g;
+}
 
-  if (showPerception) {
-    renderPerceptionOverlay(state, frame);
+function renderSurvivors3D(state, meta, frame) {
+  clearGroup(state.survGroup);
+  if (!state.elevGrid) return;
+  const G              = state.fireGridSize;
+  const survivorRadius = meta.survivor_radius ?? 0.03;
+  for (const s of (frame.survivors ?? [])) {
+    const tz   = terrainElevAt(s.x, s.y, state.elevGrid, G);
+    const mesh = makeSurvivorMesh(state, s, survivorRadius);
+    mesh.position.set(s.x, s.y, tz + 0.006);
+    state.survGroup.add(mesh);
   }
 }
 
-// Animate per-RAF: propeller spin, layered fire flicker, scouted-survivor pulse.
-function tickAnimation(state, t) {
-  state.agentGroup.traverse(obj => {
-    if (obj.userData?.isProp) {
-      obj.rotation.z = t * 18 + (obj.userData.phase || 0);
-    }
-  });
-  state.fireGroup.traverse(obj => {
-    if (obj.userData?.isFireOverlay) {
-      const baseOp = obj.userData.baseOp || 0.92;
-      obj.material.opacity = Math.max(0.45, baseOp * (0.90 + 0.10 * Math.sin(t * 8)));
-    } else if (obj.userData?.isFireLayer) {
-      const phase  = obj.userData.phase  || 0;
-      const baseOp = obj.userData.baseOp || 0.7;
-      const wobble = obj.userData.wobble || 0.1;
-      // Opacity flicker
-      obj.material.opacity = Math.max(0.05, baseOp * (0.7 + 0.3 * Math.sin(t * 8 + phase)));
-      // Scale wobble (more on the outer layers, less on the hot core)
-      const s = 1 + wobble * Math.sin(t * 11 + phase * 1.7);
-      obj.scale.set(s, s, 1);
-    }
-  });
-  state.smokeGroup.traverse(obj => {
-    if (obj.userData?.isSmokeOverlay) {
-      const baseOp = obj.userData.baseOp || 0.78;
-      obj.material.opacity = Math.max(0.45, baseOp * (0.92 + 0.08 * Math.sin(t * 2.5)));
-    } else if (obj.userData?.isSmoke) {
-      const phase = obj.userData.phase || 0;
-      const baseOp = obj.userData.baseOp || 0.2;
-      obj.material.opacity = Math.max(0.04, baseOp * (0.85 + 0.15 * Math.sin(t * 2.5 + phase)));
-    }
-  });
-  state.agentGroup.traverse(obj => {
-    if (obj.userData?.isCommsIndicator && !obj.userData.commsUp) {
-      // Pulse red dot when comms are dropped to draw attention.
-      const s = 1 + 0.35 * Math.sin(t * 10);
-      obj.scale.set(s, s, 1);
-      obj.material.opacity = 0.55 + 0.45 * Math.abs(Math.sin(t * 10));
-    }
-  });
-  state.survGroup.traverse(obj => {
-    if (obj.userData?.isPulse) {
-      const s = 1 + 0.1 * Math.sin(t * 6);
-      obj.scale.set(s, s, 1);
-    }
-  });
-}
-
-// Build per-agent position history from all frames (run once when data loads)
-function buildHistories(frames) {
-  const out = {};
+// ---------------------------------------------------------------------
+// Agent histories — xy + altitude per step for trail and Z placement
+// ---------------------------------------------------------------------
+function buildHistories3D(frames) {
+  const xy  = {};
+  const alt = {};
   for (const f of frames) {
     for (const a of f.agents) {
-      if (!out[a.name]) out[a.name] = [];
-      out[a.name].push([a.x, a.y]);
+      if (!xy[a.name])  xy[a.name]  = [];
+      if (!alt[a.name]) alt[a.name] = [];
+      xy[a.name].push([a.x, a.y]);
+      alt[a.name].push(a.altitude_agl ?? 0);
     }
   }
-  return out;
-}
-
-function useThree(meta, frame, histories, frames, showPerception) {
-  const canvasRef = useRef(null);
-  const stateRef = useRef(null);
-
-  // Initial setup (once)
-  useEffect(() => {
-    if (!canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const rect = canvas.parentElement.getBoundingClientRect();
-    const { renderer, scene, camera } = setupScene(canvas, rect.width, rect.height);
-
-    const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
-    const burnedGroup = new THREE.Group(); scene.add(burnedGroup);
-    const fireGroup  = new THREE.Group();  scene.add(fireGroup);
-    const smokeGroup = new THREE.Group();  scene.add(smokeGroup);
-    const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
-    const trailGroup = new THREE.Group();  scene.add(trailGroup);
-    const perceptionGroup = new THREE.Group(); scene.add(perceptionGroup);
-    const survGroup  = new THREE.Group();  scene.add(survGroup);
-    const agentGroup = new THREE.Group();  scene.add(agentGroup);
-
-    stateRef.current = {
-      renderer, scene, camera, terrainGroup, burnedGroup, fireGroup, smokeGroup, obstacleGroup,
-      trailGroup, perceptionGroup, agentGroup, survGroup,
-      terrainSource: null, burnedSource: null, burnedStep: -1,
-    };
-
-    let raf;
-    const t0 = performance.now();
-    const tick = () => {
-      const t = (performance.now() - t0) / 1000;
-      if (stateRef.current) tickAnimation(stateRef.current, t);
-      renderer.render(scene, camera);
-      raf = requestAnimationFrame(tick);
-    };
-    tick();
-
-    const onResize = () => {
-      const r = canvas.parentElement.getBoundingClientRect();
-      renderer.setSize(r.width, r.height, false);
-      fitCameraToWorld(camera, r.width, r.height);
-    };
-    window.addEventListener('resize', onResize);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener('resize', onResize);
-      renderer.dispose();
-    };
-  }, []);
-
-  // Render frame whenever frame or meta changes
-  useEffect(() => {
-    if (!stateRef.current || !frame || !meta || !histories) return;
-    renderFrame(stateRef.current, frame, meta, histories, frames, showPerception);
-  }, [meta, frame, histories, frames, showPerception]);
-
-  return canvasRef;
+  return { xy, alt };
 }
 
 // ---------------------------------------------------------------------
-// Playback hook
+// Agent rendering — drones float at altitude, ground robots hug terrain.
+// All markers are flat 2D meshes oriented as billboards (camera-facing),
+// so they remain readable from any orbit angle.
+// ---------------------------------------------------------------------
+const TRAIL_LEN = 30;
+const GROUND_SUBDIVISIONS = 6; // terrain samples per recorded segment for ground trails
+
+function headingFromHistory(xyHist, step, fallbackX, fallbackY) {
+  const current = xyHist[Math.min(step, xyHist.length - 1)] ?? [fallbackX, fallbackY];
+  for (let i = Math.min(step - 1, xyHist.length - 2); i >= 0; i--) {
+    const prev = xyHist[i];
+    if (!prev) continue;
+    const dx = current[0] - prev[0];
+    const dy = current[1] - prev[1];
+    if (Math.hypot(dx, dy) > 1e-4) return Math.atan2(dy, dx);
+  }
+  return 0;
+}
+
+function renderAgents3D(state, meta, frame, histories) {
+  clearGroup(state.agentGroup);
+  clearGroup(state.trailGroup);
+  if (!state.elevGrid) return;
+
+  const G           = state.fireGridSize;
+  const agentRadius = meta.agent_radius ?? 0.04;
+  const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
+
+  // --- Trails ---
+  for (const a of frame.agents) {
+    const xyHist  = histories.xy[a.name]  ?? [];
+    const altHist = histories.alt[a.name] ?? [];
+    const start = Math.max(0, frame.step - TRAIL_LEN);
+    const end   = Math.min(frame.step + 1, xyHist.length);
+    if (end - start < 2) continue;
+
+    let pts;
+    if (a.type === 'ground') {
+      // Dense sampling: subdivide each segment so the trail hugs the terrain
+      // surface between recorded steps instead of cutting through hills.
+      pts = [];
+      for (let i = start; i < end - 1; i++) {
+        const [x0, y0] = xyHist[i]     ?? [a.x, a.y];
+        const [x1, y1] = xyHist[i + 1] ?? [a.x, a.y];
+        for (let s = 0; s < GROUND_SUBDIVISIONS; s++) {
+          const f  = s / GROUND_SUBDIVISIONS;
+          const hx = x0 + (x1 - x0) * f;
+          const hy = y0 + (y1 - y0) * f;
+          pts.push(hx, hy, terrainElevAt(hx, hy, state.elevGrid, G) + 0.008);
+        }
+      }
+      // Final recorded point
+      const [lx, ly] = xyHist[end - 1] ?? [a.x, a.y];
+      pts.push(lx, ly, terrainElevAt(lx, ly, state.elevGrid, G) + 0.008);
+    } else {
+      // Drone: one sample per recorded step, Z = terrain + altitude at that step
+      pts = [];
+      for (let i = start; i < end; i++) {
+        const [hx, hy] = xyHist[i] ?? [a.x, a.y];
+        const hagl     = altHist[i] ?? 0;
+        const tz       = terrainElevAt(hx, hy, state.elevGrid, G);
+        pts.push(hx, hy, tz + hagl * HEIGHT_SCALE);
+      }
+    }
+
+    const positions = new Float32Array(pts);
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    state.trailGroup.add(new THREE.Line(geom, new THREE.LineBasicMaterial({
+      color: a.type === 'drone' ? COLORS.drone : COLORS.ground,
+      transparent: true, opacity: 0.50,
+    })));
+  }
+
+  // --- Agent markers + drone altitude staff ---
+  for (const a of frame.agents) {
+    const altAgl = a.altitude_agl ?? 0;
+    const tz     = terrainElevAt(a.x, a.y, state.elevGrid, G);
+    const az     = a.type === 'drone' ? tz + altAgl * HEIGHT_SCALE : tz + 0.008;
+
+    // Drone: vertical staff from terrain surface to drone — makes altitude
+    // above ground immediately readable from any orbit angle.
+    if (a.type === 'drone') {
+      const staffPts = new Float32Array([a.x, a.y, tz + 0.005, a.x, a.y, az]);
+      const staffGeom = new THREE.BufferGeometry();
+      staffGeom.setAttribute('position', new THREE.BufferAttribute(staffPts, 3));
+      state.trailGroup.add(new THREE.Line(staffGeom, new THREE.LineBasicMaterial({
+        color: COLORS.drone, transparent: true, opacity: 0.30,
+      })));
+    }
+
+    let mesh;
+    if (a.type === 'drone') {
+      const heading = headingFromHistory(histories.xy[a.name] ?? [], frame.step, a.x, a.y);
+      mesh = makeCrazyflieDroneMesh(state, agentRadius, altAgl, maxAltitude, heading)
+        ?? makeDroneMesh(agentRadius, altAgl, maxAltitude);
+    } else {
+      const heading = headingFromHistory(histories.xy[a.name] ?? [], frame.step, a.x, a.y);
+      mesh = makeSpotMiniGroundMesh(state, agentRadius, heading) ?? makeGroundBoxMesh(agentRadius, heading);
+    }
+    mesh.position.set(a.x, a.y, az);
+    if (!mesh.userData.keepWorldOrientation) mesh.userData.isBillboard = true;
+    state.agentGroup.add(mesh);
+
+    if (a.comms_up !== undefined) {
+      const dot = makeCommsIndicator(a.comms_up);
+      dot.position.set(a.x + agentRadius * 1.2, a.y + agentRadius * 1.2, az + agentRadius * 1.5);
+      dot.userData.isBillboard = true;
+      state.agentGroup.add(dot);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Fire — terrain glow for the burned area plus screen-stable edge embers.
+// Built once per terrain load, matrix-updated every frame.
+// ---------------------------------------------------------------------
+function makeRadialPointTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 30);
+  gradient.addColorStop(0.0, 'rgba(255,255,255,0.82)');
+  gradient.addColorStop(0.28, 'rgba(255,255,255,0.54)');
+  gradient.addColorStop(0.72, 'rgba(255,255,255,0.16)');
+  gradient.addColorStop(1.0, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 64, 64);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function buildFireColumnInstances(maxCount) {
+  const emberTexture = makeRadialPointTexture();
+  const glowMesh = new THREE.InstancedMesh(
+    new THREE.CircleGeometry(1, 28),
+    new THREE.MeshBasicMaterial({
+      color: 0xff4d16,
+      transparent: true,
+      opacity: 0.36,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+    maxCount,
+  );
+  glowMesh.count = 0;
+  glowMesh.renderOrder = 5;
+
+  const emberPositions = new Float32Array(maxCount * 3);
+  const emberGeometry = new THREE.BufferGeometry();
+  emberGeometry.setAttribute('position', new THREE.BufferAttribute(emberPositions, 3));
+  emberGeometry.setDrawRange(0, 0);
+  const emberMesh = new THREE.Points(emberGeometry, new THREE.PointsMaterial({
+    color: 0xff7c24,
+    transparent: true,
+    opacity: 0.48,
+    size: 12.0,
+    sizeAttenuation: false,
+    map: emberTexture,
+    blending: THREE.AdditiveBlending,
+    depthTest: false,
+    depthWrite: false,
+  }));
+  emberMesh.renderOrder = 20;
+
+  const corePositions = new Float32Array(maxCount * 3);
+  const coreGeometry = new THREE.BufferGeometry();
+  coreGeometry.setAttribute('position', new THREE.BufferAttribute(corePositions, 3));
+  coreGeometry.setDrawRange(0, 0);
+  const coreMesh = new THREE.Points(
+    coreGeometry,
+    new THREE.PointsMaterial({
+      color: 0xffc86a,
+      transparent: true,
+      opacity: 0.34,
+      size: 6.0,
+      sizeAttenuation: false,
+      map: emberTexture,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  coreMesh.renderOrder = 21;
+
+  return {
+    glowMesh, emberMesh, coreMesh, emberPositions, corePositions, dummy: new THREE.Object3D(),
+  };
+}
+
+function updateFireColumns(state, meta, frame) {
+  if (!state.fireInstances || !state.elevGrid) return;
+  const {
+    glowMesh, emberMesh, coreMesh, emberPositions, corePositions, dummy,
+  } = state.fireInstances;
+  const G       = state.fireGridSize;
+  const cellW   = 2 / G;
+  const maxCount = state.fireMaxCount;
+  const activeCells = new Set((frame.fire_cells ?? []).map(([gx, gy]) => `${gx},${gy}`));
+  let glowCount = 0;
+  let flameCount = 0;
+
+  for (const cell of (frame.fire_cells ?? [])) {
+    if (glowCount >= maxCount) break;
+    const [gx, gy, rawIntensity = 1] = cell;
+    const intensity = Math.max(0.2, Math.min(1.0, rawIntensity));
+    const wx = (gx + 0.5) / G * 2 - 1;
+    const wy = (gy + 0.5) / G * 2 - 1;
+    const tz = terrainElevAt(wx, wy, state.elevGrid, G);
+    const h  = Math.min(0.24, Math.max(0.085, cellW * (4.8 + intensity * 8.5)));
+    const glowRadius = cellW * (0.56 + intensity * 0.34);
+    const isFireEdge =
+      !activeCells.has(`${gx - 1},${gy}`) ||
+      !activeCells.has(`${gx + 1},${gy}`) ||
+      !activeCells.has(`${gx},${gy - 1}`) ||
+      !activeCells.has(`${gx},${gy + 1}`);
+    const showEmber =
+      (isFireEdge && cellNoise(gx, gy, 29) > 0.38) ||
+      intensity > 0.92 ||
+      cellNoise(gx, gy, 31) > 0.94;
+    const jitterX = (cellNoise(gx, gy, 41) - 0.5) * cellW * 0.52;
+    const jitterY = (cellNoise(gx, gy, 53) - 0.5) * cellW * 0.52;
+
+    // Terrain-hugging heat footprint.
+    dummy.position.set(wx, wy, tz + 0.004);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(glowRadius, glowRadius, 1);
+    dummy.updateMatrix();
+    glowMesh.setMatrixAt(glowCount, dummy.matrix);
+    glowCount++;
+
+    if (!showEmber || flameCount >= maxCount) continue;
+
+    const i = flameCount * 3;
+    emberPositions[i] = wx + jitterX;
+    emberPositions[i + 1] = wy + jitterY;
+    emberPositions[i + 2] = tz + h * 0.46;
+    corePositions[i] = wx + jitterX * 0.55;
+    corePositions[i + 1] = wy + jitterY * 0.55;
+    corePositions[i + 2] = tz + h * 0.62;
+    flameCount++;
+  }
+
+  glowMesh.count = glowCount;
+  emberMesh.geometry.setDrawRange(0, flameCount);
+  coreMesh.geometry.setDrawRange(0, flameCount);
+  glowMesh.instanceMatrix.needsUpdate = true;
+  emberMesh.geometry.attributes.position.needsUpdate = true;
+  coreMesh.geometry.attributes.position.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------
+// Smoke — soft screen-stable puffs so visibility is consistent while zooming.
+// ---------------------------------------------------------------------
+function buildSmokeInstances(maxCount) {
+  const positions = new Float32Array(maxCount * 3);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setDrawRange(0, 0);
+
+  const mesh = new THREE.Points(geometry, new THREE.PointsMaterial({
+    color: 0xb7c0ca,
+    transparent: true,
+    opacity: 0.20,
+    size: 13.0,
+    sizeAttenuation: false,
+    map: makeRadialPointTexture(),
+    blending: THREE.NormalBlending,
+    depthTest: false,
+    depthWrite: false,
+  }));
+  mesh.renderOrder = 15;
+  mesh.userData.positions = positions;
+  return mesh;
+}
+
+function updateSmoke(state, meta, frame) {
+  if (!state.smokeMesh || !state.elevGrid) return;
+  const mesh     = state.smokeMesh;
+  const positions = mesh.userData.positions;
+  const G        = state.fireGridSize;
+  const cellW    = 2 / G;
+  const maxCount = state.smokeMaxCount;
+  let count = 0;
+
+  for (const cell of (frame.smoke_cells ?? [])) {
+    if (count >= maxCount) break;
+    const [gx, gy, intensity] = cell;
+    if (intensity < 0.05) continue;
+    const wx = (gx + 0.5) / G * 2 - 1;
+    const wy = (gy + 0.5) / G * 2 - 1;
+    const tz = terrainElevAt(wx, wy, state.elevGrid, G);
+    const lift = Math.min(0.30, Math.max(0.08, cellW * (5.2 + intensity * 8.5)));
+    const driftX = (cellNoise(gx, gy, 67) - 0.5) * cellW * 0.65;
+    const driftY = (cellNoise(gx, gy, 71) - 0.5) * cellW * 0.65;
+
+    const i = count * 3;
+    positions[i] = wx + driftX;
+    positions[i + 1] = wy + driftY;
+    positions[i + 2] = tz + lift;
+    count++;
+  }
+
+  mesh.geometry.setDrawRange(0, count);
+  mesh.geometry.attributes.position.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------
+// Scene setup
+// ---------------------------------------------------------------------
+function setup3DScene(canvas, width, height) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(width, height, false);
+  renderer.setClearColor(0x0a0d14, 1);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const camera = new THREE.PerspectiveCamera(50, width / height, 0.001, 100);
+  camera.up.set(0, 0, 1); // Z-up: matches terrain (XY plane, elevation in Z)
+  camera.position.set(0, -2.0, 2.0);
+  camera.lookAt(0, 0, 0.5);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0, 0.3);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 0.3;
+  controls.maxDistance = 8;
+  controls.minPolarAngle = 0.05;           // prevent straight-down gimbal lock
+  controls.maxPolarAngle = Math.PI * 0.75; // allow ground-level and slightly upward views
+  controls.update();
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x0a0d14, 0.18);
+
+  // Ambient fill — keeps shadowed faces readable
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+
+  // Key light — afternoon sun from SW, casts slope shadows
+  const sun = new THREE.DirectionalLight(0xfff5e0, 0.85);
+  sun.position.set(0.5, -1.0, 1.5);
+  sun.castShadow = true;
+  sun.shadow.mapSize.width  = 2048;
+  sun.shadow.mapSize.height = 2048;
+  sun.shadow.camera.near = 0.1;
+  sun.shadow.camera.far  = 20;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -2;
+  sun.shadow.camera.right = sun.shadow.camera.top  =  2;
+  scene.add(sun);
+
+  // Subtle sky-blue rim from above to separate terrain from sky
+  const sky = new THREE.DirectionalLight(0xc0d8ff, 0.22);
+  sky.position.set(0, 0, 1);
+  scene.add(sky);
+
+  return { renderer, scene, camera, controls };
+}
+
+// ---------------------------------------------------------------------
+// Placeholder grid — visible while terrain is not yet loaded
+// ---------------------------------------------------------------------
+function makePlaceholderGrid() {
+  const group = new THREE.Group();
+
+  // Ground plane
+  const plane = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.MeshLambertMaterial({ color: 0x1a2a1a }),
+  );
+  group.add(plane);
+
+  // Grid lines
+  const grid = new THREE.GridHelper(2, 16, 0x2a3f2a, 0x1f2f1f);
+  grid.rotation.x = Math.PI / 2; // lay flat in XY plane
+  grid.position.z = 0.001;
+  group.add(grid);
+
+  // World-boundary box outline so the [-1,1] extent is clear
+  const box = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(2, 2, 0.001)),
+    new THREE.LineBasicMaterial({ color: 0x3a4f3a }),
+  );
+  group.add(box);
+
+  return group;
+}
+
+// ---------------------------------------------------------------------
+// Playback hook (identical to 2D viewer)
 // ---------------------------------------------------------------------
 function usePlayback(nFrames) {
-  const [step, setStep] = useState(0);
-  const [playing, setPlaying] = useState(true);
-  const [speed, setSpeed] = useState(1);   // frames per tick (10 ticks/sec)
+  const [step, setStep]     = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed]   = useState(1);
 
   useEffect(() => {
     if (!playing) return;
@@ -988,64 +1238,15 @@ function usePlayback(nFrames) {
 }
 
 // ---------------------------------------------------------------------
-// Components
+// Metrics sidebar
 // ---------------------------------------------------------------------
-function Legend() {
-  // [shape, color, label]
-  const items = [
-    ['tri',    '#4a90ff', 'Drone'],
-    ['square', '#14b8a6', 'Ground robot'],
-    ['circle', '#88ff88', 'Comms up'],
-    ['circle', '#ff4444', 'Comms dropped'],
-    ['circle', '#60a5fa', 'Drone camera footprint'],
-    ['gradient', '#fbbf24:#22c55e', 'Detection link (amber=low → green=high)'],
-    ['circle', '#ff3838', 'Survivor (unscouted)'],
-    ['circle', '#fbbf24', 'Survivor (scouted)'],
-    ['circle', '#84cc16', 'Survivor (confirmed)'],
-    ['square', '#b59665', 'Access road'],
-    ['square', '#315a2e', 'Brush'],
-    ['square', '#203d24', 'Forest'],
-    ['square', '#555963', 'Rock / blocked'],
-    ['square', '#2563eb', 'Water / ocean'],
-    ['circle', '#1d5128', 'Tree canopy'],
-    ['square', '#a34d3d', 'House'],
-    ['square', '#2b211b', 'Burned / post-fire'],
-    ['square', '#f06e1e', 'Fire'],
-  ];
-  return h('div', { id: 'legend' },
-    items.map(([shape, c, label]) => {
-      let swatchStyle;
-      if (shape === 'tri') {
-        swatchStyle = { background: 'transparent', '--swatch-color': c };
-      } else if (shape === 'gradient') {
-        const [from, to] = c.split(':');
-        swatchStyle = { background: `linear-gradient(to right, ${from}, ${to})`, borderRadius: '2px' };
-      } else {
-        swatchStyle = { background: c, '--swatch-color': c };
-      }
-      const cls = shape === 'gradient' ? 'swatch square' : `swatch ${shape}`;
-      return h('div', { key: label, className: 'item' },
-        h('span', { className: cls, style: swatchStyle }),
-        label,
-      );
-    }),
-  );
-}
-
 function MetricsPanel({ meta, frame }) {
-  const m = meta?.metrics ?? {};
-  const landCover = meta?.terrain?.land_cover ?? [];
-  const waterCells = landCover.reduce(
-    (total, row) => total + row.reduce((n, cover) => n + (cover === 5 ? 1 : 0), 0),
-    0,
-  );
-  const totalTerrainCells = landCover.reduce((total, row) => total + row.length, 0);
-  const waterPct = totalTerrainCells > 0 ? (100 * waterCells / totalTerrainCells).toFixed(1) : '0.0';
-  const fmt = (v, suffix='') => {
+  const m   = meta?.metrics ?? {};
+  const fmt = (v, suffix = '') => {
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
     return (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(2) : v) + suffix;
   };
-  const rows = [
+  const metricRows = [
     ['Survivor recall',      fmt(m.survivor_recall)],
     ['Time-to-verification', fmt(m.time_to_verification, ' steps')],
     ['False-positive trips', fmt(m.false_positive_trips)],
@@ -1054,100 +1255,298 @@ function MetricsPanel({ meta, frame }) {
     ['Episode length',       fmt(m.n_steps, ' steps')],
   ];
   const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
-  const perception = frame?.drone_perception ?? [];
-  const perceptionRows = perception.map(d => {
-    const visible = (d.survivors ?? []).filter(s => s.visible);
-    const best = visible.reduce((m, s) => Math.max(m, s.probability ?? 0), 0);
-    return {
-      name: d.name,
-      footprint: d.footprint ?? 0,
-      visible: visible.length,
-      best,
-    };
-  });
   return h('aside', null,
     h('div', { className: 'panel' },
       h('h2', null, 'Strategy'),
       h('div', { style: { fontSize: 20, fontWeight: 600, marginBottom: 4 } },
         meta?.strategy ?? '—'),
       h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
-        `seed ${meta?.seed ?? '—'} · ${meta?.n_drones} drones + ${meta?.n_ground} ground · ${meta?.n_survivors} survivors`),
-      h('div', { style: { color: 'var(--muted)', fontSize: 12, marginTop: 6 } },
-        `viewer ${APP_VERSION} · water cells ${waterCells} (${waterPct}%)`),
-    ),
-    h('div', { className: 'panel' },
-      h('h2', null, 'Legend'),
-      h(Legend),
+        meta
+          ? `${meta.n_drones} drones · ${meta.n_ground} ground · ${meta.n_survivors} survivors`
+          : '—'),
     ),
     h('div', { className: 'panel' },
       h('h2', null, 'Mission metrics (final)'),
-      rows.map(([k, v]) => h('div', { key: k, className: 'metric' },
+      metricRows.map(([k, v]) => h('div', { key: k, className: 'metric' },
         h('span', { className: 'k' }, k),
         h('span', { className: 'v' }, v),
       )),
     ),
-    h('div', { className: 'panel' },
-      h('h2', null, 'Drone flight altitude'),
+    drones.length > 0 && h('div', { className: 'panel' },
+      h('h2', null, 'Drone altitude'),
       drones.map(a => h('div', { key: a.name, className: 'metric' },
         h('span', { className: 'k' }, a.name),
-        h('span', { className: 'v' }, `${fmt(a.altitude_agl ?? a.altitude)} AGL / ${fmt(a.altitude_msl ?? a.altitude)} MSL`),
+        h('span', { className: 'v' },
+          `${fmt(a.altitude_agl)} AGL / ${fmt(a.altitude_msl)} MSL`),
       )),
     ),
-    perceptionRows.length > 0 && h('div', { className: 'panel' },
-      h('h2', null, 'Drone perception'),
-      perceptionRows.map(row => h('div', { key: row.name, className: 'metric' },
-        h('span', { className: 'k' }, `${row.name} · r ${fmt(row.footprint)}`),
-        h('span', { className: 'v' }, `${row.visible} seen · p ${row.best.toFixed(2)}`),
-      )),
+    h('div', { className: 'hint' },
+      'Drag to orbit · Scroll to zoom · Right-drag to pan',
     ),
   );
 }
 
+// ---------------------------------------------------------------------
+// React hook — mounts the Three.js scene once and drives the RAF loop.
+// Rebuilds the terrain group whenever meta changes.
+// ---------------------------------------------------------------------
+function useThree3D(meta, frame, frames, histories) {
+  const canvasRef = useRef(null);
+  const stateRef  = useRef(null);
+  const [agentAssetTick, setAgentAssetTick] = useState(0);
+
+  // Initial setup (once)
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const rect   = canvas.parentElement.getBoundingClientRect();
+    const { renderer, scene, camera, controls } = setup3DScene(canvas, rect.width, rect.height);
+
+    const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
+    const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
+    const burnedGroup  = new THREE.Group(); scene.add(burnedGroup);
+    const fireGroup    = new THREE.Group(); scene.add(fireGroup);
+    const smokeGroup   = new THREE.Group(); scene.add(smokeGroup);
+    const trailGroup   = new THREE.Group(); scene.add(trailGroup);
+    const survGroup    = new THREE.Group(); scene.add(survGroup);
+    const agentGroup   = new THREE.Group(); scene.add(agentGroup);
+
+    const placeholder = makePlaceholderGrid();
+    scene.add(placeholder);
+
+    stateRef.current = {
+      renderer, scene, camera, controls,
+      terrainGroup, obstacleGroup, burnedGroup, fireGroup, smokeGroup,
+      trailGroup, survGroup, agentGroup,
+      placeholder,
+      droneModelTemplate: null, droneModelSize: 1, droneModelError: null,
+      groundModelTemplate: null, groundModelSize: 1, groundModelError: null,
+      survivorModelTemplate: null, survivorModelSize: 1, survivorModelError: null,
+      terrainSource: null, burnedStep: -1, burnedSource: null,
+    };
+
+    let alive = true;
+    loadCrazyflieTemplate()
+      .then(({ model, normalizedSize }) => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.droneModelTemplate = model;
+        stateRef.current.droneModelSize = normalizedSize;
+        setAgentAssetTick(tick => tick + 1);
+      })
+      .catch(err => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.droneModelError = err;
+        console.warn('Could not load Crazyflie model; using procedural drone marker.', err);
+      });
+    loadSpotMiniTemplate()
+      .then(({ model, normalizedSize }) => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.groundModelTemplate = model;
+        stateRef.current.groundModelSize = normalizedSize;
+        setAgentAssetTick(tick => tick + 1);
+      })
+      .catch(err => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.groundModelError = err;
+        console.warn('Could not load Spot Mini model; using yellow UGV box.', err);
+      });
+    loadHumanTemplate()
+      .then(({ model, normalizedSize }) => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.survivorModelTemplate = model;
+        stateRef.current.survivorModelSize = normalizedSize;
+        setAgentAssetTick(tick => tick + 1);
+      })
+      .catch(err => {
+        if (!alive || !stateRef.current) return;
+        stateRef.current.survivorModelError = err;
+        console.warn('Could not load human survivor model; using procedural survivor marker.', err);
+      });
+
+    let raf;
+    const t0 = performance.now();
+    const tick = () => {
+      const t = (performance.now() - t0) / 1000;
+      controls.update();
+      // Fire flicker — vary opacity globally across all instances.
+      const s = stateRef.current;
+      if (s?.fireInstances) {
+        s.fireInstances.glowMesh.material.opacity = 0.28 + 0.06 * Math.sin(t * 5.2);
+        s.fireInstances.emberMesh.material.opacity = 0.44 + 0.07 * Math.sin(t * 8.0);
+        s.fireInstances.coreMesh.material.opacity = 0.30 + 0.05 * Math.sin(t * 11.0 + 1.1);
+      }
+      if (s?.smokeMesh) {
+        s.smokeMesh.material.opacity = 0.16 + 0.04 * Math.sin(t * 2.5);
+      }
+      // Billboard: orient all agent/comms markers to face the camera
+      if (s?.agentGroup) {
+        s.agentGroup.traverse(obj => {
+          if (obj.userData?.isBillboard) obj.quaternion.copy(camera.quaternion);
+        });
+      }
+      // Propeller spin (local z in billboard space = spin axis toward camera)
+      if (s?.agentGroup) {
+        s.agentGroup.traverse(obj => {
+          if (obj.userData?.isProp) {
+            const base = obj.userData.baseRotation;
+            if (base) {
+              obj.rotation.set(base[0], base[1], base[2] + t * 18 + (obj.userData.phase || 0));
+            } else {
+              obj.rotation.z = t * 18 + (obj.userData.phase || 0);
+            }
+          }
+        });
+      }
+      // Pulse comms-dropped dots
+      if (s?.agentGroup) {
+        s.agentGroup.traverse(obj => {
+          if (obj.userData?.isCommsIndicator && !obj.userData.commsUp) {
+            const sc = 1 + 0.35 * Math.sin(t * 10);
+            obj.scale.set(sc, sc, 1);
+            obj.material.opacity = 0.55 + 0.45 * Math.abs(Math.sin(t * 10));
+          }
+        });
+      }
+      // Survivor billboard + scouted-ring pulse
+      if (s?.survGroup) {
+        s.survGroup.traverse(obj => {
+          if (obj.userData?.isBillboard) obj.quaternion.copy(camera.quaternion);
+          if (obj.userData?.isPulse) {
+            const sc = 1 + 0.10 * Math.sin(t * 6);
+            obj.scale.set(sc, sc, 1);
+          }
+        });
+      }
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+
+    const onResize = () => {
+      const r = canvas.parentElement.getBoundingClientRect();
+      renderer.setSize(r.width, r.height, false);
+      camera.aspect = r.width / r.height;
+      camera.updateProjectionMatrix();
+    };
+    window.addEventListener('resize', onResize);
+
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
+      controls.dispose();
+      renderer.dispose();
+    };
+  }, []);
+
+  // Rebuild terrain whenever meta changes (new strategy loaded)
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!state || !meta) return;
+
+    // Remove placeholder grid on first real terrain load
+    if (state.placeholder) {
+      state.scene.remove(state.placeholder);
+      state.placeholder = null;
+    }
+
+    if (state.terrainSource === meta.terrain) return;
+
+    clearGroup(state.terrainGroup);
+    clearGroup(state.obstacleGroup);
+    clearGroup(state.burnedGroup);
+
+    const G = meta.fire_grid_size;
+    const built = buildTerrainMesh(meta);
+    if (built) {
+      state.terrainGroup.add(built.mesh);
+      for (const houseMesh of buildHouseMeshes(meta)) {
+        state.obstacleGroup.add(houseMesh);
+      }
+      // Build the scar mesh from the same displaced geometry
+      const scar = buildBurnScarMesh(built.geo, G);
+      state.burnedGroup.add(scar.mesh);
+      state.burnedCanvas  = scar.canvas;
+      state.burnedCtx     = scar.ctx;
+      state.burnedTexture = scar.texture;
+    }
+    state.terrainSource = meta.terrain;
+    state.burnedStep    = -1;
+    state.burnedSource  = null;
+    state.elevGrid      = meta.terrain?.elevation ?? null;
+    state.fireGridSize  = G;
+
+    // Build fire instances (terrain glow plus screen-stable edge embers).
+    clearGroup(state.fireGroup);
+    const maxCount = G * G;
+    const instances = buildFireColumnInstances(maxCount);
+    state.fireGroup.add(instances.glowMesh);
+    state.fireGroup.add(instances.emberMesh);
+    state.fireGroup.add(instances.coreMesh);
+    state.fireInstances = instances;
+    state.fireMaxCount  = maxCount;
+
+    // Build smoke instances
+    clearGroup(state.smokeGroup);
+    const smokeMesh = buildSmokeInstances(maxCount);
+    state.smokeGroup.add(smokeMesh);
+    state.smokeMesh    = smokeMesh;
+    state.smokeMaxCount = maxCount;
+  }, [meta]);
+
+  // Sync overlays whenever the current frame changes
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!state || !meta || !frame || !frames.length) return;
+    syncBurnedOverlay3D(state, meta, frame, frames);
+    updateFireColumns(state, meta, frame);
+    updateSmoke(state, meta, frame);
+    if (histories) renderAgents3D(state, meta, frame, histories);
+    renderSurvivors3D(state, meta, frame);
+  }, [meta, frame, frames, histories, agentAssetTick]);
+
+  return { canvasRef, stateRef };
+}
+
+// ---------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------
 function App() {
-  const [strategy, setStrategy] = useState(STRATEGY_NAMES[2]); // nearest_candidate
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [showPerception, setShowPerception] = useState(true);
+  const [strategy, setStrategy] = useState(STRATEGY_NAMES[1]); // lawnmower
+  const [data, setData]         = useState(null);
+  const [error, setError]       = useState(null);
 
   useEffect(() => {
     setData(null); setError(null);
-    loadTrajectory(strategy)
-      .then(setData)
-      .catch(e => setError(e.message));
+    loadTrajectory(strategy).then(setData).catch(e => setError(e.message));
   }, [strategy]);
 
-  const meta = data?.metadata;
-  const runLabel = meta
-    ? `Loaded: seed ${meta.seed} · ${meta.actual_n_steps ?? meta.n_steps} steps · ${meta.fire_grid_size}x${meta.fire_grid_size}`
-    : 'No trajectory loaded yet';
-  const frames = data?.frames ?? [];
-  const histories = useMemo(() => buildHistories(frames), [data]);
+  const meta     = data?.metadata ?? null;
+  const frames   = data?.frames   ?? [];
+  const histories = useMemo(() => buildHistories3D(frames), [data]);
+
   const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
 
-  // Reset playback whenever the user switches strategy (or trajectory reloads).
-  useEffect(() => {
-    setStep(0);
-    setPlaying(true);
-  }, [strategy]);
+  // Reset and auto-play when strategy changes
+  useEffect(() => { setStep(0); setPlaying(true); }, [strategy]);
 
-  // Play button: if we're parked at the end, rewind first.
   const onPlay = () => {
-    if (step >= frames.length - 1) {
-      setStep(0);
-      setPlaying(true);
-    } else {
-      setPlaying(p => !p);
-    }
+    if (step >= frames.length - 1) { setStep(0); setPlaying(true); }
+    else setPlaying(p => !p);
   };
 
-  const frame = frames[step] ?? null;
-  const canvasRef = useThree(meta, frame, histories, frames, showPerception);
+  const frame    = frames[step] ?? null;
+  const runLabel = meta
+    ? `seed ${meta.seed} · ${meta.actual_n_steps ?? meta.n_steps} steps · ${meta.fire_grid_size}×${meta.fire_grid_size}`
+    : error ? 'Load error' : 'Loading…';
+
+  const { canvasRef } = useThree3D(meta, frame, frames, histories);
 
   return h(React.Fragment, null,
     h('header', null,
       h('h1', null, 'OmniSearch · Strategy Viewer'),
+      h('span', { className: 'badge' }, '3D'),
       h('div', { className: 'meta' }, runLabel),
-      h('div', { className: 'meta' }, APP_VERSION),
       h('div', { style: { flex: 1 } }),
       h('label', null,
         'Strategy: ',
@@ -1156,7 +1555,7 @@ function App() {
           onChange: e => setStrategy(e.target.value),
         }, STRATEGY_NAMES.map(n => h('option', { key: n, value: n }, n))),
       ),
-      h('a', { className: 'view3d', href: './index3d.html' }, '3D Viewer →'),
+      h('a', { className: 'back', href: './index2d.html' }, '← 2D Viewer'),
     ),
     h('main', null,
       h('div', { id: 'scene-wrap' },
@@ -1170,31 +1569,27 @@ function App() {
           h('div', { style: { color: 'var(--muted)', fontSize: 13 } },
             strategy === 'happo_trained'
               ? 'Run `python scripts/train_happo_smoke.py` then `python scripts/export_trajectories.py` first.'
-              : 'Run `python scripts/export_trajectories.py` first.'),
+              : 'Run `python scripts/export_trajectories.py` first.',
+          ),
         ),
       ),
       h(MetricsPanel, { meta, frame }),
     ),
     h('footer', null,
       h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
-      h('button', { onClick: onPlay }, playing ? 'Pause' : (step >= frames.length - 1 ? 'Replay' : 'Play')),
+      h('button', { onClick: onPlay },
+        playing ? 'Pause' : (step >= frames.length - 1 ? 'Replay' : 'Play')),
       h('input', {
         type: 'range', min: 0, max: Math.max(0, frames.length - 1),
-        value: step, onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
+        value: step,
+        onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
       }),
       h('div', { className: 'step' }, `step ${step} / ${Math.max(0, frames.length - 1)}`),
-      h('label', { className: 'toggle' },
-        h('input', {
-          type: 'checkbox',
-          checked: showPerception,
-          onChange: e => setShowPerception(e.target.checked),
-        }),
-        'perception',
-      ),
       h('div', { className: 'speed' },
         'speed: ',
         h('select', {
-          value: speed, onChange: e => setSpeed(Number(e.target.value)),
+          value: speed,
+          onChange: e => setSpeed(Number(e.target.value)),
         }, [1, 2, 4, 8].map(s => h('option', { key: s, value: s }, `${s}×`))),
       ),
     ),
