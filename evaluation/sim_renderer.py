@@ -51,7 +51,7 @@ def _person_sprite(target_height_px: int) -> Image.Image:
     aspect = person.width / person.height
     new_h = target_height_px
     new_w = max(int(round(target_height_px * aspect)), 4)
-    return person.resize((new_w, new_h), Image.LANCZOS)
+    return person.resize((new_w, new_h), Image.Resampling.NEAREST)
 
 
 @dataclass

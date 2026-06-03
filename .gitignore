@@ -236,6 +236,7 @@ web/trajectories/
 # Downloaded/geocoded terrain cache artifacts
 data/terrain_cache/
 data/source_cache/
+data/cv_assets/
 cache/
 
 # Local Claude Code config and agent context (machine-specific)
