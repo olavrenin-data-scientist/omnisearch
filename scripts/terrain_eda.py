@@ -33,8 +33,8 @@ LAND_COVER_COLORS = ["#b59665", "#47783d", "#315a2e", "#203d24", "#555963", "#25
 OBSTACLE_NAMES = ["none", "tree", "house"]
 OBSTACLE_COLORS = ["#111827", "#1d5128", "#a34d3d"]
 CONTINUOUS_LAYERS = ("elevation", "slope", "moisture", "fuel_density", "rockiness")
-DRONE_LANE_SPACING_FACTOR = 1.5
-DRONE_LANE_MIN_SPACING = 0.08
+# The planner's footprint value is camera radius, so 1.6 * radius = 0.8 * full footprint width.
+DRONE_LANE_SPACING_FACTOR = 1.6
 
 
 def main() -> None:
@@ -979,11 +979,8 @@ def _expected_lawnmower_lanes(terrain: dict) -> tuple[list[dict], dict]:
     flight_levels = mission.get("terrain", {}).get("drone_flight_levels", [])
     fov_deg = float(mission.get("terrain", {}).get("drone_camera_fov_deg", 65.0))
     min_altitude = min(float(v) for v in flight_levels) if flight_levels else 0.18
-    footprint = max(
-        min_altitude * math.tan(math.radians(fov_deg) / 2.0),
-        DRONE_LANE_MIN_SPACING / DRONE_LANE_SPACING_FACTOR,
-    )
-    lane_spacing = max(footprint * DRONE_LANE_SPACING_FACTOR, DRONE_LANE_MIN_SPACING)
+    footprint = max(min_altitude * math.tan(math.radians(fov_deg) / 2.0), 1e-6)
+    lane_spacing = footprint * DRONE_LANE_SPACING_FACTOR
 
     margin = max(agent_radius, 0.02)
     x_min_world = -x_semidim + margin
