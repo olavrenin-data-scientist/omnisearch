@@ -146,7 +146,7 @@ class WildfireSearchScenario(BaseScenario):
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
         # continuous AGL altitude. MSL altitude is derived from local terrain elevation.
         # Meter-based anchors are converted to sim units after loading terrain metadata.
-        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (500.0, 750.0, 1000.0))
+        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (20.0, 35.0, 50.0))
         drone_flight_levels_override = kwargs.pop("drone_flight_levels", None)
         drone_flight_levels = (
             tuple(float(v) for v in drone_flight_levels_override)
@@ -185,7 +185,7 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.20)
         self.drone_safety_clearance_sim_override = kwargs.pop("drone_safety_clearance", None)
-        self.drone_safety_clearance_m = max(float(kwargs.pop("drone_safety_clearance_m", 15.0)), 0.0)
+        self.drone_safety_clearance_m = max(float(kwargs.pop("drone_safety_clearance_m", 3.0)), 0.0)
         self.drone_climb_rate = max(float(kwargs.pop("drone_climb_rate", 0.035)), 0.0)
         self.drone_descent_rate = max(float(kwargs.pop("drone_descent_rate", 0.020)), 0.0)
         self.drone_climb_rate_m = max(float(kwargs.pop("drone_climb_rate_m", 10.0)), 0.0)

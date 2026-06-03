@@ -68,6 +68,27 @@
   .metric .k { color: var(--muted); font-size: 13px; }
   .metric .v { font-size: 18px; font-variant-numeric: tabular-nums; }
   .panel { margin-bottom: 22px; }
+  .camera-panel select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 7px 9px; font-size: 13px; margin: 8px 0 10px;
+  }
+  .camera-view {
+    width: 100%; aspect-ratio: 1 / 1; display: grid; place-items: center;
+    background: #090c12; border: 1px solid var(--border);
+    border-radius: 4px; overflow: hidden;
+  }
+  .camera-view img {
+    width: 100%; height: 100%; object-fit: contain; image-rendering: auto;
+  }
+  .camera-empty {
+    color: var(--muted); font-size: 12px; line-height: 1.4;
+    text-align: center; padding: 12px;
+  }
+  .camera-detection {
+    margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+  }
   .hint { color: var(--muted); font-size: 11px; margin-top: 10px; line-height: 1.5; }
   footer {
     display: flex; align-items: center; gap: 18px;
@@ -1237,10 +1258,19 @@ function usePlayback(nFrames) {
   return { step, setStep, playing, setPlaying, speed, setSpeed };
 }
 
+function imagePathForBrowser(path) {
+  if (!path) return null;
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('./')) return path;
+  const marker = '/web/';
+  const idx = path.indexOf(marker);
+  if (idx >= 0) return `./${path.slice(idx + marker.length)}`;
+  return path;
+}
+
 // ---------------------------------------------------------------------
 // Metrics sidebar
 // ---------------------------------------------------------------------
-function MetricsPanel({ meta, frame }) {
+function MetricsPanel({ meta, frame, selectedDrone, setSelectedDrone }) {
   const m   = meta?.metrics ?? {};
   const fmt = (v, suffix = '') => {
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
@@ -1255,6 +1285,15 @@ function MetricsPanel({ meta, frame }) {
     ['Episode length',       fmt(m.n_steps, ' steps')],
   ];
   const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
+  const cvRecords = frame?.cv_perception ?? [];
+  const cvNames = cvRecords.map(record => record.name);
+  const activeDrone = cvNames.includes(selectedDrone) ? selectedDrone : (cvNames[0] ?? '');
+  const activeCv = cvRecords.find(record => record.name === activeDrone);
+  const activeDetections = activeCv?.detections ?? [];
+  useEffect(() => {
+    if (!activeDrone || activeDrone === selectedDrone) return;
+    setSelectedDrone(activeDrone);
+  }, [activeDrone, selectedDrone, setSelectedDrone]);
   return h('aside', null,
     h('div', { className: 'panel' },
       h('h2', null, 'Strategy'),
@@ -1279,6 +1318,35 @@ function MetricsPanel({ meta, frame }) {
         h('span', { className: 'v' },
           `${fmt(a.altitude_agl)} AGL / ${fmt(a.altitude_msl)} MSL`),
       )),
+    ),
+    h('div', { className: 'panel camera-panel' },
+      h('h2', null, 'Drone camera'),
+      cvRecords.length > 0
+        ? h(React.Fragment, null,
+            h('select', {
+              value: activeDrone,
+              onChange: e => setSelectedDrone(e.target.value),
+            }, cvRecords.map(record => h('option', { key: record.name, value: record.name }, record.name))),
+            h('div', { className: 'camera-view' },
+              activeCv?.image_path
+                ? h('img', {
+                    src: imagePathForBrowser(activeCv.image_path),
+                    alt: `${activeDrone} camera view`,
+                  })
+                : h('div', { className: 'camera-empty' },
+                    'No saved camera image for this step.',
+                  ),
+            ),
+            h('div', { className: 'camera-detection' },
+              `detections: ${activeDetections.length}`,
+              activeDetections.length > 0 && h('br'),
+              activeDetections.length > 0 &&
+                `cell: ${activeDetections[0].estimated_cell?.join(', ') ?? '—'} · conf: ${activeDetections[0].confidence ?? '—'}`,
+            ),
+          )
+        : h('div', { className: 'camera-empty' },
+            'No CV camera frames in this trajectory.',
+          ),
     ),
     h('div', { className: 'hint' },
       'Drag to orbit · Scroll to zoom · Right-drag to pan',
@@ -1515,6 +1583,7 @@ function App() {
   const [strategy, setStrategy] = useState(STRATEGY_NAMES[1]); // lawnmower
   const [data, setData]         = useState(null);
   const [error, setError]       = useState(null);
+  const [selectedDrone, setSelectedDrone] = useState('');
 
   useEffect(() => {
     setData(null); setError(null);
@@ -1528,7 +1597,7 @@ function App() {
   const { step, setStep, playing, setPlaying, speed, setSpeed } = usePlayback(frames.length);
 
   // Reset and auto-play when strategy changes
-  useEffect(() => { setStep(0); setPlaying(true); }, [strategy]);
+  useEffect(() => { setStep(0); setPlaying(true); setSelectedDrone(''); }, [strategy]);
 
   const onPlay = () => {
     if (step >= frames.length - 1) { setStep(0); setPlaying(true); }
@@ -1573,7 +1642,7 @@ function App() {
           ),
         ),
       ),
-      h(MetricsPanel, { meta, frame }),
+      h(MetricsPanel, { meta, frame, selectedDrone, setSelectedDrone }),
     ),
     h('footer', null,
       h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
