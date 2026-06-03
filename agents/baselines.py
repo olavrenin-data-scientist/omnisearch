@@ -55,9 +55,9 @@ GROUND_RECOVERY_ANGLES = (
     -math.pi / 2,
     math.pi,
 )
-DRONE_LANE_SPACING_FACTOR = 1.5
-DRONE_LANE_MIN_SPACING = 0.08
-DRONE_WAYPOINT_TOLERANCE = 0.08
+# _search_footprint() returns camera radius, so 1.6 * radius = 0.8 * full footprint width.
+DRONE_LANE_SPACING_FACTOR = 1.6
+DRONE_WAYPOINT_TOLERANCE_M = 5.0
 DRONE_CRUISE_ACTION = 0.95
 DRONE_TURN_ACTION = 0.75
 
@@ -339,14 +339,15 @@ class LawnmowerPolicy:
                 target = torch.tensor(waypoints[wp_idx], dtype=torch.float, device=device)
                 delta = target - pos[b]
                 distance = float(delta.norm().item())
-                if distance <= DRONE_WAYPOINT_TOLERANCE:
+                waypoint_tolerance = self._waypoint_tolerance(b)
+                if distance <= waypoint_tolerance:
                     wp_idx = (wp_idx + 1) % len(waypoints)
                     self.drone_waypoint_index[b, drone_idx] = wp_idx
                     target = torch.tensor(waypoints[wp_idx], dtype=torch.float, device=device)
                     delta = target - pos[b]
                     distance = float(delta.norm().item())
                 direction = delta / delta.norm().clamp_min(1e-6)
-                cruise = DRONE_TURN_ACTION if distance <= 2.0 * DRONE_WAYPOINT_TOLERANCE else DRONE_CRUISE_ACTION
+                cruise = DRONE_TURN_ACTION if distance <= 2.0 * waypoint_tolerance else DRONE_CRUISE_ACTION
                 action[b] = (direction * cruise).clamp(-1.0, 1.0)
             actions.append(action)
         return actions
@@ -357,7 +358,7 @@ class LawnmowerPolicy:
         if sc.n_drones == 0:
             return
         footprint = self._search_footprint()
-        lane_spacing = max(footprint * DRONE_LANE_SPACING_FACTOR, DRONE_LANE_MIN_SPACING)
+        lane_spacing = footprint * DRONE_LANE_SPACING_FACTOR
         land_counts = tuple(
             int(((sc.land_cover_grid[b] != LAND_WATER) & (sc.land_cover_grid[b] != LAND_ROCK)).sum().item())
             for b in range(B)
@@ -397,7 +398,15 @@ class LawnmowerPolicy:
     def _search_footprint(self) -> float:
         sc = self.scenario
         min_altitude = float(sc.drone_flight_levels.min().item())
-        return max(min_altitude * sc.drone_camera_half_angle_tan, DRONE_LANE_MIN_SPACING / DRONE_LANE_SPACING_FACTOR)
+        return max(min_altitude * sc.drone_camera_half_angle_tan, 1e-6)
+
+    def _waypoint_tolerance(self, env_index: int) -> float:
+        sc = self.scenario
+        if hasattr(sc, "terrain_sim_units_per_meter"):
+            sim_units_per_meter = float(sc.terrain_sim_units_per_meter[env_index].item())
+            if sim_units_per_meter > 0.0:
+                return max(DRONE_WAYPOINT_TOLERANCE_M * sim_units_per_meter, 1e-4)
+        return 0.01
 
     def _search_lanes_for_env(self, env_index: int, lane_spacing: float, footprint: float) -> list[dict]:
         sc = self.scenario
