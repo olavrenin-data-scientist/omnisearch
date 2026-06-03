@@ -62,6 +62,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import vmas
 
+from detection.simulation_adapter import SimDrone, SimEntity, SimulationCvAdapter
 from envs.wildfire_search import WildfireSearchScenario, X, Y
 from evaluation.mission_metrics import EpisodeRecorder
 
@@ -185,6 +186,46 @@ def _terrain_record(scenario, env_index: int) -> dict:
     }
 
 
+def _cv_perception_records(
+    scenario,
+    env_index: int,
+    *,
+    adapter: SimulationCvAdapter | None,
+    image_dir: Path | None,
+    step: int,
+    save_images_every: int,
+) -> List[dict]:
+    if adapter is None or scenario.n_drones == 0:
+        return []
+
+    drone_agents = scenario.world.agents[:scenario.n_drones]
+    survivors = [
+        SimEntity(
+            index=i,
+            world_xy=(
+                float(survivor.state.pos[env_index, X]),
+                float(survivor.state.pos[env_index, Y]),
+            ),
+        )
+        for i, survivor in enumerate(scenario._survivors)
+        if not bool(scenario.found_survivors[env_index, i].item())
+    ]
+    records = []
+    for drone_idx, agent in enumerate(drone_agents):
+        pos = agent.state.pos[env_index]
+        drone = SimDrone(
+            index=drone_idx,
+            name=agent.name,
+            world_xy=(float(pos[X]), float(pos[Y])),
+            altitude_agl=float(scenario.drone_altitude[env_index, drone_idx]),
+        )
+        image_path = None
+        if image_dir is not None and save_images_every > 0 and step % save_images_every == 0:
+            image_path = image_dir / f"step_{step:04d}_{agent.name}.png"
+        records.append(adapter.render_and_detect(drone=drone, survivors=survivors, image_path=image_path))
+    return records
+
+
 def export_trajectory(
     strategy_name: str,
     make_policy:   Callable,
@@ -194,6 +235,7 @@ def export_trajectory(
     num_envs:      int = 2,
     env_index:     int = 0,
     scenario_kwargs: Optional[dict] = None,
+    cv_options: Optional[dict] = None,
 ) -> Path:
     """
     Run a rollout, capture every frame, write to JSON, return the path.
@@ -222,6 +264,22 @@ def export_trajectory(
     action_fn = make_policy(env)
 
     recorder = EpisodeRecorder(sc, env_index=env_index)
+    cv_options = dict(cv_options or {})
+    cv_adapter = None
+    cv_image_dir = None
+    cv_save_images_every = int(cv_options.pop("save_images_every", 0)) if cv_options else 0
+    if cv_options.pop("enabled", False):
+        cv_output_dir = Path(cv_options.pop("output_dir", output_path.parent / f"{output_path.stem}_cv"))
+        if not cv_output_dir.is_absolute():
+            cv_output_dir = Path.cwd() / cv_output_dir
+        cv_image_dir = cv_output_dir / "images"
+        if cv_save_images_every > 0:
+            cv_image_dir.mkdir(parents=True, exist_ok=True)
+        cv_adapter = SimulationCvAdapter(
+            terrain_cache_path=sc.terrain_cache_path or scenario_kwargs.get("terrain_cache_path"),
+            fov_deg=float(sc.drone_camera_fov_deg),
+            **cv_options,
+        )
 
     metadata: Dict = {
         "strategy":       strategy_name,
@@ -244,6 +302,25 @@ def export_trajectory(
             "intensity_decay": round(float(sc.fire_intensity_decay), 4),
         },
     }
+    if cv_adapter is not None:
+        metadata["cv_perception"] = {
+            "mode": "naip_sard_preliminary_detector",
+            "naip_image_path": str(cv_adapter.naip_image_path) if cv_adapter.naip_image_path else None,
+            "naip_tile_manifest_path": (
+                str(cv_adapter.tile_cache.manifest_path)
+                if cv_adapter.tile_cache is not None
+                else None
+            ),
+            "human_asset_path": str(cv_adapter.human_asset_path) if cv_adapter.human_asset_path else None,
+            "image_size_px": int(cv_adapter.image_size),
+            "background_size_px": list(cv_adapter.background_size_px),
+            "background_gsd_m_per_px": [
+                round(float(cv_adapter.background_gsd_m_per_px[0]), 4),
+                round(float(cv_adapter.background_gsd_m_per_px[1]), 4),
+            ],
+            "sim_units_per_meter": round(float(cv_adapter.sim_units_per_meter), 10),
+            "save_images_every": cv_save_images_every,
+        }
 
     frames: List[Dict] = []
     previous_burned_grid = np.zeros_like(sc.burned_grid[env_index].cpu().numpy(), dtype=bool)
@@ -257,6 +334,14 @@ def export_trajectory(
         "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
         "smoke_cells": _smoke_cells(sc, env_index),
         "drone_perception": sc.drone_perception_debug(env_index),
+        "cv_perception": _cv_perception_records(
+            sc,
+            env_index,
+            adapter=cv_adapter,
+            image_dir=cv_image_dir,
+            step=0,
+            save_images_every=cv_save_images_every,
+        ),
     })
 
     for step in range(1, n_steps + 1):
@@ -270,6 +355,14 @@ def export_trajectory(
             "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
             "smoke_cells": _smoke_cells(sc, env_index),
             "drone_perception": sc.drone_perception_debug(env_index),
+            "cv_perception": _cv_perception_records(
+                sc,
+                env_index,
+                adapter=cv_adapter,
+                image_dir=cv_image_dir,
+                step=step,
+                save_images_every=cv_save_images_every,
+            ),
         })
         if sc.done()[env_index].item():
             break

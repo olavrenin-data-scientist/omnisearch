@@ -64,6 +64,50 @@ def main():
     p.add_argument("--terrain-place", default="Malibu Creek State Park, California")
     p.add_argument("--terrain-cache-dir", default=str(ROOT / "data" / "terrain_cache"))
     p.add_argument("--terrain-cache-path", default=None)
+    p.add_argument(
+        "--drone-flight-levels-m",
+        nargs="+",
+        type=float,
+        default=(20.0, 35.0, 50.0),
+        help="Drone AGL flight levels in meters.",
+    )
+    p.add_argument(
+        "--drone-safety-clearance-m",
+        type=float,
+        default=3.0,
+        help="Minimum aerial clearance above terrain obstacles in meters.",
+    )
+    p.add_argument("--enable-cv", action="store_true", help="Add NAIP/SARD preliminary CV detections to exported frames.")
+    p.add_argument("--cv-out-dir", default=None, help="Directory for rendered CV images when --enable-cv is set.")
+    p.add_argument("--cv-save-images-every", type=int, default=0, help="Save rendered drone images every N steps; 0 disables image writes.")
+    p.add_argument("--cv-naip-image-path", default=None, help="Optional cached NAIP PNG matching the terrain bbox.")
+    p.add_argument(
+        "--cv-target-gsd-m",
+        type=float,
+        default=0.5,
+        help="Target NAIP ground resolution in meters per pixel. Use 0.5 for high-quality simulation, 2.0 for tests.",
+    )
+    p.add_argument(
+        "--cv-naip-size",
+        type=int,
+        default=8192,
+        help="Fallback square NAIP image size when --cv-target-gsd-m is disabled.",
+    )
+    p.add_argument("--cv-tile-size", type=int, default=1024, help="Tile size for high-resolution NAIP export requests.")
+    p.add_argument(
+        "--cv-single-naip-export",
+        action="store_true",
+        help="Use one NAIP export request instead of tiled export. Faster, but usually lower quality/reliability.",
+    )
+    p.add_argument(
+        "--cv-build-full-naip",
+        action="store_true",
+        help="Build one stitched full-bbox NAIP image instead of lazy tile caching.",
+    )
+    p.add_argument("--cv-image-size", type=int, default=512, help="Rendered detector crop size.")
+    p.add_argument("--cv-human-asset", default=str(ROOT / "data/cv_assets/sard_grabcut/sard_survivor_0280.png"))
+    p.add_argument("--cv-detection-probability", type=float, default=1.0)
+    p.add_argument("--cv-pixel-noise-std", type=float, default=0.0)
     args = p.parse_args()
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
@@ -86,11 +130,37 @@ def main():
         "terrain_place":    args.terrain_place,
         "terrain_cache_dir": args.terrain_cache_dir,
         "terrain_cache_path": args.terrain_cache_path,
+        "drone_flight_levels_m": tuple(args.drone_flight_levels_m),
+        "drone_safety_clearance_m": args.drone_safety_clearance_m,
     }
+    cv_options = None
+    if args.enable_cv:
+        if args.terrain_cache_path is None:
+            raise SystemExit("--enable-cv currently requires --terrain-cache-path so the NAIP bbox is unambiguous.")
+        cv_options = {
+            "enabled": True,
+            "output_dir": args.cv_out_dir or str(out_dir / "cv_frames"),
+            "save_images_every": args.cv_save_images_every,
+            "naip_image_path": args.cv_naip_image_path,
+            "target_gsd_m": args.cv_target_gsd_m if args.cv_target_gsd_m > 0 else None,
+            "lazy_tile_cache": not args.cv_build_full_naip,
+            "naip_size": args.cv_naip_size,
+            "tiled_naip": not args.cv_single_naip_export,
+            "tile_size": args.cv_tile_size,
+            "image_size": args.cv_image_size,
+            "human_asset_path": args.cv_human_asset,
+            "detection_probability": args.cv_detection_probability,
+            "pixel_noise_std": args.cv_pixel_noise_std,
+        }
 
     for name, cls in BASELINES.items():
         def make_policy(env, _cls=cls):
             return _cls() if _cls is RandomPolicy else _cls(env)
+        run_cv_options = None
+        if cv_options is not None:
+            run_cv_options = dict(cv_options)
+            if args.cv_out_dir is None:
+                run_cv_options["output_dir"] = str(out_dir / f"{name}_cv")
         t0 = time.time()
         path = export_trajectory(
             strategy_name=name,
@@ -99,6 +169,7 @@ def main():
             n_steps=args.steps,
             seed=args.seed,
             scenario_kwargs=scenario_kwargs,
+            cv_options=run_cv_options,
         )
         print(f"  ✓ {name:22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
 
@@ -113,6 +184,11 @@ def main():
         print(f"  · HAPPO checkpoint: {ckpt_disp}")
         def make_happo(env, _ckpt=ckpt):
             return HappoPolicy.from_checkpoint(_ckpt)
+        run_cv_options = None
+        if cv_options is not None:
+            run_cv_options = dict(cv_options)
+            if args.cv_out_dir is None:
+                run_cv_options["output_dir"] = str(out_dir / "happo_trained_cv")
         t0 = time.time()
         path = export_trajectory(
             strategy_name="happo_trained",
@@ -121,6 +197,7 @@ def main():
             n_steps=args.steps,
             seed=args.seed,
             scenario_kwargs=scenario_kwargs,
+            cv_options=run_cv_options,
         )
         print(f"  ✓ {'happo_trained':22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
     except ImportError as e:

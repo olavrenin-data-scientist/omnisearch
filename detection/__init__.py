@@ -31,6 +31,8 @@ from .camera_renderer import (
 )
 from .fire_detector import FireDetector, FireDetection
 from .naip import fetch_naip_image, fetch_naip_tiled_image
+from .preliminary_detector import PreliminaryDetection, PreliminaryPersonDetector, PreliminaryResult
+from .simulation_adapter import SimDrone, SimEntity, SimulationCvAdapter
 
 
 def __getattr__(name: str):
@@ -55,6 +57,12 @@ __all__ = [
     "FireDetection",
     "fetch_naip_image",
     "fetch_naip_tiled_image",
+    "PreliminaryDetection",
+    "PreliminaryPersonDetector",
+    "PreliminaryResult",
+    "SimDrone",
+    "SimEntity",
+    "SimulationCvAdapter",
     "PersonDetector",
     "PersonDetection",
     "DetectionPipeline",
