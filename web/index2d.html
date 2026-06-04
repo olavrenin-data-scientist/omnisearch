@@ -84,6 +84,27 @@
   .metric .k { color: var(--muted); font-size: 13px; }
   .metric .v { font-size: 18px; font-variant-numeric: tabular-nums; }
   .panel { margin-bottom: 22px; }
+  .survivor-preview-grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .survivor-preview-tile {
+    min-height: 118px; padding: 6px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+    background: #090c12; border: 1px solid var(--border); border-radius: 4px;
+  }
+  .survivor-preview-tile img {
+    width: 100%; height: 96px; object-fit: contain; image-rendering: auto;
+  }
+  .survivor-preview-label {
+    max-width: 100%; color: var(--muted); font-size: 10px; line-height: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .camera-empty {
+    color: var(--muted); font-size: 12px; line-height: 1.4;
+    text-align: center; padding: 12px;
+  }
   footer {
     display: flex; align-items: center; gap: 18px;
     padding: 12px 22px; border-top: 1px solid var(--border);
@@ -123,7 +144,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
-const APP_VERSION = 'coverage-toggle-v1';
+const APP_VERSION = 'survivor-preview-v1';
 const COVERAGE_TEXTURE_SIZE = 1024;
 
 // ---------------------------------------------------------------------
@@ -1168,6 +1189,37 @@ function formatStepsAsTime(steps, meta) {
   return `${stepLabel} steps (${formatDuration(value * stepSeconds(meta))})`;
 }
 
+function imagePathForBrowser(path) {
+  if (!path) return null;
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('./')) return path;
+  const marker = '/web/';
+  const idx = path.indexOf(marker);
+  if (idx >= 0) return `./${path.slice(idx + marker.length)}`;
+  return path;
+}
+
+function SurvivorAssetPreview({ previews }) {
+  if (!previews?.length) {
+    return h('div', { className: 'camera-empty' }, 'No survivor previews in this trajectory.');
+  }
+  return h('div', { className: 'survivor-preview-grid' },
+    previews.map(record => {
+      const idx = record.survivor_index ?? '—';
+      const altitude = Number(record.altitude_m);
+      const altitudeLabel = Number.isFinite(altitude) ? `${altitude.toFixed(0)}m` : 'preview';
+      return h('div', { key: idx, className: 'survivor-preview-tile' },
+        record.image_path
+          ? h('img', {
+              src: imagePathForBrowser(record.image_path),
+              alt: `survivor ${idx} preview`,
+            })
+          : h('div', { className: 'camera-empty' }, 'No image'),
+        h('div', { className: 'survivor-preview-label' }, `S${idx} · ${altitudeLabel}`),
+      );
+    }),
+  );
+}
+
 function MetricsPanel({ meta, frame, frames }) {
   const m = meta?.metrics ?? {};
   const landCover = meta?.terrain?.land_cover ?? [];
@@ -1182,6 +1234,7 @@ function MetricsPanel({ meta, frame, frames }) {
     return (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(2) : v) + suffix;
   };
   const coveragePct = accumulatedCoveragePercent(meta, frames, frame);
+  const survivorPreviews = meta?.cv_perception?.survivor_previews ?? [];
   const rows = [
     ['Survivor recall',      fmt(m.survivor_recall)],
     ['Drone coverage',       coveragePct === null ? '—' : `${coveragePct.toFixed(1)}%`],
@@ -1216,6 +1269,10 @@ function MetricsPanel({ meta, frame, frames }) {
     h('div', { className: 'panel' },
       h('h2', null, 'Legend'),
       h(Legend),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Survivor preview'),
+      h(SurvivorAssetPreview, { previews: survivorPreviews }),
     ),
     h('div', { className: 'panel' },
       h('h2', null, 'Mission metrics (final)'),

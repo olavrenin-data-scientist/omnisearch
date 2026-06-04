@@ -63,6 +63,7 @@ class SimulationCvAdapter:
         image_size: int = 512,
         fov_deg: float = 65.0,
         human_asset_path: str | Path | None = "data/cv_assets/sard_grabcut/sard_survivor_0280.png",
+        human_assets_dir: str | Path | None = None,
         survivor_width_m: float = 2.4,
         survivor_height_m: float = 1.4,
         survivor_rotation_deg: float = 0.0,
@@ -129,12 +130,15 @@ class SimulationCvAdapter:
             self.background_gsd_m_per_px = self.tile_cache.gsd_m_per_px
         else:
             raise RuntimeError("CV adapter must have either a NAIP image or a tile cache")
-        self.human_asset_path = self._resolve(human_asset_path) if human_asset_path is not None else None
-        self.human_asset = (
-            Image.open(self.human_asset_path).convert("RGBA")
-            if self.human_asset_path is not None and self.human_asset_path.exists()
-            else None
+        self.human_assets_dir = self._resolve(human_assets_dir) if human_assets_dir is not None else None
+        self.human_assets = self._load_human_assets(
+            human_asset_path=human_asset_path,
+            human_assets_dir=human_assets_dir,
         )
+        self.human_asset_path = self.human_assets[0][0] if self.human_assets else None
+        self.human_asset = self.human_assets[0][1] if self.human_assets else None
+        self._asset_order = list(range(len(self.human_assets)))
+        self.rng.shuffle(self._asset_order)
 
     def render_and_detect(
         self,
@@ -162,14 +166,16 @@ class SimulationCvAdapter:
             bbox = self._survivor_box(dx_world=dx_world, dy_world=dy_world, footprint_world=footprint_world)
             if bbox is None:
                 continue
-            if self.human_asset is not None:
-                self._paste_survivor(view, bbox)
+            human_asset_path, human_asset = self._asset_for_survivor(survivor.index)
+            if human_asset is not None:
+                self._paste_survivor(view, bbox, human_asset)
             truth_boxes.append(bbox)
             truth.append(
                 {
                     "survivor_index": survivor.index,
                     "bbox_xyxy": list(bbox),
                     "true_world_xy": [survivor.world_xy[0], survivor.world_xy[1]],
+                    "human_asset_path": str(human_asset_path) if human_asset_path is not None else None,
                 }
             )
 
@@ -224,11 +230,73 @@ class SimulationCvAdapter:
             "detections": detection_records,
         }
 
+    def render_survivor_preview(
+        self,
+        *,
+        survivor: SimEntity,
+        altitude_m: float = 20.0,
+        image_path: str | Path | None = None,
+    ) -> dict:
+        """Render a centered approximate drone view for one survivor.
+
+        The preview uses the same NAIP crop, camera FOV, image size, survivor
+        scaling, and pasted SARD asset as normal drone CV frames. The only
+        difference is that the synthetic camera is centered directly over the
+        survivor so the preview exists even when no drone has reached the area.
+        """
+
+        pseudo_drone = SimDrone(
+            index=-1,
+            name=f"survivor_{survivor.index}_preview",
+            world_xy=survivor.world_xy,
+            altitude_agl=float(altitude_m) * self.sim_units_per_meter,
+        )
+        record = self.render_and_detect(drone=pseudo_drone, survivors=[survivor], image_path=image_path)
+        asset_path, _asset = self._asset_for_survivor(survivor.index)
+        return {
+            "survivor_index": int(survivor.index),
+            "image_path": record.get("image_path"),
+            "altitude_m": round(float(altitude_m), 3),
+            "footprint_m": record.get("footprint_m"),
+            "image_size_px": record.get("image_size_px"),
+            "source_crop_px": record.get("source_crop_px"),
+            "background_gsd_m_per_px": record.get("background_gsd_m_per_px"),
+            "human_asset_path": str(asset_path) if asset_path is not None else None,
+            "truth": record.get("truth", []),
+        }
+
     def _resolve(self, path: str | Path) -> Path:
         path = Path(path)
         if path.is_absolute():
             return path
         return self.root / path
+
+    def _load_human_assets(
+        self,
+        *,
+        human_asset_path: str | Path | None,
+        human_assets_dir: str | Path | None,
+    ) -> list[tuple[Path, Image.Image]]:
+        paths: list[Path] = []
+        if human_assets_dir is not None:
+            directory = self._resolve(human_assets_dir)
+            if directory.exists():
+                paths = sorted(directory.glob("*.png"))
+            elif human_asset_path is None:
+                raise FileNotFoundError(f"Human assets directory not found: {directory}")
+        if not paths and human_asset_path is not None:
+            path = self._resolve(human_asset_path)
+            if path.exists():
+                paths = [path]
+            else:
+                raise FileNotFoundError(f"Human asset not found: {path}")
+        return [(path, Image.open(path).convert("RGBA")) for path in paths]
+
+    def _asset_for_survivor(self, survivor_index: int) -> tuple[Path | None, Image.Image | None]:
+        if not self.human_assets:
+            return None, None
+        asset_idx = self._asset_order[int(survivor_index) % len(self._asset_order)]
+        return self.human_assets[asset_idx]
 
     def _load_or_fetch_naip(
         self,
@@ -338,14 +406,14 @@ class SimulationCvAdapter:
             return None
         return x1, y1, x2, y2
 
-    def _paste_survivor(self, image: Image.Image, bbox: tuple[int, int, int, int]) -> None:
-        if self.human_asset is None:
+    def _paste_survivor(self, image: Image.Image, bbox: tuple[int, int, int, int], asset: Image.Image) -> None:
+        if asset is None:
             return
         x1, y1, x2, y2 = bbox
         width = max(1, x2 - x1)
         height = max(1, y2 - y1)
         resample = Image.Resampling.NEAREST if self.asset_resample == "nearest" else Image.Resampling.BILINEAR
-        sprite = self.human_asset.resize((width, height), resample)
+        sprite = asset.resize((width, height), resample)
         rgb = ImageEnhance.Brightness(sprite.convert("RGB")).enhance(0.92)
         rgb = ImageEnhance.Contrast(rgb).enhance(1.08)
         sprite = Image.merge("RGBA", (*rgb.split(), sprite.getchannel("A")))

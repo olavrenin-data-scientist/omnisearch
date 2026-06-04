@@ -89,6 +89,23 @@
     margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.45;
     font-variant-numeric: tabular-nums;
   }
+  .survivor-preview-grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .survivor-preview-tile {
+    min-height: 118px; padding: 6px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+    background: #090c12; border: 1px solid var(--border); border-radius: 4px;
+  }
+  .survivor-preview-tile img {
+    width: 100%; height: 96px; object-fit: contain; image-rendering: auto;
+  }
+  .survivor-preview-label {
+    max-width: 100%; color: var(--muted); font-size: 10px; line-height: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
   .hint { color: var(--muted); font-size: 11px; margin-top: 10px; line-height: 1.5; }
   footer {
     display: flex; align-items: center; gap: 18px;
@@ -132,7 +149,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
-const APP_VERSION = '3d-viewer-v2';
+const APP_VERSION = 'survivor-preview-v1';
 const HEIGHT_SCALE = 3.0;
 const DRONE_MODEL_VISUAL_SCALE = 2.0;
 const GROUND_MODEL_VISUAL_SCALE = 1.8;
@@ -1398,6 +1415,28 @@ function accumulatedCoveragePercent(meta, frames, frame) {
   return 100 * count / covered.length;
 }
 
+function SurvivorAssetPreview({ previews }) {
+  if (!previews?.length) {
+    return h('div', { className: 'camera-empty' }, 'No survivor previews in this trajectory.');
+  }
+  return h('div', { className: 'survivor-preview-grid' },
+    previews.map(record => {
+      const idx = record.survivor_index ?? '—';
+      const altitude = Number(record.altitude_m);
+      const altitudeLabel = Number.isFinite(altitude) ? `${altitude.toFixed(0)}m` : 'preview';
+      return h('div', { key: idx, className: 'survivor-preview-tile' },
+        record.image_path
+          ? h('img', {
+              src: imagePathForBrowser(record.image_path),
+              alt: `survivor ${idx} preview`,
+            })
+          : h('div', { className: 'camera-empty' }, 'No image'),
+        h('div', { className: 'survivor-preview-label' }, `S${idx} · ${altitudeLabel}`),
+      );
+    }),
+  );
+}
+
 // ---------------------------------------------------------------------
 // Metrics sidebar
 // ---------------------------------------------------------------------
@@ -1419,6 +1458,7 @@ function MetricsPanel({ meta, frame, frames, selectedDrone, setSelectedDrone }) 
   ];
   const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
   const cvRecords = frame?.cv_perception ?? [];
+  const survivorPreviews = meta?.cv_perception?.survivor_previews ?? [];
   const cvNames = cvRecords.map(record => record.name);
   const activeDrone = cvNames.includes(selectedDrone) ? selectedDrone : (cvNames[0] ?? '');
   const activeCv = cvRecords.find(record => record.name === activeDrone);
@@ -1451,6 +1491,10 @@ function MetricsPanel({ meta, frame, frames, selectedDrone, setSelectedDrone }) 
         h('span', { className: 'v' },
           `${fmt(a.altitude_agl)} AGL / ${fmt(a.altitude_msl)} MSL`),
       )),
+    ),
+    h('div', { className: 'panel' },
+      h('h2', null, 'Survivor preview'),
+      h(SurvivorAssetPreview, { previews: survivorPreviews }),
     ),
     h('div', { className: 'panel camera-panel' },
       h('h2', null, 'Drone camera'),
