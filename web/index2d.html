@@ -190,7 +190,7 @@ const COLORS = {
   survivor_scouted:    0xfbbf24,   // amber
   survivor_confirmed:  0x84cc16,   // lime
   survivor_outline:    0xffffff,
-  burned:              0x2b211b,   // post-fire burn scar
+  burned:              0x1a120d,   // post-fire burn scar
   fire_outer:          0xf06e1e,   // orange
   fire_inner:          0xfacc15,   // yellow hot core
   smoke:               0xcbd5e1,   // pale gray-blue
@@ -691,7 +691,7 @@ function resetBurnedOverlay(state, meta) {
   texture.generateMipmaps = false;
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(2, 2),
-    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.62 }),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.82 }),
   );
   mesh.position.z = -0.38;
   state.burnedGroup.add(mesh);
@@ -705,9 +705,14 @@ function resetBurnedOverlay(state, meta) {
 function paintBurnedCells(state, meta, cells) {
   if (!cells?.length) return;
   const G = meta.fire_grid_size;
-  state.burnedCtx.fillStyle = 'rgba(43, 33, 27, 0.72)';
+  state.burnedCtx.fillStyle = 'rgba(20, 14, 11, 0.95)';
   for (const [gx, gy] of cells) {
     state.burnedCtx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.burnedCtx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
+  state.burnedCtx.lineWidth = 0.12;
+  for (const [gx, gy] of cells) {
+    state.burnedCtx.strokeRect(gx + 0.06, G - gy - 1 + 0.06, 0.88, 0.88);
   }
   state.burnedTexture.needsUpdate = true;
 }
@@ -1084,7 +1089,7 @@ function Legend() {
     ['square', '#2563eb', 'Water / ocean'],
     ['circle', '#1d5128', 'Tree canopy'],
     ['square', '#a34d3d', 'House'],
-    ['square', '#2b211b', 'Burned / post-fire'],
+    ['square', '#1a120d', 'Burned / post-fire'],
     ['square', '#f06e1e', 'Fire'],
   ];
   return h('div', { id: 'legend' },
@@ -1158,7 +1163,9 @@ function formatDuration(seconds) {
 
 function formatStepsAsTime(steps, meta) {
   if (steps === null || steps === undefined || Number.isNaN(steps)) return '—';
-  return `${steps} steps (${formatDuration(Number(steps) * stepSeconds(meta))})`;
+  const value = Number(steps);
+  const stepLabel = Number.isInteger(value) ? `${value}` : value.toFixed(1);
+  return `${stepLabel} steps (${formatDuration(value * stepSeconds(meta))})`;
 }
 
 function MetricsPanel({ meta, frame, frames }) {

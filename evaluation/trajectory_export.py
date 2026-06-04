@@ -318,6 +318,22 @@ def export_trajectory(
             "slope_spread_weight": round(float(sc.fire_slope_spread_weight), 4),
             "moisture_damping": round(float(sc.fire_moisture_damping), 4),
             "intensity_decay": round(float(sc.fire_intensity_decay), 4),
+            "smoke_emission": round(float(sc.smoke_emission), 4),
+            "smoke_decay": round(float(sc.smoke_decay), 4),
+            "smoke_diffusion": round(float(sc.smoke_diffusion), 4),
+            "smolder_smoke_emission": round(float(sc.smolder_smoke_emission), 4),
+            "smolder_decay": round(float(sc.smolder_decay), 4),
+            "smolder_start_fraction": round(float(sc.smolder_start_fraction), 4),
+            "land_cover_burnout_min_updates": list(sc.land_cover_fire_burnout_min_updates),
+            "land_cover_burnout_max_updates": list(sc.land_cover_fire_burnout_max_updates),
+            "land_cover_burnout_min_minutes": [
+                round(float(v) * float(sc.fire_step_interval) * float(getattr(sc, "sim_step_seconds", 1.0)) / 60.0, 2)
+                for v in sc.land_cover_fire_burnout_min_updates
+            ],
+            "land_cover_burnout_max_minutes": [
+                round(float(v) * float(sc.fire_step_interval) * float(getattr(sc, "sim_step_seconds", 1.0)) / 60.0, 2)
+                for v in sc.land_cover_fire_burnout_max_updates
+            ],
         },
     }
     if cv_adapter is not None:

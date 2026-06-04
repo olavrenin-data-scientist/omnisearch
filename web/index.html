@@ -443,7 +443,7 @@ function buildTerrainCanvasOverlayMesh(displGeo, G, { zOffset = 0.002, opacity =
 }
 
 function buildBurnScarMesh(displGeo, G) {
-  return buildTerrainCanvasOverlayMesh(displGeo, G, { zOffset: 0.002, opacity: 0.65 });
+  return buildTerrainCanvasOverlayMesh(displGeo, G, { zOffset: 0.002, opacity: 0.84 });
 }
 
 function buildCoverageMesh(displGeo) {
@@ -461,10 +461,15 @@ function resetBurnedOverlay3D(state, meta) {
 function paintBurnedCells3D(state, meta, cells) {
   if (!cells?.length) return;
   const G = meta.fire_grid_size;
-  state.burnedCtx.fillStyle = 'rgba(43, 33, 27, 0.72)';
+  state.burnedCtx.fillStyle = 'rgba(20, 14, 11, 0.95)';
   for (const [gx, gy] of cells) {
     // UV origin is bottom-left in Three.js PlaneGeometry → flip Y
     state.burnedCtx.fillRect(gx, G - gy - 1, 1, 1);
+  }
+  state.burnedCtx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
+  state.burnedCtx.lineWidth = 0.12;
+  for (const [gx, gy] of cells) {
+    state.burnedCtx.strokeRect(gx + 0.06, G - gy - 1 + 0.06, 0.88, 0.88);
   }
   state.burnedTexture.needsUpdate = true;
 }
@@ -1354,7 +1359,9 @@ function formatDuration(seconds) {
 
 function formatStepsAsTime(steps, meta) {
   if (steps === null || steps === undefined || Number.isNaN(steps)) return '—';
-  return `${steps} steps (${formatDuration(Number(steps) * stepSeconds(meta))})`;
+  const value = Number(steps);
+  const stepLabel = Number.isInteger(value) ? `${value}` : value.toFixed(1);
+  return `${stepLabel} steps (${formatDuration(value * stepSeconds(meta))})`;
 }
 
 function accumulatedCoveragePercent(meta, frames, frame) {
