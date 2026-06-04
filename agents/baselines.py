@@ -55,8 +55,8 @@ GROUND_RECOVERY_ANGLES = (
     -math.pi / 2,
     math.pi,
 )
-# _search_footprint() returns camera radius, so 1.6 * radius = 0.8 * full footprint width.
-DRONE_LANE_SPACING_FACTOR = 1.6
+# _search_footprint() returns camera radius, so 1.2 * radius = 0.6 * full footprint width.
+DRONE_LANE_SPACING_FACTOR = 1.2
 DRONE_WAYPOINT_TOLERANCE_M = 5.0
 DRONE_CRUISE_ACTION = 0.95
 DRONE_TURN_ACTION = 0.75

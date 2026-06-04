@@ -163,6 +163,15 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "drone_safety_clearance": round(float(scenario.drone_safety_clearance_by_env[env_index]), 6),
         "drone_safety_clearance_m": round(float(scenario.drone_safety_clearance_m), 4),
         "sim_units_per_meter": round(float(scenario.terrain_sim_units_per_meter[env_index]), 8),
+        "sim_step_seconds": round(float(getattr(scenario, "sim_step_seconds", 1.0)), 4),
+        "drone_speed_mps": round(float(getattr(scenario, "drone_speed_mps", 0.0)), 4),
+        "drone_distance_per_step_m": round(
+            float(getattr(scenario, "drone_speed_mps", 0.0))
+            * float(getattr(scenario, "sim_step_seconds", 1.0)),
+            4,
+        ),
+        "drone_max_speed_sim": round(float(getattr(scenario, "drone_max_speed_sim", 0.0)), 8),
+        "drone_u_multiplier": round(float(getattr(scenario, "drone_u_multiplier", 0.0)), 4),
         "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
         "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range_by_env[env_index]), 6),
         "drone_detection_quality": [
@@ -369,6 +378,11 @@ def export_trajectory(
 
     metadata["metrics"] = recorder.finalize().as_dict()
     metadata["actual_n_steps"] = len(frames) - 1
+    metadata["sim_step_seconds"] = round(float(getattr(sc, "sim_step_seconds", 1.0)), 4)
+    metadata["actual_duration_seconds"] = round(
+        metadata["actual_n_steps"] * metadata["sim_step_seconds"],
+        4,
+    )
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -71,7 +71,7 @@ class WildfireSearchScenario(BaseScenario):
         # Drone search uses a downward camera footprint, not a fixed magic
         # radius: altitude * tan(FOV / 2) gives the visible ground radius.
         kwargs.pop("drone_lidar_range", None)  # legacy name; replaced by camera FOV.
-        self.drone_camera_fov_deg = kwargs.pop("drone_camera_fov_deg", 65.0)
+        self.drone_camera_fov_deg = kwargs.pop("drone_camera_fov_deg", 90.0)
         if not 0.0 < self.drone_camera_fov_deg < 180.0:
             raise ValueError("drone_camera_fov_deg must be between 0 and 180")
         self.drone_camera_half_angle_tan = math.tan(math.radians(self.drone_camera_fov_deg) / 2.0)
@@ -146,6 +146,17 @@ class WildfireSearchScenario(BaseScenario):
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
         # continuous AGL altitude. MSL altitude is derived from local terrain elevation.
         # Meter-based anchors are converted to sim units after loading terrain metadata.
+        self.sim_step_seconds = max(float(kwargs.pop("sim_step_seconds", 2.0)), 1e-6)
+        self.drone_speed_mps = max(float(kwargs.pop("drone_speed_mps", 10.0)), 0.0)
+        # Calibrated so a 10 m/s drone reaches cruise speed in roughly one
+        # environment step, matching ~8-10 m/s^2 Crazyflie acceleration.
+        self.drone_u_multiplier = max(float(kwargs.pop("drone_u_multiplier", 2.25)), 0.0)
+        self.drone_max_speed_sim_override = kwargs.pop("drone_max_speed", None)
+        self.drone_max_speed_sim = (
+            max(float(self.drone_max_speed_sim_override), 0.0)
+            if self.drone_max_speed_sim_override is not None
+            else 0.5
+        )
         drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (20.0, 35.0, 50.0))
         drone_flight_levels_override = kwargs.pop("drone_flight_levels", None)
         drone_flight_levels = (
@@ -241,9 +252,9 @@ class WildfireSearchScenario(BaseScenario):
                 collide=True,
                 collision_filter=drone_collision_filter,
                 shape=Sphere(radius=self.agent_radius),
-                max_speed=0.5,
+                max_speed=self.drone_max_speed_sim,
                 u_range=1.0,
-                u_multiplier=0.6,
+                u_multiplier=self.drone_u_multiplier,
                 color=Color.BLUE,
                 sensors=[],
             )
@@ -591,6 +602,7 @@ class WildfireSearchScenario(BaseScenario):
         sim_units_per_meter = self._terrain_sim_units_per_meter(terrain.metadata)
         self.terrain_sim_units_per_meter[env_index] = sim_units_per_meter
         self._refresh_drone_unit_conversions(env_index, sim_units_per_meter)
+        self._refresh_drone_speed_conversion(sim_units_per_meter)
         if self.drone_safety_clearance_sim_override is None and sim_units_per_meter > 0.0:
             clearance = self.drone_safety_clearance_m * sim_units_per_meter
         else:
@@ -623,6 +635,18 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_min_altitude = float(self.drone_min_altitude_by_env[env_index].item())
         self.drone_max_altitude = float(self.drone_max_altitude_by_env[env_index].item())
         self.drone_sensor_max_range = float(self.drone_sensor_max_range_by_env[env_index].item())
+
+    def _refresh_drone_speed_conversion(self, sim_units_per_meter: float) -> None:
+        if self.drone_max_speed_sim_override is None and sim_units_per_meter > 0.0:
+            world_dt = max(float(getattr(self.world, "dt", 1.0)), 1e-6)
+            self.drone_max_speed_sim = (
+                self.drone_speed_mps
+                * self.sim_step_seconds
+                * float(sim_units_per_meter)
+                / world_dt
+            )
+        for agent in self.world.agents[:self.n_drones]:
+            agent._max_speed = self.drone_max_speed_sim
 
     def _terrain_sim_units_per_meter(self, metadata: dict) -> float:
         """Return the terrain cache's vertical/horizontal simulation conversion."""

@@ -72,10 +72,34 @@ def main():
         help="Drone AGL flight levels in meters.",
     )
     p.add_argument(
+        "--drone-camera-fov-deg",
+        type=float,
+        default=90.0,
+        help="Downward drone camera field of view in degrees.",
+    )
+    p.add_argument(
         "--drone-safety-clearance-m",
         type=float,
         default=3.0,
         help="Minimum aerial clearance above terrain obstacles in meters.",
+    )
+    p.add_argument(
+        "--sim-step-seconds",
+        type=float,
+        default=2.0,
+        help="Physical duration represented by one simulation step.",
+    )
+    p.add_argument(
+        "--drone-speed-mps",
+        type=float,
+        default=10.0,
+        help="Drone horizontal speed cap in meters per second.",
+    )
+    p.add_argument(
+        "--drone-u-multiplier",
+        type=float,
+        default=2.25,
+        help="VMAS drone action-to-acceleration multiplier.",
     )
     p.add_argument("--enable-cv", action="store_true", help="Add NAIP/SARD preliminary CV detections to exported frames.")
     p.add_argument("--cv-out-dir", default=None, help="Directory for rendered CV images when --enable-cv is set.")
@@ -131,7 +155,11 @@ def main():
         "terrain_cache_dir": args.terrain_cache_dir,
         "terrain_cache_path": args.terrain_cache_path,
         "drone_flight_levels_m": tuple(args.drone_flight_levels_m),
+        "drone_camera_fov_deg": args.drone_camera_fov_deg,
         "drone_safety_clearance_m": args.drone_safety_clearance_m,
+        "sim_step_seconds": args.sim_step_seconds,
+        "drone_speed_mps": args.drone_speed_mps,
+        "drone_u_multiplier": args.drone_u_multiplier,
     }
     cv_options = None
     if args.enable_cv:
