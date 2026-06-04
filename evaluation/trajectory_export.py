@@ -172,6 +172,15 @@ def _terrain_record(scenario, env_index: int) -> dict:
         ),
         "drone_max_speed_sim": round(float(getattr(scenario, "drone_max_speed_sim", 0.0)), 8),
         "drone_u_multiplier": round(float(getattr(scenario, "drone_u_multiplier", 0.0)), 4),
+        "ground_speed_mps": round(float(getattr(scenario, "ground_speed_mps", 0.0)), 4),
+        "ground_accel_mps2": round(float(getattr(scenario, "ground_accel_mps2", 0.0)), 4),
+        "ground_distance_per_step_m": round(
+            float(getattr(scenario, "ground_speed_mps", 0.0))
+            * float(getattr(scenario, "sim_step_seconds", 1.0)),
+            4,
+        ),
+        "ground_max_speed_sim": round(float(getattr(scenario, "ground_max_speed_sim", 0.0)), 8),
+        "ground_u_multiplier": round(float(getattr(scenario, "ground_u_multiplier", 0.0)), 4),
         "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
         "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range_by_env[env_index]), 6),
         "drone_detection_quality": [

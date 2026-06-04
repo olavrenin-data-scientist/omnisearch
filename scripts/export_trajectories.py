@@ -101,6 +101,24 @@ def main():
         default=2.25,
         help="VMAS drone action-to-acceleration multiplier.",
     )
+    p.add_argument(
+        "--ground-speed-mps",
+        type=float,
+        default=1.6,
+        help="Nominal UGV horizontal speed cap on easy terrain in meters per second.",
+    )
+    p.add_argument(
+        "--ground-accel-mps2",
+        type=float,
+        default=2.0,
+        help="Nominal UGV operational acceleration in meters per second squared.",
+    )
+    p.add_argument(
+        "--ground-u-multiplier",
+        type=float,
+        default=None,
+        help="Optional VMAS UGV action-to-acceleration override. Defaults to a value derived from --ground-accel-mps2.",
+    )
     p.add_argument("--enable-cv", action="store_true", help="Add NAIP/SARD preliminary CV detections to exported frames.")
     p.add_argument("--cv-out-dir", default=None, help="Directory for rendered CV images when --enable-cv is set.")
     p.add_argument("--cv-save-images-every", type=int, default=0, help="Save rendered drone images every N steps; 0 disables image writes.")
@@ -160,7 +178,11 @@ def main():
         "sim_step_seconds": args.sim_step_seconds,
         "drone_speed_mps": args.drone_speed_mps,
         "drone_u_multiplier": args.drone_u_multiplier,
+        "ground_speed_mps": args.ground_speed_mps,
+        "ground_accel_mps2": args.ground_accel_mps2,
     }
+    if args.ground_u_multiplier is not None:
+        scenario_kwargs["ground_u_multiplier"] = args.ground_u_multiplier
     cv_options = None
     if args.enable_cv:
         if args.terrain_cache_path is None:
