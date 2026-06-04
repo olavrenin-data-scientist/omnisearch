@@ -84,6 +84,23 @@
   .metric .k { color: var(--muted); font-size: 13px; }
   .metric .v { font-size: 18px; font-variant-numeric: tabular-nums; }
   .panel { margin-bottom: 22px; }
+  .camera-panel select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 7px 9px; font-size: 13px; margin: 8px 0 10px;
+  }
+  .camera-view {
+    width: 100%; aspect-ratio: 1 / 1; display: grid; place-items: center;
+    background: #090c12; border: 1px solid var(--border);
+    border-radius: 4px; overflow: hidden;
+  }
+  .camera-view img {
+    width: 100%; height: 100%; object-fit: contain; image-rendering: auto;
+  }
+  .camera-detection {
+    margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+  }
   .survivor-preview-grid {
     display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
@@ -1198,29 +1215,45 @@ function imagePathForBrowser(path) {
   return path;
 }
 
-function SurvivorAssetPreview({ previews }) {
-  if (!previews?.length) {
+function SurvivorAssetPreview({ previews, selectedSurvivor, setSelectedSurvivor }) {
+  const previewRecords = previews ?? [];
+  const values = previewRecords.map(record => String(record.survivor_index ?? ''));
+  const activeValue = values.includes(selectedSurvivor) ? selectedSurvivor : values[0];
+  const activePreview = previewRecords.find(record => String(record.survivor_index ?? '') === activeValue);
+  const altitude = Number(activePreview?.altitude_m);
+  const footprint = Number(activePreview?.footprint_m);
+  useEffect(() => {
+    if (!activeValue || activeValue === selectedSurvivor) return;
+    setSelectedSurvivor(activeValue);
+  }, [activeValue, selectedSurvivor, setSelectedSurvivor]);
+  if (!previewRecords.length) {
     return h('div', { className: 'camera-empty' }, 'No survivor previews in this trajectory.');
   }
-  return h('div', { className: 'survivor-preview-grid' },
-    previews.map(record => {
+  return h(React.Fragment, null,
+    h('select', {
+      value: activeValue,
+      onChange: e => setSelectedSurvivor(e.target.value),
+    }, previewRecords.map(record => {
       const idx = record.survivor_index ?? '—';
-      const altitude = Number(record.altitude_m);
-      const altitudeLabel = Number.isFinite(altitude) ? `${altitude.toFixed(0)}m` : 'preview';
-      return h('div', { key: idx, className: 'survivor-preview-tile' },
-        record.image_path
-          ? h('img', {
-              src: imagePathForBrowser(record.image_path),
-              alt: `survivor ${idx} preview`,
-            })
-          : h('div', { className: 'camera-empty' }, 'No image'),
-        h('div', { className: 'survivor-preview-label' }, `S${idx} · ${altitudeLabel}`),
-      );
-    }),
+      return h('option', { key: idx, value: String(idx) }, `survivor ${idx}`);
+    })),
+    h('div', { className: 'camera-view' },
+      activePreview?.image_path
+        ? h('img', {
+            src: imagePathForBrowser(activePreview.image_path),
+            alt: `survivor ${activeValue} preview`,
+          })
+        : h('div', { className: 'camera-empty' }, 'No saved survivor preview.'),
+    ),
+    h('div', { className: 'camera-detection' },
+      Number.isFinite(altitude) ? `altitude: ${altitude.toFixed(0)} m` : 'altitude: —',
+      h('br'),
+      Number.isFinite(footprint) ? `footprint: ${footprint.toFixed(1)} m` : 'footprint: —',
+    ),
   );
 }
 
-function MetricsPanel({ meta, frame, frames }) {
+function MetricsPanel({ meta, frame, frames, selectedSurvivor, setSelectedSurvivor }) {
   const m = meta?.metrics ?? {};
   const landCover = meta?.terrain?.land_cover ?? [];
   const waterCells = landCover.reduce(
@@ -1271,10 +1304,6 @@ function MetricsPanel({ meta, frame, frames }) {
       h(Legend),
     ),
     h('div', { className: 'panel' },
-      h('h2', null, 'Survivor preview'),
-      h(SurvivorAssetPreview, { previews: survivorPreviews }),
-    ),
-    h('div', { className: 'panel' },
       h('h2', null, 'Mission metrics (final)'),
       rows.map(([k, v]) => h('div', { key: k, className: 'metric' },
         h('span', { className: 'k' }, k),
@@ -1295,6 +1324,14 @@ function MetricsPanel({ meta, frame, frames }) {
         h('span', { className: 'v' }, `${row.visible} seen · p ${row.best.toFixed(2)}`),
       )),
     ),
+    h('div', { className: 'panel camera-panel' },
+      h('h2', null, 'Survivor preview'),
+      h(SurvivorAssetPreview, {
+        previews: survivorPreviews,
+        selectedSurvivor,
+        setSelectedSurvivor,
+      }),
+    ),
   );
 }
 
@@ -1302,6 +1339,7 @@ function App() {
   const [strategy, setStrategy] = useState(STRATEGY_NAMES[2]); // nearest_candidate
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [selectedSurvivor, setSelectedSurvivor] = useState('');
   const [showPerception, setShowPerception] = useState(true);
   const [showCoverage, setShowCoverage] = useState(false);
 
@@ -1325,6 +1363,7 @@ function App() {
   useEffect(() => {
     setStep(0);
     setPlaying(true);
+    setSelectedSurvivor('');
   }, [strategy]);
 
   // Play button: if we're parked at the end, rewind first.
@@ -1370,7 +1409,7 @@ function App() {
               : 'Run `python scripts/export_trajectories.py` first.'),
         ),
       ),
-      h(MetricsPanel, { meta, frame, frames }),
+      h(MetricsPanel, { meta, frame, frames, selectedSurvivor, setSelectedSurvivor }),
     ),
     h('footer', null,
       h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
