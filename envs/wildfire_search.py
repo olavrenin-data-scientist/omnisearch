@@ -91,15 +91,44 @@ class WildfireSearchScenario(BaseScenario):
         self.fire_intensity_decay = min(max(float(kwargs.pop("fire_intensity_decay", 0.82)), 0.0), 1.0)
         self.initial_fire_cells  = kwargs.pop("initial_fire_cells", 1)
         self.initial_fire_area_fraction = kwargs.pop("initial_fire_area_fraction", 0.025)
-        self.fire_burnout_min_updates = max(int(kwargs.pop("fire_burnout_min_updates", 5)), 1)
-        self.fire_burnout_max_updates = max(
-            int(kwargs.pop("fire_burnout_max_updates", 14)),
-            self.fire_burnout_min_updates,
+        global_burnout_min = kwargs.pop("fire_burnout_min_updates", None)
+        global_burnout_max = kwargs.pop("fire_burnout_max_updates", None)
+        if global_burnout_min is not None or global_burnout_max is not None:
+            min_updates = max(int(global_burnout_min if global_burnout_min is not None else 5), 1)
+            max_updates = max(int(global_burnout_max if global_burnout_max is not None else 14), min_updates)
+            default_burnout_min = (min_updates,) * 6
+            default_burnout_max = (max_updates,) * 6
+        else:
+            # Active-fire residence time by land cover. With the default
+            # 6-second fire update period: road/open 0.5-2 min, brush 2-6 min,
+            # forest 6-20 min. Rock/water cannot ignite.
+            default_burnout_min = (5, 5, 20, 60, 0, 0)
+            default_burnout_max = (20, 20, 60, 200, 0, 0)
+        land_cover_fire_burnout_min = _land_cover_values(
+            kwargs.pop("land_cover_fire_burnout_min_updates", default_burnout_min),
+            water_value=0.0,
+            name="land_cover_fire_burnout_min_updates",
         )
+        land_cover_fire_burnout_max = _land_cover_values(
+            kwargs.pop("land_cover_fire_burnout_max_updates", default_burnout_max),
+            water_value=0.0,
+            name="land_cover_fire_burnout_max_updates",
+        )
+        self.land_cover_fire_burnout_min_updates = tuple(max(int(round(v)), 0) for v in land_cover_fire_burnout_min)
+        self.land_cover_fire_burnout_max_updates = tuple(
+            max(int(round(vmax)), self.land_cover_fire_burnout_min_updates[i])
+            for i, vmax in enumerate(land_cover_fire_burnout_max)
+        )
+        positive_min_updates = [v for v in self.land_cover_fire_burnout_min_updates if v > 0]
+        self.fire_burnout_min_updates = min(positive_min_updates) if positive_min_updates else 1
+        self.fire_burnout_max_updates = max(self.land_cover_fire_burnout_max_updates)
         self.fire_step_interval  = kwargs.pop("fire_step_interval", 3)  # spread every N env steps
-        self.smoke_emission = kwargs.pop("smoke_emission", 0.18)
-        self.smoke_decay = kwargs.pop("smoke_decay", 0.96)
-        self.smoke_diffusion = kwargs.pop("smoke_diffusion", 0.16)
+        self.smoke_emission = max(float(kwargs.pop("smoke_emission", 0.18)), 0.0)
+        self.smoke_decay = min(max(float(kwargs.pop("smoke_decay", 0.985)), 0.0), 1.0)
+        self.smoke_diffusion = min(max(float(kwargs.pop("smoke_diffusion", 0.16)), 0.0), 1.0)
+        self.smolder_smoke_emission = max(float(kwargs.pop("smolder_smoke_emission", 0.04)), 0.0)
+        self.smolder_decay = min(max(float(kwargs.pop("smolder_decay", 0.995)), 0.0), 1.0)
+        self.smolder_start_fraction = min(max(float(kwargs.pop("smolder_start_fraction", 0.65)), 0.0), 1.0)
         land_cover_fire_fuel = _land_cover_values(
             kwargs.pop("land_cover_fire_fuel", (0.05, 0.40, 1.10, 1.35, 0.0, 0.0)),
             water_value=0.0,
@@ -335,6 +364,7 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.float, device=device,
         )
+        self.smolder_grid = torch.zeros_like(self.smoke_grid)
         self.land_cover_grid = torch.full(
             (batch_dim, self.fire_grid_size, self.fire_grid_size),
             LAND_OPEN, dtype=torch.long, device=device,
@@ -369,6 +399,12 @@ class WildfireSearchScenario(BaseScenario):
         self.land_cover_cost_values = torch.tensor(land_cover_costs, dtype=torch.float, device=device)
         self.land_cover_speed_values = torch.tensor(land_cover_speeds, dtype=torch.float, device=device)
         self.land_cover_fire_fuel = torch.tensor(land_cover_fire_fuel, dtype=torch.float, device=device)
+        self.land_cover_fire_burnout_min = torch.tensor(
+            self.land_cover_fire_burnout_min_updates, dtype=torch.long, device=device,
+        )
+        self.land_cover_fire_burnout_max = torch.tensor(
+            self.land_cover_fire_burnout_max_updates, dtype=torch.long, device=device,
+        )
         self.object_fire_fuel = torch.tensor(object_fire_fuel, dtype=torch.float, device=device)
         self.drone_flight_levels = torch.tensor(drone_flight_levels, dtype=torch.float, device=device)
         self.drone_detection_quality = torch.tensor(drone_detection_quality, dtype=torch.float, device=device)
@@ -425,6 +461,7 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_lifetime_grid.zero_()
             self.fire_intensity_grid.zero_()
             self.smoke_grid.zero_()
+            self.smolder_grid.zero_()
             self.step_count.zero_()
             self.prev_drone_dist.fill_(float("inf"))
             self.prev_ground_dist.fill_(float("inf"))
@@ -438,6 +475,7 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_lifetime_grid[env_index] = 0
             self.fire_intensity_grid[env_index] = 0.0
             self.smoke_grid[env_index] = 0.0
+            self.smolder_grid[env_index] = 0.0
             self.step_count[env_index] = 0
             self.prev_drone_dist[env_index]  = float("inf")
             self.prev_ground_dist[env_index] = float("inf")
@@ -544,13 +582,12 @@ class WildfireSearchScenario(BaseScenario):
         """Mark cells as actively burning and assign each a random burn lifetime."""
         if not bool(new_burns.any().item()):
             return
-        random_lifetime = torch.randint(
-            self.fire_burnout_min_updates,
-            self.fire_burnout_max_updates + 1,
-            self.fire_lifetime_grid.shape,
-            device=self.fire_lifetime_grid.device,
-            dtype=self.fire_lifetime_grid.dtype,
-        )
+        min_lifetime = self.land_cover_fire_burnout_min[self.land_cover_grid]
+        max_lifetime = self.land_cover_fire_burnout_max[self.land_cover_grid]
+        lifetime_span = (max_lifetime - min_lifetime + 1).clamp_min(1)
+        random_lifetime = min_lifetime + torch.floor(
+            torch.rand_like(self.fire_intensity_grid) * lifetime_span.float()
+        ).long()
         self.fire_grid = self.fire_grid | new_burns
         self.burned_grid = self.burned_grid | new_burns
         self.fire_age_grid = torch.where(new_burns, torch.zeros_like(self.fire_age_grid), self.fire_age_grid)
@@ -881,6 +918,12 @@ class WildfireSearchScenario(BaseScenario):
         )
         self._update_fire_intensity()
         burned_out = self.fire_grid & (self.fire_age_grid >= self.fire_lifetime_grid.clamp_min(1))
+        new_smolder = self.fire_intensity_grid * float(self.smolder_start_fraction)
+        self.smolder_grid = torch.where(
+            burned_out,
+            torch.maximum(self.smolder_grid, new_smolder),
+            self.smolder_grid,
+        )
         self.fire_grid = self.fire_grid & ~burned_out
         self.fire_intensity_grid = torch.where(
             self.fire_grid,
@@ -929,11 +972,22 @@ class WildfireSearchScenario(BaseScenario):
         return (0.15 + 0.85 * fuel * moisture_factor * slope_factor).clamp(0.0, 1.0)
 
     def _update_smoke(self) -> None:
-        """Emit smoke from burning cells, then diffuse, drift, and decay."""
+        """Emit smoke from active fire and smoldering cells, then diffuse, drift, and decay."""
         smoke = self.smoke_grid * self.smoke_decay
+        self.smolder_grid = torch.where(
+            self.fire_grid,
+            torch.zeros_like(self.smolder_grid),
+            self.smolder_grid * self.smolder_decay,
+        )
+        self.smolder_grid = torch.where(
+            self.smolder_grid < 0.005,
+            torch.zeros_like(self.smolder_grid),
+            self.smolder_grid,
+        )
         fuel = self._fire_fuel_grid()
         flame_output = self.fire_grid.float() * self.fire_intensity_grid.clamp(0.15, 1.0)
         smoke = smoke + flame_output * self.smoke_emission * fuel.clamp(0.0, 1.0)
+        smoke = smoke + self.smolder_grid * self.smolder_smoke_emission * fuel.clamp(0.0, 1.0)
         neighbor_mean = self._neighbor_sum(smoke) / 4.0
         smoke = smoke + self.smoke_diffusion * (neighbor_mean - smoke)
 
