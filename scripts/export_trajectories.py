@@ -148,6 +148,17 @@ def main():
     )
     p.add_argument("--cv-image-size", type=int, default=512, help="Rendered detector crop size.")
     p.add_argument("--cv-human-asset", default=str(ROOT / "data/cv_assets/sard_grabcut/sard_survivor_0280.png"))
+    p.add_argument(
+        "--cv-human-assets-dir",
+        default=str(ROOT / "data/cv_assets/sard_grabcut"),
+        help="Directory of transparent SARD survivor PNGs. Overrides --cv-human-asset when present.",
+    )
+    p.add_argument(
+        "--cv-preview-altitude-m",
+        type=float,
+        default=20.0,
+        help="Altitude in meters for centered per-survivor preview images.",
+    )
     p.add_argument("--cv-detection-probability", type=float, default=1.0)
     p.add_argument("--cv-pixel-noise-std", type=float, default=0.0)
     args = p.parse_args()
@@ -199,6 +210,8 @@ def main():
             "tile_size": args.cv_tile_size,
             "image_size": args.cv_image_size,
             "human_asset_path": args.cv_human_asset,
+            "human_assets_dir": args.cv_human_assets_dir or None,
+            "survivor_preview_altitude_m": args.cv_preview_altitude_m,
             "detection_probability": args.cv_detection_probability,
             "pixel_noise_std": args.cv_pixel_noise_std,
         }

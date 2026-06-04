@@ -244,6 +244,49 @@ def _cv_perception_records(
     return records
 
 
+def _cv_survivor_previews(
+    scenario,
+    env_index: int,
+    *,
+    adapter: SimulationCvAdapter | None,
+    preview_dir: Path | None,
+    altitude_m: float,
+) -> List[dict]:
+    if adapter is None or preview_dir is None:
+        return []
+
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    records = []
+    for i, survivor in enumerate(scenario._survivors):
+        pos = survivor.state.pos[env_index]
+        entity = SimEntity(
+            index=i,
+            world_xy=(float(pos[X]), float(pos[Y])),
+        )
+        image_path = preview_dir / f"survivor_{i:02d}_preview_{int(round(float(altitude_m)))}m.png"
+        records.append(
+            adapter.render_survivor_preview(
+                survivor=entity,
+                altitude_m=float(altitude_m),
+                image_path=image_path,
+            )
+        )
+    return records
+
+
+def _cv_survivor_asset_records(adapter: SimulationCvAdapter, n_survivors: int) -> List[dict]:
+    records = []
+    for i in range(n_survivors):
+        asset_path, _asset = adapter._asset_for_survivor(i)
+        records.append(
+            {
+                "survivor_index": i,
+                "human_asset_path": str(asset_path) if asset_path is not None else None,
+            }
+        )
+    return records
+
+
 def export_trajectory(
     strategy_name: str,
     make_policy:   Callable,
@@ -286,6 +329,8 @@ def export_trajectory(
     cv_adapter = None
     cv_image_dir = None
     cv_save_images_every = int(cv_options.pop("save_images_every", 0)) if cv_options else 0
+    cv_survivor_preview_altitude_m = float(cv_options.pop("survivor_preview_altitude_m", 20.0)) if cv_options else 20.0
+    cv_survivor_previews: List[dict] = []
     if cv_options.pop("enabled", False):
         cv_output_dir = Path(cv_options.pop("output_dir", output_path.parent / f"{output_path.stem}_cv"))
         if not cv_output_dir.is_absolute():
@@ -297,6 +342,13 @@ def export_trajectory(
             terrain_cache_path=sc.terrain_cache_path or scenario_kwargs.get("terrain_cache_path"),
             fov_deg=float(sc.drone_camera_fov_deg),
             **cv_options,
+        )
+        cv_survivor_previews = _cv_survivor_previews(
+            sc,
+            env_index,
+            adapter=cv_adapter,
+            preview_dir=cv_output_dir / "survivor_previews",
+            altitude_m=cv_survivor_preview_altitude_m,
         )
 
     metadata: Dict = {
@@ -346,6 +398,10 @@ def export_trajectory(
                 else None
             ),
             "human_asset_path": str(cv_adapter.human_asset_path) if cv_adapter.human_asset_path else None,
+            "human_assets_dir": str(cv_adapter.human_assets_dir) if cv_adapter.human_assets_dir else None,
+            "survivor_assets": _cv_survivor_asset_records(cv_adapter, sc.n_survivors),
+            "survivor_preview_altitude_m": round(float(cv_survivor_preview_altitude_m), 3),
+            "survivor_previews": cv_survivor_previews,
             "image_size_px": int(cv_adapter.image_size),
             "background_size_px": list(cv_adapter.background_size_px),
             "background_gsd_m_per_px": [
