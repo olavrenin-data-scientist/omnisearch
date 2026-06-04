@@ -26,7 +26,7 @@ def main() -> None:
     parser.add_argument("--out-dir", default="results/cv_demo_highres_naip_yolo")
     parser.add_argument("--drone-cell", nargs=2, type=int, default=(64, 64), metavar=("GX", "GY"))
     parser.add_argument("--altitude-agl-m", nargs="+", type=float, default=(30.0, 100.0, 300.0))
-    parser.add_argument("--fov-deg", type=float, default=65.0)
+    parser.add_argument("--fov-deg", type=float, default=90.0)
     parser.add_argument("--patch-size-m", type=float, default=2000.0)
     parser.add_argument("--patch-image-size", type=int, default=8192)
     parser.add_argument("--tile-size", type=int, default=1024)

@@ -33,8 +33,8 @@ LAND_COVER_COLORS = ["#b59665", "#47783d", "#315a2e", "#203d24", "#555963", "#25
 OBSTACLE_NAMES = ["none", "tree", "house"]
 OBSTACLE_COLORS = ["#111827", "#1d5128", "#a34d3d"]
 CONTINUOUS_LAYERS = ("elevation", "slope", "moisture", "fuel_density", "rockiness")
-# The planner's footprint value is camera radius, so 1.6 * radius = 0.8 * full footprint width.
-DRONE_LANE_SPACING_FACTOR = 1.6
+# The planner's footprint value is camera radius, so 1.2 * radius = 0.6 * full footprint width.
+DRONE_LANE_SPACING_FACTOR = 1.2
 
 
 def main() -> None:

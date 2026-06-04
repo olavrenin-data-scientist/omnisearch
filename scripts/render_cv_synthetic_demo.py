@@ -52,7 +52,7 @@ def main() -> None:
         default=None,
         help="Drone altitude in meters AGL. Overrides --altitude-agl when terrain metadata has sim_units_per_meter.",
     )
-    parser.add_argument("--fov-deg", type=float, default=65.0)
+    parser.add_argument("--fov-deg", type=float, default=90.0)
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--global-image-size", type=int, default=2048)
     parser.add_argument(

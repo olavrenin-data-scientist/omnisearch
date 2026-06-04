@@ -103,7 +103,9 @@
   footer button:hover { border-color: var(--accent); }
   footer input[type="range"] { flex: 1; accent-color: var(--accent); }
   footer .step { color: var(--muted); font-size: 13px; min-width: 90px; }
-  footer .speed { color: var(--muted); font-size: 13px; }
+  footer .speed, footer .toggle { color: var(--muted); font-size: 13px; }
+  footer .toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  footer input[type="checkbox"] { accent-color: var(--accent); }
 </style>
 
 <script type="importmap">
@@ -130,7 +132,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
-const APP_VERSION = '3d-viewer-v1';
+const APP_VERSION = '3d-viewer-v2';
 const HEIGHT_SCALE = 3.0;
 const DRONE_MODEL_VISUAL_SCALE = 2.0;
 const GROUND_MODEL_VISUAL_SCALE = 1.8;
@@ -406,12 +408,14 @@ function buildHouseMeshes(meta) {
 // ---------------------------------------------------------------------
 // Burned scar overlay — cloned terrain geometry + canvas texture
 // ---------------------------------------------------------------------
-function buildBurnScarMesh(displGeo, G) {
+const COVERAGE_TEXTURE_SIZE = 1024;
+
+function buildTerrainCanvasOverlayMesh(displGeo, G, { zOffset = 0.002, opacity = 0.65 } = {}) {
   const geo = displGeo.clone();
   const pos = geo.attributes.position;
-  // Nudge every vertex up slightly to avoid z-fighting with the terrain mesh
+  // Nudge every vertex up slightly to avoid z-fighting with the terrain mesh.
   for (let i = 0; i < pos.count; i++) {
-    pos.setZ(i, pos.getZ(i) + 0.002);
+    pos.setZ(i, pos.getZ(i) + zOffset);
   }
   pos.needsUpdate = true;
 
@@ -428,9 +432,22 @@ function buildBurnScarMesh(displGeo, G) {
 
   const mesh = new THREE.Mesh(
     geo,
-    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.65 }),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+    }),
   );
   return { mesh, canvas, ctx, texture };
+}
+
+function buildBurnScarMesh(displGeo, G) {
+  return buildTerrainCanvasOverlayMesh(displGeo, G, { zOffset: 0.002, opacity: 0.65 });
+}
+
+function buildCoverageMesh(displGeo) {
+  return buildTerrainCanvasOverlayMesh(displGeo, COVERAGE_TEXTURE_SIZE, { zOffset: 0.004, opacity: 0.72 });
 }
 
 function resetBurnedOverlay3D(state, meta) {
@@ -461,6 +478,47 @@ function syncBurnedOverlay3D(state, meta, frame, frames) {
     paintBurnedCells3D(state, meta, frames[i].burned_cells_added);
   }
   state.burnedStep = frame.step;
+}
+
+function resetCoverageOverlay3D(state, meta) {
+  const size = state.coverageCanvas?.width ?? COVERAGE_TEXTURE_SIZE;
+  state.coverageCtx.clearRect(0, 0, size, size);
+  state.coverageTexture.needsUpdate = true;
+  state.coverageStep   = -1;
+  state.coverageSource = meta.terrain;
+}
+
+function paintDroneCoverage3D(state, meta, frame) {
+  if (!frame?.drone_perception?.length) return;
+  const size = state.coverageCanvas?.width ?? COVERAGE_TEXTURE_SIZE;
+  const ctx = state.coverageCtx;
+  ctx.save();
+  ctx.fillStyle = 'rgba(96, 165, 250, 0.18)';
+  for (const record of frame.drone_perception) {
+    const footprint = Number(record.footprint);
+    if (!Number.isFinite(footprint) || footprint <= 0) continue;
+    const agent = (frame.agents ?? []).find(a => a.name === record.name);
+    if (!agent) continue;
+    const cx = (Number(agent.x) + 1.0) * 0.5 * size;
+    const cy = (1.0 - (Number(agent.y) + 1.0) * 0.5) * size;
+    const radiusPx = footprint * 0.5 * size;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radiusPx, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  state.coverageTexture.needsUpdate = true;
+}
+
+function syncCoverageOverlay3D(state, meta, frame, frames) {
+  if (!state.coverageCtx) return;
+  if (state.coverageSource !== meta.terrain) resetCoverageOverlay3D(state, meta);
+  if (frame.step <= state.coverageStep)      resetCoverageOverlay3D(state, meta);
+  const start = Math.max(0, state.coverageStep + 1);
+  for (let i = start; i <= frame.step && i < frames.length; i++) {
+    paintDroneCoverage3D(state, meta, frames[i]);
+  }
+  state.coverageStep = frame.step;
 }
 
 // ---------------------------------------------------------------------
@@ -1279,22 +1337,78 @@ function imagePathForBrowser(path) {
   return path;
 }
 
+function stepSeconds(meta) {
+  return Number(meta?.sim_step_seconds ?? meta?.terrain?.sim_step_seconds ?? 1);
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return '—';
+  const total = Math.max(0, Math.round(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function formatStepsAsTime(steps, meta) {
+  if (steps === null || steps === undefined || Number.isNaN(steps)) return '—';
+  return `${steps} steps (${formatDuration(Number(steps) * stepSeconds(meta))})`;
+}
+
+function accumulatedCoveragePercent(meta, frames, frame) {
+  const G = meta?.fire_grid_size;
+  if (!G || !frames?.length || !frame) return null;
+  const covered = new Uint8Array(G * G);
+  const end = Math.min(Number(frame.step) || 0, frames.length - 1);
+  for (let i = 0; i <= end; i++) {
+    const f = frames[i];
+    for (const record of (f.drone_perception ?? [])) {
+      const footprint = Number(record.footprint);
+      if (!Number.isFinite(footprint) || footprint <= 0) continue;
+      const agent = (f.agents ?? []).find(a => a.name === record.name);
+      if (!agent) continue;
+      const cx = (Number(agent.x) + 1.0) * 0.5 * G;
+      const cy = (Number(agent.y) + 1.0) * 0.5 * G;
+      const rCells = footprint * 0.5 * G;
+      const x0 = Math.max(0, Math.floor(cx - rCells));
+      const x1 = Math.min(G - 1, Math.ceil(cx + rCells));
+      const y0 = Math.max(0, Math.floor(cy - rCells));
+      const y1 = Math.min(G - 1, Math.ceil(cy + rCells));
+      const r2 = rCells * rCells;
+      for (let gy = y0; gy <= y1; gy++) {
+        const dy = gy + 0.5 - cy;
+        for (let gx = x0; gx <= x1; gx++) {
+          const dx = gx + 0.5 - cx;
+          if (dx * dx + dy * dy <= r2) covered[gy * G + gx] = 1;
+        }
+      }
+    }
+  }
+  let count = 0;
+  for (const value of covered) count += value;
+  return 100 * count / covered.length;
+}
+
 // ---------------------------------------------------------------------
 // Metrics sidebar
 // ---------------------------------------------------------------------
-function MetricsPanel({ meta, frame, selectedDrone, setSelectedDrone }) {
+function MetricsPanel({ meta, frame, frames, selectedDrone, setSelectedDrone }) {
   const m   = meta?.metrics ?? {};
   const fmt = (v, suffix = '') => {
     if (v === null || v === undefined || Number.isNaN(v)) return '—';
     return (typeof v === 'number' && !Number.isInteger(v) ? v.toFixed(2) : v) + suffix;
   };
+  const coveragePct = accumulatedCoveragePercent(meta, frames, frame);
   const metricRows = [
     ['Survivor recall',      fmt(m.survivor_recall)],
-    ['Time-to-verification', fmt(m.time_to_verification, ' steps')],
+    ['Drone coverage',       coveragePct === null ? '—' : `${coveragePct.toFixed(1)}%`],
+    ['Time-to-verification', formatStepsAsTime(m.time_to_verification, meta)],
     ['False-positive trips', fmt(m.false_positive_trips)],
-    ['Hazard exposure',      fmt(m.hazard_exposure, ' steps')],
+    ['Hazard exposure',      fmt(m.hazard_exposure, ' agent-steps')],
     ['UGV travel cost',      fmt(m.ugv_travel_cost)],
-    ['Episode length',       fmt(m.n_steps, ' steps')],
+    ['Episode length',       formatStepsAsTime(m.n_steps, meta)],
   ];
   const drones = (frame?.agents ?? []).filter(a => a.type === 'drone');
   const cvRecords = frame?.cv_perception ?? [];
@@ -1370,7 +1484,7 @@ function MetricsPanel({ meta, frame, selectedDrone, setSelectedDrone }) {
 // React hook — mounts the Three.js scene once and drives the RAF loop.
 // Rebuilds the terrain group whenever meta changes.
 // ---------------------------------------------------------------------
-function useThree3D(meta, frame, frames, histories) {
+function useThree3D(meta, frame, frames, histories, showCoverage) {
   const canvasRef = useRef(null);
   const stateRef  = useRef(null);
   const [agentAssetTick, setAgentAssetTick] = useState(0);
@@ -1385,6 +1499,7 @@ function useThree3D(meta, frame, frames, histories) {
     const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
     const obstacleGroup = new THREE.Group(); scene.add(obstacleGroup);
     const burnedGroup  = new THREE.Group(); scene.add(burnedGroup);
+    const coverageGroup = new THREE.Group(); scene.add(coverageGroup);
     const fireGroup    = new THREE.Group(); scene.add(fireGroup);
     const smokeGroup   = new THREE.Group(); scene.add(smokeGroup);
     const trailGroup   = new THREE.Group(); scene.add(trailGroup);
@@ -1397,12 +1512,14 @@ function useThree3D(meta, frame, frames, histories) {
     stateRef.current = {
       renderer, scene, camera, controls,
       terrainGroup, obstacleGroup, burnedGroup, fireGroup, smokeGroup,
-      trailGroup, survGroup, agentGroup,
+      coverageGroup, trailGroup, survGroup, agentGroup,
       placeholder,
       droneModelTemplate: null, droneModelSize: 1, droneModelError: null,
       groundModelTemplate: null, groundModelSize: 1, groundModelError: null,
       survivorModelTemplate: null, survivorModelSize: 1, survivorModelError: null,
-      terrainSource: null, burnedStep: -1, burnedSource: null,
+      terrainSource: null,
+      burnedStep: -1, burnedSource: null,
+      coverageStep: -1, coverageSource: null,
     };
 
     let alive = true;
@@ -1535,6 +1652,7 @@ function useThree3D(meta, frame, frames, histories) {
     clearGroup(state.terrainGroup);
     clearGroup(state.obstacleGroup);
     clearGroup(state.burnedGroup);
+    clearGroup(state.coverageGroup);
 
     const G = meta.fire_grid_size;
     const built = buildTerrainMesh(meta);
@@ -1549,10 +1667,17 @@ function useThree3D(meta, frame, frames, histories) {
       state.burnedCanvas  = scar.canvas;
       state.burnedCtx     = scar.ctx;
       state.burnedTexture = scar.texture;
+      const coverage = buildCoverageMesh(built.geo);
+      state.coverageGroup.add(coverage.mesh);
+      state.coverageCanvas  = coverage.canvas;
+      state.coverageCtx     = coverage.ctx;
+      state.coverageTexture = coverage.texture;
     }
     state.terrainSource = meta.terrain;
     state.burnedStep    = -1;
     state.burnedSource  = null;
+    state.coverageStep   = -1;
+    state.coverageSource = null;
     state.elevGrid      = meta.terrain?.elevation ?? null;
     state.fireGridSize  = G;
 
@@ -1578,12 +1703,14 @@ function useThree3D(meta, frame, frames, histories) {
   useEffect(() => {
     const state = stateRef.current;
     if (!state || !meta || !frame || !frames.length) return;
+    state.coverageGroup.visible = showCoverage;
     syncBurnedOverlay3D(state, meta, frame, frames);
+    syncCoverageOverlay3D(state, meta, frame, frames);
     updateFireColumns(state, meta, frame);
     updateSmoke(state, meta, frame);
     if (histories) renderAgents3D(state, meta, frame, histories);
     renderSurvivors3D(state, meta, frame);
-  }, [meta, frame, frames, histories, agentAssetTick]);
+  }, [meta, frame, frames, histories, agentAssetTick, showCoverage]);
 
   return { canvasRef, stateRef };
 }
@@ -1596,6 +1723,7 @@ function App() {
   const [data, setData]         = useState(null);
   const [error, setError]       = useState(null);
   const [selectedDrone, setSelectedDrone] = useState('');
+  const [showCoverage, setShowCoverage] = useState(true);
 
   useEffect(() => {
     setData(null); setError(null);
@@ -1617,11 +1745,12 @@ function App() {
   };
 
   const frame    = frames[step] ?? null;
+  const totalSteps = meta?.actual_n_steps ?? meta?.n_steps;
   const runLabel = meta
-    ? `seed ${meta.seed} · ${meta.actual_n_steps ?? meta.n_steps} steps · ${meta.fire_grid_size}×${meta.fire_grid_size}`
+    ? `seed ${meta.seed} · ${formatStepsAsTime(totalSteps, meta)} · ${meta.fire_grid_size}×${meta.fire_grid_size}`
     : error ? 'Load error' : 'Loading…';
 
-  const { canvasRef } = useThree3D(meta, frame, frames, histories);
+  const { canvasRef } = useThree3D(meta, frame, frames, histories, showCoverage);
 
   return h(React.Fragment, null,
     h('header', null,
@@ -1654,7 +1783,7 @@ function App() {
           ),
         ),
       ),
-      h(MetricsPanel, { meta, frame, selectedDrone, setSelectedDrone }),
+      h(MetricsPanel, { meta, frame, frames, selectedDrone, setSelectedDrone }),
     ),
     h('footer', null,
       h('button', { onClick: () => { setPlaying(false); setStep(0); }, title: 'Restart' }, '⟲'),
@@ -1665,7 +1794,16 @@ function App() {
         value: step,
         onChange: e => { setPlaying(false); setStep(Number(e.target.value)); },
       }),
-      h('div', { className: 'step' }, `step ${step} / ${Math.max(0, frames.length - 1)}`),
+      h('div', { className: 'step' },
+        `step ${step} / ${Math.max(0, frames.length - 1)} · t=${formatDuration(step * stepSeconds(meta))}`),
+      h('label', { className: 'toggle' },
+        h('input', {
+          type: 'checkbox',
+          checked: showCoverage,
+          onChange: e => setShowCoverage(e.target.checked),
+        }),
+        'coverage',
+      ),
       h('div', { className: 'speed' },
         'speed: ',
         h('select', {
