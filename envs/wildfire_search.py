@@ -157,6 +157,22 @@ class WildfireSearchScenario(BaseScenario):
             if self.drone_max_speed_sim_override is not None
             else 0.5
         )
+        # Ground robots are calibrated in physical units, then converted to
+        # VMAS units once the terrain cache gives us sim_units_per_meter.
+        self.ground_speed_mps = max(float(kwargs.pop("ground_speed_mps", 1.6)), 0.0)
+        self.ground_accel_mps2 = max(float(kwargs.pop("ground_accel_mps2", 2.0)), 0.0)
+        self.ground_max_speed_sim_override = kwargs.pop("ground_max_speed", None)
+        self.ground_max_speed_sim = (
+            max(float(self.ground_max_speed_sim_override), 0.0)
+            if self.ground_max_speed_sim_override is not None
+            else 0.2
+        )
+        ground_u_multiplier_override = kwargs.pop("ground_u_multiplier", None)
+        self.ground_u_multiplier = (
+            max(float(ground_u_multiplier_override), 0.0)
+            if ground_u_multiplier_override is not None
+            else max(0.25 * self.ground_accel_mps2, 0.0)
+        )
         drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (20.0, 35.0, 50.0))
         drone_flight_levels_override = kwargs.pop("drone_flight_levels", None)
         drone_flight_levels = (
@@ -267,9 +283,9 @@ class WildfireSearchScenario(BaseScenario):
                 name=f"ground_{i}",
                 collide=True,
                 shape=Sphere(radius=self.agent_radius),
-                max_speed=0.2,
+                max_speed=self.ground_max_speed_sim,
                 u_range=1.0,
-                u_multiplier=0.3,
+                u_multiplier=self.ground_u_multiplier,
                 color=Color.GREEN,
                 sensors=[
                     Lidar(
@@ -603,6 +619,7 @@ class WildfireSearchScenario(BaseScenario):
         self.terrain_sim_units_per_meter[env_index] = sim_units_per_meter
         self._refresh_drone_unit_conversions(env_index, sim_units_per_meter)
         self._refresh_drone_speed_conversion(sim_units_per_meter)
+        self._refresh_ground_speed_conversion(sim_units_per_meter)
         if self.drone_safety_clearance_sim_override is None and sim_units_per_meter > 0.0:
             clearance = self.drone_safety_clearance_m * sim_units_per_meter
         else:
@@ -647,6 +664,18 @@ class WildfireSearchScenario(BaseScenario):
             )
         for agent in self.world.agents[:self.n_drones]:
             agent._max_speed = self.drone_max_speed_sim
+
+    def _refresh_ground_speed_conversion(self, sim_units_per_meter: float) -> None:
+        if self.ground_max_speed_sim_override is None and sim_units_per_meter > 0.0:
+            world_dt = max(float(getattr(self.world, "dt", 1.0)), 1e-6)
+            self.ground_max_speed_sim = (
+                self.ground_speed_mps
+                * self.sim_step_seconds
+                * float(sim_units_per_meter)
+                / world_dt
+            )
+        for agent in self.world.agents[self.n_drones:]:
+            agent._max_speed = self.ground_max_speed_sim
 
     def _terrain_sim_units_per_meter(self, metadata: dict) -> float:
         """Return the terrain cache's vertical/horizontal simulation conversion."""
@@ -1019,11 +1048,24 @@ class WildfireSearchScenario(BaseScenario):
                 corrected_pos = torch.where(
                     blocked.unsqueeze(-1), soft_pos, agent.state.pos,
                 )
-                soft_vel = (soft_pos - self._pre_step_ground_pos[:, i]) / self.world.dt
-                corrected_vel = torch.where(
-                    blocked.unsqueeze(-1), soft_vel, agent.state.vel,
+                speed = self._terrain_path_speed_multiplier(
+                    self._pre_step_ground_pos[:, i], corrected_pos,
+                ).clamp(0.0, 1.0)
+                max_step = (
+                    self.ground_speed_mps
+                    * self.sim_step_seconds
+                    * self.terrain_sim_units_per_meter.to(corrected_pos.device)
+                    * speed
                 )
-                agent.set_pos(corrected_pos, batch_index=None)
+                delta = corrected_pos - self._pre_step_ground_pos[:, i]
+                dist = delta.norm(dim=-1).clamp_min(1e-12)
+                scale = torch.minimum(torch.ones_like(dist), max_step / dist)
+                speed_limited_pos = self._pre_step_ground_pos[:, i] + delta * scale.unsqueeze(-1)
+                soft_vel = (speed_limited_pos - self._pre_step_ground_pos[:, i]) / self.world.dt
+                corrected_vel = torch.where(
+                    (blocked | (scale < 1.0)).unsqueeze(-1), soft_vel, agent.state.vel,
+                )
+                agent.set_pos(speed_limited_pos, batch_index=None)
                 agent.set_vel(corrected_vel, batch_index=None)
 
         drone_agents = self.world.agents[:self.n_drones]
@@ -1304,6 +1346,21 @@ class WildfireSearchScenario(BaseScenario):
         multipliers = self._grid_values_at_positions(self.mobility_cost_grid, path, env_indices)
         distance = (end_pos - start_pos).norm(dim=-1)
         return distance * multipliers.mean(dim=-1)
+
+    def _terrain_path_speed_multiplier(
+        self,
+        start_pos: Tensor,
+        end_pos: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> Tensor:
+        """Average terrain speed multiplier along a UGV movement segment."""
+        single_agent = start_pos.ndim == 2
+        if single_agent:
+            start_pos = start_pos.unsqueeze(1)
+            end_pos = end_pos.unsqueeze(1)
+        path = self._sample_path(start_pos, end_pos)
+        speed = self._grid_values_at_positions(self.speed_multiplier_grid, path, env_indices).mean(dim=-1)
+        return speed.squeeze(1) if single_agent else speed
 
     def _sample_path(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
         samples = max(int(self.terrain_path_samples), 2)
