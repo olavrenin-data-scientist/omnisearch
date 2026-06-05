@@ -204,17 +204,24 @@ See [notebooks/README.md](notebooks/README.md) for the cell-by-cell walkthrough 
 
 ### 5. Web viewer — React + Three.js replay
 
+The **2D viewer** works from just `x`/`y`, so the quick path is:
+
 ```bash
-# 1. Export one trajectory JSON per baseline (~1.5 s total)
-python scripts/export_trajectories.py
-
-# 2. Serve the web/ folder (browsers need HTTP for fetch)
-python -m http.server -d web 8080
-
-# 3. Open http://localhost:8080
+python scripts/export_trajectories.py   # writes web/trajectories/*.json
+python -m http.server -d web 8080       # browsers need HTTP for fetch
+# open http://localhost:8080/index2d.html
 ```
 
-Top-down replay of each strategy with playback controls + mission-metrics panel. No `npm install`, no build — single HTML file, dependencies loaded from `esm.sh`. See [web/README.md](web/README.md).
+The **3D viewer** (`http://localhost:8080`, the default) additionally
+needs the trajectory JSONs to contain **real terrain** — which means the
+geospatial deps and a built terrain cache must exist first, or the 3D
+scene renders black. The full prerequisite chain (geo deps → build terrain
+cache → handle the hash-vs-slug filename → export → why `happo_trained`
+can be dark → retrain) plus a **Troubleshooting table** of every common
+local failure is in **[web/README.md](web/README.md)** — start there if
+the 3D scene is blank.
+
+No `npm install`, no build — single HTML file, deps loaded from `esm.sh`.
 
 ---
 

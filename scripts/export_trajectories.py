@@ -281,6 +281,10 @@ def main():
     except FileNotFoundError as e:
         print(f"  ⚠ HAPPO export skipped — no checkpoint found ({e})")
         print(f"    Run `python scripts/train_happo_smoke.py` first to produce a checkpoint.")
+    except RuntimeError as e:
+        print(f"  ⚠ HAPPO export skipped — checkpoint incompatible with current scenario ({e})")
+        print(f"    The saved policy's observation/action shapes no longer match the env "
+              f"(it predates a scenario change). Retrain with `python scripts/train_happo_smoke.py`.")
 
     print("-" * 60)
     print(f" Done. Serve with: python -m http.server -d web")
