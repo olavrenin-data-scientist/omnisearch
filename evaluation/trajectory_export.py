@@ -399,6 +399,11 @@ def export_trajectory(
             ),
             "human_asset_path": str(cv_adapter.human_asset_path) if cv_adapter.human_asset_path else None,
             "human_assets_dir": str(cv_adapter.human_assets_dir) if cv_adapter.human_assets_dir else None,
+            "human_asset_list_path": (
+                str(cv_adapter.human_asset_list_path)
+                if cv_adapter.human_asset_list_path is not None
+                else None
+            ),
             "survivor_assets": _cv_survivor_asset_records(cv_adapter, sc.n_survivors),
             "survivor_preview_altitude_m": round(float(cv_survivor_preview_altitude_m), 3),
             "survivor_previews": cv_survivor_previews,

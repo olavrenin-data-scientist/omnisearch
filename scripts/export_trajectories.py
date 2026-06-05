@@ -154,6 +154,11 @@ def main():
         help="Directory of transparent SARD survivor PNGs. Overrides --cv-human-asset when present.",
     )
     p.add_argument(
+        "--cv-human-asset-list",
+        default=str(ROOT / "configs/cv/sard_grabcut_asset_review.json"),
+        help="Optional JSON review list. When set, only accepted_assets are used.",
+    )
+    p.add_argument(
         "--cv-preview-altitude-m",
         type=float,
         default=20.0,
@@ -211,6 +216,7 @@ def main():
             "image_size": args.cv_image_size,
             "human_asset_path": args.cv_human_asset,
             "human_assets_dir": args.cv_human_assets_dir or None,
+            "human_asset_list_path": args.cv_human_asset_list or None,
             "survivor_preview_altitude_m": args.cv_preview_altitude_m,
             "detection_probability": args.cv_detection_probability,
             "pixel_noise_std": args.cv_pixel_noise_std,
