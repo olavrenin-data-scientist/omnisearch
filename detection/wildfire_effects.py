@@ -26,7 +26,7 @@ from scipy import ndimage
 class WildfireEffectConfig:
     """Parameters controlling visual wildfire rendering."""
 
-    burn_rgb_drop: float = 0.46
+    burn_rgb_drop: float = 0.62
     burn_nir_drop: float = 0.90
     smoke_nir_drop: float = 0.22
     char_rgb: tuple[float, float, float] = (0.07, 0.065, 0.05)
@@ -178,7 +178,7 @@ def apply_wildfire_effects(
         noise = _fractal_noise(rgb.shape[:2], seed=cfg.seed)
         spark_noise = _smooth_noise(rgb.shape[:2], grid=4, seed=cfg.seed + 43)
         perimeter_noise = _smooth_noise(rgb.shape[:2], grid=14, seed=cfg.seed + 89)
-        burn_texture = (0.42 + 0.58 * noise).clip(0.0, 1.0)
+        burn_texture = (0.56 + 0.44 * noise).clip(0.0, 1.0)
         soft_burn = (
             ndimage.gaussian_filter(np.maximum(burned, active * 0.32), sigma=1.1)
             * burn_texture
