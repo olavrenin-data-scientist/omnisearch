@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from pathlib import Path
 import random
@@ -64,6 +65,7 @@ class SimulationCvAdapter:
         fov_deg: float = 65.0,
         human_asset_path: str | Path | None = "data/cv_assets/sard_grabcut/sard_survivor_0280.png",
         human_assets_dir: str | Path | None = None,
+        human_asset_list_path: str | Path | None = None,
         survivor_width_m: float = 2.4,
         survivor_height_m: float = 1.4,
         survivor_rotation_deg: float = 0.0,
@@ -131,9 +133,11 @@ class SimulationCvAdapter:
         else:
             raise RuntimeError("CV adapter must have either a NAIP image or a tile cache")
         self.human_assets_dir = self._resolve(human_assets_dir) if human_assets_dir is not None else None
+        self.human_asset_list_path = self._resolve(human_asset_list_path) if human_asset_list_path is not None else None
         self.human_assets = self._load_human_assets(
             human_asset_path=human_asset_path,
             human_assets_dir=human_assets_dir,
+            human_asset_list_path=human_asset_list_path,
         )
         self.human_asset_path = self.human_assets[0][0] if self.human_assets else None
         self.human_asset = self.human_assets[0][1] if self.human_assets else None
@@ -276,10 +280,14 @@ class SimulationCvAdapter:
         *,
         human_asset_path: str | Path | None,
         human_assets_dir: str | Path | None,
+        human_asset_list_path: str | Path | None,
     ) -> list[tuple[Path, Image.Image]]:
         paths: list[Path] = []
-        if human_assets_dir is not None:
-            directory = self._resolve(human_assets_dir)
+        directory = self._resolve(human_assets_dir) if human_assets_dir is not None else None
+        if human_asset_list_path is not None:
+            list_path = self._resolve(human_asset_list_path)
+            paths = self._paths_from_asset_list(list_path, directory=directory)
+        elif directory is not None:
             if directory.exists():
                 paths = sorted(directory.glob("*.png"))
             elif human_asset_path is None:
@@ -291,6 +299,39 @@ class SimulationCvAdapter:
             else:
                 raise FileNotFoundError(f"Human asset not found: {path}")
         return [(path, Image.open(path).convert("RGBA")) for path in paths]
+
+    def _paths_from_asset_list(self, list_path: Path, *, directory: Path | None) -> list[Path]:
+        if not list_path.exists():
+            raise FileNotFoundError(f"Human asset review list not found: {list_path}")
+        data = json.loads(list_path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("accepted_assets") or data.get("accepted") or []
+            if directory is None and data.get("asset_dir"):
+                directory = self._resolve(data["asset_dir"])
+        else:
+            raise ValueError(f"Unsupported human asset list format: {list_path}")
+
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for item in items:
+            raw_path = item.get("path") if isinstance(item, dict) else item
+            if raw_path is None:
+                continue
+            path = Path(str(raw_path))
+            if not path.is_absolute():
+                path = directory / path if directory is not None and len(path.parts) == 1 else self._resolve(path)
+            path = path.resolve()
+            if path in seen:
+                continue
+            if not path.exists():
+                raise FileNotFoundError(f"Accepted human asset not found: {path}")
+            paths.append(path)
+            seen.add(path)
+        if not paths:
+            raise ValueError(f"No accepted human assets listed in {list_path}")
+        return paths
 
     def _asset_for_survivor(self, survivor_index: int) -> tuple[Path | None, Image.Image | None]:
         if not self.human_assets:
