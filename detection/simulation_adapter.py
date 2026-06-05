@@ -186,7 +186,7 @@ class SimulationCvAdapter:
         view = crop.resize((self.image_size, self.image_size), Image.Resampling.BILINEAR)
         wildfire_stats = None
         wildfire_masks = None
-        if self.render_wildfire_effects and wildfire_state is not None:
+        if self.render_wildfire_effects and wildfire_state is not None and image_path is not None:
             wildfire_masks = masks_from_simulation_grids(
                 image_size=view.size,
                 center_world=drone.world_xy,

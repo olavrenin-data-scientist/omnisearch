@@ -26,18 +26,27 @@ from scipy import ndimage
 class WildfireEffectConfig:
     """Parameters controlling visual wildfire rendering."""
 
-    burn_rgb_drop: float = 0.70
+    burn_rgb_drop: float = 0.68
     burn_nir_drop: float = 0.90
     smoke_nir_drop: float = 0.22
-    smoke_color_rgb: tuple[float, float, float] = (0.70, 0.65, 0.58)
-    smoke_alpha: float = 0.62
-    smoke_blur_px: float = 5.0
-    smoke_noise_strength: float = 0.28
-    flame_gain: float = 0.95
-    flame_core_rgb: tuple[float, float, float] = (1.00, 0.72, 0.16)
-    flame_edge_rgb: tuple[float, float, float] = (0.95, 0.22, 0.02)
-    flame_bloom_px: float = 1.8
-    flame_hotspot_noise: float = 0.42
+    char_rgb: tuple[float, float, float] = (0.07, 0.065, 0.05)
+    ember_rgb: tuple[float, float, float] = (0.70, 0.15, 0.08)
+    smoke_color_rgb: tuple[float, float, float] = (0.49, 0.54, 0.52)
+    haze_rgb: tuple[float, float, float] = (0.37, 0.36, 0.31)
+    smoke_alpha: float = 0.44
+    smoke_blur_px: float = 16.0
+    smoke_noise_strength: float = 0.36
+    flame_gain: float = 1.00
+    flame_bloom_px: float = 8.0
+    flame_hotspot_noise: float = 0.52
+    heat_ramp_rgb: tuple[tuple[float, tuple[float, float, float]], ...] = (
+        (0.00, (0.36, 0.07, 0.05)),
+        (0.24, (0.74, 0.14, 0.07)),
+        (0.48, (1.00, 0.32, 0.05)),
+        (0.72, (1.00, 0.69, 0.13)),
+        (0.90, (1.00, 0.93, 0.36)),
+        (1.00, (1.00, 1.00, 0.82)),
+    )
     seed: int = 7
 
 
@@ -163,35 +172,65 @@ def apply_wildfire_effects(
     active = _safe_mask(masks.active, rgb.shape[:2])
     intensity = _safe_mask(masks.intensity, rgb.shape[:2])
     smoke = _safe_mask(masks.smoke, rgb.shape[:2])
+    flame = (active * intensity).clip(0.0, 1.0)
+
+    if include_burn or include_flame:
+        noise = _fractal_noise(rgb.shape[:2], seed=cfg.seed)
+        spark_noise = _smooth_noise(rgb.shape[:2], grid=4, seed=cfg.seed + 43)
+        perimeter_noise = _smooth_noise(rgb.shape[:2], grid=14, seed=cfg.seed + 89)
+        soft_burn = ndimage.gaussian_filter(np.maximum(burned, active * 0.38), sigma=1.1).clip(0.0, 1.0)
+        front = (_perimeter_mask(active) * flame).clip(0.0, 1.0)
+        hotspots = (_hotspot_texture(active.shape, cfg) * active * flame).clip(0.0, 1.0)
+        broken = ((0.58 * noise + 0.42 * perimeter_noise - 0.20) / 0.62).clip(0.0, 1.0)
+        flame_mask = ((1.30 * front * (0.55 + 0.45 * broken) + 0.72 * hotspots - 0.035) / 0.965).clip(0.0, 1.0)
+        hot_break = ((spark_noise - 0.34) / 0.66).clip(0.0, 1.0)
+        hot_core = (
+            ((1.18 * front + 0.78 * hotspots - 0.28) / 0.72).clip(0.0, 1.0)
+            * (0.45 + 0.55 * broken)
+            * hot_break
+        ).clip(0.0, 1.0)
+        ember = np.zeros_like(soft_burn, dtype=np.float32)
+        ember_candidates = (soft_burn > 0.18) & (flame_mask < 0.24)
+        speckle = ((noise - 0.62) / 0.38).clip(0.0, 1.0)
+        ember[ember_candidates] = (
+            soft_burn[ember_candidates] ** 1.6
+            * speckle[ember_candidates] ** 2.2
+            * 0.70
+        )
 
     if include_burn:
-        soft_burn = ndimage.gaussian_filter(np.maximum(burned, active * 0.45), sigma=1.2).clip(0.0, 1.0)
-        rgb *= (1.0 - cfg.burn_rgb_drop * soft_burn[..., None]).clip(0.0, 1.0)
+        rgb[:] = _blend_rgb(rgb, cfg.char_rgb, cfg.burn_rgb_drop * soft_burn)
+        rgb[:] = _blend_rgb(rgb, cfg.ember_rgb, 0.42 * ember)
         if nir is not None:
             nir *= (1.0 - cfg.burn_nir_drop * soft_burn).clip(0.0, 1.0)
 
     if include_flame:
-        flame = (active * intensity).clip(0.0, 1.0)
-        if flame.max() > 0:
-            edge = _perimeter_mask(active)
-            hotspots = _hotspot_texture(active.shape, cfg)
-            core_seed = flame * (0.78 * edge + cfg.flame_hotspot_noise * hotspots * active)
-            core = ndimage.gaussian_filter(core_seed, sigma=0.65).clip(0.0, 1.0)
-            bloom = ndimage.gaussian_filter(core, sigma=max(float(cfg.flame_bloom_px), 0.0)).clip(0.0, 1.0)
-            edge_color = np.asarray(cfg.flame_edge_rgb, dtype=np.float32)
-            core_color = np.asarray(cfg.flame_core_rgb, dtype=np.float32)
-            rgb += bloom[..., None] * edge_color * (cfg.flame_gain * 0.55)
-            rgb += core[..., None] * core_color * (cfg.flame_gain * 0.85)
+        if flame_mask.max() > 0 or hot_core.max() > 0:
+            heat = (0.50 * flame_mask + 0.72 * hot_core + 0.20 * ember + 0.12 * noise).clip(0.0, 1.0)
+            heat_color = _color_ramp(cfg.heat_ramp_rgb, heat)
+            rgb[:] = _blend_rgb(rgb, heat_color, 0.72 * flame_mask * cfg.flame_gain)
+            rgb[:] = _blend_rgb(rgb, (1.0, 0.97, 0.70), 0.35 * hot_core * hot_core)
+            glow_alpha = ndimage.gaussian_filter(flame_mask, sigma=max(float(cfg.flame_bloom_px), 0.0))
+            glow_alpha = (glow_alpha * 0.28 * cfg.flame_gain).clip(0.0, 0.34)
+            rgb[:] = _blend_rgb(rgb, (1.0, 0.36, 0.08), glow_alpha)
+            thermal_heat = (0.60 * flame_mask + 0.95 * hot_core + 0.24 * ember + 0.12 * noise).clip(0.0, 1.0)
+            thermal_color = _color_ramp(cfg.heat_ramp_rgb, thermal_heat)
+            thermal_alpha = (0.92 * flame_mask + 0.55 * hot_core + 0.12 * ember).clip(0.0, 1.0)
+            thermal_alpha = ndimage.gaussian_filter(thermal_alpha, sigma=0.35).clip(0.0, 1.0)
+            rgb[:] = _blend_rgb(rgb, thermal_color, thermal_alpha * 0.72 * cfg.flame_gain)
             rgb[:] = np.clip(rgb, 0.0, 1.0)
 
     if include_smoke:
-        smoke_alpha = _textured_smoke(smoke, cfg).clip(0.0, 1.0)
+        smoke_source = np.maximum(smoke, 0.32 * burned + 0.48 * flame)
+        smoke_alpha = _textured_smoke(smoke_source, cfg).clip(0.0, 1.0)
         if smoke_alpha.max() > 0:
-            smoke_color = np.asarray(cfg.smoke_color_rgb, dtype=np.float32)
             luminance = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2])[..., None]
-            desaturated = 0.45 * rgb + 0.55 * luminance
-            rgb[:] = rgb * (1.0 - 0.35 * smoke_alpha[..., None]) + desaturated * (0.35 * smoke_alpha[..., None])
-            rgb[:] = rgb * (1.0 - smoke_alpha[..., None]) + smoke_color * smoke_alpha[..., None]
+            desaturated = 0.36 * rgb + 0.64 * luminance
+            contrast_alpha = (0.46 * smoke_alpha).clip(0.0, 0.62)
+            rgb[:] = rgb * (1.0 - contrast_alpha[..., None]) + desaturated * contrast_alpha[..., None]
+            rgb[:] = _blend_rgb(rgb, cfg.smoke_color_rgb, smoke_alpha * 0.78)
+            haze_alpha = (smoke_alpha * 0.20).clip(0.0, 0.26)
+            rgb[:] = _blend_rgb(rgb, cfg.haze_rgb, haze_alpha)
             if nir is not None:
                 nir *= (1.0 - cfg.smoke_nir_drop * smoke_alpha).clip(0.0, 1.0)
 
@@ -341,6 +380,52 @@ def _safe_mask(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     if arr.shape != shape:
         raise ValueError(f"mask shape {arr.shape} does not match image shape {shape}")
     return np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0).clip(0.0, 1.0)
+
+
+def _blend_rgb(image: np.ndarray, color, alpha: np.ndarray) -> np.ndarray:
+    base = np.asarray(image, dtype=np.float32)
+    color_arr = np.asarray(color, dtype=np.float32)
+    if color_arr.ndim == 1:
+        color_arr = color_arr.reshape(1, 1, 3)
+    alpha_arr = np.asarray(alpha, dtype=np.float32).clip(0.0, 1.0)
+    if alpha_arr.ndim == 2:
+        alpha_arr = alpha_arr[..., None]
+    return (base * (1.0 - alpha_arr) + color_arr * alpha_arr).clip(0.0, 1.0)
+
+
+def _color_ramp(
+    stops: tuple[tuple[float, tuple[float, float, float]], ...],
+    values: np.ndarray,
+) -> np.ndarray:
+    positions = np.asarray([stop[0] for stop in stops], dtype=np.float32)
+    colors = np.asarray([stop[1] for stop in stops], dtype=np.float32)
+    flat = np.asarray(values, dtype=np.float32).clip(0.0, 1.0).ravel()
+    channels = [np.interp(flat, positions, colors[:, idx]) for idx in range(3)]
+    return np.stack(channels, axis=-1).reshape((*values.shape, 3)).astype(np.float32)
+
+
+def _smooth_noise(shape: tuple[int, int], *, grid: int, seed: int) -> np.ndarray:
+    height, width = int(shape[0]), int(shape[1])
+    grid = max(int(grid), 1)
+    small_h = max(2, int(math.ceil(height / grid)))
+    small_w = max(2, int(math.ceil(width / grid)))
+    rng = np.random.default_rng(int(seed))
+    coarse = rng.random((small_h, small_w), dtype=np.float32)
+    zoom = (height / small_h, width / small_w)
+    noise = ndimage.zoom(coarse, zoom, order=3)
+    return noise[:height, :width].clip(0.0, 1.0)
+
+
+def _fractal_noise(shape: tuple[int, int], *, seed: int) -> np.ndarray:
+    large = _smooth_noise(shape, grid=56, seed=seed + 1)
+    medium = _smooth_noise(shape, grid=22, seed=seed + 2)
+    fine = _smooth_noise(shape, grid=9, seed=seed + 3)
+    noise = 0.52 * large + 0.30 * medium + 0.18 * fine
+    low = float(noise.min())
+    high = float(noise.max())
+    if high - low <= 1e-6:
+        return np.zeros(shape, dtype=np.float32)
+    return ((noise - low) / (high - low)).astype(np.float32)
 
 
 def _perimeter_mask(mask: np.ndarray) -> np.ndarray:
