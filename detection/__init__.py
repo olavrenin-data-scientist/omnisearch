@@ -32,7 +32,17 @@ from .camera_renderer import (
 from .fire_detector import FireDetector, FireDetection
 from .naip import fetch_naip_image, fetch_naip_tiled_image
 from .preliminary_detector import PreliminaryDetection, PreliminaryPersonDetector, PreliminaryResult
-from .simulation_adapter import SimDrone, SimEntity, SimulationCvAdapter
+from .simulation_adapter import SimDrone, SimEntity, SimWildfireState, SimulationCvAdapter
+from .wildfire_effects import (
+    WildfireEffectConfig,
+    WildfireMasks,
+    apply_wildfire_effects,
+    apply_wildfire_effects_to_pil,
+    inject_wildfire_effects_geotiff,
+    latlon_to_rowcol,
+    masks_from_simulation_grids,
+    procedural_wildfire_masks,
+)
 
 
 def __getattr__(name: str):
@@ -62,7 +72,16 @@ __all__ = [
     "PreliminaryResult",
     "SimDrone",
     "SimEntity",
+    "SimWildfireState",
     "SimulationCvAdapter",
+    "WildfireEffectConfig",
+    "WildfireMasks",
+    "apply_wildfire_effects",
+    "apply_wildfire_effects_to_pil",
+    "inject_wildfire_effects_geotiff",
+    "latlon_to_rowcol",
+    "masks_from_simulation_grids",
+    "procedural_wildfire_masks",
     "PersonDetector",
     "PersonDetection",
     "DetectionPipeline",

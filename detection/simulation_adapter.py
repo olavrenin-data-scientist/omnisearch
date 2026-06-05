@@ -20,6 +20,11 @@ from .naip import (
     fetch_naip_tiled_image_for_gsd,
 )
 from .preliminary_detector import PreliminaryPersonDetector
+from .wildfire_effects import (
+    WildfireEffectConfig,
+    apply_wildfire_effects_to_pil,
+    masks_from_simulation_grids,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,17 @@ class SimDrone:
     name: str
     world_xy: tuple[float, float]
     altitude_agl: float
+
+
+@dataclass(frozen=True)
+class SimWildfireState:
+    """Simulator wildfire fields needed for image-space rendering."""
+
+    fire_grid: np.ndarray
+    fire_intensity_grid: np.ndarray
+    burned_grid: np.ndarray
+    smoke_grid: np.ndarray
+    wind_direction: tuple[float, float] = (1.0, 0.0)
 
 
 class SimulationCvAdapter:
@@ -74,6 +90,8 @@ class SimulationCvAdapter:
         pixel_noise_std: float = 0.0,
         confidence: float = 0.95,
         confidence_jitter: float = 0.0,
+        render_wildfire_effects: bool = True,
+        wildfire_effect_seed: int | None = None,
         seed: int = 7,
         root: str | Path | None = None,
     ):
@@ -85,6 +103,10 @@ class SimulationCvAdapter:
         self.survivor_height_m = float(survivor_height_m)
         self.survivor_rotation_deg = float(survivor_rotation_deg)
         self.asset_resample = asset_resample
+        self.render_wildfire_effects = bool(render_wildfire_effects)
+        self.wildfire_effect_config = WildfireEffectConfig(
+            seed=int(seed if wildfire_effect_seed is None else wildfire_effect_seed)
+        )
         self.rng = random.Random(int(seed))
         self.detector = PreliminaryPersonDetector(
             detection_probability=detection_probability,
@@ -149,6 +171,7 @@ class SimulationCvAdapter:
         *,
         drone: SimDrone,
         survivors: Iterable[SimEntity],
+        wildfire_state: SimWildfireState | None = None,
         image_path: str | Path | None = None,
     ) -> dict:
         altitude_m = max(float(drone.altitude_agl) / self.sim_units_per_meter, 1e-6)
@@ -161,6 +184,27 @@ class SimulationCvAdapter:
 
         crop = self._crop_background(drone.world_xy, source_crop_size_px, footprint_world=footprint_world)
         view = crop.resize((self.image_size, self.image_size), Image.Resampling.BILINEAR)
+        wildfire_stats = None
+        wildfire_masks = None
+        if self.render_wildfire_effects and wildfire_state is not None:
+            wildfire_masks = masks_from_simulation_grids(
+                image_size=view.size,
+                center_world=drone.world_xy,
+                footprint_world=footprint_world,
+                fire_grid=wildfire_state.fire_grid,
+                fire_intensity_grid=wildfire_state.fire_intensity_grid,
+                burned_grid=wildfire_state.burned_grid,
+                smoke_grid=wildfire_state.smoke_grid,
+            )
+            view, ground_stats = apply_wildfire_effects_to_pil(
+                view,
+                wildfire_masks,
+                config=self.wildfire_effect_config,
+                include_burn=True,
+                include_flame=True,
+                include_smoke=False,
+            )
+            wildfire_stats = {"ground_and_flame": ground_stats}
 
         truth: list[dict] = []
         truth_boxes: list[tuple[int, int, int, int]] = []
@@ -182,6 +226,18 @@ class SimulationCvAdapter:
                     "human_asset_path": str(human_asset_path) if human_asset_path is not None else None,
                 }
             )
+
+        if wildfire_masks is not None:
+            view, smoke_stats = apply_wildfire_effects_to_pil(
+                view,
+                wildfire_masks,
+                config=self.wildfire_effect_config,
+                include_burn=False,
+                include_flame=False,
+                include_smoke=True,
+            )
+            if wildfire_stats is not None:
+                wildfire_stats["smoke"] = smoke_stats
 
         detections = self.detector.detect_boxes(truth_boxes, image_size=self.image_size)
         detection_records = []
@@ -230,6 +286,7 @@ class SimulationCvAdapter:
                 round(float(self.background_gsd_m_per_px[1]), 4),
             ],
             "image_path": saved_path,
+            "wildfire_effects": wildfire_stats,
             "truth": truth,
             "detections": detection_records,
         }
