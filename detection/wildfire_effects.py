@@ -137,10 +137,14 @@ def masks_from_simulation_grids(
 
     cell_px = max(width * (2.0 * x_semidim / grid_w) / max(footprint_world, 1e-6), 1.0)
     edge_sigma = min(max(cell_px * 0.14, 0.8), 5.0)
+    active_soft = _soft_grid_mask(active, sigma=edge_sigma)
+    intensity_soft = _soft_grid_mask(intensity, sigma=edge_sigma)
+    if intensity_soft.max(initial=0.0) <= 0.0 and active_soft.max(initial=0.0) > 0.0:
+        intensity_soft = active_soft.copy()
     return WildfireMasks(
         burned=_soft_grid_mask(burned, sigma=edge_sigma),
-        active=_soft_grid_mask(active, sigma=edge_sigma),
-        intensity=np.clip(intensity, 0.0, 1.0),
+        active=active_soft,
+        intensity=intensity_soft.clip(0.0, 1.0),
         smoke=np.clip(smoke, 0.0, 1.0),
     )
 
@@ -183,14 +187,17 @@ def apply_wildfire_effects(
             ndimage.gaussian_filter(np.maximum(burned, active * 0.32), sigma=1.1)
             * burn_texture
         ).clip(0.0, 1.0)
-        front = np.maximum(_perimeter_mask(active), _ridge_mask(flame))
-        front = (front * flame).clip(0.0, 1.0)
-        hotspots = (_hotspot_texture(active.shape, cfg) * active * flame).clip(0.0, 1.0)
+        edge_front = _perimeter_mask(active)
+        front = (2.6 * edge_front * np.maximum(flame, 0.75 * active)).clip(0.0, 1.0)
         broken = ((0.58 * noise + 0.42 * perimeter_noise - 0.20) / 0.62).clip(0.0, 1.0)
-        flame_mask = ((2.15 * front * (0.42 + 0.58 * broken) + 1.10 * hotspots - 0.045) / 1.10).clip(0.0, 1.0)
         hot_break = ((spark_noise - 0.34) / 0.66).clip(0.0, 1.0)
+        front_support = (front + 0.22 * flame * hot_break**2.8).clip(0.0, 1.0)
+        hotspots = (_hotspot_texture(active.shape, cfg) * front_support * hot_break).clip(0.0, 1.0)
+        line_break = ((0.42 * broken + 0.58 * hot_break - 0.44) / 0.56).clip(0.0, 1.0)
+        broken_front = (front * line_break).clip(0.0, 1.0)
+        flame_mask = ((2.65 * broken_front + 0.92 * hotspots - 0.025) / 1.08).clip(0.0, 1.0)
         hot_core = (
-            ((1.70 * front + 1.18 * hotspots - 0.22) / 0.78).clip(0.0, 1.0)
+            ((2.10 * broken_front + 0.90 * hotspots - 0.20) / 0.78).clip(0.0, 1.0)
             * (0.45 + 0.55 * broken)
             * hot_break
         ).clip(0.0, 1.0)
