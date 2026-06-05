@@ -150,7 +150,7 @@ def main():
     p.add_argument(
         "--cv-disable-wildfire-effects",
         action="store_true",
-        help="Disable burn scar and flame rendering in saved CV drone crops.",
+        help="Disable burn scar, flame, and smoke rendering in saved CV drone crops.",
     )
     p.add_argument("--cv-human-asset", default=str(ROOT / "data/cv_assets/sard_grabcut/sard_survivor_0280.png"))
     p.add_argument(

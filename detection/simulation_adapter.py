@@ -194,7 +194,7 @@ class SimulationCvAdapter:
                 fire_grid=wildfire_state.fire_grid,
                 fire_intensity_grid=wildfire_state.fire_intensity_grid,
                 burned_grid=wildfire_state.burned_grid,
-                smoke_grid=None,
+                smoke_grid=wildfire_state.smoke_grid,
             )
             view, ground_stats = apply_wildfire_effects_to_pil(
                 view,
@@ -206,7 +206,7 @@ class SimulationCvAdapter:
             )
             wildfire_stats = {
                 "source": "simulation_fire_and_burned_grids",
-                "smoke_rendered": False,
+                "smoke_rendered": True,
                 "ground_and_flame": ground_stats,
             }
 
@@ -230,6 +230,18 @@ class SimulationCvAdapter:
                     "human_asset_path": str(human_asset_path) if human_asset_path is not None else None,
                 }
             )
+
+        if wildfire_masks is not None:
+            view, smoke_stats = apply_wildfire_effects_to_pil(
+                view,
+                wildfire_masks,
+                config=self.wildfire_effect_config,
+                include_burn=False,
+                include_flame=False,
+                include_smoke=True,
+            )
+            if wildfire_stats is not None:
+                wildfire_stats["smoke"] = smoke_stats
 
         detections = self.detector.detect_boxes(truth_boxes, image_size=self.image_size)
         detection_records = []
