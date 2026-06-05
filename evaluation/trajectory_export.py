@@ -62,7 +62,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import vmas
 
-from detection.simulation_adapter import SimDrone, SimEntity, SimulationCvAdapter
+from detection.simulation_adapter import SimDrone, SimEntity, SimWildfireState, SimulationCvAdapter
 from envs.wildfire_search import WildfireSearchScenario, X, Y
 from evaluation.mission_metrics import EpisodeRecorder
 
@@ -216,6 +216,13 @@ def _cv_perception_records(
     if adapter is None or scenario.n_drones == 0:
         return []
 
+    wildfire_state = SimWildfireState(
+        fire_grid=scenario.fire_grid[env_index].cpu().numpy(),
+        fire_intensity_grid=scenario.fire_intensity_grid[env_index].cpu().numpy(),
+        burned_grid=scenario.burned_grid[env_index].cpu().numpy(),
+        smoke_grid=scenario.smoke_grid[env_index].cpu().numpy(),
+        wind_direction=tuple(float(v) for v in scenario.wind_direction),
+    )
     drone_agents = scenario.world.agents[:scenario.n_drones]
     survivors = [
         SimEntity(
@@ -240,7 +247,14 @@ def _cv_perception_records(
         image_path = None
         if image_dir is not None and save_images_every > 0 and step % save_images_every == 0:
             image_path = image_dir / f"step_{step:04d}_{agent.name}.png"
-        records.append(adapter.render_and_detect(drone=drone, survivors=survivors, image_path=image_path))
+        records.append(
+            adapter.render_and_detect(
+                drone=drone,
+                survivors=survivors,
+                wildfire_state=wildfire_state,
+                image_path=image_path,
+            )
+        )
     return records
 
 
@@ -404,6 +418,7 @@ def export_trajectory(
                 if cv_adapter.human_asset_list_path is not None
                 else None
             ),
+            "render_wildfire_effects": bool(cv_adapter.render_wildfire_effects),
             "survivor_assets": _cv_survivor_asset_records(cv_adapter, sc.n_survivors),
             "survivor_preview_altitude_m": round(float(cv_survivor_preview_altitude_m), 3),
             "survivor_previews": cv_survivor_previews,

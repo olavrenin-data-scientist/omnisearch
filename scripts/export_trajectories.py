@@ -147,6 +147,11 @@ def main():
         help="Build one stitched full-bbox NAIP image instead of lazy tile caching.",
     )
     p.add_argument("--cv-image-size", type=int, default=512, help="Rendered detector crop size.")
+    p.add_argument(
+        "--cv-disable-wildfire-effects",
+        action="store_true",
+        help="Disable burn scar, flame, and smoke rendering in saved CV drone crops.",
+    )
     p.add_argument("--cv-human-asset", default=str(ROOT / "data/cv_assets/sard_grabcut/sard_survivor_0280.png"))
     p.add_argument(
         "--cv-human-assets-dir",
@@ -214,6 +219,7 @@ def main():
             "tiled_naip": not args.cv_single_naip_export,
             "tile_size": args.cv_tile_size,
             "image_size": args.cv_image_size,
+            "render_wildfire_effects": not args.cv_disable_wildfire_effects,
             "human_asset_path": args.cv_human_asset,
             "human_assets_dir": args.cv_human_assets_dir or None,
             "human_asset_list_path": args.cv_human_asset_list or None,
