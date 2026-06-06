@@ -525,6 +525,58 @@ def _build_subcell_fire_fields(
         hot_core = zeros
         white_core = zeros
 
+    # Preserve the original active-cell flame texture, then layer the smoother
+    # outer fire front above it. This keeps visible interior combustion while
+    # making the advancing perimeter the dominant structure.
+    active_heat_seed = (active * intensity).clip(0.0, 1.0)
+    if active_heat_seed.max(initial=0.0) > 0.0:
+        active_edge = np.maximum(_perimeter_mask(active), 0.75 * _ridge_mask(active))
+        active_edge = _normalize_mask(active_edge * active)
+        active_gate = ((0.28 * large + 0.34 * medium + 0.38 * fine - 0.38) / 0.44).clip(0.0, 1.0)
+        active_gate = ndimage.gaussian_filter(active_gate, sigma=0.35)
+        active_seed = (active_edge * intensity * (0.28 + 0.72 * active_gate)).clip(0.0, 1.0)
+        if active_seed.max(initial=0.0) <= 1e-6:
+            active_seed = (active_heat_seed * active_gate).clip(0.0, 1.0)
+
+        active_fragment = ((0.30 * large + 0.36 * medium + 0.34 * fine - 0.36) / 0.48).clip(0.0, 1.0)
+        active_fragment = ndimage.gaussian_filter(active_fragment, sigma=0.45)
+        active_near = ndimage.gaussian_filter(active_seed, sigma=max(cell_px * 0.055, 0.90))
+        active_bloom = ndimage.gaussian_filter(active_seed, sigma=max(cell_px * 0.18, 2.2))
+        active_heat = _normalize_mask(1.15 * active_near + 0.24 * active_bloom)
+        active_heat = (active_heat * (0.74 + 0.26 * medium)).clip(0.0, 1.0)
+        active_ridge = (
+            active_heat
+            - 0.58 * ndimage.gaussian_filter(active_heat, sigma=max(cell_px * 0.16, 1.8))
+        ).clip(0.0, 1.0)
+        active_ridge = _normalize_mask(active_ridge)
+        active_broken = (
+            (0.74 * active_ridge + 0.26 * active_heat)
+            * (0.38 + 0.62 * active_fragment)
+        )
+        active_flame = ((active_broken - 0.18) / 0.36).clip(0.0, 1.0)
+        active_flame = ndimage.gaussian_filter(
+            active_flame,
+            sigma=max(cell_px * 0.030, 0.55),
+        ).clip(0.0, 1.0)
+        active_hot = (
+            (
+                (0.76 * active_ridge + 0.24 * active_heat)
+                * (0.26 + 0.74 * (fine ** 2.15))
+                - 0.32
+            )
+            / 0.38
+        ).clip(0.0, 1.0)
+        active_hot = ndimage.gaussian_filter(
+            active_hot,
+            sigma=max(cell_px * 0.014, 0.25),
+        ).clip(0.0, 1.0)
+        active_white = ((active_hot * (micro ** 1.9) - 0.56) / 0.34).clip(0.0, 1.0)
+        active_white = ndimage.gaussian_filter(active_white, sigma=0.35).clip(0.0, 1.0)
+
+        flame_alpha = np.maximum(flame_alpha, 0.90 * active_flame).clip(0.0, 1.0)
+        hot_core = np.maximum(hot_core, 0.82 * active_hot).clip(0.0, 1.0)
+        white_core = np.maximum(white_core, 0.72 * active_white).clip(0.0, 1.0)
+
     active_scorch_source = np.maximum(heat_seed, 0.62 * interior_heat)
     scorch = _normalize_mask(
         ndimage.gaussian_filter(active_scorch_source, sigma=max(cell_px * 0.42, 3.4))
@@ -538,16 +590,16 @@ def _build_subcell_fire_fields(
         0.68 * ndimage.gaussian_filter(burn_source, sigma=max(cell_px * 0.32, 3.5)),
     ).clip(0.0, 1.0)
 
-    ember_gate = ((0.58 * fine + 0.42 * micro - 0.50) / 0.50).clip(0.0, 1.0)
+    ember_gate = ((0.58 * fine + 0.42 * micro - 0.60) / 0.40).clip(0.0, 1.0)
     ember_alpha = (
         interior_heat
-        * (ember_gate ** 1.55)
-        * (0.20 + 0.42 * medium)
-    ).clip(0.0, 0.52)
+        * (ember_gate ** 1.8)
+        * (0.08 + 0.18 * medium)
+    ).clip(0.0, 0.20)
     ember_alpha = ndimage.gaussian_filter(
         ember_alpha,
-        sigma=max(cell_px * 0.025, 0.35),
-    ).clip(0.0, 0.52)
+        sigma=max(cell_px * 0.018, 0.28),
+    ).clip(0.0, 0.20)
 
     # Smoke opacity comes from the simulator smoke field only. Burn scars and
     # active cells must not create a second dark haze layer on their own.
