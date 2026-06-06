@@ -368,7 +368,9 @@ class LawnmowerPolicy:
                 delta = target - pos[b]
                 distance = float(delta.norm().item())
                 waypoint_tolerance = self._waypoint_tolerance(b)
-                if distance <= waypoint_tolerance:
+                prev_wp = torch.tensor(waypoints[(wp_idx - 1) % len(waypoints)], dtype=torch.float, device=device)
+                overshot = float(torch.dot(delta, target - prev_wp).item()) < 0.0
+                if distance <= waypoint_tolerance or overshot:
                     wp_idx = (wp_idx + 1) % len(waypoints)
                     self.drone_waypoint_index[b, drone_idx] = wp_idx
                     target = torch.tensor(waypoints[wp_idx], dtype=torch.float, device=device)
