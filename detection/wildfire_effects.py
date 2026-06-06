@@ -476,26 +476,54 @@ def _build_subcell_fire_fields(
     micro = _smooth_noise_px(shape, scale_px=max(cell_px * 0.045, 2.0), seed=cfg.seed + 317, order=1)
 
     if heat_seed.max(initial=0.0) > 0.0:
+        affected = np.maximum(burned, active)
         affected_soft = ndimage.gaussian_filter(
-            np.maximum(burned, active),
-            sigma=max(cell_px * 0.22, 1.8),
+            affected,
+            sigma=max(cell_px * 0.36, 2.4),
         )
-        outside_edge = ndimage.gaussian_gradient_magnitude(
+
+        # The simulator boundary is cell-aligned. Gently displace its smoothed
+        # image-space contour so the rendered front does not inherit square
+        # steps and right-angle corners from the physics grid.
+        warp_scale = max(cell_px * 1.8, 18.0)
+        warp_amplitude = max(cell_px * 0.22, 1.5)
+        warp_x = (
+            _smooth_noise_px(shape, scale_px=warp_scale, seed=cfg.seed + 331) - 0.5
+        ) * (2.0 * warp_amplitude)
+        warp_y = (
+            _smooth_noise_px(shape, scale_px=warp_scale, seed=cfg.seed + 337) - 0.5
+        ) * (2.0 * warp_amplitude)
+        yy, xx = np.indices(shape, dtype=np.float32)
+        affected_contour_field = ndimage.map_coordinates(
             affected_soft,
-            sigma=max(cell_px * 0.08, 0.75),
+            (yy + warp_y, xx + warp_x),
+            order=1,
+            mode="nearest",
+        )
+        outside_edge = np.exp(
+            -0.5 * ((affected_contour_field - 0.50) / 0.13) ** 2
+        ).astype(np.float32)
+        outside_edge = ndimage.gaussian_filter(
+            outside_edge,
+            sigma=max(cell_px * 0.035, 0.45),
         )
         outside_edge = _normalize_mask(outside_edge)
         front_support = ndimage.gaussian_filter(
             front,
-            sigma=max(cell_px * 0.18, 1.4),
+            sigma=max(cell_px * 0.42, 2.4),
         )
         front_support = _normalize_mask(front_support)
+        front_intensity = ndimage.gaussian_filter(
+            heat_seed,
+            sigma=max(cell_px * 0.24, 1.8),
+        )
+        front_intensity = _normalize_mask(front_intensity)
         line_gate = ((0.28 * large + 0.34 * medium + 0.38 * fine - 0.38) / 0.44).clip(0.0, 1.0)
         line_gate = ndimage.gaussian_filter(line_gate, sigma=0.35)
         front_seed = (
             outside_edge
             * front_support
-            * intensity
+            * front_intensity
             * (0.62 + 0.38 * line_gate)
         ).clip(0.0, 1.0)
         if front_seed.max(initial=0.0) <= 1e-6:
