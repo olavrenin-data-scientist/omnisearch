@@ -263,7 +263,9 @@ def apply_wildfire_effects(
             rgb[:] = _blend_rgb(rgb, (1.0, 0.98, 0.72), (0.55 * white_core).clip(0.0, 0.62))
             glow_alpha = ndimage.gaussian_filter(flame_alpha, sigma=max(cell_px * 0.10, 1.0))
             rgb[:] = _blend_rgb(rgb, (0.88, 0.34, 0.10), (0.12 * glow_alpha).clip(0.0, 0.18))
-            rgb[:] = _blend_rgb(rgb, cfg.ember_rgb, fields.ember_alpha)
+            rgb[:] = _blend_rgb(rgb, (0.82, 0.20, 0.055), fields.ember_alpha)
+            interior_hot = ((fields.ember_alpha - 0.20) / 0.30).clip(0.0, 1.0)
+            rgb[:] = _blend_rgb(rgb, (1.0, 0.55, 0.14), 0.36 * interior_hot)
             rgb[:] = np.clip(rgb, 0.0, 1.0)
 
     if include_smoke:
@@ -536,16 +538,16 @@ def _build_subcell_fire_fields(
         0.68 * ndimage.gaussian_filter(burn_source, sigma=max(cell_px * 0.32, 3.5)),
     ).clip(0.0, 1.0)
 
-    ember_gate = ((fine * micro - 0.68) / 0.32).clip(0.0, 1.0)
+    ember_gate = ((0.58 * fine + 0.42 * micro - 0.50) / 0.50).clip(0.0, 1.0)
     ember_alpha = (
         interior_heat
-        * (ember_gate ** 2.2)
-        * (0.06 + 0.14 * medium)
-    ).clip(0.0, 0.16)
+        * (ember_gate ** 1.55)
+        * (0.20 + 0.42 * medium)
+    ).clip(0.0, 0.52)
     ember_alpha = ndimage.gaussian_filter(
         ember_alpha,
-        sigma=max(cell_px * 0.012, 0.22),
-    ).clip(0.0, 0.16)
+        sigma=max(cell_px * 0.025, 0.35),
+    ).clip(0.0, 0.52)
 
     # Smoke opacity comes from the simulator smoke field only. Burn scars and
     # active cells must not create a second dark haze layer on their own.
@@ -560,7 +562,8 @@ def _build_subcell_fire_fields(
     else:
         smoke_alpha = zeros
 
-    warm_smoke = ndimage.gaussian_filter(flame_alpha, sigma=max(cell_px * 0.32, 3.2)).clip(0.0, 1.0)
+    warm_sources = np.maximum(flame_alpha, 0.72 * ember_alpha)
+    warm_smoke = ndimage.gaussian_filter(warm_sources, sigma=max(cell_px * 0.32, 3.2)).clip(0.0, 1.0)
     return _SubcellFireFields(
         stress=stress.astype(np.float32),
         char=char.astype(np.float32),
