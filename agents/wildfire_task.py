@@ -113,6 +113,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "land_cover_speeds": (1.0, 0.9, 0.65, 0.45, 0.0, 0.0),
     "ground_speed_mps": 1.6,
     "ground_accel_mps2": 2.0,
+    "ground_arrival_slowdown_m": 10.0,
+    "ground_arrival_damping": 0.6,
     "drone_flight_levels_m": (500.0, 750.0, 1000.0),
     "drone_detection_quality": (0.95, 0.75, 0.55),
     "drone_cover_detection_factors": (1.0, 1.0, 0.72, 0.45, 0.35, 0.95),

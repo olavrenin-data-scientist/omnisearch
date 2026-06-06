@@ -42,12 +42,6 @@ from envs.wildfire_search import LAND_ROCK, LAND_WATER, WildfireSearchScenario, 
 GROUND_ROUTE_WAYPOINT_CELLS = 10
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
-# Velocity-braking gain for ground robots. Pure proportional control toward a
-# target makes momentum-carrying UGVs overshoot and oscillate in place near a
-# survivor (path length >> net displacement), so they jitter at ~1.5x the
-# confirm radius and never confirm. Subtracting a fraction of the current
-# velocity (a PD derivative term) damps the overshoot so they settle on target.
-GROUND_ARRIVAL_DAMPING = 0.6
 GROUND_RECOVERY_ANGLES = (
     0.0,
     math.pi / 6,
@@ -181,15 +175,20 @@ def _terrain_safe_ground_action(
     to_target = target_pos - pos
     distance = to_target.norm(dim=-1, keepdim=True)
     direction = to_target / distance.clamp_min(1e-6)
-    magnitude = distance.clamp(max=1.0)
-    # PD control: proportional pull toward the target minus a velocity-braking
-    # term so the UGV decelerates as it arrives instead of overshooting and
-    # oscillating. Normalize velocity by the robot's max speed so the brake
-    # stays in the action's [-1, 1] range.
     vel = sc.world.agents[ag_idx].state.vel
     vmax = max(float(getattr(sc, "ground_max_speed_sim", 0.0)), 1e-6)
-    brake = (vel / vmax).clamp(-1.0, 1.0)
-    direct = (direction * magnitude - GROUND_ARRIVAL_DAMPING * brake).clamp(-1.0, 1.0)
+    slowdown_distance = (
+        sc.ground_arrival_slowdown_m
+        * sc.terrain_sim_units_per_meter.to(distance.device)
+    ).view(-1, 1).clamp_min(torch.finfo(distance.dtype).eps)
+    direct = _ground_arrival_action(
+        direction=direction,
+        distance=distance,
+        velocity=vel,
+        max_speed=vmax,
+        slowdown_distance=slowdown_distance,
+        damping=sc.ground_arrival_damping,
+    )
 
     candidates = torch.stack(
         [_rotate(direct, angle) for angle in GROUND_RECOVERY_ANGLES],
@@ -219,6 +218,21 @@ def _terrain_safe_ground_action(
     chosen = candidates.gather(1, best.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
     any_safe = traversable.any(dim=-1)
     return torch.where(any_safe.unsqueeze(-1), chosen, fallback)
+
+
+def _ground_arrival_action(
+    *,
+    direction: torch.Tensor,
+    distance: torch.Tensor,
+    velocity: torch.Tensor,
+    max_speed: float,
+    slowdown_distance: torch.Tensor,
+    damping: float,
+) -> torch.Tensor:
+    """Return a dimensionless, scale-independent PD arrival action."""
+    proportional = (distance / slowdown_distance).clamp(0.0, 1.0)
+    brake = (velocity / max(float(max_speed), 1e-6)).clamp(-1.0, 1.0)
+    return (direction * proportional - float(damping) * brake).clamp(-1.0, 1.0)
 
 
 def _coordinated_ground_actions(
