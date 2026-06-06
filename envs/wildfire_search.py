@@ -77,16 +77,32 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_camera_half_angle_tan = math.tan(math.radians(self.drone_camera_fov_deg) / 2.0)
         self.ground_lidar_range = kwargs.pop("ground_lidar_range", 0.20)
         self.n_lidar_rays       = kwargs.pop("n_lidar_rays", 12)
-        self.detection_range    = kwargs.pop("detection_range", 0.10)   # ground confirm radius
-        # Floor (in sim units) on the drone scout footprint. The physical
-        # footprint = altitude * tan(FOV/2) collapses to a pinprick on
-        # large real-terrain caches (a 22 km world maps 50 m altitude to
-        # ~0.005 sim units), making survivors undetectable. detection_range
-        # (ground confirm) lives in fixed sim units, so the scout sensor
-        # must too — clamp it to at least this radius so drones stay the
-        # "broad" sensor (>= ground confirm) regardless of terrain scale.
-        self.drone_min_footprint = max(
-            float(kwargs.pop("drone_min_footprint", 0.12)), 0.0,
+        # Physical dimensions are converted after terrain metadata is loaded.
+        # The legacy simulation-unit kwargs remain available as explicit
+        # overrides for old experiments.
+        self.agent_radius_sim_override = kwargs.pop("agent_radius", None)
+        self.survivor_radius_sim_override = kwargs.pop("survivor_radius", None)
+        self.detection_range_sim_override = kwargs.pop("detection_range", None)
+        kwargs.pop("drone_min_footprint", None)  # removed legacy workaround
+        self.agent_radius_m = max(float(kwargs.pop("agent_radius_m", 0.50)), 0.01)
+        self.survivor_radius_m = max(float(kwargs.pop("survivor_radius_m", 0.35)), 0.01)
+        self.ground_confirmation_range_m = max(
+            float(kwargs.pop("ground_confirmation_range_m", 10.0)), 0.0,
+        )
+        self.agent_radius = (
+            max(float(self.agent_radius_sim_override), 1e-6)
+            if self.agent_radius_sim_override is not None
+            else 0.04
+        )
+        self.survivor_radius = (
+            max(float(self.survivor_radius_sim_override), 1e-6)
+            if self.survivor_radius_sim_override is not None
+            else 0.03
+        )
+        self.detection_range = (
+            max(float(self.detection_range_sim_override), 0.0)
+            if self.detection_range_sim_override is not None
+            else 0.10
         )
 
         # Fire spread (cellular automata on a discrete grid overlay)
@@ -201,8 +217,8 @@ class WildfireSearchScenario(BaseScenario):
         self.ground_speed_mps = max(float(kwargs.pop("ground_speed_mps", 1.6)), 0.0)
         self.ground_accel_mps2 = max(float(kwargs.pop("ground_accel_mps2", 2.0)), 0.0)
         # Floor (sim units / tick) on the ground robot's full-traction step.
-        # Like drone_min_footprint, this keeps the UGV mobile at any terrain
-        # scale: on a large real-terrain cache the physical step
+        # Keep the UGV mobile at any terrain scale: on a large real-terrain
+        # cache the physical step
         # (speed_mps * step_seconds * sim_units_per_meter) shrinks so far that
         # robots crawl and never reach scouted survivors within the episode.
         self.ground_min_step_sim = max(float(kwargs.pop("ground_min_step_sim", 0.012)), 0.0)
@@ -284,10 +300,6 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
-
-        # Physical sizes
-        self.agent_radius    = 0.04
-        self.survivor_radius = 0.03
 
         # ---- Build world ----
         world = World(
@@ -402,6 +414,15 @@ class WildfireSearchScenario(BaseScenario):
             (batch_dim,), initial_clearance, dtype=torch.float, device=device,
         )
         self.terrain_sim_units_per_meter = torch.zeros(batch_dim, dtype=torch.float, device=device)
+        self.agent_radius_by_env = torch.full(
+            (batch_dim,), self.agent_radius, dtype=torch.float, device=device,
+        )
+        self.survivor_radius_by_env = torch.full(
+            (batch_dim,), self.survivor_radius, dtype=torch.float, device=device,
+        )
+        self.detection_range_by_env = torch.full(
+            (batch_dim,), self.detection_range, dtype=torch.float, device=device,
+        )
         self.drone_safety_clearance = initial_clearance
         self.drone_flight_levels_by_env = torch.tensor(
             drone_flight_levels, dtype=torch.float, device=device,
@@ -670,6 +691,7 @@ class WildfireSearchScenario(BaseScenario):
         self.terrain_source_metadata[env_index] = dict(terrain.metadata)
         sim_units_per_meter = self._terrain_sim_units_per_meter(terrain.metadata)
         self.terrain_sim_units_per_meter[env_index] = sim_units_per_meter
+        self._refresh_physical_size_conversions(env_index, sim_units_per_meter)
         self._refresh_drone_unit_conversions(env_index, sim_units_per_meter)
         self._refresh_drone_speed_conversion(sim_units_per_meter)
         self._refresh_ground_speed_conversion(sim_units_per_meter)
@@ -679,6 +701,40 @@ class WildfireSearchScenario(BaseScenario):
             clearance = self.drone_safety_clearance_by_env[env_index].item()
         self.drone_safety_clearance_by_env[env_index] = max(float(clearance), 0.0)
         self.drone_safety_clearance = float(self.drone_safety_clearance_by_env.mean().item())
+
+    def _refresh_physical_size_conversions(self, env_index: int, sim_units_per_meter: float) -> None:
+        """Convert robot, survivor, and confirmation dimensions from meters."""
+        scale = max(float(sim_units_per_meter), 0.0)
+        agent_radius = (
+            max(float(self.agent_radius_sim_override), 1e-6)
+            if self.agent_radius_sim_override is not None
+            else max(self.agent_radius_m * scale, 1e-6)
+        )
+        survivor_radius = (
+            max(float(self.survivor_radius_sim_override), 1e-6)
+            if self.survivor_radius_sim_override is not None
+            else max(self.survivor_radius_m * scale, 1e-6)
+        )
+        detection_range = (
+            max(float(self.detection_range_sim_override), 0.0)
+            if self.detection_range_sim_override is not None
+            else self.ground_confirmation_range_m * scale
+        )
+
+        self.agent_radius_by_env[env_index] = agent_radius
+        self.survivor_radius_by_env[env_index] = survivor_radius
+        self.detection_range_by_env[env_index] = detection_range
+
+        # VMAS shape dimensions are shared across a vectorized batch. All
+        # environments in this scenario load the same terrain configuration,
+        # so their conversion scale is identical.
+        self.agent_radius = agent_radius
+        self.survivor_radius = survivor_radius
+        self.detection_range = detection_range
+        for agent in self.world.agents:
+            agent.shape._radius = agent_radius
+        for survivor in self._survivors:
+            survivor.shape._radius = survivor_radius
 
     def _refresh_drone_unit_conversions(self, env_index: int, sim_units_per_meter: float) -> None:
         if not self.drone_flight_levels_sim_override and sim_units_per_meter > 0.0:
@@ -1181,7 +1237,8 @@ class WildfireSearchScenario(BaseScenario):
         drone_dists = dists[:, :self.n_drones, :]
         drone_seen = self._drone_survivor_detections(drone_dists, drone_pos, surv_pos)
         seen_by_drone       = drone_seen.any(dim=1)
-        within_confirm      = dists < self.detection_range
+        confirm_range = self.detection_range_by_env.view(-1, 1, 1)
+        within_confirm      = dists < confirm_range
         confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
 
         newly_scouted = seen_by_drone       & ~self.scouted_survivors & ~self.found_survivors
@@ -1620,13 +1677,10 @@ class WildfireSearchScenario(BaseScenario):
     def _drone_camera_ranges(self) -> Tensor:
         """Ground footprint radius for each drone's current flight altitude.
 
-        Clamped to ``drone_min_footprint`` so the scout sensor stays usable
-        on large real-terrain caches, where the physical footprint
-        (altitude * tan(FOV/2)) would otherwise shrink below a survivor's
-        own radius and nothing could ever be detected.
+        Both altitude and horizontal positions use simulation units, so this
+        remains physically consistent across terrain scales.
         """
-        physical = self.drone_altitude * self.drone_camera_half_angle_tan
-        return physical.clamp_min(self.drone_min_footprint)
+        return self.drone_altitude * self.drone_camera_half_angle_tan
 
     def _grid_values_at_positions(
         self,
