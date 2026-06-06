@@ -41,6 +41,8 @@ def main():
     p.add_argument("--steps", type=int, default=500)
     p.add_argument("--seed",  type=int, default=0)
     p.add_argument("--out",   default=str(ROOT / "web" / "trajectories"))
+    p.add_argument("--x-semidim", type=float, default=1.0)
+    p.add_argument("--y-semidim", type=float, default=1.0)
     p.add_argument(
         "--grid-size",
         type=int,
@@ -187,6 +189,8 @@ def main():
 
     scenario_kwargs = {
         "max_steps":        args.steps,
+        "x_semidim":        args.x_semidim,
+        "y_semidim":        args.y_semidim,
         "fire_grid_size":   args.grid_size,
         "comms_dropout":    args.comms_dropout,
         "terrain_source":   args.terrain_source,

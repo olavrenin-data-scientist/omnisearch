@@ -75,6 +75,8 @@ def build_real_terrain_cache(
     landfire_force_download: bool = False,
     force_rebuild: bool = False,
     source_note: str | None = None,
+    require_square_bbox: bool = False,
+    square_bbox_tolerance: float = 0.02,
 ) -> Path:
     """Create an OmniSearch terrain cache from USGS 3DEP and OSM layers."""
 
@@ -101,6 +103,12 @@ def build_real_terrain_cache(
     west, south, east, north = bbox
     if west >= east or south >= north:
         raise ValueError("bbox must be ordered as west, south, east, north")
+    projected_bbox = _project_bbox_to_web_mercator(pyproj, bbox)
+    if require_square_bbox:
+        _validate_square_projected_bounds(
+            projected_bbox,
+            tolerance=square_bbox_tolerance,
+        )
 
     out_path = Path(out) if out is not None else _default_cache_path(
         place=place,
@@ -503,6 +511,39 @@ def _bbox_from_place(ox, place: str) -> tuple[float, float, float, float]:
     return float(west), float(south), float(east), float(north)
 
 
+def _project_bbox_to_web_mercator(
+    pyproj,
+    bbox: Sequence[float],
+) -> tuple[float, float, float, float]:
+    west, south, east, north = bbox
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    west_m, south_m = transformer.transform(west, south)
+    east_m, north_m = transformer.transform(east, north)
+    return float(west_m), float(south_m), float(east_m), float(north_m)
+
+
+def _validate_square_projected_bounds(
+    projected_bounds: Sequence[float],
+    *,
+    tolerance: float = 0.02,
+) -> None:
+    """Reject terrain bounds that are not approximately square in meters."""
+    tolerance = float(tolerance)
+    if not 0.0 <= tolerance < 1.0:
+        raise ValueError("square_bbox_tolerance must be between 0 and 1")
+    west_m, south_m, east_m, north_m = (float(v) for v in projected_bounds)
+    width_m = abs(east_m - west_m)
+    height_m = abs(north_m - south_m)
+    max_extent_m = max(width_m, height_m, 1e-6)
+    relative_difference = abs(width_m - height_m) / max_extent_m
+    if relative_difference > tolerance:
+        raise ValueError(
+            "bbox must be square in projected meters: "
+            f"width={width_m:.1f} m, height={height_m:.1f} m, "
+            f"difference={relative_difference:.1%}, tolerance={tolerance:.1%}"
+        )
+
+
 def _download_usgs_dem_grid(
     *,
     requests,
@@ -547,10 +588,8 @@ def _download_usgs_dem_grid(
         grid = _resize_nearest(grid, (grid_size, grid_size))
     grid = _fill_nan_grid(grid)
 
-    transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    west_m, south_m = transformer.transform(west, south)
-    east_m, north_m = transformer.transform(east, north)
-    projected_bounds = (float(west_m), float(south_m), float(east_m), float(north_m))
+    projected_bounds = _project_bbox_to_web_mercator(pyproj, bbox)
+    west_m, south_m, east_m, north_m = projected_bounds
     cell_size_m = max(
         abs(float(east_m - west_m)) / max(grid_size - 1, 1),
         abs(float(north_m - south_m)) / max(grid_size - 1, 1),

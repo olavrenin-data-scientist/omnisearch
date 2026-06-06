@@ -66,10 +66,19 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.agent_radius_m = 0.50
         scenario.survivor_radius_m = 0.35
         scenario.ground_confirmation_range_m = 10.0
+        scenario.ground_lidar_range_sim_override = None
+        scenario.ground_lidar_range_m = 20.0
+        scenario.spawn_padding_m = 1.0
+        scenario.ground_min_step_sim_override = None
+        scenario.ground_min_step_m = 0.0
         scenario.agent_radius_by_env = torch.zeros(1)
         scenario.survivor_radius_by_env = torch.zeros(1)
         scenario.detection_range_by_env = torch.zeros(1)
-        scenario.world = types.SimpleNamespace(agents=[_Entity(0.04)])
+        scenario.spawn_padding_by_env = torch.zeros(1)
+        ground = _Entity(0.04)
+        ground.sensors = [types.SimpleNamespace(_max_range=0.20)]
+        scenario.n_drones = 0
+        scenario.world = types.SimpleNamespace(agents=[ground])
         scenario._survivors = [_Entity(0.03)]
         return scenario
 
@@ -95,6 +104,26 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(footprint.item()), 50.0 * scale, places=7)
         self.assertLess(float(footprint.item()), 0.12)
+
+    def test_terrain_scale_honors_non_default_equal_semidims(self):
+        scenario = self._scenario()
+        scenario.world_scale = 2.0
+        metadata = {"units": {"sim_units_per_meter": 2.0 / 13_794.918831077}}
+
+        scale = scenario._terrain_sim_units_per_meter(metadata)
+
+        self.assertAlmostEqual(scale, 4.0 / 13_794.918831077)
+
+    def test_ground_sensor_distances_are_converted_from_meters(self):
+        scenario = self._scenario()
+        scale = 2.0 / 13_794.918831077
+
+        scenario._refresh_ground_sensor_conversions(0, scale)
+
+        self.assertAlmostEqual(scenario.ground_lidar_range, 20.0 * scale)
+        self.assertAlmostEqual(float(scenario.spawn_padding_by_env[0]), 1.0 * scale)
+        self.assertEqual(scenario.ground_min_step_sim, 0.0)
+        self.assertAlmostEqual(scenario.world.agents[0].sensors[0]._max_range, 20.0 * scale)
 
 
 if __name__ == "__main__":
