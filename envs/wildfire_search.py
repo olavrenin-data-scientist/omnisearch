@@ -78,6 +78,16 @@ class WildfireSearchScenario(BaseScenario):
         self.ground_lidar_range = kwargs.pop("ground_lidar_range", 0.20)
         self.n_lidar_rays       = kwargs.pop("n_lidar_rays", 12)
         self.detection_range    = kwargs.pop("detection_range", 0.10)   # ground confirm radius
+        # Floor (in sim units) on the drone scout footprint. The physical
+        # footprint = altitude * tan(FOV/2) collapses to a pinprick on
+        # large real-terrain caches (a 22 km world maps 50 m altitude to
+        # ~0.005 sim units), making survivors undetectable. detection_range
+        # (ground confirm) lives in fixed sim units, so the scout sensor
+        # must too — clamp it to at least this radius so drones stay the
+        # "broad" sensor (>= ground confirm) regardless of terrain scale.
+        self.drone_min_footprint = max(
+            float(kwargs.pop("drone_min_footprint", 0.12)), 0.0,
+        )
 
         # Fire spread (cellular automata on a discrete grid overlay)
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 128)
@@ -1598,8 +1608,15 @@ class WildfireSearchScenario(BaseScenario):
         return torch.where(any_safe.unsqueeze(-1), chosen, start_pos)
 
     def _drone_camera_ranges(self) -> Tensor:
-        """Ground footprint radius for each drone's current flight altitude."""
-        return self.drone_altitude * self.drone_camera_half_angle_tan
+        """Ground footprint radius for each drone's current flight altitude.
+
+        Clamped to ``drone_min_footprint`` so the scout sensor stays usable
+        on large real-terrain caches, where the physical footprint
+        (altitude * tan(FOV/2)) would otherwise shrink below a survivor's
+        own radius and nothing could ever be detected.
+        """
+        physical = self.drone_altitude * self.drone_camera_half_angle_tan
+        return physical.clamp_min(self.drone_min_footprint)
 
     def _grid_values_at_positions(
         self,
