@@ -151,9 +151,9 @@ import { createRoot } from 'react-dom/client';
 const h = React.createElement;
 const APP_VERSION = 'survivor-preview-v1';
 const HEIGHT_SCALE = 3.0;
-const DRONE_MODEL_VISUAL_SCALE = 2.0;
-const GROUND_MODEL_VISUAL_SCALE = 1.8;
-const SURVIVOR_MODEL_VISUAL_SCALE = 3.8;
+const DRONE_MODEL_VISUAL_SCALE = 3.6;
+const GROUND_MODEL_VISUAL_SCALE = 3.0;
+const SURVIVOR_MODEL_VISUAL_SCALE = 5.5;
 const CRAZYFLIE_MODEL_URL = './assets/crazyflie.glb';
 const SPOT_MINI_MODEL_URL = './assets/spot_mini.glb';
 const HUMAN_MODEL_URL = './assets/human_1a.glb';
@@ -637,6 +637,11 @@ function prepareCrazyflieTemplate(gltf) {
     if (obj.isMesh) {
       obj.castShadow = true;
       obj.receiveShadow = true;
+      if (obj.material && obj.material.emissive) {
+        obj.material.emissive.set(0x35a8ff); // cyan-blue self-glow so drones pop against terrain
+        obj.material.emissiveIntensity = 0.75;
+        obj.material.needsUpdate = true;
+      }
     }
     if ((obj.name || '').toLowerCase().includes('propeller')) {
       obj.userData.isProp = true;
@@ -677,8 +682,8 @@ function prepareSpotMiniTemplate(gltf) {
       if (obj.material) {
         obj.material.side = THREE.DoubleSide;
         if (obj.material.emissive) {
-          obj.material.emissive.set(0x10100a);
-          obj.material.emissiveIntensity = 0.08;
+          obj.material.emissive.set(0xff8c1a); // amber self-glow — distinct from the blue drones
+          obj.material.emissiveIntensity = 0.6;
         }
         obj.material.needsUpdate = true;
       }
@@ -903,6 +908,7 @@ function renderSurvivors3D(state, meta, frame) {
     const tz   = terrainElevAt(s.x, s.y, state.elevGrid, G);
     const mesh = makeSurvivorMesh(state, s, survivorRadius);
     mesh.position.set(s.x, s.y, tz + 0.006);
+    setAlwaysOnTop(mesh, 41);
     state.survGroup.add(mesh);
   }
 }
@@ -942,6 +948,25 @@ function headingFromHistory(xyHist, step, fallbackX, fallbackY) {
     if (Math.hypot(dx, dy) > 1e-4) return Math.atan2(dy, dx);
   }
   return 0;
+}
+
+// Force an agent model to render over the terrain so ridges never hide it.
+// Disables depth-testing against the scene and lifts the render order above
+// terrain (0) and fire (5-21). depthWrite stays off so it composites cleanly.
+function setAlwaysOnTop(obj3d, order = 40) {
+  obj3d.renderOrder = order;
+  obj3d.traverse(o => {
+    if (o.isMesh && o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) {
+        m.depthTest = false;
+        m.depthWrite = false;
+        m.transparent = true;
+        m.needsUpdate = true;
+      }
+      o.renderOrder = order;
+    }
+  });
 }
 
 function renderAgents3D(state, meta, frame, histories) {
@@ -1037,6 +1062,7 @@ function renderAgents3D(state, meta, frame, histories) {
     }
     mesh.position.set(a.x, a.y, az);
     if (!mesh.userData.keepWorldOrientation) mesh.userData.isBillboard = true;
+    setAlwaysOnTop(mesh, a.type === 'drone' ? 42 : 40);
     state.agentGroup.add(mesh);
 
     if (a.comms_up !== undefined) {
@@ -1273,13 +1299,13 @@ function setup3DScene(canvas, width, height) {
   controls.update();
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x0a0d14, 0.18);
+  scene.fog = new THREE.FogExp2(0x0a0d14, 0.06);
 
   // Ambient fill — keeps shadowed faces readable
-  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.85));
 
   // Key light — afternoon sun from SW, casts slope shadows
-  const sun = new THREE.DirectionalLight(0xfff5e0, 0.85);
+  const sun = new THREE.DirectionalLight(0xfff5e0, 1.15);
   sun.position.set(0.5, -1.0, 1.5);
   sun.castShadow = true;
   sun.shadow.mapSize.width  = 2048;
