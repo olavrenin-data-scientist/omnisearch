@@ -186,29 +186,41 @@ class SimulationCvAdapter:
         view = crop.resize((self.image_size, self.image_size), Image.Resampling.BILINEAR)
         wildfire_stats = None
         wildfire_masks = None
-        if self.render_wildfire_effects and wildfire_state is not None and image_path is not None:
-            wildfire_masks = masks_from_simulation_grids(
-                image_size=view.size,
-                center_world=drone.world_xy,
-                footprint_world=footprint_world,
-                fire_grid=wildfire_state.fire_grid,
-                fire_intensity_grid=wildfire_state.fire_intensity_grid,
-                burned_grid=wildfire_state.burned_grid,
-                smoke_grid=wildfire_state.smoke_grid,
+        if self.render_wildfire_effects and wildfire_state is not None:
+            grid_h, grid_w = wildfire_state.fire_grid.shape
+            half = footprint_world * 0.5
+            cx, cy = drone.world_xy
+            c0 = max(0, int(np.floor((cx - half + 1.0) * 0.5 * grid_w)))
+            c1 = min(grid_w, int(np.ceil((cx + half + 1.0) * 0.5 * grid_w)))
+            r0 = max(0, int(np.floor((cy - half + 1.0) * 0.5 * grid_h)))
+            r1 = min(grid_h, int(np.ceil((cy + half + 1.0) * 0.5 * grid_h)))
+            footprint_has_fire = (
+                wildfire_state.fire_grid[r0:r1, c0:c1].any()
+                or wildfire_state.burned_grid[r0:r1, c0:c1].any()
             )
-            view, ground_stats = apply_wildfire_effects_to_pil(
-                view,
-                wildfire_masks,
-                config=self.wildfire_effect_config,
-                include_burn=True,
-                include_flame=True,
-                include_smoke=False,
-            )
-            wildfire_stats = {
-                "source": "simulation_fire_and_burned_grids",
-                "smoke_rendered": True,
-                "ground_and_flame": ground_stats,
-            }
+            if footprint_has_fire:
+                wildfire_masks = masks_from_simulation_grids(
+                    image_size=view.size,
+                    center_world=drone.world_xy,
+                    footprint_world=footprint_world,
+                    fire_grid=wildfire_state.fire_grid,
+                    fire_intensity_grid=wildfire_state.fire_intensity_grid,
+                    burned_grid=wildfire_state.burned_grid,
+                    smoke_grid=wildfire_state.smoke_grid,
+                )
+                view, ground_stats = apply_wildfire_effects_to_pil(
+                    view,
+                    wildfire_masks,
+                    config=self.wildfire_effect_config,
+                    include_burn=True,
+                    include_flame=True,
+                    include_smoke=False,
+                )
+                wildfire_stats = {
+                    "source": "simulation_fire_and_burned_grids",
+                    "smoke_rendered": True,
+                    "ground_and_flame": ground_stats,
+                }
 
         truth: list[dict] = []
         truth_boxes: list[tuple[int, int, int, int]] = []
