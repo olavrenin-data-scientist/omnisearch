@@ -39,9 +39,6 @@ from envs.wildfire_search import LAND_ROCK, LAND_WATER, WildfireSearchScenario, 
 # agent, in the same order as env.agents. WildfireSearchScenario's
 # actions are 2D continuous in [-1, 1] (a force vector).
 
-# Immediate collision check for the next UGV action. This should stay close to
-# one physical step; long-horizon obstacle avoidance is handled by A* routing.
-GROUND_LOOKAHEAD = 0.045
 GROUND_ROUTE_WAYPOINT_CELLS = 10
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
@@ -198,7 +195,11 @@ def _terrain_safe_ground_action(
         [_rotate(direct, angle) for angle in GROUND_RECOVERY_ANGLES],
         dim=1,
     )
-    endpoints = pos.unsqueeze(1) + candidates * GROUND_LOOKAHEAD
+    lookahead = max(
+        sc.ground_speed_mps * sc.sim_step_seconds * float(sc.terrain_sim_units_per_meter.max()),
+        1e-6,
+    )
+    endpoints = pos.unsqueeze(1) + candidates * lookahead
     endpoints[..., X] = endpoints[..., X].clamp(-sc.x_semidim, sc.x_semidim)
     endpoints[..., Y] = endpoints[..., Y].clamp(-sc.y_semidim, sc.y_semidim)
 
@@ -419,13 +420,13 @@ class LawnmowerPolicy:
             sim_units_per_meter = float(sc.terrain_sim_units_per_meter[env_index].item())
             if sim_units_per_meter > 0.0:
                 return max(DRONE_WAYPOINT_TOLERANCE_M * sim_units_per_meter, 1e-4)
-        return 0.01
+        return 0.01 * sc.world_scale
 
     def _search_lanes_for_env(self, env_index: int, lane_spacing: float, footprint: float) -> list[dict]:
         sc = self.scenario
         size = sc.fire_grid_size
         device = sc.fire_grid.device
-        margin = max(float(sc.agent_radius), 0.02)
+        margin = max(float(sc.agent_radius), 0.02 * sc.world_scale)
         x_min_world = -float(sc.x_semidim) + margin
         x_max_world = float(sc.x_semidim) - margin
         y_min_world = -float(sc.y_semidim) + margin

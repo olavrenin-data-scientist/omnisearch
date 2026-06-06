@@ -381,6 +381,8 @@ def export_trajectory(
         "survivor_radius_m": round(float(sc.survivor_radius_m), 4),
         "ground_confirmation_range": round(float(sc.detection_range_by_env[env_index]), 8),
         "ground_confirmation_range_m": round(float(sc.ground_confirmation_range_m), 4),
+        "ground_lidar_range": round(float(sc.ground_lidar_range), 8),
+        "ground_lidar_range_m": round(float(sc.ground_lidar_range_m), 4),
         "fire_model": {
             "spread_prob": round(float(sc.fire_spread_prob), 4),
             "spread_variability": round(float(sc.fire_spread_variability), 4),

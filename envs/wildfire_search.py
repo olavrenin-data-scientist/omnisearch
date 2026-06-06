@@ -64,8 +64,16 @@ class WildfireSearchScenario(BaseScenario):
         self.n_agents    = self.n_drones + self.n_ground
 
         # World geometry
-        self.x_semidim = kwargs.pop("x_semidim", 1.0)
-        self.y_semidim = kwargs.pop("y_semidim", 1.0)
+        self.x_semidim = float(kwargs.pop("x_semidim", 1.0))
+        self.y_semidim = float(kwargs.pop("y_semidim", 1.0))
+        if self.x_semidim <= 0.0 or self.y_semidim <= 0.0:
+            raise ValueError("x_semidim and y_semidim must be positive")
+        if not math.isclose(self.x_semidim, self.y_semidim, rel_tol=1e-6, abs_tol=1e-9):
+            raise ValueError(
+                "x_semidim and y_semidim must be equal so one simulation-unit "
+                "scale preserves circular distances and physical dimensions"
+            )
+        self.world_scale = self.x_semidim
 
         # Detection / sensing
         # Drone search uses a downward camera footprint, not a fixed magic
@@ -75,7 +83,13 @@ class WildfireSearchScenario(BaseScenario):
         if not 0.0 < self.drone_camera_fov_deg < 180.0:
             raise ValueError("drone_camera_fov_deg must be between 0 and 180")
         self.drone_camera_half_angle_tan = math.tan(math.radians(self.drone_camera_fov_deg) / 2.0)
-        self.ground_lidar_range = kwargs.pop("ground_lidar_range", 0.20)
+        self.ground_lidar_range_sim_override = kwargs.pop("ground_lidar_range", None)
+        self.ground_lidar_range_m = max(float(kwargs.pop("ground_lidar_range_m", 20.0)), 0.0)
+        self.ground_lidar_range = (
+            max(float(self.ground_lidar_range_sim_override), 0.0)
+            if self.ground_lidar_range_sim_override is not None
+            else 0.20
+        )
         self.n_lidar_rays       = kwargs.pop("n_lidar_rays", 12)
         # Physical dimensions are converted after terrain metadata is loaded.
         # The legacy simulation-unit kwargs remain available as explicit
@@ -89,6 +103,7 @@ class WildfireSearchScenario(BaseScenario):
         self.ground_confirmation_range_m = max(
             float(kwargs.pop("ground_confirmation_range_m", 10.0)), 0.0,
         )
+        self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
         self.agent_radius = (
             max(float(self.agent_radius_sim_override), 1e-6)
             if self.agent_radius_sim_override is not None
@@ -221,7 +236,14 @@ class WildfireSearchScenario(BaseScenario):
         # cache the physical step
         # (speed_mps * step_seconds * sim_units_per_meter) shrinks so far that
         # robots crawl and never reach scouted survivors within the episode.
-        self.ground_min_step_sim = max(float(kwargs.pop("ground_min_step_sim", 0.012)), 0.0)
+        ground_min_step_sim_override = kwargs.pop("ground_min_step_sim", None)
+        self.ground_min_step_sim_override = ground_min_step_sim_override
+        self.ground_min_step_m = max(float(kwargs.pop("ground_min_step_m", 0.0)), 0.0)
+        self.ground_min_step_sim = (
+            max(float(ground_min_step_sim_override), 0.0)
+            if ground_min_step_sim_override is not None
+            else 0.0
+        )
         self.ground_max_speed_sim_override = kwargs.pop("ground_max_speed", None)
         self.ground_max_speed_sim = (
             max(float(self.ground_max_speed_sim_override), 0.0)
@@ -423,6 +445,7 @@ class WildfireSearchScenario(BaseScenario):
         self.detection_range_by_env = torch.full(
             (batch_dim,), self.detection_range, dtype=torch.float, device=device,
         )
+        self.spawn_padding_by_env = torch.zeros(batch_dim, dtype=torch.float, device=device)
         self.drone_safety_clearance = initial_clearance
         self.drone_flight_levels_by_env = torch.tensor(
             drone_flight_levels, dtype=torch.float, device=device,
@@ -484,7 +507,10 @@ class WildfireSearchScenario(BaseScenario):
             entities=self._survivors + self.world.agents,
             world=self.world,
             env_index=env_index,
-            min_dist_between_entities=2 * self.agent_radius + 0.02,
+            min_dist_between_entities=(
+                2 * self.agent_radius
+                + float(self.spawn_padding_by_env.max().item())
+            ),
             x_bounds=(-self.x_semidim, self.x_semidim),
             y_bounds=(-self.y_semidim, self.y_semidim),
         )
@@ -668,7 +694,7 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.elevation_grid[env_index] = torch.as_tensor(
             terrain.elevation, dtype=torch.float, device=device,
-        )
+        ) * self.world_scale
         self.slope_grid[env_index] = torch.as_tensor(
             terrain.slope, dtype=torch.float, device=device,
         )
@@ -686,12 +712,13 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.obstacle_height_grid[env_index] = torch.as_tensor(
             terrain.obstacle_height, dtype=torch.float, device=device,
-        )
+        ) * self.world_scale
         self.terrain_source_description[env_index] = terrain.source
         self.terrain_source_metadata[env_index] = dict(terrain.metadata)
         sim_units_per_meter = self._terrain_sim_units_per_meter(terrain.metadata)
         self.terrain_sim_units_per_meter[env_index] = sim_units_per_meter
         self._refresh_physical_size_conversions(env_index, sim_units_per_meter)
+        self._refresh_ground_sensor_conversions(env_index, sim_units_per_meter)
         self._refresh_drone_unit_conversions(env_index, sim_units_per_meter)
         self._refresh_drone_speed_conversion(sim_units_per_meter)
         self._refresh_ground_speed_conversion(sim_units_per_meter)
@@ -735,6 +762,22 @@ class WildfireSearchScenario(BaseScenario):
             agent.shape._radius = agent_radius
         for survivor in self._survivors:
             survivor.shape._radius = survivor_radius
+
+    def _refresh_ground_sensor_conversions(self, env_index: int, sim_units_per_meter: float) -> None:
+        scale = max(float(sim_units_per_meter), 0.0)
+        self.ground_lidar_range = (
+            max(float(self.ground_lidar_range_sim_override), 0.0)
+            if self.ground_lidar_range_sim_override is not None
+            else self.ground_lidar_range_m * scale
+        )
+        self.spawn_padding_by_env[env_index] = self.spawn_padding_m * scale
+        self.ground_min_step_sim = (
+            max(float(self.ground_min_step_sim_override), 0.0)
+            if self.ground_min_step_sim_override is not None
+            else self.ground_min_step_m * scale
+        )
+        for agent in self.world.agents[self.n_drones:]:
+            agent.sensors[0]._max_range = self.ground_lidar_range
 
     def _refresh_drone_unit_conversions(self, env_index: int, sim_units_per_meter: float) -> None:
         if not self.drone_flight_levels_sim_override and sim_units_per_meter > 0.0:
@@ -789,7 +832,7 @@ class WildfireSearchScenario(BaseScenario):
             agent._max_speed = self.ground_max_speed_sim
 
     def _terrain_sim_units_per_meter(self, metadata: dict) -> float:
-        """Return the terrain cache's vertical/horizontal simulation conversion."""
+        """Return the meter conversion for the configured simulation bounds."""
         candidates = (
             metadata.get("units", {}).get("sim_units_per_meter"),
             metadata.get("inputs", {}).get("usgs_3dep", {}).get("sim_units_per_meter"),
@@ -800,17 +843,19 @@ class WildfireSearchScenario(BaseScenario):
             except (TypeError, ValueError):
                 continue
             if value_f > 0.0:
-                return value_f
+                return value_f * self.world_scale
 
         bounds = metadata.get("inputs", {}).get("usgs_3dep", {}).get("projected_bounds")
         if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
             west_m, south_m, east_m, north_m = (float(v) for v in bounds)
             extent_m = max(abs(east_m - west_m), abs(north_m - south_m), 1e-6)
-            return 2.0 / extent_m
+            return 2.0 * self.world_scale / extent_m
 
         cell_size_m = metadata.get("inputs", {}).get("usgs_3dep", {}).get("cell_size_m")
         try:
-            return 2.0 / max(float(cell_size_m) * float(self.fire_grid_size), 1e-6)
+            return 2.0 * self.world_scale / max(
+                float(cell_size_m) * float(self.fire_grid_size), 1e-6,
+            )
         except (TypeError, ValueError):
             return 0.0
 

@@ -45,6 +45,17 @@ def main() -> None:
         help="Use an explicit lon/lat bbox instead of geocoding --place.",
     )
     p.add_argument("--grid-size", type=int, default=128)
+    p.add_argument(
+        "--require-square-bbox",
+        action="store_true",
+        help="Reject bboxes whose projected width and height are not approximately equal.",
+    )
+    p.add_argument(
+        "--square-bbox-tolerance",
+        type=float,
+        default=0.02,
+        help="Maximum relative width/height difference allowed with --require-square-bbox.",
+    )
     p.add_argument("--cache-dir", default=str(ROOT / "data" / "terrain_cache"))
     p.add_argument("--out", default=None, help="Optional explicit .npz output path.")
     p.add_argument("--dem-resolution-m", type=int, default=10)
@@ -121,6 +132,8 @@ def main() -> None:
         raise SystemExit("--grid-size must be at least 8")
     if args.dem_resolution_m <= 0:
         raise SystemExit("--dem-resolution-m must be positive")
+    if not 0.0 <= args.square_bbox_tolerance < 1.0:
+        raise SystemExit("--square-bbox-tolerance must be between 0 and 1")
     print(f"Place:          {args.place}")
     if args.bbox is not None:
         print(f"BBox:           {tuple(args.bbox)}")
@@ -155,6 +168,8 @@ def main() -> None:
             landfire_poll_interval_s=args.landfire_poll_interval_s,
             landfire_force_download=args.landfire_force_download,
             force_rebuild=args.force_rebuild,
+            require_square_bbox=args.require_square_bbox,
+            square_bbox_tolerance=args.square_bbox_tolerance,
         )
     except (ImportError, RuntimeError, TimeoutError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
