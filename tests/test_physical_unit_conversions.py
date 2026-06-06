@@ -25,6 +25,11 @@ def _install_vmas_stubs() -> None:
     class ScenarioUtils:
         pass
 
+    class BaseScenario:
+        @property
+        def world(self):
+            return self._world
+
     class Color:
         BLUE = "blue"
         GREEN = "green"
@@ -34,7 +39,7 @@ def _install_vmas_stubs() -> None:
     core.Landmark = type("Landmark", (), {})
     core.Sphere = Sphere
     core.World = type("World", (), {})
-    scenario.BaseScenario = type("BaseScenario", (), {})
+    scenario.BaseScenario = BaseScenario
     sensors.Lidar = type("Lidar", (), {})
     utils.Color = Color
     utils.ScenarioUtils = ScenarioUtils

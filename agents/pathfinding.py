@@ -59,6 +59,13 @@ def find_ground_route(
                     continue
                 if not _is_open(traversable_np, cost_np, (nx_cell, ny_cell)):
                     continue
+                if dx != 0 and dy != 0:
+                    # A diagonal UGV move cannot squeeze between two blocked
+                    # axial neighbors even when both diagonal cells are open.
+                    if not _is_open(traversable_np, cost_np, (x + dx, y)):
+                        continue
+                    if not _is_open(traversable_np, cost_np, (x, y + dy)):
+                        continue
                 edge_cost = step_len * (cost_np[y, x] + cost_np[ny_cell, nx_cell]) * 0.5
                 graph.add_edge((x, y), (nx_cell, ny_cell), weight=float(edge_cost))
 

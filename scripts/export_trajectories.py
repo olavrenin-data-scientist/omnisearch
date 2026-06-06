@@ -24,6 +24,16 @@ if str(ROOT) not in sys.path:
 
 import vmas
 
+from envs.wildfire_defaults import (
+    DRONE_CAMERA_FOV_DEG,
+    DRONE_FLIGHT_LEVELS_M,
+    DRONE_SAFETY_CLEARANCE_M,
+    DRONE_SPEED_MPS,
+    DRONE_U_MULTIPLIER,
+    GROUND_ACCEL_MPS2,
+    GROUND_SPEED_MPS,
+    SIM_STEP_SECONDS,
+)
 from envs.wildfire_search import WildfireSearchScenario
 from agents.baselines import BASELINES, RandomPolicy
 from evaluation.trajectory_export import export_trajectory
@@ -70,49 +80,49 @@ def main():
         "--drone-flight-levels-m",
         nargs="+",
         type=float,
-        default=(20.0, 35.0, 50.0),
+        default=DRONE_FLIGHT_LEVELS_M,
         help="Drone AGL flight levels in meters.",
     )
     p.add_argument(
         "--drone-camera-fov-deg",
         type=float,
-        default=90.0,
+        default=DRONE_CAMERA_FOV_DEG,
         help="Downward drone camera field of view in degrees.",
     )
     p.add_argument(
         "--drone-safety-clearance-m",
         type=float,
-        default=3.0,
+        default=DRONE_SAFETY_CLEARANCE_M,
         help="Minimum aerial clearance above terrain obstacles in meters.",
     )
     p.add_argument(
         "--sim-step-seconds",
         type=float,
-        default=2.0,
+        default=SIM_STEP_SECONDS,
         help="Physical duration represented by one simulation step.",
     )
     p.add_argument(
         "--drone-speed-mps",
         type=float,
-        default=10.0,
+        default=DRONE_SPEED_MPS,
         help="Drone horizontal speed cap in meters per second.",
     )
     p.add_argument(
         "--drone-u-multiplier",
         type=float,
-        default=2.25,
+        default=DRONE_U_MULTIPLIER,
         help="VMAS drone action-to-acceleration multiplier.",
     )
     p.add_argument(
         "--ground-speed-mps",
         type=float,
-        default=1.6,
+        default=GROUND_SPEED_MPS,
         help="Nominal UGV horizontal speed cap on easy terrain in meters per second.",
     )
     p.add_argument(
         "--ground-accel-mps2",
         type=float,
-        default=2.0,
+        default=GROUND_ACCEL_MPS2,
         help="Nominal UGV operational acceleration in meters per second squared.",
     )
     p.add_argument(

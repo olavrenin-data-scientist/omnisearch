@@ -30,6 +30,21 @@ from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
 from vmas.simulator.utils import Color, ScenarioUtils
 
+from envs.wildfire_defaults import (
+    DRONE_CAMERA_FOV_DEG,
+    DRONE_FLIGHT_LEVELS_M,
+    DRONE_SAFETY_CLEARANCE_M,
+    DRONE_SPEED_MPS,
+    DRONE_U_MULTIPLIER,
+    GROUND_ACCEL_MPS2,
+    GROUND_ARRIVAL_DAMPING,
+    GROUND_ARRIVAL_SLOWDOWN_M,
+    GROUND_CONFIRMATION_RANGE_M,
+    GROUND_LIDAR_RANGE_M,
+    GROUND_SPEED_MPS,
+    SIM_STEP_SECONDS,
+)
+
 
 # Indices into agent position tensors
 X, Y = 0, 1
@@ -79,12 +94,14 @@ class WildfireSearchScenario(BaseScenario):
         # Drone search uses a downward camera footprint, not a fixed magic
         # radius: altitude * tan(FOV / 2) gives the visible ground radius.
         kwargs.pop("drone_lidar_range", None)  # legacy name; replaced by camera FOV.
-        self.drone_camera_fov_deg = kwargs.pop("drone_camera_fov_deg", 90.0)
+        self.drone_camera_fov_deg = kwargs.pop("drone_camera_fov_deg", DRONE_CAMERA_FOV_DEG)
         if not 0.0 < self.drone_camera_fov_deg < 180.0:
             raise ValueError("drone_camera_fov_deg must be between 0 and 180")
         self.drone_camera_half_angle_tan = math.tan(math.radians(self.drone_camera_fov_deg) / 2.0)
         self.ground_lidar_range_sim_override = kwargs.pop("ground_lidar_range", None)
-        self.ground_lidar_range_m = max(float(kwargs.pop("ground_lidar_range_m", 20.0)), 0.0)
+        self.ground_lidar_range_m = max(
+            float(kwargs.pop("ground_lidar_range_m", GROUND_LIDAR_RANGE_M)), 0.0,
+        )
         self.ground_lidar_range = (
             max(float(self.ground_lidar_range_sim_override), 0.0)
             if self.ground_lidar_range_sim_override is not None
@@ -101,7 +118,7 @@ class WildfireSearchScenario(BaseScenario):
         self.agent_radius_m = max(float(kwargs.pop("agent_radius_m", 0.50)), 0.01)
         self.survivor_radius_m = max(float(kwargs.pop("survivor_radius_m", 0.35)), 0.01)
         self.ground_confirmation_range_m = max(
-            float(kwargs.pop("ground_confirmation_range_m", 10.0)), 0.0,
+            float(kwargs.pop("ground_confirmation_range_m", GROUND_CONFIRMATION_RANGE_M)), 0.0,
         )
         self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
         self.agent_radius = (
@@ -216,11 +233,17 @@ class WildfireSearchScenario(BaseScenario):
         # 2.5D drone flight: horizontal VMAS motion plus an automatic safe
         # continuous AGL altitude. MSL altitude is derived from local terrain elevation.
         # Meter-based anchors are converted to sim units after loading terrain metadata.
-        self.sim_step_seconds = max(float(kwargs.pop("sim_step_seconds", 2.0)), 1e-6)
-        self.drone_speed_mps = max(float(kwargs.pop("drone_speed_mps", 10.0)), 0.0)
+        self.sim_step_seconds = max(
+            float(kwargs.pop("sim_step_seconds", SIM_STEP_SECONDS)), 1e-6,
+        )
+        self.drone_speed_mps = max(
+            float(kwargs.pop("drone_speed_mps", DRONE_SPEED_MPS)), 0.0,
+        )
         # Calibrated so a 10 m/s drone reaches cruise speed in roughly one
         # environment step, matching ~8-10 m/s^2 Crazyflie acceleration.
-        self.drone_u_multiplier = max(float(kwargs.pop("drone_u_multiplier", 2.25)), 0.0)
+        self.drone_u_multiplier = max(
+            float(kwargs.pop("drone_u_multiplier", DRONE_U_MULTIPLIER)), 0.0,
+        )
         self.drone_max_speed_sim_override = kwargs.pop("drone_max_speed", None)
         self.drone_max_speed_sim = (
             max(float(self.drone_max_speed_sim_override), 0.0)
@@ -229,13 +252,17 @@ class WildfireSearchScenario(BaseScenario):
         )
         # Ground robots are calibrated in physical units, then converted to
         # VMAS units once the terrain cache gives us sim_units_per_meter.
-        self.ground_speed_mps = max(float(kwargs.pop("ground_speed_mps", 1.6)), 0.0)
-        self.ground_accel_mps2 = max(float(kwargs.pop("ground_accel_mps2", 2.0)), 0.0)
+        self.ground_speed_mps = max(
+            float(kwargs.pop("ground_speed_mps", GROUND_SPEED_MPS)), 0.0,
+        )
+        self.ground_accel_mps2 = max(
+            float(kwargs.pop("ground_accel_mps2", GROUND_ACCEL_MPS2)), 0.0,
+        )
         self.ground_arrival_slowdown_m = max(
-            float(kwargs.pop("ground_arrival_slowdown_m", 10.0)), 1e-6,
+            float(kwargs.pop("ground_arrival_slowdown_m", GROUND_ARRIVAL_SLOWDOWN_M)), 1e-6,
         )
         self.ground_arrival_damping = max(
-            float(kwargs.pop("ground_arrival_damping", 0.6)), 0.0,
+            float(kwargs.pop("ground_arrival_damping", GROUND_ARRIVAL_DAMPING)), 0.0,
         )
         # Optional minimum physical step. It defaults to zero; the legacy
         # simulation-unit override remains available for old experiments.
@@ -259,7 +286,7 @@ class WildfireSearchScenario(BaseScenario):
             if ground_u_multiplier_override is not None
             else max(0.25 * self.ground_accel_mps2, 0.0)
         )
-        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", (20.0, 35.0, 50.0))
+        drone_flight_levels_m = kwargs.pop("drone_flight_levels_m", DRONE_FLIGHT_LEVELS_M)
         drone_flight_levels_override = kwargs.pop("drone_flight_levels", None)
         drone_flight_levels = (
             tuple(float(v) for v in drone_flight_levels_override)
@@ -298,7 +325,9 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.20)
         self.drone_safety_clearance_sim_override = kwargs.pop("drone_safety_clearance", None)
-        self.drone_safety_clearance_m = max(float(kwargs.pop("drone_safety_clearance_m", 3.0)), 0.0)
+        self.drone_safety_clearance_m = max(
+            float(kwargs.pop("drone_safety_clearance_m", DRONE_SAFETY_CLEARANCE_M)), 0.0,
+        )
         self.drone_climb_rate = max(float(kwargs.pop("drone_climb_rate", 0.035)), 0.0)
         self.drone_descent_rate = max(float(kwargs.pop("drone_descent_rate", 0.020)), 0.0)
         self.drone_climb_rate_m = max(float(kwargs.pop("drone_climb_rate_m", 10.0)), 0.0)
@@ -1553,7 +1582,16 @@ class WildfireSearchScenario(BaseScenario):
         return start + (end - start) * alpha.view(1, 1, 1, -1, 1)
 
     def _path_is_traversable(self, start_pos: Tensor, end_pos: Tensor) -> Tensor:
-        path = self._sample_path(start_pos, end_pos)
+        delta = (end_pos - start_pos).abs()
+        cells_x = delta[..., X] * self.fire_grid_size / (2.0 * self.x_semidim)
+        cells_y = delta[..., Y] * self.fire_grid_size / (2.0 * self.y_semidim)
+        crossed_cells = torch.maximum(cells_x, cells_y)
+        samples = max(
+            int(self.terrain_path_samples),
+            int(torch.ceil(crossed_cells.max()).item()) * 2 + 1,
+        )
+        alpha = torch.linspace(0.0, 1.0, samples, device=start_pos.device).view(1, 1, -1, 1)
+        path = start_pos.unsqueeze(2) + (end_pos - start_pos).unsqueeze(2) * alpha
         return self._grid_values_at_positions(self.traversable_grid, path).all(dim=-1)
 
     def _update_drone_altitudes(

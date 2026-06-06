@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from envs.wildfire_defaults import DRONE_CAMERA_FOV_DEG
+
 
 PLOTLY_JS = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 LAND_COVER_NAMES = ["road", "open", "brush", "forest", "rock", "water"]
@@ -977,7 +979,9 @@ def _expected_lawnmower_lanes(terrain: dict) -> tuple[list[dict], dict]:
     y_semidim = float(world.get("y_semidim", 1.0))
     agent_radius = float(terrain.get("_agent_radius", 0.04))
     flight_levels = mission.get("terrain", {}).get("drone_flight_levels", [])
-    fov_deg = float(mission.get("terrain", {}).get("drone_camera_fov_deg", 65.0))
+    fov_deg = float(
+        mission.get("terrain", {}).get("drone_camera_fov_deg", DRONE_CAMERA_FOV_DEG),
+    )
     min_altitude = min(float(v) for v in flight_levels) if flight_levels else 0.18
     footprint = max(min_altitude * math.tan(math.radians(fov_deg) / 2.0), 1e-6)
     lane_spacing = footprint * DRONE_LANE_SPACING_FACTOR
