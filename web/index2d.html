@@ -161,6 +161,8 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const h = React.createElement;
+const MIN_AGENT_VISUAL_RADIUS_FRACTION = 0.006;
+const MIN_SURVIVOR_VISUAL_RADIUS_FRACTION = 0.004;
 const APP_VERSION = 'survivor-preview-v1';
 const COVERAGE_TEXTURE_SIZE = 1024;
 
@@ -892,8 +894,18 @@ function renderFrame(state, frame, meta, histories, frames, showPerception, show
   clearGroup(trailGroup);
   clearGroup(perceptionGroup);
 
-  const agentRadius = meta.agent_radius ?? 0.04;
-  const survivorRadius = meta.survivor_radius ?? 0.03;
+  const worldScale = Math.max(
+    meta.world?.x_semidim ?? 1,
+    meta.world?.y_semidim ?? 1,
+  );
+  const agentRadius = Math.max(
+    meta.agent_radius ?? 0.04,
+    MIN_AGENT_VISUAL_RADIUS_FRACTION * worldScale,
+  );
+  const survivorRadius = Math.max(
+    meta.survivor_radius ?? 0.03,
+    MIN_SURVIVOR_VISUAL_RADIUS_FRACTION * worldScale,
+  );
 
   // --- Survivors (shoulders + head + state ring) ---
   for (const s of frame.survivors) {
