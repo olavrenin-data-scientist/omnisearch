@@ -39,9 +39,9 @@ from envs.wildfire_search import LAND_ROCK, LAND_WATER, WildfireSearchScenario, 
 # agent, in the same order as env.agents. WildfireSearchScenario's
 # actions are 2D continuous in [-1, 1] (a force vector).
 
-GROUND_ROUTE_WAYPOINT_CELLS = 10
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
+GROUND_ROUTE_MAX_LOOKAHEAD_CELLS = 10
 GROUND_RECOVERY_ANGLES = (
     0.0,
     math.pi / 6,
@@ -55,8 +55,9 @@ GROUND_RECOVERY_ANGLES = (
 # _search_footprint() returns camera radius, so 1.2 * radius = 0.6 * full footprint width.
 DRONE_LANE_SPACING_FACTOR = 1.2
 DRONE_WAYPOINT_TOLERANCE_M = 5.0
+DRONE_ARRIVAL_SLOWDOWN_M = 40.0
+DRONE_ARRIVAL_DAMPING = 0.65
 DRONE_CRUISE_ACTION = 0.95
-DRONE_TURN_ACTION = 0.75
 
 
 def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
@@ -100,6 +101,51 @@ def _nearest_traversable_cell(sc: WildfireSearchScenario, env_index: int, gx: in
         if valid:
             return min(valid, key=lambda cell: (cell[0] - gx) ** 2 + (cell[1] - gy) ** 2)
     return None
+
+
+def _grid_segment_is_traversable(
+    traversable: torch.Tensor,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> bool:
+    """Check a cell-center segment without skipping blocked corner cells."""
+    x0, y0 = start
+    x1, y1 = end
+    steps = max(abs(x1 - x0), abs(y1 - y0))
+    if steps == 0:
+        return bool(traversable[y0, x0].item())
+
+    previous = start
+    for i in range(steps + 1):
+        x = int(round(x0 + (x1 - x0) * i / steps))
+        y = int(round(y0 + (y1 - y0) * i / steps))
+        if not bool(traversable[y, x].item()):
+            return False
+        px, py = previous
+        if x != px and y != py:
+            if not bool(traversable[py, x].item()):
+                return False
+            if not bool(traversable[y, px].item()):
+                return False
+        previous = (x, y)
+    return True
+
+
+def _route_lookahead_cell(
+    traversable: torch.Tensor,
+    path: list[tuple[int, int]],
+    nearest_idx: int,
+) -> tuple[int, int]:
+    """Return the farthest near-term route cell visible from the current cell."""
+    start = path[nearest_idx]
+    best = path[min(nearest_idx + 1, len(path) - 1)]
+    stop = min(nearest_idx + GROUND_ROUTE_MAX_LOOKAHEAD_CELLS, len(path) - 1)
+    for idx in range(nearest_idx + 2, stop + 1):
+        candidate = path[idx]
+        if not _grid_segment_is_traversable(traversable, start, candidate):
+            break
+        best = candidate
+    return best
 
 
 def _route_ground_waypoints(
@@ -158,7 +204,9 @@ def _route_ground_waypoints(
             range(len(path)),
             key=lambda idx: (path[idx][0] - start[0]) ** 2 + (path[idx][1] - start[1]) ** 2,
         )
-        wx, wy = path[min(nearest_idx + GROUND_ROUTE_WAYPOINT_CELLS, len(path) - 1)]
+        # Keep enough lookahead for smooth motion, but stop before the route
+        # bends behind an obstacle or across a blocked diagonal corner.
+        wx, wy = _route_lookahead_cell(sc.traversable_grid[b], path, nearest_idx)
         waypoint[b] = _grid_to_world(sc, wx, wy, target_pos.device)
     return waypoint
 
@@ -233,6 +281,21 @@ def _ground_arrival_action(
     proportional = (distance / slowdown_distance).clamp(0.0, 1.0)
     brake = (velocity / max(float(max_speed), 1e-6)).clamp(-1.0, 1.0)
     return (direction * proportional - float(damping) * brake).clamp(-1.0, 1.0)
+
+
+def _drone_arrival_action(
+    *,
+    direction: torch.Tensor,
+    distance: torch.Tensor,
+    velocity: torch.Tensor,
+    max_speed: float,
+    slowdown_distance: float,
+) -> torch.Tensor:
+    """Brake into lawnmower endpoints so the next lane starts aligned."""
+    proportional = min(max(distance / max(float(slowdown_distance), 1e-6), 0.0), 1.0)
+    desired = direction * (DRONE_CRUISE_ACTION * proportional)
+    brake = velocity / max(float(max_speed), 1e-6)
+    return (desired - DRONE_ARRIVAL_DAMPING * brake).clamp(-1.0, 1.0)
 
 
 def _coordinated_ground_actions(
@@ -377,8 +440,18 @@ class LawnmowerPolicy:
                     delta = target - pos[b]
                     distance = float(delta.norm().item())
                 direction = delta / delta.norm().clamp_min(1e-6)
-                cruise = DRONE_TURN_ACTION if distance <= 2.0 * waypoint_tolerance else DRONE_CRUISE_ACTION
-                action[b] = (direction * cruise).clamp(-1.0, 1.0)
+                slowdown_distance = max(
+                    DRONE_ARRIVAL_SLOWDOWN_M
+                    * float(sc.terrain_sim_units_per_meter[b].item()),
+                    waypoint_tolerance,
+                )
+                action[b] = _drone_arrival_action(
+                    direction=direction,
+                    distance=distance,
+                    velocity=sc.world.agents[drone_idx].state.vel[b],
+                    max_speed=float(sc.drone_max_speed_sim),
+                    slowdown_distance=slowdown_distance,
+                )
             actions.append(action)
         return actions
 
