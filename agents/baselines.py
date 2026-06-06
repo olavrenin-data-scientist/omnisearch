@@ -217,7 +217,7 @@ def _terrain_safe_ground_action(
     best = score.argmax(dim=-1)
     chosen = candidates.gather(1, best.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
     any_safe = traversable.any(dim=-1)
-    return torch.where(any_safe.unsqueeze(-1), chosen, fallback)
+    return torch.where(any_safe.unsqueeze(-1), chosen, fallback).clamp(-1.0, 1.0)
 
 
 def _ground_arrival_action(
