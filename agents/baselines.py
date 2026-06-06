@@ -45,6 +45,12 @@ GROUND_LOOKAHEAD = 0.045
 GROUND_ROUTE_WAYPOINT_CELLS = 10
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
+# Velocity-braking gain for ground robots. Pure proportional control toward a
+# target makes momentum-carrying UGVs overshoot and oscillate in place near a
+# survivor (path length >> net displacement), so they jitter at ~1.5x the
+# confirm radius and never confirm. Subtracting a fraction of the current
+# velocity (a PD derivative term) damps the overshoot so they settle on target.
+GROUND_ARRIVAL_DAMPING = 0.6
 GROUND_RECOVERY_ANGLES = (
     0.0,
     math.pi / 6,
@@ -179,7 +185,14 @@ def _terrain_safe_ground_action(
     distance = to_target.norm(dim=-1, keepdim=True)
     direction = to_target / distance.clamp_min(1e-6)
     magnitude = distance.clamp(max=1.0)
-    direct = direction * magnitude
+    # PD control: proportional pull toward the target minus a velocity-braking
+    # term so the UGV decelerates as it arrives instead of overshooting and
+    # oscillating. Normalize velocity by the robot's max speed so the brake
+    # stays in the action's [-1, 1] range.
+    vel = sc.world.agents[ag_idx].state.vel
+    vmax = max(float(getattr(sc, "ground_max_speed_sim", 0.0)), 1e-6)
+    brake = (vel / vmax).clamp(-1.0, 1.0)
+    direct = (direction * magnitude - GROUND_ARRIVAL_DAMPING * brake).clamp(-1.0, 1.0)
 
     candidates = torch.stack(
         [_rotate(direct, angle) for angle in GROUND_RECOVERY_ANGLES],

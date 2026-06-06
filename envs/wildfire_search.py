@@ -200,6 +200,12 @@ class WildfireSearchScenario(BaseScenario):
         # VMAS units once the terrain cache gives us sim_units_per_meter.
         self.ground_speed_mps = max(float(kwargs.pop("ground_speed_mps", 1.6)), 0.0)
         self.ground_accel_mps2 = max(float(kwargs.pop("ground_accel_mps2", 2.0)), 0.0)
+        # Floor (sim units / tick) on the ground robot's full-traction step.
+        # Like drone_min_footprint, this keeps the UGV mobile at any terrain
+        # scale: on a large real-terrain cache the physical step
+        # (speed_mps * step_seconds * sim_units_per_meter) shrinks so far that
+        # robots crawl and never reach scouted survivors within the episode.
+        self.ground_min_step_sim = max(float(kwargs.pop("ground_min_step_sim", 0.012)), 0.0)
         self.ground_max_speed_sim_override = kwargs.pop("ground_max_speed", None)
         self.ground_max_speed_sim = (
             max(float(self.ground_max_speed_sim_override), 0.0)
@@ -715,12 +721,14 @@ class WildfireSearchScenario(BaseScenario):
     def _refresh_ground_speed_conversion(self, sim_units_per_meter: float) -> None:
         if self.ground_max_speed_sim_override is None and sim_units_per_meter > 0.0:
             world_dt = max(float(getattr(self.world, "dt", 1.0)), 1e-6)
-            self.ground_max_speed_sim = (
+            physical = (
                 self.ground_speed_mps
                 * self.sim_step_seconds
                 * float(sim_units_per_meter)
                 / world_dt
             )
+            # Floor the velocity cap so robots stay mobile on large terrains.
+            self.ground_max_speed_sim = max(physical, self.ground_min_step_sim / world_dt)
         for agent in self.world.agents[self.n_drones:]:
             agent._max_speed = self.ground_max_speed_sim
 
@@ -1115,12 +1123,14 @@ class WildfireSearchScenario(BaseScenario):
                 speed = self._terrain_path_speed_multiplier(
                     self._pre_step_ground_pos[:, i], corrected_pos,
                 ).clamp(0.0, 1.0)
-                max_step = (
+                base_step = (
                     self.ground_speed_mps
                     * self.sim_step_seconds
                     * self.terrain_sim_units_per_meter.to(corrected_pos.device)
-                    * speed
-                )
+                ).clamp_min(self.ground_min_step_sim)
+                # traction (speed) still scales the floored base, so robots
+                # remain slower on brush/forest/slopes but never crawl to a halt.
+                max_step = base_step * speed
                 delta = corrected_pos - self._pre_step_ground_pos[:, i]
                 dist = delta.norm(dim=-1).clamp_min(1e-12)
                 scale = torch.minimum(torch.ones_like(dist), max_step / dist)
