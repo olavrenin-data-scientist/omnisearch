@@ -259,8 +259,23 @@ def apply_wildfire_effects(
             heat_color[..., 2] = 0.07 + 0.12 * hot_core
             rgb[:] = _blend_rgb(rgb, heat_color, (0.42 * flame_alpha).clip(0.0, 0.68))
             rgb[:] = (rgb + heat_color * (0.18 * flame_alpha)[..., None]).clip(0.0, 1.0)
-            rgb[:] = _blend_rgb(rgb, (1.0, 0.78, 0.28), (0.40 * hot_core).clip(0.0, 0.58))
-            rgb[:] = _blend_rgb(rgb, (1.0, 0.98, 0.72), (0.55 * white_core).clip(0.0, 0.62))
+            rgb[:] = _blend_rgb(rgb, (1.0, 0.74, 0.20), (0.58 * hot_core).clip(0.0, 0.68))
+            rgb[:] = _blend_rgb(rgb, (1.0, 0.99, 0.80), (0.78 * white_core).clip(0.0, 0.82))
+            core_bloom = ndimage.gaussian_filter(
+                hot_core,
+                sigma=max(cell_px * 0.065, 0.8),
+            )
+            white_bloom = ndimage.gaussian_filter(
+                white_core,
+                sigma=max(cell_px * 0.10, 1.0),
+            )
+            rgb[:] = (
+                rgb
+                + np.asarray((1.0, 0.42, 0.08), dtype=np.float32)
+                * (0.16 * core_bloom)[..., None]
+                + np.asarray((1.0, 0.82, 0.34), dtype=np.float32)
+                * (0.20 * white_bloom)[..., None]
+            ).clip(0.0, 1.0)
             glow_alpha = ndimage.gaussian_filter(flame_alpha, sigma=max(cell_px * 0.10, 1.0))
             rgb[:] = _blend_rgb(rgb, (0.88, 0.34, 0.10), (0.12 * glow_alpha).clip(0.0, 0.18))
             rgb[:] = _blend_rgb(rgb, (0.82, 0.20, 0.055), fields.ember_alpha)
@@ -474,6 +489,15 @@ def _build_subcell_fire_fields(
     medium = _smooth_noise_px(shape, scale_px=max(cell_px * 0.30, 5.0), seed=cfg.seed + 307)
     fine = _smooth_noise_px(shape, scale_px=max(cell_px * 0.09, 2.5), seed=cfg.seed + 313, order=1)
     micro = _smooth_noise_px(shape, scale_px=max(cell_px * 0.045, 2.0), seed=cfg.seed + 317, order=1)
+    hotspot_clusters = _smooth_noise_px(
+        shape,
+        scale_px=max(cell_px * 0.72, 7.0),
+        seed=cfg.seed + 347,
+    )
+    hotspot_texture = (
+        0.58 * hotspot_clusters + 0.27 * fine + 0.15 * micro
+    ).clip(0.0, 1.0)
+    hotspot_gate = ((hotspot_texture - 0.43) / 0.42).clip(0.0, 1.0)
 
     if heat_seed.max(initial=0.0) > 0.0:
         affected = np.maximum(burned, active)
@@ -517,7 +541,9 @@ def _build_subcell_fire_fields(
             heat_seed,
             sigma=max(cell_px * 0.24, 1.8),
         )
-        front_intensity = _normalize_mask(front_intensity)
+        front_intensity = (
+            front_intensity / max(float(front_intensity.max(initial=0.0)), 0.35)
+        ).clip(0.0, 1.0)
         line_gate = ((0.28 * large + 0.34 * medium + 0.38 * fine - 0.38) / 0.44).clip(0.0, 1.0)
         line_gate = ndimage.gaussian_filter(line_gate, sigma=0.35)
         front_seed = (
@@ -542,10 +568,26 @@ def _build_subcell_fire_fields(
         flame_alpha = ((broken_front - 0.075) / 0.40).clip(0.0, 1.0)
         flame_alpha = ndimage.gaussian_filter(flame_alpha, sigma=max(cell_px * 0.045, 0.65)).clip(0.0, 1.0)
 
-        hot_core = ((0.76 * ridge + 0.24 * heat) * (0.20 + 0.80 * (fine ** 2.35)) - 0.38) / 0.34
+        front_hotspot = (
+            (0.72 * hotspot_gate ** 1.35 + 0.28 * fine ** 2.2)
+            * (0.36 + 0.64 * front_intensity)
+        ).clip(0.0, 1.0)
+        hot_core = (
+            (0.78 * ridge + 0.22 * heat)
+            * (0.10 + 0.90 * front_hotspot)
+            - 0.22
+        ) / 0.50
         hot_core = hot_core.clip(0.0, 1.0)
         hot_core = ndimage.gaussian_filter(hot_core, sigma=max(cell_px * 0.014, 0.25)).clip(0.0, 1.0)
-        white_core = ((hot_core * (micro ** 1.9) - 0.56) / 0.34).clip(0.0, 1.0)
+        white_core = (
+            (
+                hot_core
+                * hotspot_gate ** 1.7
+                * (0.32 + 0.68 * micro ** 1.5)
+                - 0.34
+            )
+            / 0.42
+        ).clip(0.0, 1.0)
         white_core = ndimage.gaussian_filter(white_core, sigma=0.35).clip(0.0, 1.0)
     else:
         heat_bloom = zeros
@@ -572,6 +614,13 @@ def _build_subcell_fire_fields(
         active_bloom = ndimage.gaussian_filter(active_seed, sigma=max(cell_px * 0.18, 2.2))
         active_heat = _normalize_mask(1.15 * active_near + 0.24 * active_bloom)
         active_heat = (active_heat * (0.74 + 0.26 * medium)).clip(0.0, 1.0)
+        active_intensity = ndimage.gaussian_filter(
+            active_heat_seed,
+            sigma=max(cell_px * 0.20, 1.6),
+        )
+        active_intensity = (
+            active_intensity / max(float(active_intensity.max(initial=0.0)), 0.35)
+        ).clip(0.0, 1.0)
         active_ridge = (
             active_heat
             - 0.58 * ndimage.gaussian_filter(active_heat, sigma=max(cell_px * 0.16, 1.8))
@@ -586,24 +635,45 @@ def _build_subcell_fire_fields(
             active_flame,
             sigma=max(cell_px * 0.030, 0.55),
         ).clip(0.0, 1.0)
-        active_hot = (
-            (
-                (0.76 * active_ridge + 0.24 * active_heat)
-                * (0.26 + 0.74 * (fine ** 2.15))
-                - 0.32
-            )
-            / 0.38
+        active_hotspot = (
+            (0.68 * hotspot_gate ** 1.4 + 0.32 * fine ** 2.1)
+            * (0.38 + 0.62 * active_intensity)
         ).clip(0.0, 1.0)
+        active_hot = (
+            (0.76 * active_ridge + 0.24 * active_heat)
+            * (0.10 + 0.90 * active_hotspot)
+            - 0.24
+        ) / 0.48
+        active_hot = active_hot.clip(0.0, 1.0)
         active_hot = ndimage.gaussian_filter(
             active_hot,
             sigma=max(cell_px * 0.014, 0.25),
         ).clip(0.0, 1.0)
-        active_white = ((active_hot * (micro ** 1.9) - 0.56) / 0.34).clip(0.0, 1.0)
+        active_white = (
+            (
+                active_hot
+                * hotspot_gate ** 1.8
+                * (0.30 + 0.70 * micro ** 1.5)
+                - 0.36
+            )
+            / 0.40
+        ).clip(0.0, 1.0)
         active_white = ndimage.gaussian_filter(active_white, sigma=0.35).clip(0.0, 1.0)
 
         flame_alpha = np.maximum(flame_alpha, 0.90 * active_flame).clip(0.0, 1.0)
         hot_core = np.maximum(hot_core, 0.82 * active_hot).clip(0.0, 1.0)
         white_core = np.maximum(white_core, 0.72 * active_white).clip(0.0, 1.0)
+
+    # Expand only the upper end of the heat hierarchy. Most visible fire
+    # remains orange, while a few clustered high-intensity regions become
+    # yellow or white-hot and produce a compact sensor bloom.
+    hot_core = ((hot_core - 0.025) / 0.68).clip(0.0, 1.0)
+    peak_gate = ((hotspot_gate - 0.62) / 0.34).clip(0.0, 1.0)
+    white_peaks = (
+        ((hot_core - 0.34) / 0.48).clip(0.0, 1.0)
+        * peak_gate ** 1.35
+    )
+    white_core = np.maximum(white_core, white_peaks).clip(0.0, 1.0)
 
     active_scorch_source = np.maximum(heat_seed, 0.62 * interior_heat)
     scorch = _normalize_mask(
