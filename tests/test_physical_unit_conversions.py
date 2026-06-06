@@ -78,7 +78,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         ground = _Entity(0.04)
         ground.sensors = [types.SimpleNamespace(_max_range=0.20)]
         scenario.n_drones = 0
-        scenario.world = types.SimpleNamespace(agents=[ground])
+        scenario._world = types.SimpleNamespace(agents=[ground])
         scenario._survivors = [_Entity(0.03)]
         return scenario
 

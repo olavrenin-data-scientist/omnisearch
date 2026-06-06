@@ -231,11 +231,14 @@ class WildfireSearchScenario(BaseScenario):
         # VMAS units once the terrain cache gives us sim_units_per_meter.
         self.ground_speed_mps = max(float(kwargs.pop("ground_speed_mps", 1.6)), 0.0)
         self.ground_accel_mps2 = max(float(kwargs.pop("ground_accel_mps2", 2.0)), 0.0)
-        # Floor (sim units / tick) on the ground robot's full-traction step.
-        # Keep the UGV mobile at any terrain scale: on a large real-terrain
-        # cache the physical step
-        # (speed_mps * step_seconds * sim_units_per_meter) shrinks so far that
-        # robots crawl and never reach scouted survivors within the episode.
+        self.ground_arrival_slowdown_m = max(
+            float(kwargs.pop("ground_arrival_slowdown_m", 10.0)), 1e-6,
+        )
+        self.ground_arrival_damping = max(
+            float(kwargs.pop("ground_arrival_damping", 0.6)), 0.0,
+        )
+        # Optional minimum physical step. It defaults to zero; the legacy
+        # simulation-unit override remains available for old experiments.
         ground_min_step_sim_override = kwargs.pop("ground_min_step_sim", None)
         self.ground_min_step_sim_override = ground_min_step_sim_override
         self.ground_min_step_m = max(float(kwargs.pop("ground_min_step_m", 0.0)), 0.0)
