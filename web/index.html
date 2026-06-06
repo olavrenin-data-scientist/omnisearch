@@ -154,6 +154,8 @@ const HEIGHT_SCALE = 3.0;
 const DRONE_MODEL_VISUAL_SCALE = 3.6;
 const GROUND_MODEL_VISUAL_SCALE = 3.0;
 const SURVIVOR_MODEL_VISUAL_SCALE = 5.5;
+const MIN_AGENT_VISUAL_RADIUS_FRACTION = 0.03;
+const MIN_SURVIVOR_VISUAL_RADIUS_FRACTION = 0.03;
 const CRAZYFLIE_MODEL_URL = './assets/crazyflie.glb';
 const SPOT_MINI_MODEL_URL = './assets/spot_mini.glb';
 const HUMAN_MODEL_URL = './assets/human_1a.glb';
@@ -902,8 +904,15 @@ function makeSurvivorMesh(state, survivorState, radius = 0.03) {
 function renderSurvivors3D(state, meta, frame) {
   clearGroup(state.survGroup);
   if (!state.elevGrid) return;
-  const G              = state.fireGridSize;
-  const survivorRadius = meta.survivor_radius ?? 0.03;
+  const G = state.fireGridSize;
+  const worldScale = Math.max(
+    meta.world?.x_semidim ?? 1,
+    meta.world?.y_semidim ?? 1,
+  );
+  const survivorRadius = Math.max(
+    meta.survivor_radius ?? 0.03,
+    MIN_SURVIVOR_VISUAL_RADIUS_FRACTION * worldScale,
+  );
   for (const s of (frame.survivors ?? [])) {
     const tz   = terrainElevAt(s.x, s.y, state.elevGrid, G);
     const mesh = makeSurvivorMesh(state, s, survivorRadius);
@@ -974,8 +983,15 @@ function renderAgents3D(state, meta, frame, histories) {
   clearGroup(state.trailGroup);
   if (!state.elevGrid) return;
 
-  const G           = state.fireGridSize;
-  const agentRadius = meta.agent_radius ?? 0.04;
+  const G = state.fireGridSize;
+  const worldScale = Math.max(
+    meta.world?.x_semidim ?? 1,
+    meta.world?.y_semidim ?? 1,
+  );
+  const agentRadius = Math.max(
+    meta.agent_radius ?? 0.04,
+    MIN_AGENT_VISUAL_RADIUS_FRACTION * worldScale,
+  );
   const maxAltitude = meta.terrain?.drone_flight_levels?.at(-1) ?? 1;
   const dronePerceptionByName = new Map(
     (frame.drone_perception ?? []).map(record => [record.name, record]),
