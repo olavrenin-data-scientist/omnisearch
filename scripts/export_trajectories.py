@@ -49,6 +49,7 @@ def _display_path(path: Path) -> Path:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--steps", type=int, default=500)
+    p.add_argument("--frame-stride", type=int, default=1, help="Record every Nth frame (keeps long-run JSON loadable; physics still runs every step).")
     p.add_argument("--seed",  type=int, default=0)
     p.add_argument("--out",   default=str(ROOT / "web" / "trajectories"))
     p.add_argument("--x-semidim", type=float, default=1.0)
@@ -282,6 +283,7 @@ def main():
             seed=args.seed,
             scenario_kwargs=scenario_kwargs,
             cv_options=run_cv_options,
+            frame_stride=args.frame_stride,
         )
         print(f"  ✓ {name:22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
 
@@ -310,6 +312,7 @@ def main():
             seed=args.seed,
             scenario_kwargs=scenario_kwargs,
             cv_options=run_cv_options,
+            frame_stride=args.frame_stride,
         )
         print(f"  ✓ {'happo_trained':22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
     except ImportError as e:
