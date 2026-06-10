@@ -183,6 +183,23 @@ def main():
     )
     p.add_argument("--cv-detection-probability", type=float, default=1.0)
     p.add_argument("--cv-pixel-noise-std", type=float, default=0.0)
+    p.add_argument(
+        "--cv-detector",
+        choices=("preliminary", "yolo"),
+        default="preliminary",
+        help="CV detection backend. 'preliminary' echoes ground-truth boxes (fast, default); "
+             "'yolo' runs a real YOLOv8 person detector over the rendered crop.",
+    )
+    p.add_argument("--cv-person-model", default="yolov8n.pt",
+                   help="Ultralytics weights for the yolo backend (yolov8n/s/m/l/x.pt).")
+    p.add_argument("--cv-person-conf", type=float, default=0.15,
+                   help="YOLO confidence threshold for survivor detection.")
+    p.add_argument("--cv-person-imgsz", type=int, default=None,
+                   help="YOLO inference image size; defaults to max(cv-image-size, 1280) for small survivors.")
+    p.add_argument("--cv-person-no-tiling", action="store_true",
+                   help="Disable tiled small-object inference for the yolo backend.")
+    p.add_argument("--cv-person-tile-grid", type=int, default=2,
+                   help="Tile grid (NxN) for tiled yolo inference.")
     args = p.parse_args()
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
@@ -240,6 +257,12 @@ def main():
             "survivor_preview_altitude_m": args.cv_preview_altitude_m,
             "detection_probability": args.cv_detection_probability,
             "pixel_noise_std": args.cv_pixel_noise_std,
+            "detector_backend": args.cv_detector,
+            "person_model": args.cv_person_model,
+            "person_conf": args.cv_person_conf,
+            "person_imgsz": args.cv_person_imgsz,
+            "person_tiled": not args.cv_person_no_tiling,
+            "person_tile_grid": args.cv_person_tile_grid,
         }
 
     for name, cls in BASELINES.items():
