@@ -239,5 +239,10 @@ data/source_cache/
 data/cv_assets/
 cache/
 
+# Generated CV training data and fine-tuned detector weights
+data/cv_train/
+models/
+*.pt
+
 # Local Claude Code config and agent context (machine-specific)
 .claude/

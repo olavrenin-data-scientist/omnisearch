@@ -90,6 +90,16 @@ class SimulationCvAdapter:
         pixel_noise_std: float = 0.0,
         confidence: float = 0.95,
         confidence_jitter: float = 0.0,
+        detector_backend: str = "preliminary",
+        person_model: str = "yolov8n.pt",
+        person_conf: float = 0.15,
+        person_iou: float = 0.7,
+        person_imgsz: int | None = None,
+        person_tiled: bool = True,
+        person_tile_grid: int = 2,
+        person_tile_overlap: float = 0.2,
+        person_match_iou: float = 0.15,
+        person_device: str | None = None,
         render_wildfire_effects: bool = True,
         wildfire_effect_seed: int | None = None,
         seed: int = 7,
@@ -115,6 +125,48 @@ class SimulationCvAdapter:
             confidence_jitter=confidence_jitter,
             seed=seed,
         )
+
+        # Real computer-vision detection backend. "preliminary" (default) echoes
+        # renderer ground-truth boxes — fast, deterministic, no model download —
+        # and stays the default for tests. "yolo" runs a real YOLOv8 person
+        # detector over the rendered crop. Aerial survivors are tiny (~20-100 px),
+        # well below YOLO's reliable floor, so small-object inference (tiling +
+        # high imgsz) is enabled by default for the yolo backend.
+        self.detector_backend = str(detector_backend).lower()
+        if self.detector_backend not in ("preliminary", "yolo"):
+            raise ValueError(f"detector_backend must be 'preliminary' or 'yolo', got {detector_backend!r}")
+        # Prefer the OmniSearch-fine-tuned survivor detector when the caller
+        # left the stock default and the trained weights exist. Stock COCO YOLO
+        # is unreliable on top-down aerial survivors; the fine-tuned model
+        # (scripts/train_survivor_detector.py) is in-distribution and far more
+        # confident. Pass an explicit --cv-person-model to override.
+        if str(person_model) == "yolov8n.pt":
+            # Prefer the stronger yolov8s drone model, then the nano fallback.
+            for candidate in ("survivor_yolov8s.pt", "survivor_yolov8n.pt"):
+                path = self.root / "models" / candidate
+                if path.exists():
+                    self.person_model_name = str(path)
+                    break
+            else:
+                self.person_model_name = str(person_model)
+        else:
+            self.person_model_name = str(person_model)
+        self.person_conf = float(person_conf)
+        self.person_iou = float(person_iou)
+        self.person_imgsz = int(person_imgsz) if person_imgsz else max(int(image_size), 1280)
+        self.person_tiled = bool(person_tiled)
+        self.person_tile_grid = max(int(person_tile_grid), 1)
+        self.person_tile_overlap = min(max(float(person_tile_overlap), 0.0), 0.9)
+        self.person_match_iou = float(person_match_iou)
+        self.person_device = person_device
+        self._person_detector = None  # lazily built on first yolo detection
+        # Ground-robot confirmation reuses the main detector. Empirically the
+        # stronger drone model (yolov8s) beats a dedicated nano model trained on
+        # large survivors — model capacity matters more than size-specialization,
+        # and the drone model's training already overlaps the close-range scale.
+        # A separate close-range model can still be supplied via person_model.
+        self.ground_person_model_name = self.person_model_name
+        self._ground_detector = None
 
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
@@ -165,6 +217,102 @@ class SimulationCvAdapter:
         self.human_asset = self.human_assets[0][1] if self.human_assets else None
         self._asset_order = list(range(len(self.human_assets)))
         self.rng.shuffle(self._asset_order)
+
+    def _get_person_detector(self):
+        """Lazily construct the YOLOv8 person detector on first use."""
+        if self._person_detector is None:
+            from .person_detector import PersonDetector
+            self._person_detector = PersonDetector(
+                model_name=self.person_model_name,
+                conf=self.person_conf,
+                iou=self.person_iou,
+                device=self.person_device,
+            )
+        return self._person_detector
+
+    @staticmethod
+    def _iou(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0.0:
+            return 0.0
+        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
+    def _nms(self, boxes, confs, iou_thresh):
+        """Greedy non-maximum suppression (merges duplicate tile detections)."""
+        order = sorted(range(len(boxes)), key=lambda i: confs[i], reverse=True)
+        keep = []
+        while order:
+            i = order.pop(0)
+            keep.append(i)
+            order = [j for j in order if self._iou(boxes[i], boxes[j]) < iou_thresh]
+        return [(boxes[i], confs[i]) for i in keep]
+
+    def _detect_people_cv(self, view: Image.Image):
+        """Run real YOLO person detection over the rendered crop.
+
+        Aerial survivors occupy only tens of pixels — below YOLO's reliable
+        detection floor. When ``person_tiled`` is set we slice the frame into an
+        overlapping grid and run each tile at high ``imgsz`` so each survivor
+        gets more effective resolution, then map boxes back to full-frame pixel
+        coordinates and de-duplicate with NMS.
+        """
+        detector = self._get_person_detector()
+        W, H = view.size
+        boxes: list[tuple[float, float, float, float]] = []
+        confs: list[float] = []
+
+        if not self.person_tiled or self.person_tile_grid <= 1:
+            res = detector.model.predict(
+                source=view, classes=[0], conf=self.person_conf, iou=self.person_iou,
+                imgsz=self.person_imgsz, device=self.person_device, verbose=False,
+            )
+            r = res[0] if res else None
+            if r is not None and r.boxes is not None and len(r.boxes):
+                for (x1, y1, x2, y2), c in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()):
+                    boxes.append((float(x1), float(y1), float(x2), float(y2)))
+                    confs.append(float(c))
+        else:
+            g = self.person_tile_grid
+            step_x, step_y = W / g, H / g
+            ov_x, ov_y = step_x * self.person_tile_overlap, step_y * self.person_tile_overlap
+            for ty in range(g):
+                for tx in range(g):
+                    x0 = max(0, int(tx * step_x - ov_x)); y0 = max(0, int(ty * step_y - ov_y))
+                    x1 = min(W, int((tx + 1) * step_x + ov_x)); y1 = min(H, int((ty + 1) * step_y + ov_y))
+                    tile = view.crop((x0, y0, x1, y1))
+                    res = detector.model.predict(
+                        source=tile, classes=[0], conf=self.person_conf, iou=self.person_iou,
+                        imgsz=self.person_imgsz, device=self.person_device, verbose=False,
+                    )
+                    r = res[0] if res else None
+                    if r is None or r.boxes is None or not len(r.boxes):
+                        continue
+                    for (bx1, by1, bx2, by2), c in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()):
+                        boxes.append((float(bx1) + x0, float(by1) + y0, float(bx2) + x0, float(by2) + y0))
+                        confs.append(float(c))
+
+        merged = self._nms(boxes, confs, self.person_iou)
+        merged.sort(key=lambda bc: bc[1], reverse=True)
+        return merged
+
+    def _match_truth_index(self, box, truth_boxes, truth):
+        """Return the survivor_index of the best-overlapping ground-truth box."""
+        best_idx, best_iou = None, self.person_match_iou
+        for i, tb in enumerate(truth_boxes):
+            iou = self._iou(box, tb)
+            if iou >= best_iou:
+                best_iou, best_idx = iou, i
+        if best_idx is None:
+            return None
+        return truth[best_idx]["survivor_index"] if best_idx < len(truth) else None
 
     def render_and_detect(
         self,
@@ -255,28 +403,58 @@ class SimulationCvAdapter:
             if wildfire_stats is not None:
                 wildfire_stats["smoke"] = smoke_stats
 
-        detections = self.detector.detect_boxes(truth_boxes, image_size=self.image_size)
-        detection_records = []
-        for det_idx, detection in enumerate(detections.detections):
-            center_px = detection.center_xy
-            relative_world = self._pixel_center_to_relative_world(center_px, footprint_world=footprint_world)
-            estimated_world = (
-                drone.world_xy[0] + relative_world[0],
-                drone.world_xy[1] + relative_world[1],
-            )
-            survivor_index = truth[det_idx]["survivor_index"] if det_idx < len(truth) else None
-            detection_records.append(
-                {
-                    "class_name": detection.class_name,
-                    "confidence": round(float(detection.confidence), 4),
-                    "bbox_xyxy": list(detection.box),
-                    "center_px": [round(center_px[0], 3), round(center_px[1], 3)],
-                    "relative_to_drone_world": [round(relative_world[0], 6), round(relative_world[1], 6)],
-                    "estimated_world_xy": [round(estimated_world[0], 6), round(estimated_world[1], 6)],
-                    "estimated_cell": list(self._world_to_cell(estimated_world)),
-                    "matched_survivor_index": survivor_index,
-                }
-            )
+        # Build detections either from the renderer ground truth (preliminary
+        # stub) or by running real computer vision over the rendered crop.
+        if self.detector_backend == "yolo":
+            cv_boxes = self._detect_people_cv(view)
+            detection_records = []
+            for box, conf in cv_boxes:
+                cx = (box[0] + box[2]) * 0.5
+                cy = (box[1] + box[3]) * 0.5
+                center_px = (cx, cy)
+                relative_world = self._pixel_center_to_relative_world(center_px, footprint_world=footprint_world)
+                estimated_world = (
+                    drone.world_xy[0] + relative_world[0],
+                    drone.world_xy[1] + relative_world[1],
+                )
+                # Match the CV box to a ground-truth survivor by overlap so the
+                # downstream pipeline still knows which survivor (if any) this is.
+                survivor_index = self._match_truth_index(box, truth_boxes, truth)
+                detection_records.append(
+                    {
+                        "class_name": "person",
+                        "confidence": round(float(conf), 4),
+                        "bbox_xyxy": [int(v) for v in box],
+                        "center_px": [round(center_px[0], 3), round(center_px[1], 3)],
+                        "relative_to_drone_world": [round(relative_world[0], 6), round(relative_world[1], 6)],
+                        "estimated_world_xy": [round(estimated_world[0], 6), round(estimated_world[1], 6)],
+                        "estimated_cell": list(self._world_to_cell(estimated_world)),
+                        "matched_survivor_index": survivor_index,
+                    }
+                )
+        else:
+            detections = self.detector.detect_boxes(truth_boxes, image_size=self.image_size)
+            detection_records = []
+            for det_idx, detection in enumerate(detections.detections):
+                center_px = detection.center_xy
+                relative_world = self._pixel_center_to_relative_world(center_px, footprint_world=footprint_world)
+                estimated_world = (
+                    drone.world_xy[0] + relative_world[0],
+                    drone.world_xy[1] + relative_world[1],
+                )
+                survivor_index = truth[det_idx]["survivor_index"] if det_idx < len(truth) else None
+                detection_records.append(
+                    {
+                        "class_name": detection.class_name,
+                        "confidence": round(float(detection.confidence), 4),
+                        "bbox_xyxy": list(detection.box),
+                        "center_px": [round(center_px[0], 3), round(center_px[1], 3)],
+                        "relative_to_drone_world": [round(relative_world[0], 6), round(relative_world[1], 6)],
+                        "estimated_world_xy": [round(estimated_world[0], 6), round(estimated_world[1], 6)],
+                        "estimated_cell": list(self._world_to_cell(estimated_world)),
+                        "matched_survivor_index": survivor_index,
+                    }
+                )
 
         saved_path = None
         if image_path is not None:
@@ -339,6 +517,88 @@ class SimulationCvAdapter:
             "source_crop_px": record.get("source_crop_px"),
             "background_gsd_m_per_px": record.get("background_gsd_m_per_px"),
             "human_asset_path": str(asset_path) if asset_path is not None else None,
+            "truth": record.get("truth", []),
+        }
+
+    def render_ground_confirmation(
+        self,
+        *,
+        robot: SimEntity,
+        survivor: SimEntity,
+        wildfire_state: SimWildfireState | None = None,
+        view_radius_m: float = 4.0,
+        image_path: str | Path | None = None,
+    ) -> dict:
+        """Render a ground robot's close-range confirmation view and detect.
+
+        A ground robot confirms a survivor from a few metres away, so the
+        survivor fills a large fraction of the frame — the opposite of the
+        drone's tiny aerial target. We model that as a small-footprint camera
+        view (``2 * view_radius_m`` across) centred on the survivor, reusing the
+        full render + CV pipeline. Because the survivor is large, detection is
+        high-confidence. (The sim is top-down, so this is a close-range
+        approximation of an eye-level confirmation, not a true perspective view.)
+
+        Returns the per-frame detection record plus a ``confirmed`` flag and the
+        robot-survivor distance in metres.
+        """
+        footprint_m = max(2.0 * float(view_radius_m), 1.0)
+        # Invert footprint_m = 2 * altitude_m * tan(fov/2) to get the pseudo
+        # camera "height" that yields this close-range footprint.
+        altitude_m = footprint_m / (2.0 * math.tan(math.radians(self.fov_deg) / 2.0))
+        pseudo_drone = SimDrone(
+            index=-1,
+            name=f"ground_confirm_survivor_{survivor.index}",
+            world_xy=survivor.world_xy,
+            altitude_agl=float(altitude_m) * self.sim_units_per_meter,
+        )
+        # The close-range survivor is large in frame, so single-pass inference
+        # is correct here — tiling would up-scale an already-large survivor past
+        # the detector's training scale and *lower* confidence. Also swap in the
+        # dedicated ground (large-survivor) detector when available.
+        prev_tiled = self.person_tiled
+        prev_detector = self._person_detector
+        prev_model = self.person_model_name
+        self.person_tiled = False
+        if self.ground_person_model_name != self.person_model_name:
+            if self._ground_detector is None:
+                from .person_detector import PersonDetector
+                self._ground_detector = PersonDetector(
+                    model_name=self.ground_person_model_name, conf=self.person_conf,
+                    iou=self.person_iou, device=self.person_device,
+                )
+            self._person_detector = self._ground_detector
+            self.person_model_name = self.ground_person_model_name
+        try:
+            record = self.render_and_detect(
+                drone=pseudo_drone, survivors=[survivor],
+                wildfire_state=wildfire_state, image_path=image_path,
+            )
+        finally:
+            self.person_tiled = prev_tiled
+            self._person_detector = prev_detector
+            self.person_model_name = prev_model
+        dx_m = (robot.world_xy[0] - survivor.world_xy[0]) / self.sim_units_per_meter
+        dy_m = (robot.world_xy[1] - survivor.world_xy[1]) / self.sim_units_per_meter
+        distance_m = math.hypot(dx_m, dy_m)
+        confirmed = any(
+            d.get("matched_survivor_index") == survivor.index for d in record.get("detections", [])
+        )
+        confidence = max(
+            (float(d["confidence"]) for d in record.get("detections", [])
+             if d.get("matched_survivor_index") == survivor.index),
+            default=0.0,
+        )
+        return {
+            "agent": "ground_robot",
+            "robot_index": int(robot.index),
+            "survivor_index": int(survivor.index),
+            "confirmed": bool(confirmed),
+            "confidence": round(float(confidence), 4),
+            "distance_m": round(float(distance_m), 3),
+            "view_radius_m": round(float(view_radius_m), 3),
+            "image_path": record.get("image_path"),
+            "detections": record.get("detections", []),
             "truth": record.get("truth", []),
         }
 

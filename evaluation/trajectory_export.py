@@ -264,6 +264,58 @@ def _cv_perception_records(
     return records
 
 
+def _cv_ground_confirmations(
+    scenario,
+    env_index: int,
+    *,
+    adapter: SimulationCvAdapter | None,
+    image_dir: Path | None,
+    step: int,
+    save_images_every: int,
+) -> List[dict]:
+    """Close-range CV confirmation by ground robots near scouted survivors.
+
+    A ground robot does a real visual confirmation when it gets within ~1.5x its
+    confirmation range of a drone-scouted, not-yet-confirmed survivor. Only fires
+    at those moments, so the extra YOLO inference is rare and cheap.
+    """
+    if adapter is None or getattr(scenario, "n_ground", 0) == 0:
+        return []
+    ground_agents = scenario.world.agents[scenario.n_drones:]
+    confirm_range = float(scenario.detection_range_by_env[env_index])
+    wildfire_state = SimWildfireState(
+        fire_grid=scenario.fire_grid[env_index].cpu().numpy(),
+        fire_intensity_grid=scenario.fire_intensity_grid[env_index].cpu().numpy(),
+        burned_grid=scenario.burned_grid[env_index].cpu().numpy(),
+        smoke_grid=scenario.smoke_grid[env_index].cpu().numpy(),
+        wind_direction=tuple(float(v) for v in scenario.wind_direction),
+    )
+    records = []
+    for gi, agent in enumerate(ground_agents):
+        gpos = agent.state.pos[env_index]
+        robot = SimEntity(index=gi, world_xy=(float(gpos[X]), float(gpos[Y])))
+        for si, surv in enumerate(scenario._survivors):
+            if bool(scenario.found_survivors[env_index, si].item()):
+                continue
+            if not bool(scenario.scouted_survivors[env_index, si].item()):
+                continue
+            spos = surv.state.pos[env_index]
+            dist = ((float(gpos[X]) - float(spos[X])) ** 2 + (float(gpos[Y]) - float(spos[Y])) ** 2) ** 0.5
+            if dist > confirm_range * 1.5:
+                continue
+            image_path = None
+            if image_dir is not None and save_images_every > 0 and step % save_images_every == 0:
+                image_path = image_dir / f"ground_confirm_step_{step:04d}_g{gi}_s{si}.png"
+            survivor = SimEntity(index=si, world_xy=(float(spos[X]), float(spos[Y])))
+            records.append(
+                adapter.render_ground_confirmation(
+                    robot=robot, survivor=survivor,
+                    wildfire_state=wildfire_state, image_path=image_path,
+                )
+            )
+    return records
+
+
 def _cv_survivor_previews(
     scenario,
     env_index: int,
@@ -464,6 +516,14 @@ def export_trajectory(
             step=0,
             save_images_every=cv_save_images_every,
         ),
+        "cv_ground_confirmations": _cv_ground_confirmations(
+            sc,
+            env_index,
+            adapter=cv_adapter,
+            image_dir=cv_image_dir,
+            step=0,
+            save_images_every=cv_save_images_every,
+        ),
     })
 
     for step in range(1, n_steps + 1):
@@ -478,6 +538,14 @@ def export_trajectory(
             "smoke_cells": _smoke_cells(sc, env_index),
             "drone_perception": sc.drone_perception_debug(env_index),
             "cv_perception": _cv_perception_records(
+                sc,
+                env_index,
+                adapter=cv_adapter,
+                image_dir=cv_image_dir,
+                step=step,
+                save_images_every=cv_save_images_every,
+            ),
+            "cv_ground_confirmations": _cv_ground_confirmations(
                 sc,
                 env_index,
                 adapter=cv_adapter,
