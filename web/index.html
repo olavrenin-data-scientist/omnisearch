@@ -1521,6 +1521,11 @@ function MetricsPanel({ meta, frame, frames, selectedDrone, setSelectedDrone, se
   const activeDrone = cvNames.includes(selectedDrone) ? selectedDrone : (cvNames[0] ?? '');
   const activeCv = cvRecords.find(record => record.name === activeDrone);
   const activeDetections = activeCv?.detections ?? [];
+  // Camera images are saved every N steps; hold the most recent frame per drone
+  // on the in-between steps so the panel doesn't blink to empty.
+  const lastCamRef = useRef({});
+  if (activeCv?.image_path) lastCamRef.current[activeDrone] = activeCv.image_path;
+  const camImage = activeCv?.image_path ?? lastCamRef.current[activeDrone] ?? null;
   useEffect(() => {
     if (!activeDrone || activeDrone === selectedDrone) return;
     setSelectedDrone(activeDrone);
@@ -1559,13 +1564,13 @@ function MetricsPanel({ meta, frame, frames, selectedDrone, setSelectedDrone, se
               onChange: e => setSelectedDrone(e.target.value),
             }, cvRecords.map(record => h('option', { key: record.name, value: record.name }, record.name))),
             h('div', { className: 'camera-view' },
-              activeCv?.image_path
+              camImage
                 ? h('img', {
-                    src: imagePathForBrowser(activeCv.image_path),
+                    src: imagePathForBrowser(camImage),
                     alt: `${activeDrone} camera view`,
                   })
                 : h('div', { className: 'camera-empty' },
-                    'No saved camera image for this step.',
+                    'No saved camera image yet.',
                   ),
             ),
             h('div', { className: 'camera-detection' },
