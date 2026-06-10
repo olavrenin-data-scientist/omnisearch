@@ -114,6 +114,31 @@ confidence (measured 0.29 tiled vs 0.70–0.73 single-pass, peaks ~0.88). So
 | Terrain background (training) | Procedural color-field noise | **Simulated** |
 | Fire / smoke / burn | Rendered by [detection/wildfire_effects.py](../detection/wildfire_effects.py) | **Simulated** overlay |
 
+## The procedural-background trap (and the NAIP fix)
+
+A model fine-tuned on **procedural** (synthetic noise) backgrounds looked great on
+synthetic eval (~0.84) but **failed on the real pipeline**: when tested on real
+NAIP imagery it fired **~23 false positives per empty crop** — it never learned
+what real terrain looks like, so it saw "people" all over rocks and brush. In a
+short export run where survivors were rarely in the camera footprint, the result
+was *all false positives, zero real survivors detected.*
+
+The fix: generate training composites on **real NAIP crops** as backgrounds
+(`--naip-dir`), so the model learns real terrain. Honest eval on real NAIP:
+
+| Model | Real survivor recall | False positives / empty crop |
+|---|---|---|
+| Procedural-trained | 1.00 | **23.0** |
+| **NAIP-trained @ conf 0.40** | 0.95 | **1.15** |
+
+A ~20× drop in false positives at the same recall. **Lesson: always train the
+detector on the same imagery it will be deployed on.** The adapter auto-prefers
+`models/survivor_naip_yolov8s.pt` and the default confidence threshold is 0.35.
+
+> Caveat: only 4 NAIP tiles (one 1 km area) were available, so the false-positive
+> eval is partly in-distribution. On an unseen area FP would be higher; the proper
+> next step is NAIP training data spanning many regions.
+
 ## Domain-gap limitations (be honest about these)
 
 - **No real people-in-fire imagery exists** in the dataset. "A survivor in fire"

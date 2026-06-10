@@ -50,6 +50,33 @@ def _procedural_background(size: int, rng: np.random.Generator) -> Image.Image:
     return Image.fromarray(np.clip(arr, 0, 255).astype("uint8")).convert("RGB")
 
 
+def _load_naip_tiles(naip_dir: str):
+    """Load cached NAIP tiles to sample real aerial backgrounds from."""
+    paths = sorted(glob.glob(str(Path(naip_dir) / "**" / "*.png"), recursive=True))
+    tiles = []
+    for p in paths:
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception:
+            continue
+        if min(im.size) >= 64:
+            tiles.append(im)
+    return tiles
+
+
+def _naip_background(tiles, size: int, rng: np.random.Generator) -> Image.Image:
+    """Random crop from a real NAIP tile (with light scale/flip augmentation)."""
+    tile = tiles[int(rng.integers(0, len(tiles)))]
+    W, H = tile.size
+    scale = rng.uniform(0.5, 1.0)
+    cw = max(8, int(min(W, H) * scale))
+    x = int(rng.integers(0, max(1, W - cw))); y = int(rng.integers(0, max(1, H - cw)))
+    crop = tile.crop((x, y, x + cw, y + cw)).resize((size, size), Image.Resampling.BILINEAR)
+    if rng.random() < 0.5:
+        crop = crop.transpose(Image.FLIP_LEFT_RIGHT)
+    return crop
+
+
 def _disc(size: int, cx: float, cy: float, r: float) -> np.ndarray:
     yy, xx = np.mgrid[0:size, 0:size]
     return np.clip(1.0 - np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max(r, 1.0), 0, 1).astype(np.float32)
@@ -78,12 +105,18 @@ def _wildfire_masks(size, rng, centers):
     return WildfireMasks(burned=burned, active=active, intensity=active.copy(), smoke=smoke)
 
 
-def _generate_split(out_dir: Path, n: int, assets, size, rng, cfg, fire_frac=0.65, surv_px=(45, 230)):
+def _generate_split(out_dir: Path, n: int, assets, size, rng, cfg, fire_frac=0.65, surv_px=(45, 230), naip_tiles=None):
     img_dir = out_dir / "images"; lbl_dir = out_dir / "labels"
     img_dir.mkdir(parents=True, exist_ok=True); lbl_dir.mkdir(parents=True, exist_ok=True)
     lo, hi = int(surv_px[0]), int(surv_px[1])
     for i in range(n):
-        bg = _procedural_background(size, rng)
+        # Real NAIP crops when available (matches deployment imagery and kills
+        # the false positives a procedural-only model fires on real terrain);
+        # mix in some procedural for variety.
+        if naip_tiles and rng.random() < 0.85:
+            bg = _naip_background(naip_tiles, size, rng)
+        else:
+            bg = _procedural_background(size, rng)
         # Decide survivor placements first so fire can be centered on them.
         placements = []
         for _ in range(int(rng.integers(1, 4))):  # 1-3 survivors
@@ -125,6 +158,9 @@ def main():
                     help="Min survivor width in the generated image. Use larger (e.g. 120) for a ground-robot close-range model.")
     ap.add_argument("--max-surv-px", type=int, default=230,
                     help="Max survivor width in the generated image.")
+    ap.add_argument("--naip-dir", default=None,
+                    help="Cached NAIP tile dir to sample REAL aerial backgrounds from "
+                         "(e.g. data/source_cache/naip/naip_tiles_*). Strongly recommended for real deployment.")
     ap.add_argument("--assets-dir", default=str(ROOT / "data/cv_assets/sard_grabcut"))
     ap.add_argument("--data-dir", default=str(ROOT / "data/cv_train/survivor"))
     ap.add_argument("--out", default=str(ROOT / "models/survivor_yolov8n.pt"))
@@ -145,8 +181,13 @@ def main():
     print(f"Generating {args.n_train} train / {args.n_val} val composites at {args.size}px "
           f"({int(args.fire_frac*100)}% with fire/smoke on survivors) ...")
     surv_px = (args.min_surv_px, args.max_surv_px)
-    _generate_split(data_dir / "train", args.n_train, train_assets, args.size, rng, cfg, fire_frac=args.fire_frac, surv_px=surv_px)
-    _generate_split(data_dir / "val", args.n_val, val_assets, args.size, rng, cfg, fire_frac=args.fire_frac, surv_px=surv_px)
+    naip_tiles = _load_naip_tiles(args.naip_dir) if args.naip_dir else None
+    if naip_tiles:
+        print(f"Using {len(naip_tiles)} real NAIP tiles for backgrounds.")
+    elif args.naip_dir:
+        print(f"WARNING: no NAIP tiles found in {args.naip_dir}; using procedural backgrounds.")
+    _generate_split(data_dir / "train", args.n_train, train_assets, args.size, rng, cfg, fire_frac=args.fire_frac, surv_px=surv_px, naip_tiles=naip_tiles)
+    _generate_split(data_dir / "val", args.n_val, val_assets, args.size, rng, cfg, fire_frac=args.fire_frac, surv_px=surv_px, naip_tiles=naip_tiles)
 
     yaml = data_dir / "survivor.yaml"
     yaml.write_text(

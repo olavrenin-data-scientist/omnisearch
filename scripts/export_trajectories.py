@@ -192,7 +192,7 @@ def main():
     )
     p.add_argument("--cv-person-model", default="yolov8n.pt",
                    help="Ultralytics weights for the yolo backend (yolov8n/s/m/l/x.pt).")
-    p.add_argument("--cv-person-conf", type=float, default=0.15,
+    p.add_argument("--cv-person-conf", type=float, default=0.35,
                    help="YOLO confidence threshold for survivor detection.")
     p.add_argument("--cv-person-imgsz", type=int, default=None,
                    help="YOLO inference image size; defaults to max(cv-image-size, 1280) for small survivors.")

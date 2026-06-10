@@ -92,7 +92,7 @@ class SimulationCvAdapter:
         confidence_jitter: float = 0.0,
         detector_backend: str = "preliminary",
         person_model: str = "yolov8n.pt",
-        person_conf: float = 0.15,
+        person_conf: float = 0.35,
         person_iou: float = 0.7,
         person_imgsz: int | None = None,
         person_tiled: bool = True,
@@ -141,8 +141,10 @@ class SimulationCvAdapter:
         # (scripts/train_survivor_detector.py) is in-distribution and far more
         # confident. Pass an explicit --cv-person-model to override.
         if str(person_model) == "yolov8n.pt":
-            # Prefer the stronger yolov8s drone model, then the nano fallback.
-            for candidate in ("survivor_yolov8s.pt", "survivor_yolov8n.pt"):
+            # Prefer the NAIP-trained model (real aerial backgrounds, far fewer
+            # false positives on real terrain), then the procedural-trained
+            # models, then stock.
+            for candidate in ("survivor_naip_yolov8s.pt", "survivor_yolov8s.pt", "survivor_yolov8n.pt"):
                 path = self.root / "models" / candidate
                 if path.exists():
                     self.person_model_name = str(path)
@@ -460,7 +462,17 @@ class SimulationCvAdapter:
         if image_path is not None:
             out = Path(image_path)
             out.parent.mkdir(parents=True, exist_ok=True)
-            view.save(out)
+            # Draw the detector's boxes + confidence onto the saved image so the
+            # CV is visible in the viewer's camera panel (green = detection).
+            annotated = view.copy()
+            if detection_records:
+                from PIL import ImageDraw
+                draw = ImageDraw.Draw(annotated)
+                for d in detection_records:
+                    x1, y1, x2, y2 = d["bbox_xyxy"]
+                    draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=3)
+                    draw.text((x1, max(0, y1 - 12)), f"{d['confidence']:.2f}", fill=(0, 255, 0))
+            annotated.save(out)
             saved_path = str(out)
 
         return {
