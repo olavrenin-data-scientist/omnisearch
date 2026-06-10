@@ -118,9 +118,12 @@ def _burned_cells_added(scenario, env_index: int, previous_grid) -> List[List[in
 
 
 def _smoke_cells(scenario, env_index: int) -> List[List[float]]:
+    # Only export visibly-significant smoke. A low 0.02 threshold dumped ~6k
+    # faint cells per frame (~83 MB over 1000 steps) that barely render; 0.15
+    # keeps the visible plume at a fraction of the size.
     grid = scenario.smoke_grid[env_index].cpu().numpy()
-    ys, xs = (grid > 0.02).nonzero()
-    return [[int(x), int(y), round(float(grid[y, x]), 4)] for x, y in zip(xs, ys)]
+    ys, xs = (grid > 0.15).nonzero()
+    return [[int(x), int(y), round(float(grid[y, x]), 2)] for x, y in zip(xs, ys)]
 
 
 def _terrain_record(scenario, env_index: int) -> dict:
@@ -369,6 +372,7 @@ def export_trajectory(
     env_index:     int = 0,
     scenario_kwargs: Optional[dict] = None,
     cv_options: Optional[dict] = None,
+    frame_stride: int = 1,
 ) -> Path:
     """
     Run a rollout, capture every frame, write to JSON, return the path.
@@ -526,9 +530,16 @@ def export_trajectory(
         ),
     })
 
+    stride = max(int(frame_stride), 1)
     for step in range(1, n_steps + 1):
         env.step(action_fn(env))
         recorder.step()
+        # Physics + metrics run every step; only RECORD frames on the stride
+        # (and always the final step) to keep the JSON loadable for long runs.
+        # burned/smoke/cv deltas are computed only on recorded frames, so the
+        # viewer's incremental burn stays correct (delta since last record).
+        if step % stride != 0 and step != n_steps:
+            continue
         frames.append({
             "step":       step,
             "agents":     [_agent_record(a, sc, env_index) for a in sc.world.agents],
