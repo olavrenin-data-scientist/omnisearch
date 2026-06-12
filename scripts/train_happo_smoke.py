@@ -120,6 +120,7 @@ def build_args(
     ground_confirm_min: float = 0.0,
     fire_grid_size: int = 128,
     reward_search: bool = False,
+    recurrent: bool = False,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -160,7 +161,7 @@ def build_args(
             "initialization_method":      "orthogonal_",
             "gain":                       0.01,
             "use_naive_recurrent_policy": False,
-            "use_recurrent_policy":       False,
+            "use_recurrent_policy":       recurrent,
             "recurrent_n":                1,
             "data_chunk_length":          10,
             "lr":                         5e-4,
@@ -225,6 +226,7 @@ def build_args(
             "r_ground_travel_cost": -0.01,  # was -0.05
             "r_drone_climb_cost":  -0.005,  # was -0.02
             "r_time_penalty":     -0.0005,  # was -0.001
+            "r_coverage":          0.02,   # exploration: reward covering new ground
         })
     env_args = {
         "max_cycles":      episode_length,
@@ -261,6 +263,8 @@ def main():
     p.add_argument("--ground-confirm-min", type=float, default=0.0,
                    help="Floor on ground confirm range (sim units). >0 gives ground robots a learnable confirm reward (e.g. 0.12).")
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument("--recurrent", action="store_true",
+                   help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
                         "to avoid the do-nothing degenerate policy.")
@@ -298,6 +302,7 @@ def main():
         ground_confirm_min = args.ground_confirm_min,
         fire_grid_size = args.fire_grid_size,
         reward_search = args.reward_search,
+        recurrent = args.recurrent,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
