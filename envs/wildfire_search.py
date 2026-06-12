@@ -114,7 +114,17 @@ class WildfireSearchScenario(BaseScenario):
         self.agent_radius_sim_override = kwargs.pop("agent_radius", None)
         self.survivor_radius_sim_override = kwargs.pop("survivor_radius", None)
         self.detection_range_sim_override = kwargs.pop("detection_range", None)
-        kwargs.pop("drone_min_footprint", None)  # removed legacy workaround
+        # Optional floor (sim units) on the drone scout footprint. Default 0.0
+        # keeps the physical footprint untouched (the deliberate physical-units
+        # design). Set > 0 to guarantee a usable scout radius on large terrains
+        # where the physical footprint shrinks below a survivor — this restores a
+        # learnable reward signal for RL (drones actually scout survivors).
+        self.drone_min_footprint = max(float(kwargs.pop("drone_min_footprint", 0.0)), 0.0)
+        # Optional floor (sim units) on the ground confirmation range. Default 0.0
+        # keeps the physical range. Set > 0 so ground robots get a learnable
+        # confirm reward on large terrains (the physical range shrinks so small
+        # that RL never reaches it — the ground analog of drone_min_footprint).
+        self.ground_confirm_min = max(float(kwargs.pop("ground_confirm_min", 0.0)), 0.0)
         self.agent_radius_m = max(float(kwargs.pop("agent_radius_m", 0.50)), 0.01)
         self.survivor_radius_m = max(float(kwargs.pop("survivor_radius_m", 0.35)), 0.01)
         self.ground_confirmation_range_m = max(
@@ -779,6 +789,9 @@ class WildfireSearchScenario(BaseScenario):
             if self.detection_range_sim_override is not None
             else self.ground_confirmation_range_m * scale
         )
+        floor = getattr(self, "ground_confirm_min", 0.0)
+        if floor > 0.0:
+            detection_range = max(detection_range, floor)
 
         self.agent_radius_by_env[env_index] = agent_radius
         self.survivor_radius_by_env[env_index] = survivor_radius
@@ -1764,9 +1777,15 @@ class WildfireSearchScenario(BaseScenario):
         """Ground footprint radius for each drone's current flight altitude.
 
         Both altitude and horizontal positions use simulation units, so this
-        remains physically consistent across terrain scales.
+        remains physically consistent across terrain scales. An optional
+        ``drone_min_footprint`` floor (default 0.0 = off) guarantees a usable
+        scout radius for training/large terrains without changing the default.
         """
-        return self.drone_altitude * self.drone_camera_half_angle_tan
+        physical = self.drone_altitude * self.drone_camera_half_angle_tan
+        floor = getattr(self, "drone_min_footprint", 0.0)
+        if floor > 0.0:
+            return physical.clamp_min(floor)
+        return physical
 
     def _grid_values_at_positions(
         self,

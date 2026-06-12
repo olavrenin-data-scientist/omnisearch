@@ -115,6 +115,11 @@ def build_args(
     entropy_coef:   float,
     exp_name:       str,
     n_rollout_threads: int = 1,
+    terrain_cache_path: str | None = None,
+    drone_min_footprint: float = 0.0,
+    ground_confirm_min: float = 0.0,
+    fire_grid_size: int = 128,
+    reward_search: bool = False,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -163,7 +168,8 @@ def build_args(
             "opti_eps":                   1e-5,
             "weight_decay":               0,
             "std_x_coef":                 1,
-            "std_y_coef":                 0.5,
+            "std_y_coef":                 1.0,  # was 0.5; higher keeps action std from
+                                                # collapsing into saturated corner-camping
         },
         "algo": {
             "ppo_epoch":               2,
@@ -191,14 +197,38 @@ def build_args(
         },
     }
 
+    scenario_kwargs = {
+        "max_steps":     episode_length,
+        "n_drones":      3,
+        "n_ground":      2,
+        "comms_dropout": comms_dropout,
+        "fire_grid_size": fire_grid_size,
+        "drone_min_footprint": drone_min_footprint,
+        "ground_confirm_min": ground_confirm_min,
+    }
+    if terrain_cache_path:
+        scenario_kwargs["terrain_source"] = "real"
+        scenario_kwargs["terrain_cache_path"] = terrain_cache_path
+    if reward_search:
+        # Search-dominant reward: make finding/scouting survivors clearly worth
+        # more than any movement/hazard cost, and strengthen potential-based
+        # shaping toward survivors, so the policy is rewarded for searching
+        # rather than for sitting still to avoid cost (the degenerate optimum
+        # under the default cost-heavy reward).
+        scenario_kwargs.update({
+            "r_found_survivor":   10.0,   # was 1.0
+            "r_drone_scout":       2.0,   # was 0.3
+            "r_ground_confirm":    4.0,   # was 0.5
+            "r_drone_shaping":     0.30,  # was 0.05  (dense pull toward survivors)
+            "r_ground_shaping":    0.30,  # was 0.10
+            "r_fire_penalty":     -0.20,  # was -1.0  (no longer dominates)
+            "r_ground_travel_cost": -0.01,  # was -0.05
+            "r_drone_climb_cost":  -0.005,  # was -0.02
+            "r_time_penalty":     -0.0005,  # was -0.001
+        })
     env_args = {
         "max_cycles":      episode_length,
-        "scenario_kwargs": {
-            "max_steps":     episode_length,
-            "n_drones":      3,
-            "n_ground":      2,
-            "comms_dropout": comms_dropout,
-        },
+        "scenario_kwargs": scenario_kwargs,
     }
 
     return args, algo_args, env_args
@@ -222,6 +252,18 @@ def main():
                    help="Higher (0.05+) encourages exploration — helps break "
                         "the drones-at-corners action-saturation pathology.")
     p.add_argument("--exp-name",       default="happo_smoke")
+    p.add_argument("--terrain-cache-path", default=None,
+                   help="Train on this cached real terrain (recommended: match what you evaluate on, "
+                        "e.g. data/terrain_cache/malibu_creek_1km_128.npz). Default uses the scenario default.")
+    p.add_argument("--drone-min-footprint", type=float, default=0.0,
+                   help="Floor on the drone scout footprint (sim units). >0 gives RL a learnable reward "
+                        "signal on large terrains by ensuring drones actually scout survivors (e.g. 0.15).")
+    p.add_argument("--ground-confirm-min", type=float, default=0.0,
+                   help="Floor on ground confirm range (sim units). >0 gives ground robots a learnable confirm reward (e.g. 0.12).")
+    p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument("--reward-search", action="store_true",
+                   help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
+                        "to avoid the do-nothing degenerate policy.")
     args = p.parse_args()
 
     if args.research:
@@ -251,6 +293,11 @@ def main():
         comms_dropout  = args.comms_dropout,
         entropy_coef   = args.entropy_coef,
         exp_name       = args.exp_name,
+        terrain_cache_path = args.terrain_cache_path,
+        drone_min_footprint = args.drone_min_footprint,
+        ground_confirm_min = args.ground_confirm_min,
+        fire_grid_size = args.fire_grid_size,
+        reward_search = args.reward_search,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
