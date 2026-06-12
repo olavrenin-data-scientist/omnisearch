@@ -65,6 +65,7 @@ import vmas
 from detection.simulation_adapter import SimDrone, SimEntity, SimWildfireState, SimulationCvAdapter
 from envs.wildfire_search import WildfireSearchScenario, X, Y
 from evaluation.mission_metrics import EpisodeRecorder
+from evaluation.trajectory_metadata import trajectory_timing
 
 
 def _agent_record(agent, scenario, env_index: int) -> dict:
@@ -569,11 +570,11 @@ def export_trajectory(
             break
 
     metadata["metrics"] = recorder.finalize().as_dict()
-    metadata["actual_n_steps"] = len(frames) - 1
-    metadata["sim_step_seconds"] = round(float(getattr(sc, "sim_step_seconds", 1.0)), 4)
-    metadata["actual_duration_seconds"] = round(
-        metadata["actual_n_steps"] * metadata["sim_step_seconds"],
-        4,
+    metadata.update(
+        trajectory_timing(
+            frames,
+            sim_step_seconds=getattr(sc, "sim_step_seconds", 1.0),
+        ),
     )
 
     output_path = Path(output_path)
