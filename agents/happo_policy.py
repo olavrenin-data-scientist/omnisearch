@@ -27,7 +27,8 @@ import numpy as np
 import torch
 from gymnasium.spaces import Box
 
-from agents.harl_runner import default_algo_args, default_env_args
+from agents.happo_checkpoint import load_training_manifest
+from agents.harl_runner import default_algo_args
 
 
 class HappoPolicy:
@@ -90,22 +91,28 @@ class HappoPolicy:
         algo_args: Optional[dict] = None,
         deterministic: bool = True,
     ) -> "HappoPolicy":
-        algo_args = algo_args if algo_args is not None else default_algo_args()
-        # Match the architecture the checkpoint was trained with (e.g. recurrent
-        # policy) by reading the run's saved config, so loading never mismatches.
-        cfg_path = Path(checkpoint_dir).parent / "config.json"
-        if cfg_path.exists():
-            try:
-                import json
-                saved = json.load(open(cfg_path))
-                saved_model = saved.get("algo_args", {}).get("model", {})
-                for key in ("use_recurrent_policy", "use_naive_recurrent_policy",
-                            "recurrent_n", "data_chunk_length", "hidden_sizes",
-                            "activation_func", "use_feature_normalization"):
-                    if key in saved_model:
-                        algo_args = {**algo_args, "model": {**algo_args["model"], key: saved_model[key]}}
-            except Exception:
-                pass
+        if algo_args is None:
+            manifest = load_training_manifest(checkpoint_dir)
+            if manifest is not None:
+                algo_args = manifest["algo_args"]
+            else:
+                algo_args = default_algo_args()
+                # HARL's config is a fallback for checkpoints created before the
+                # OmniSearch manifest existed, including recurrent policies.
+                cfg_path = Path(checkpoint_dir).parent / "config.json"
+                if cfg_path.exists():
+                    try:
+                        import json
+
+                        with cfg_path.open(encoding="utf-8") as config_file:
+                            saved = json.load(config_file)
+                        saved_model = saved.get("algo_args", {}).get("model", {})
+                        algo_args = {
+                            **algo_args,
+                            "model": {**algo_args["model"], **saved_model},
+                        }
+                    except (OSError, TypeError, ValueError):
+                        pass
         return cls(checkpoint_dir, algo_args, deterministic)
 
     # ------------------------------------------------------------------
