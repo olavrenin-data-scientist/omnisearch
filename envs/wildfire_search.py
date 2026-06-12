@@ -362,13 +362,11 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.05)
         self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
-        # Coverage (exploration) reward: per-drone reward for flying its camera
-        # over a grid cell not yet covered this episode. Default 0.0 = off. This
-        # is the key signal for learning *systematic area coverage* (the sweep a
-        # memoryless policy can't otherwise discover) — drones can't farm it by
-        # hovering, only by visiting new ground.
+        # Coverage reward: maximum team bonus for covering the full map once.
+        # Credit uses the physical camera footprint and is split when drones
+        # simultaneously claim the same new cell. Default 0.0 keeps it off.
         self.r_coverage = kwargs.pop("r_coverage", 0.0)
-        self.coverage_radius_cells = max(int(kwargs.pop("coverage_radius_cells", 3)), 0)
+        kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -1406,7 +1404,7 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.step_ugv_travel_cost.zero_()
 
-        coverage_new = self._coverage_reward(drone_pos)  # [B, D] newly-covered cells per drone
+        coverage_new = self._coverage_reward(drone_pos)  # [B, D] new-map fraction per drone
 
         for i, agent in enumerate(self.world.agents):
             r = team_reward.clone()
@@ -1789,32 +1787,58 @@ class WildfireSearchScenario(BaseScenario):
         return torch.where(any_safe.unsqueeze(-1), chosen, start_pos)
 
     def _coverage_reward(self, drone_pos: Tensor) -> Tensor:
-        """Per-drone count of newly-covered grid cells this step (footprint sweep).
+        """Per-drone fraction of the map newly covered by camera footprints.
 
-        Marks a small disc of cells under each drone in ``coverage_grid`` and
-        returns how many were previously uncovered — the exploration signal that
-        drives systematic area coverage. Cheap: O(n_drones * kernel * batch).
+        All drone claims are calculated before updating ``coverage_grid``.
+        Simultaneous overlap is split equally, so total team credit across an
+        episode cannot exceed 1.0 regardless of map resolution.
         """
         B = drone_pos.shape[0]
         new_per_drone = torch.zeros(B, self.n_drones, device=drone_pos.device)
         if self.r_coverage <= 0.0 or self.n_drones == 0:
             return new_per_drone
+
         G = self.fire_grid_size
-        rad = self.coverage_radius_cells
-        gx, gy = self._positions_to_grid(drone_pos)  # each [B, D]
-        b_idx = torch.arange(B, device=drone_pos.device)
-        for d in range(self.n_drones):
-            cx0, cy0 = gx[:, d], gy[:, d]
-            for dx in range(-rad, rad + 1):
-                for dy in range(-rad, rad + 1):
-                    if dx * dx + dy * dy > rad * rad:
-                        continue
-                    cx = (cx0 + dx).clamp(0, G - 1)
-                    cy = (cy0 + dy).clamp(0, G - 1)
-                    covered = self.coverage_grid[b_idx, cy, cx]
-                    new_per_drone[:, d] += (~covered).float()
-                    self.coverage_grid[b_idx, cy, cx] = True
-        return new_per_drone
+        cell_width = 2.0 * self.x_semidim / G
+        cell_height = 2.0 * self.y_semidim / G
+        xs = torch.linspace(
+            -self.x_semidim + cell_width / 2.0,
+            self.x_semidim - cell_width / 2.0,
+            G,
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        )
+        ys = torch.linspace(
+            -self.y_semidim + cell_height / 2.0,
+            self.y_semidim - cell_height / 2.0,
+            G,
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        )
+
+        # Circle-cell intersection uses the nearest point in each cell, so even
+        # footprints smaller than one cell remain physically meaningful.
+        dx = (
+            (xs.view(1, 1, 1, G) - drone_pos[..., X].view(B, self.n_drones, 1, 1)).abs()
+            - cell_width / 2.0
+        ).clamp_min(0.0)
+        dy = (
+            (ys.view(1, 1, G, 1) - drone_pos[..., Y].view(B, self.n_drones, 1, 1)).abs()
+            - cell_height / 2.0
+        ).clamp_min(0.0)
+        footprint = self._drone_camera_ranges().view(B, self.n_drones, 1, 1)
+        claims = dx.square() + dy.square() <= footprint.square()
+
+        team_claims = claims.any(dim=1)
+        newly_covered = team_claims & ~self.coverage_grid
+        claim_count = claims.sum(dim=1).clamp_min(1)
+        split_credit = (
+            claims.float()
+            * newly_covered.unsqueeze(1).float()
+            / claim_count.unsqueeze(1)
+        )
+        self.coverage_grid |= team_claims
+        return split_credit.sum(dim=(-1, -2)) / float(G * G)
 
     def _drone_camera_ranges(self) -> Tensor:
         """Ground footprint radius for each drone's current flight altitude.
