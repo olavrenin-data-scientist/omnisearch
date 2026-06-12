@@ -8,6 +8,7 @@ trajectories shown in the viewer:
     python scripts/export_trajectories.py
     python scripts/export_trajectories.py --seed 7 --steps 500
     python scripts/export_trajectories.py --seed 7 --steps 500 --grid-size 128
+    python scripts/export_trajectories.py --approach happo
     python scripts/export_trajectories.py --comms-dropout 0.5  # show dropout effect
 """
 
@@ -39,6 +40,14 @@ from agents.baselines import BASELINES, RandomPolicy
 from evaluation.trajectory_export import export_trajectory
 
 
+def _selected_baselines(approach: str) -> list[str]:
+    if approach == "all":
+        return list(BASELINES)
+    if approach == "happo":
+        return []
+    return [approach]
+
+
 def _display_path(path: Path) -> Path:
     try:
         return path.resolve().relative_to(ROOT)
@@ -48,6 +57,12 @@ def _display_path(path: Path) -> Path:
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument(
+        "--approach",
+        choices=("all", "happo", *BASELINES),
+        default="all",
+        help="Export all approaches (default), only HAPPO, or one named baseline.",
+    )
     p.add_argument("--steps", type=int, default=500)
     p.add_argument("--frame-stride", type=int, default=1, help="Record every Nth frame (keeps long-run JSON loadable; physics still runs every step).")
     p.add_argument("--seed",  type=int, default=0)
@@ -223,6 +238,7 @@ def main():
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
+    print(f" Approach:      {args.approach}")
     print(f" Steps:         {args.steps}")
     print(f" Grid:          {args.grid_size}x{args.grid_size}")
     print(f" Comms dropout: {args.comms_dropout}")
@@ -309,7 +325,8 @@ def main():
             "person_tile_grid": args.cv_person_tile_grid,
         }
 
-    for name, cls in BASELINES.items():
+    for name in _selected_baselines(args.approach):
+        cls = BASELINES[name]
         def make_policy(env, _cls=cls):
             return _cls() if _cls is RandomPolicy else _cls(env)
         run_cv_options = None
@@ -330,44 +347,45 @@ def main():
         )
         print(f"  ✓ {name:22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
 
-    # Trained HAPPO policy — pulls the most recent checkpoint from results/harl_runs/
-    try:
-        from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
-        ckpt = happo_checkpoint or find_latest_happo_checkpoint().resolve()
+    if args.approach in ("all", "happo"):
+        # Trained HAPPO policy pulls the most recent checkpoint from results/harl_runs/.
         try:
-            ckpt_disp = ckpt.relative_to(ROOT.resolve())
-        except ValueError:
-            ckpt_disp = ckpt
-        print(f"  · HAPPO checkpoint: {ckpt_disp}")
-        def make_happo(env, _ckpt=ckpt):
-            return HappoPolicy.from_checkpoint(_ckpt)
-        run_cv_options = None
-        if cv_options is not None:
-            run_cv_options = dict(cv_options)
-            if args.cv_out_dir is None:
-                run_cv_options["output_dir"] = str(out_dir / "happo_trained_cv")
-        t0 = time.time()
-        path = export_trajectory(
-            strategy_name="happo_trained",
-            make_policy=make_happo,
-            output_path=out_dir / "happo_trained.json",
-            n_steps=args.steps,
-            seed=args.seed,
-            scenario_kwargs=scenario_kwargs,
-            cv_options=run_cv_options,
-            frame_stride=args.frame_stride,
-        )
-        print(f"  ✓ {'happo_trained':22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
-    except ImportError as e:
-        print(f"  ⚠ HAPPO export skipped — missing dependency ({e})")
-        print(f"    Install HARL deps or activate the correct venv.")
-    except FileNotFoundError as e:
-        print(f"  ⚠ HAPPO export skipped — no checkpoint found ({e})")
-        print(f"    Run `python scripts/train_happo_smoke.py` first to produce a checkpoint.")
-    except RuntimeError as e:
-        print(f"  ⚠ HAPPO export skipped — checkpoint incompatible with current scenario ({e})")
-        print(f"    The saved policy's observation/action shapes no longer match the env "
-              f"(it predates a scenario change). Retrain with `python scripts/train_happo_smoke.py`.")
+            from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+            ckpt = happo_checkpoint or find_latest_happo_checkpoint().resolve()
+            try:
+                ckpt_disp = ckpt.relative_to(ROOT.resolve())
+            except ValueError:
+                ckpt_disp = ckpt
+            print(f"  · HAPPO checkpoint: {ckpt_disp}")
+            def make_happo(env, _ckpt=ckpt):
+                return HappoPolicy.from_checkpoint(_ckpt)
+            run_cv_options = None
+            if cv_options is not None:
+                run_cv_options = dict(cv_options)
+                if args.cv_out_dir is None:
+                    run_cv_options["output_dir"] = str(out_dir / "happo_trained_cv")
+            t0 = time.time()
+            path = export_trajectory(
+                strategy_name="happo_trained",
+                make_policy=make_happo,
+                output_path=out_dir / "happo_trained.json",
+                n_steps=args.steps,
+                seed=args.seed,
+                scenario_kwargs=scenario_kwargs,
+                cv_options=run_cv_options,
+                frame_stride=args.frame_stride,
+            )
+            print(f"  ✓ {'happo_trained':22s} → {_display_path(path)}  ({time.time() - t0:.1f}s)")
+        except ImportError as e:
+            print(f"  ⚠ HAPPO export skipped — missing dependency ({e})")
+            print(f"    Install HARL deps or activate the correct venv.")
+        except FileNotFoundError as e:
+            print(f"  ⚠ HAPPO export skipped — no checkpoint found ({e})")
+            print(f"    Run `python scripts/train_happo_smoke.py` first to produce a checkpoint.")
+        except RuntimeError as e:
+            print(f"  ⚠ HAPPO export skipped — checkpoint incompatible with current scenario ({e})")
+            print(f"    The saved policy's observation/action shapes no longer match the env "
+                  f"(it predates a scenario change). Retrain with `python scripts/train_happo_smoke.py`.")
 
     print("-" * 60)
     print(f" Done. Serve with: python -m http.server -d web")
