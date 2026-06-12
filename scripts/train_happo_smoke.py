@@ -289,6 +289,7 @@ def main():
 
     _register_wildfire_with_harl()
     from harl.runners.on_policy_ha_runner import OnPolicyHARunner
+    from agents.happo_checkpoint import save_training_manifest
 
     harl_args, algo_args, env_args = build_args(
         num_env_steps  = num_env_steps,
@@ -309,6 +310,13 @@ def main():
 
     t0 = time.time()
     runner = OnPolicyHARunner(harl_args, algo_args, env_args)
+    manifest_path = save_training_manifest(
+        runner,
+        harl_args=harl_args,
+        algo_args=algo_args,
+        env_args=env_args,
+    )
+    print(f" training config: {manifest_path}")
     runner.run()
     runner.close()
 

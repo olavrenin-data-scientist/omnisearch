@@ -78,6 +78,20 @@ def main():
     p.add_argument("--terrain-cache-dir", default=str(ROOT / "data" / "terrain_cache"))
     p.add_argument("--terrain-cache-path", default=None)
     p.add_argument(
+        "--drone-min-footprint",
+        type=float,
+        default=None,
+        help="Override the HAPPO checkpoint's drone footprint floor. "
+             "Use 0 to disable it for legacy checkpoints.",
+    )
+    p.add_argument(
+        "--ground-confirm-min",
+        type=float,
+        default=None,
+        help="Override the HAPPO checkpoint's ground confirmation floor. "
+             "Use 0 to disable it for legacy checkpoints.",
+    )
+    p.add_argument(
         "--drone-flight-levels-m",
         nargs="+",
         type=float,
@@ -236,9 +250,38 @@ def main():
     }
     if args.ground_u_multiplier is not None:
         scenario_kwargs["ground_u_multiplier"] = args.ground_u_multiplier
+
+    # A trained policy must be compared in the environment it learned in.
+    # New checkpoints carry a project-owned manifest beside models/. Apply its
+    # scenario configuration to HAPPO and all baselines so comparisons remain
+    # apples-to-apples. Episode length and dropout stay evaluation controls.
+    happo_checkpoint = None
+    try:
+        from agents.happo_checkpoint import load_training_manifest, merge_training_scenario
+        from agents.happo_policy import find_latest_happo_checkpoint
+
+        happo_checkpoint = find_latest_happo_checkpoint().resolve()
+        training_manifest = load_training_manifest(happo_checkpoint)
+        if training_manifest is not None:
+            scenario_kwargs = merge_training_scenario(
+                scenario_kwargs,
+                training_manifest,
+                max_steps=args.steps,
+                comms_dropout=args.comms_dropout,
+            )
+            print(f" HAPPO env:     restored from {happo_checkpoint.parent.name}")
+        else:
+            print(" HAPPO env:     legacy checkpoint (no saved training config)")
+    except (ImportError, FileNotFoundError):
+        training_manifest = None
+
+    if args.drone_min_footprint is not None:
+        scenario_kwargs["drone_min_footprint"] = max(args.drone_min_footprint, 0.0)
+    if args.ground_confirm_min is not None:
+        scenario_kwargs["ground_confirm_min"] = max(args.ground_confirm_min, 0.0)
     cv_options = None
     if args.enable_cv:
-        if args.terrain_cache_path is None:
+        if scenario_kwargs.get("terrain_cache_path") is None:
             raise SystemExit("--enable-cv currently requires --terrain-cache-path so the NAIP bbox is unambiguous.")
         cv_options = {
             "enabled": True,
@@ -290,7 +333,7 @@ def main():
     # Trained HAPPO policy — pulls the most recent checkpoint from results/harl_runs/
     try:
         from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
-        ckpt = find_latest_happo_checkpoint().resolve()
+        ckpt = happo_checkpoint or find_latest_happo_checkpoint().resolve()
         try:
             ckpt_disp = ckpt.relative_to(ROOT.resolve())
         except ValueError:
