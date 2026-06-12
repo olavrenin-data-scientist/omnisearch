@@ -130,6 +130,67 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(scenario.ground_min_step_sim, 0.0)
         self.assertAlmostEqual(scenario.world.agents[0].sensors[0]._max_range, 20.0 * scale)
 
+    def _coverage_scenario(self, n_drones=1, grid_size=32):
+        scenario = self._scenario()
+        scenario.n_drones = n_drones
+        scenario.r_coverage = 1.0
+        scenario.fire_grid_size = grid_size
+        scenario.x_semidim = 1.0
+        scenario.y_semidim = 1.0
+        scenario.coverage_grid = torch.zeros(1, grid_size, grid_size, dtype=torch.bool)
+        scenario.drone_camera_half_angle_tan = 1.0
+        scenario.drone_min_footprint = 0.0
+        return scenario
+
+    def test_coverage_uses_camera_footprint(self):
+        scenario = self._coverage_scenario()
+        positions = torch.zeros(1, 1, 2)
+
+        scenario.drone_altitude = torch.tensor([[0.05]])
+        small_footprint = float(scenario._coverage_reward(positions).sum())
+
+        scenario.coverage_grid.zero_()
+        scenario.drone_altitude = torch.tensor([[0.20]])
+        large_footprint = float(scenario._coverage_reward(positions).sum())
+
+        self.assertGreater(large_footprint, small_footprint)
+
+    def test_coverage_overlap_is_split_without_duplicate_credit(self):
+        scenario = self._coverage_scenario(n_drones=2)
+        scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
+        positions = torch.zeros(1, 2, 2)
+
+        credit = scenario._coverage_reward(positions)
+
+        self.assertAlmostEqual(float(credit[0, 0]), float(credit[0, 1]), places=7)
+        self.assertAlmostEqual(
+            float(credit.sum()),
+            float(scenario.coverage_grid.float().mean()),
+            places=7,
+        )
+
+    def test_revisiting_covered_ground_earns_no_reward(self):
+        scenario = self._coverage_scenario()
+        scenario.drone_altitude = torch.tensor([[0.10]])
+        positions = torch.zeros(1, 1, 2)
+
+        first_credit = scenario._coverage_reward(positions)
+        revisit_credit = scenario._coverage_reward(positions)
+
+        self.assertGreater(float(first_credit.sum()), 0.0)
+        self.assertEqual(float(revisit_credit.sum()), 0.0)
+
+    def test_total_episode_coverage_credit_is_bounded(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.drone_altitude = torch.tensor([[0.50]])
+
+        total = 0.0
+        for x in (-0.75, -0.25, 0.25, 0.75):
+            for y in (-0.75, -0.25, 0.25, 0.75):
+                total += float(scenario._coverage_reward(torch.tensor([[[x, y]]])).sum())
+
+        self.assertLessEqual(total, 1.0 + 1e-7)
+
 
 if __name__ == "__main__":
     unittest.main()

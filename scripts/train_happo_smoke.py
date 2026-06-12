@@ -226,7 +226,7 @@ def build_args(
             "r_ground_travel_cost": -0.01,  # was -0.05
             "r_drone_climb_cost":  -0.005,  # was -0.02
             "r_time_penalty":     -0.0005,  # was -0.001
-            "r_coverage":          0.02,   # exploration: reward covering new ground
+            "r_coverage":          5.0,    # max team bonus for covering the full map once
         })
     env_args = {
         "max_cycles":      episode_length,
