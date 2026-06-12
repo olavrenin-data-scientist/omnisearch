@@ -362,6 +362,13 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.05)
         self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
+        # Coverage (exploration) reward: per-drone reward for flying its camera
+        # over a grid cell not yet covered this episode. Default 0.0 = off. This
+        # is the key signal for learning *systematic area coverage* (the sweep a
+        # memoryless policy can't otherwise discover) — drones can't farm it by
+        # hovering, only by visiting new ground.
+        self.r_coverage = kwargs.pop("r_coverage", 0.0)
+        self.coverage_radius_cells = max(int(kwargs.pop("coverage_radius_cells", 3)), 0)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -441,6 +448,9 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.n_survivors, dtype=torch.bool, device=device,
         )
         self.scouted_survivors = torch.zeros_like(self.found_survivors)
+        self.coverage_grid = torch.zeros(
+            batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
+        )
         self.fire_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size,
             dtype=torch.bool, device=device,
@@ -560,6 +570,7 @@ class WildfireSearchScenario(BaseScenario):
         if env_index is None:
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
+            self.coverage_grid.zero_()
             self.fire_grid.zero_()
             self.burned_grid.zero_()
             self.fire_age_grid.zero_()
@@ -574,6 +585,7 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
+            self.coverage_grid[env_index] = False
             self.fire_grid[env_index] = False
             self.burned_grid[env_index] = False
             self.fire_age_grid[env_index] = 0
@@ -1394,6 +1406,8 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.step_ugv_travel_cost.zero_()
 
+        coverage_new = self._coverage_reward(drone_pos)  # [B, D] newly-covered cells per drone
+
         for i, agent in enumerate(self.world.agents):
             r = team_reward.clone()
             if agent.is_drone:
@@ -1401,6 +1415,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r - self.drone_energy_cost[:, i]
                 r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
                 r = r + drone_shaping[:, i]
+                r = r + coverage_new[:, i] * self.r_coverage
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
@@ -1772,6 +1787,34 @@ class WildfireSearchScenario(BaseScenario):
         chosen = endpoints.gather(1, best.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
         any_safe = traversable.any(dim=-1)
         return torch.where(any_safe.unsqueeze(-1), chosen, start_pos)
+
+    def _coverage_reward(self, drone_pos: Tensor) -> Tensor:
+        """Per-drone count of newly-covered grid cells this step (footprint sweep).
+
+        Marks a small disc of cells under each drone in ``coverage_grid`` and
+        returns how many were previously uncovered — the exploration signal that
+        drives systematic area coverage. Cheap: O(n_drones * kernel * batch).
+        """
+        B = drone_pos.shape[0]
+        new_per_drone = torch.zeros(B, self.n_drones, device=drone_pos.device)
+        if self.r_coverage <= 0.0 or self.n_drones == 0:
+            return new_per_drone
+        G = self.fire_grid_size
+        rad = self.coverage_radius_cells
+        gx, gy = self._positions_to_grid(drone_pos)  # each [B, D]
+        b_idx = torch.arange(B, device=drone_pos.device)
+        for d in range(self.n_drones):
+            cx0, cy0 = gx[:, d], gy[:, d]
+            for dx in range(-rad, rad + 1):
+                for dy in range(-rad, rad + 1):
+                    if dx * dx + dy * dy > rad * rad:
+                        continue
+                    cx = (cx0 + dx).clamp(0, G - 1)
+                    cy = (cy0 + dy).clamp(0, G - 1)
+                    covered = self.coverage_grid[b_idx, cy, cx]
+                    new_per_drone[:, d] += (~covered).float()
+                    self.coverage_grid[b_idx, cy, cx] = True
+        return new_per_drone
 
     def _drone_camera_ranges(self) -> Tensor:
         """Ground footprint radius for each drone's current flight altitude.

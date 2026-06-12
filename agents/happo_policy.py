@@ -91,27 +91,55 @@ class HappoPolicy:
         deterministic: bool = True,
     ) -> "HappoPolicy":
         algo_args = algo_args if algo_args is not None else default_algo_args()
+        # Match the architecture the checkpoint was trained with (e.g. recurrent
+        # policy) by reading the run's saved config, so loading never mismatches.
+        cfg_path = Path(checkpoint_dir).parent / "config.json"
+        if cfg_path.exists():
+            try:
+                import json
+                saved = json.load(open(cfg_path))
+                saved_model = saved.get("algo_args", {}).get("model", {})
+                for key in ("use_recurrent_policy", "use_naive_recurrent_policy",
+                            "recurrent_n", "data_chunk_length", "hidden_sizes",
+                            "activation_func", "use_feature_normalization"):
+                    if key in saved_model:
+                        algo_args = {**algo_args, "model": {**algo_args["model"], key: saved_model[key]}}
+            except Exception:
+                pass
         return cls(checkpoint_dir, algo_args, deterministic)
 
     # ------------------------------------------------------------------
+    def reset(self) -> None:
+        """Clear recurrent hidden state (call at episode boundaries)."""
+        self._rnn_states = None
+
     def __call__(self, env) -> List[torch.Tensor]:
         """Return per-agent action tensors of shape (num_envs, action_dim)."""
         out: List[torch.Tensor] = []
         B = env.scenario.world.batch_dim
+        # Persist per-agent RNN hidden state across steps — otherwise a recurrent
+        # policy is reset to zero memory every step and behaves like a
+        # feedforward one. (No-op for non-recurrent policies.)
+        if getattr(self, "_rnn_states", None) is None or self._rnn_states[0].shape[0] != B:
+            self._rnn_states = [
+                np.zeros((B, self._recurrent_n, self._rnn_hidden_size), dtype=np.float32)
+                for _ in env.agents
+            ]
         for i, agent in enumerate(env.agents):
             # Pull current obs via the scenario hook — this is the same
             # path that training used.
             obs = env.scenario.observation(agent).cpu().numpy()  # (B, obs_dim)
-            rnn_states = np.zeros((B, self._recurrent_n, self._rnn_hidden_size),
-                                  dtype=np.float32)
             masks = np.ones((B, 1), dtype=np.float32)
             with torch.no_grad():
                 # HAPPO.act returns (actions, rnn_states_actor)
-                actions, _ = self.actors[i].act(
-                    obs, rnn_states, masks,
+                actions, rnn_out = self.actors[i].act(
+                    obs, self._rnn_states[i], masks,
                     available_actions=None,
                     deterministic=self.deterministic,
                 )
+            self._rnn_states[i] = (
+                rnn_out.cpu().numpy() if isinstance(rnn_out, torch.Tensor) else np.asarray(rnn_out)
+            )
             if isinstance(actions, torch.Tensor):
                 a_np = actions.cpu().numpy()
             else:
