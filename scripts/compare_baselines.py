@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 import vmas
 
 from envs.wildfire_search import WildfireSearchScenario
-from agents.baselines import BASELINES, RandomPolicy
+from agents.baselines import BASELINES, RandomActionPolicy
 from evaluation.mission_metrics import EpisodeRecorder, MissionMetrics
 
 
@@ -43,7 +43,7 @@ def run_one(strategy_name: str, seed: int, steps: int) -> MissionMetrics:
     )
     env.reset()
     cls = BASELINES[strategy_name]
-    policy = cls() if cls is RandomPolicy else cls(env)
+    policy = cls() if cls is RandomActionPolicy else cls(env)
 
     rec = EpisodeRecorder(env.scenario, env_index=0)
     for _ in range(steps):

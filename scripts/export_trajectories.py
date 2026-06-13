@@ -36,7 +36,7 @@ from envs.wildfire_defaults import (
     SIM_STEP_SECONDS,
 )
 from envs.wildfire_search import WildfireSearchScenario
-from agents.baselines import BASELINES, RandomPolicy
+from agents.baselines import BASELINES, RandomActionPolicy
 from evaluation.trajectory_export import export_trajectory
 
 
@@ -337,7 +337,7 @@ def main():
     for name in _selected_baselines(args.approach):
         cls = BASELINES[name]
         def make_policy(env, _cls=cls):
-            return _cls() if _cls is RandomPolicy else _cls(env)
+            return _cls() if _cls is RandomActionPolicy else _cls(env)
         run_cv_options = None
         if cv_options is not None:
             run_cv_options = dict(cv_options)
