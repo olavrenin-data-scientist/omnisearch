@@ -793,7 +793,7 @@ class LawnmowerPolicy:
 # ----------------------------------------------------------------------
 class NearestCandidatePolicy:
     """
-    Drones take random actions (no map coverage strategy).
+    Drones use persistent random walks (no map coverage strategy).
     Ground robots head to the *nearest* survivor that has been scouted
     by any drone but not yet confirmed.
 
@@ -803,6 +803,7 @@ class NearestCandidatePolicy:
 
     def __init__(self, env):
         self.scenario: WildfireSearchScenario = env.scenario
+        self._random_walk = RandomWalkPolicy(env)
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
 
     def __call__(self, env) -> List[torch.Tensor]:
@@ -810,10 +811,11 @@ class NearestCandidatePolicy:
         B = sc.world.batch_dim
         out: List[torch.Tensor] = []
 
-        # Drones: random
+        # Drones: coherent but uninformed persistent random search.
+        random_walk_actions = self._random_walk(env)
         rand_actions = env.get_random_actions()
         for i in range(sc.n_drones):
-            out.append(rand_actions[i])
+            out.append(random_walk_actions[i])
 
         # Ground: split up across nearest scouted survivors
         scouted    = sc.scouted_survivors
