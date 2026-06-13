@@ -7,6 +7,7 @@ import torch
 
 from agents.baselines import (
     BASELINES,
+    NearestCandidatePolicy,
     RandomWalkPolicy,
     _reflect_random_walk_directions,
 )
@@ -48,6 +49,42 @@ class RandomWalkTests(unittest.TestCase):
 
     def test_registered_as_random_walk(self):
         self.assertIs(BASELINES["random_walk"], RandomWalkPolicy)
+
+    def test_nearest_candidate_uses_random_walk_for_uavs(self):
+        scenario = SimpleNamespace(
+            world=SimpleNamespace(batch_dim=1),
+            n_drones=2,
+            n_ground=1,
+            scouted_survivors=torch.tensor([[False]]),
+            found_survivors=torch.tensor([[False]]),
+        )
+        env = SimpleNamespace(
+            scenario=scenario,
+            get_random_actions=lambda: [
+                torch.tensor([[0.1, 0.1]]),
+                torch.tensor([[0.2, 0.2]]),
+                torch.tensor([[0.3, 0.3]]),
+            ],
+        )
+        policy = NearestCandidatePolicy.__new__(NearestCandidatePolicy)
+        policy.scenario = scenario
+        policy.ground_route_cache = [dict()]
+        walk_actions = [
+            torch.tensor([[0.8, 0.0]]),
+            torch.tensor([[0.0, 0.8]]),
+            torch.tensor([[0.4, 0.4]]),
+        ]
+        policy._random_walk = lambda _: walk_actions
+
+        with patch(
+            "agents.baselines._coordinated_ground_actions",
+            return_value=[torch.tensor([[0.3, 0.3]])],
+        ):
+            actions = policy(env)
+
+        torch.testing.assert_close(actions[0], walk_actions[0])
+        torch.testing.assert_close(actions[1], walk_actions[1])
+        torch.testing.assert_close(actions[2], torch.tensor([[0.3, 0.3]]))
 
     @staticmethod
     def _scenario(n_drones: int, path_rule: str):

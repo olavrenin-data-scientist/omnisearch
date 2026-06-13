@@ -288,7 +288,7 @@ Baselines defined in [agents/baselines.py](agents/baselines.py):
 - **`random_action`** — both agent types take independent random actions (control)
 - **`random_walk`** — both agent types follow persistent random headings with reactive boundary and terrain avoidance
 - **`lawnmower`** — drones sweep a serpentine path; ground robots head to nearest scouted survivor
-- **`nearest_candidate`** — drones random; ground robots go to nearest scouted-not-confirmed survivor
+- **`nearest_candidate`** — drones use persistent random walks; ground robots go to nearest scouted-not-confirmed survivor
 - **`highest_confidence`** — drones lawnmower; ground robots prioritize freshest scout
 
 ### Smoke comparison (3 seeds × 200 steps)
