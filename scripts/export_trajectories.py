@@ -63,6 +63,13 @@ def main():
         default="all",
         help="Export all approaches (default), only HAPPO, or one named baseline.",
     )
+    p.add_argument(
+        "--ignore-happo-env",
+        action="store_true",
+        help="Use the CLI scenario settings exactly instead of restoring the "
+             "latest HAPPO checkpoint environment. Intended for baseline-only "
+             "terrain experiments.",
+    )
     p.add_argument("--steps", type=int, default=500)
     p.add_argument("--frame-stride", type=int, default=1, help="Record every Nth frame (keeps long-run JSON loadable; physics still runs every step).")
     p.add_argument("--seed",  type=int, default=0)
@@ -278,7 +285,9 @@ def main():
 
         happo_checkpoint = find_latest_happo_checkpoint().resolve()
         training_manifest = load_training_manifest(happo_checkpoint)
-        if training_manifest is not None:
+        if args.ignore_happo_env:
+            print(" HAPPO env:     ignored; using CLI scenario settings")
+        elif training_manifest is not None:
             scenario_kwargs = merge_training_scenario(
                 scenario_kwargs,
                 training_manifest,

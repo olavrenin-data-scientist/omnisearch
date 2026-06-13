@@ -82,7 +82,7 @@ The output is saved as `data/terrain_cache/<slugified-place>_<grid>.npz` alongsi
 
 ## Step 2 — Export Trajectories
 
-Runs the four hand-coded baseline strategies through the simulation and records each step as a JSON frame for the web viewer.
+Runs the hand-coded baseline strategies through the simulation and records each step as a JSON frame for the web viewer.
 
 ```bash
 python scripts/export_trajectories.py
@@ -96,6 +96,7 @@ This produces one JSON file per strategy in `web/trajectories/`:
 | `lawnmower.json` | Drones sweep in terrain-aware lanes; ground robots head to nearest scouted survivor |
 | `nearest_candidate.json` | Drones random walk; ground robots go to nearest scouted survivor |
 | `highest_confidence.json` | Drones sweep; ground robots prioritise most recently scouted survivor |
+| `ant_colony.json` | Drones avoid locally fresh coverage pheromone; UGVs follow locally known survivor events |
 | `happo_trained.json` | Trained HAPPO policy (exported only when a checkpoint exists) |
 
 **Key options:**
@@ -107,6 +108,7 @@ This produces one JSON file per strategy in `web/trajectories/`:
 | `--comms-dropout` | 0.0 | Comms dropout rate (0 = perfect radio, 0.8 = mostly broken) |
 | `--seed` | 0 | Random seed |
 | `--terrain-cache-path` | auto | Override terrain cache path |
+| `--ignore-happo-env` | off | Keep CLI terrain/settings instead of restoring the latest HAPPO training environment |
 
 **Examples:**
 
