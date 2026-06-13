@@ -24,6 +24,12 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from agents.harl_metrics import (
+    accumulate_env_metrics,
+    init_env_metric_storage,
+    log_done_env_metrics,
+)
+
 # Module-level flag so monkey-patches run only once
 _REGISTERED = False
 
@@ -45,11 +51,20 @@ def _build_wildfire_logger_class():
         def get_task_name(self):
             return "wildfire_search"
 
+        def init(self, episodes):
+            super().init(episodes)
+            init_env_metric_storage(self)
+
+        def per_step(self, data):
+            accumulate_env_metrics(self, data[4], data[3])
+            super().per_step(data)
+
         def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
             # Snapshot before super() clears done_episodes_rewards
             if len(self.done_episodes_rewards) > 0:
                 self.last_aver_episode_rewards = float(np.mean(self.done_episodes_rewards))
             super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
+            log_done_env_metrics(self)
             self.last_average_step_rewards = float(critic_train_info["average_step_rewards"])
 
     return WildfireLogger

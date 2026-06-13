@@ -114,21 +114,30 @@ class WildfireSearchScenario(BaseScenario):
         self.agent_radius_sim_override = kwargs.pop("agent_radius", None)
         self.survivor_radius_sim_override = kwargs.pop("survivor_radius", None)
         self.detection_range_sim_override = kwargs.pop("detection_range", None)
-        # Optional floor (sim units) on the drone scout footprint. Default 0.0
-        # keeps the physical footprint untouched (the deliberate physical-units
-        # design). Set > 0 to guarantee a usable scout radius on large terrains
-        # where the physical footprint shrinks below a survivor — this restores a
-        # learnable reward signal for RL (drones actually scout survivors).
-        self.drone_min_footprint = max(float(kwargs.pop("drone_min_footprint", 0.0)), 0.0)
-        # Optional floor (sim units) on the ground confirmation range. Default 0.0
-        # keeps the physical range. Set > 0 so ground robots get a learnable
-        # confirm reward on large terrains (the physical range shrinks so small
-        # that RL never reaches it — the ground analog of drone_min_footprint).
-        self.ground_confirm_min = max(float(kwargs.pop("ground_confirm_min", 0.0)), 0.0)
+        # Public floor settings use meters and are converted per terrain.
+        # The old names remain simulation-unit overrides for legacy manifests.
+        legacy_drone_floor = kwargs.pop("drone_min_footprint", None)
+        self.drone_min_footprint_sim_override = (
+            max(float(legacy_drone_floor), 0.0) if legacy_drone_floor is not None else None
+        )
+        self.drone_min_footprint_m = max(
+            float(kwargs.pop("drone_min_footprint_m", 0.0)), 0.0,
+        )
+        legacy_ground_floor = kwargs.pop("ground_confirm_min", None)
+        self.ground_confirm_min_sim_override = (
+            max(float(legacy_ground_floor), 0.0) if legacy_ground_floor is not None else None
+        )
+        self.ground_confirm_min_m = max(
+            float(kwargs.pop("ground_confirm_min_m", 0.0)), 0.0,
+        )
         self.agent_radius_m = max(float(kwargs.pop("agent_radius_m", 0.50)), 0.01)
         self.survivor_radius_m = max(float(kwargs.pop("survivor_radius_m", 0.35)), 0.01)
         self.ground_confirmation_range_m = max(
             float(kwargs.pop("ground_confirmation_range_m", GROUND_CONFIRMATION_RANGE_M)), 0.0,
+        )
+        self.ground_approach_radius_sim_override = kwargs.pop("ground_approach_radius", None)
+        self.ground_approach_radius_m = max(
+            float(kwargs.pop("ground_approach_radius_m", 25.0)), 0.0,
         )
         self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
         self.agent_radius = (
@@ -148,6 +157,7 @@ class WildfireSearchScenario(BaseScenario):
         )
 
         # Fire spread (cellular automata on a discrete grid overlay)
+        self.disable_fire = bool(kwargs.pop("disable_fire", False))
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 128)
         self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
         self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.065)
@@ -352,6 +362,7 @@ class WildfireSearchScenario(BaseScenario):
 
         # Episode
         self.max_steps = kwargs.pop("max_steps", 500)
+        self.known_survivors_at_reset = bool(kwargs.pop("known_survivors_at_reset", False))
 
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)
@@ -362,6 +373,13 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.05)
         self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
+        self.ground_progress_scale_m = max(
+            float(kwargs.pop(
+                "ground_progress_scale_m",
+                self.ground_speed_mps * self.sim_step_seconds,
+            )),
+            1e-6,
+        )
         # Coverage reward: maximum team bonus for covering the full map once.
         # Credit uses the physical camera footprint and is split when drones
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
@@ -373,7 +391,6 @@ class WildfireSearchScenario(BaseScenario):
         # shaping only rewards distance *change*, leaving robots stalled just
         # outside confirm range; this pulls them all the way in to confirm.
         self.r_ground_approach = kwargs.pop("r_ground_approach", 0.0)
-        self.ground_approach_radius = max(float(kwargs.pop("ground_approach_radius", 0.4)), 1e-6)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -459,6 +476,13 @@ class WildfireSearchScenario(BaseScenario):
         self.step_ground_confirmations = torch.zeros(
             batch_dim, self.n_ground, self.n_survivors, dtype=torch.bool, device=device,
         )
+        # Agent-local mission knowledge. A UAV learns from its own detections,
+        # a UGV learns from its own confirmations, and connected receivers
+        # merge the team's accumulated knowledge into their local memory.
+        self.known_survivors_by_agent = torch.zeros(
+            batch_dim, self.n_agents, self.n_survivors, dtype=torch.bool, device=device,
+        )
+        self.confirmed_survivors_by_agent = torch.zeros_like(self.known_survivors_by_agent)
         self.coverage_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
         )
@@ -508,6 +532,22 @@ class WildfireSearchScenario(BaseScenario):
         self.detection_range_by_env = torch.full(
             (batch_dim,), self.detection_range, dtype=torch.float, device=device,
         )
+        initial_drone_footprint_floor = (
+            self.drone_min_footprint_sim_override
+            if self.drone_min_footprint_sim_override is not None
+            else 0.0
+        )
+        self.drone_min_footprint_by_env = torch.full(
+            (batch_dim,), initial_drone_footprint_floor, dtype=torch.float, device=device,
+        )
+        initial_ground_approach_radius = (
+            max(float(self.ground_approach_radius_sim_override), 1e-6)
+            if self.ground_approach_radius_sim_override is not None
+            else 0.4
+        )
+        self.ground_approach_radius_by_env = torch.full(
+            (batch_dim,), initial_ground_approach_radius, dtype=torch.float, device=device,
+        )
         self.spawn_padding_by_env = torch.zeros(batch_dim, dtype=torch.float, device=device)
         self.drone_safety_clearance = initial_clearance
         self.drone_flight_levels_by_env = torch.tensor(
@@ -553,6 +593,10 @@ class WildfireSearchScenario(BaseScenario):
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.prev_drone_dist  = torch.full((batch_dim, self.n_drones),  float("inf"), device=device)
         self.prev_ground_dist = torch.full((batch_dim, self.n_ground), float("inf"), device=device)
+        self.prev_ground_target_idx = torch.full(
+            (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
+        )
+        self._zero_step_metric_buffers(batch_dim, device)
         self.terrain_source_description = ["real"] * batch_dim
         self.terrain_source_metadata = [{} for _ in range(batch_dim)]
 
@@ -561,6 +605,45 @@ class WildfireSearchScenario(BaseScenario):
             agent.scenario_reward = torch.zeros(batch_dim, device=device)
 
         return world
+
+    def _zero_step_metric_buffers(self, batch_dim: int, device: torch.device) -> None:
+        self.metric_new_scouts = torch.zeros(batch_dim, device=device)
+        self.metric_new_confirmations = torch.zeros(batch_dim, device=device)
+        self.metric_full_success = torch.zeros(batch_dim, device=device)
+        self.metric_reward_team = torch.zeros(batch_dim, device=device)
+        self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
+        self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
+        self.metric_reward_ugv_progress = torch.zeros(batch_dim, device=device)
+        self.metric_reward_ugv_approach = torch.zeros(batch_dim, device=device)
+        self.metric_reward_ground_confirm = torch.zeros(batch_dim, device=device)
+        self.metric_reward_coverage = torch.zeros(batch_dim, device=device)
+        self.metric_cost_ugv_fire_exposure = torch.zeros(batch_dim, device=device)
+        self.metric_cost_ugv_travel = torch.zeros(batch_dim, device=device)
+        self.metric_cost_drone_energy = torch.zeros(batch_dim, device=device)
+        self.metric_cost_drone_climb = torch.zeros(batch_dim, device=device)
+
+    def _reset_step_metric_buffers(self, env_index: int | None = None) -> None:
+        buffers = [
+            self.metric_new_scouts,
+            self.metric_new_confirmations,
+            self.metric_full_success,
+            self.metric_reward_team,
+            self.metric_reward_drone_scout,
+            self.metric_reward_drone_progress,
+            self.metric_reward_ugv_progress,
+            self.metric_reward_ugv_approach,
+            self.metric_reward_ground_confirm,
+            self.metric_reward_coverage,
+            self.metric_cost_ugv_fire_exposure,
+            self.metric_cost_ugv_travel,
+            self.metric_cost_drone_energy,
+            self.metric_cost_drone_climb,
+        ]
+        for buffer in buffers:
+            if env_index is None:
+                buffer.zero_()
+            else:
+                buffer[env_index] = 0.0
 
     # ------------------------------------------------------------------
     # Reset
@@ -583,6 +666,8 @@ class WildfireSearchScenario(BaseScenario):
             self.scouted_survivors.zero_()
             self.step_drone_detections.zero_()
             self.step_ground_confirmations.zero_()
+            self.known_survivors_by_agent.zero_()
+            self.confirmed_survivors_by_agent.zero_()
             self.coverage_grid.zero_()
             self.fire_grid.zero_()
             self.burned_grid.zero_()
@@ -594,12 +679,16 @@ class WildfireSearchScenario(BaseScenario):
             self.step_count.zero_()
             self.prev_drone_dist.fill_(float("inf"))
             self.prev_ground_dist.fill_(float("inf"))
+            self.prev_ground_target_idx.fill_(-1)
+            self._reset_step_metric_buffers()
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.step_drone_detections[env_index] = False
             self.step_ground_confirmations[env_index] = False
+            self.known_survivors_by_agent[env_index] = False
+            self.confirmed_survivors_by_agent[env_index] = False
             self.coverage_grid[env_index] = False
             self.fire_grid[env_index] = False
             self.burned_grid[env_index] = False
@@ -611,12 +700,16 @@ class WildfireSearchScenario(BaseScenario):
             self.step_count[env_index] = 0
             self.prev_drone_dist[env_index]  = float("inf")
             self.prev_ground_dist[env_index] = float("inf")
+            self.prev_ground_target_idx[env_index] = -1
+            self._reset_step_metric_buffers(env_index)
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
         for b in envs_to_seed:
             self._generate_terrain(b)
-            self._seed_initial_fire(b, H, W)
+            if not self.disable_fire:
+                self._seed_initial_fire(b, H, W)
+            self._initialize_known_survivors_at_reset(b)
 
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
@@ -644,6 +737,14 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ugv_travel_cost.zero_()
         else:
             self.step_ugv_travel_cost[env_index] = 0
+
+    def _initialize_known_survivors_at_reset(self, env_index: int) -> None:
+        """Optionally start the episode with survivors known to ground agents."""
+        if not self.known_survivors_at_reset or self.n_survivors <= 0:
+            return
+        self.scouted_survivors[env_index] = True
+        if self.n_ground > 0:
+            self.known_survivors_by_agent[env_index, self.n_drones:, :] = True
 
     def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
         """Start an irregular compact fire patch with resolution-independent area."""
@@ -799,7 +900,7 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_safety_clearance = float(self.drone_safety_clearance_by_env.mean().item())
 
     def _refresh_physical_size_conversions(self, env_index: int, sim_units_per_meter: float) -> None:
-        """Convert robot, survivor, and confirmation dimensions from meters."""
+        """Convert robot, survivor, confirmation, and shaping dimensions from meters."""
         scale = max(float(sim_units_per_meter), 0.0)
         agent_radius = (
             max(float(self.agent_radius_sim_override), 1e-6)
@@ -816,13 +917,29 @@ class WildfireSearchScenario(BaseScenario):
             if self.detection_range_sim_override is not None
             else self.ground_confirmation_range_m * scale
         )
-        floor = getattr(self, "ground_confirm_min", 0.0)
-        if floor > 0.0:
-            detection_range = max(detection_range, floor)
+        ground_confirm_floor = (
+            self.ground_confirm_min_sim_override
+            if self.ground_confirm_min_sim_override is not None
+            else self.ground_confirm_min_m * scale
+        )
+        if ground_confirm_floor > 0.0:
+            detection_range = max(detection_range, ground_confirm_floor)
+        drone_footprint_floor = (
+            self.drone_min_footprint_sim_override
+            if self.drone_min_footprint_sim_override is not None
+            else self.drone_min_footprint_m * scale
+        )
+        ground_approach_radius = (
+            max(float(self.ground_approach_radius_sim_override), 1e-6)
+            if self.ground_approach_radius_sim_override is not None
+            else max(self.ground_approach_radius_m * scale, 1e-6)
+        )
 
         self.agent_radius_by_env[env_index] = agent_radius
         self.survivor_radius_by_env[env_index] = survivor_radius
         self.detection_range_by_env[env_index] = detection_range
+        self.drone_min_footprint_by_env[env_index] = drone_footprint_floor
+        self.ground_approach_radius_by_env[env_index] = ground_approach_radius
 
         # VMAS shape dimensions are shared across a vectorized batch. All
         # environments in this scenario load the same terrain configuration,
@@ -1356,15 +1473,20 @@ class WildfireSearchScenario(BaseScenario):
         seen_by_drone       = drone_seen.any(dim=1)
         confirm_range = self.detection_range_by_env.view(-1, 1, 1)
         within_confirm      = dists < confirm_range
-        confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
         self.step_drone_detections = drone_seen
-        self.step_ground_confirmations = within_confirm[:, self.n_drones:, :]
 
-        newly_scouted = seen_by_drone       & ~self.scouted_survivors & ~self.found_survivors
-        newly_found   = confirmed_by_ground & ~self.found_survivors
+        newly_scouted = seen_by_drone & ~self.scouted_survivors & ~self.found_survivors
+        eligible_ground_confirmations = (
+            within_confirm[:, self.n_drones:, :]
+            & self.scouted_survivors.unsqueeze(1)
+        )
+        self.step_ground_confirmations = eligible_ground_confirmations
+        confirmed_by_ground = eligible_ground_confirmations.any(dim=1)
+        newly_found = confirmed_by_ground & ~self.found_survivors
 
         self.scouted_survivors = self.scouted_survivors | newly_scouted
         self.found_survivors   = self.found_survivors   | newly_found
+        self._record_local_survivor_knowledge(drone_seen, eligible_ground_confirmations)
 
         # Dense potential-based shaping (Ng et al. 1999): α · (prev_dist − curr_dist)
         # Drones: target = unscouted survivors
@@ -1385,26 +1507,56 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.prev_drone_dist = curr_drone_dist
 
-        # Ground robots: target = scouted-but-unconfirmed survivors
+        # Ground robots: target = locally known, scouted, unconfirmed survivors.
+        # Progress is measured in meters and clipped to one nominal UGV step so
+        # the shaping coefficient has a terrain-independent reward scale.
         unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
-        ground_d = torch.where(
-            unconfirmed_scouted.unsqueeze(1),
+        ground_known = self.known_survivors_by_agent[:, self.n_drones:, :]
+        known_ground_targets = ground_known & unconfirmed_scouted.unsqueeze(1)
+        ground_d_sim = torch.where(
+            known_ground_targets,
             dists[:, self.n_drones:, :],
             torch.full_like(dists[:, self.n_drones:, :], INF),
         )
-        curr_ground_dist, _ = ground_d.min(dim=2)
-        all_done = ~unconfirmed_scouted.any(dim=1, keepdim=True)
-        prev_known = ~torch.isinf(self.prev_ground_dist) & ~all_done
+        curr_ground_dist_sim, curr_ground_target_idx = ground_d_sim.min(dim=2)
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(curr_ground_dist_sim.device)
+        meters_per_sim = torch.where(
+            sim_units_per_meter > 1e-9,
+            1.0 / sim_units_per_meter,
+            torch.ones_like(sim_units_per_meter),
+        ).view(-1, 1)
+        curr_ground_dist_m = curr_ground_dist_sim * meters_per_sim
+        valid_ground_target = ~torch.isinf(curr_ground_dist_m)
+        same_ground_target = self.prev_ground_target_idx == curr_ground_target_idx
+        prev_known = (
+            ~torch.isinf(self.prev_ground_dist)
+            & valid_ground_target
+            & same_ground_target
+        )
+        ground_progress_m = self.prev_ground_dist - curr_ground_dist_m
+        ground_progress_scaled = (
+            ground_progress_m / self.ground_progress_scale_m
+        ).clamp(min=-1.0, max=1.0)
         ground_shaping = torch.where(
             prev_known,
-            (self.prev_ground_dist - curr_ground_dist) * self.r_ground_shaping,
-            torch.zeros_like(curr_ground_dist),
+            ground_progress_scaled * self.r_ground_shaping,
+            torch.zeros_like(curr_ground_dist_m),
         )
-        self.prev_ground_dist = curr_ground_dist
+        self.prev_ground_dist = torch.where(
+            valid_ground_target,
+            curr_ground_dist_m,
+            torch.full_like(curr_ground_dist_m, INF),
+        )
+        self.prev_ground_target_idx = torch.where(
+            valid_ground_target,
+            curr_ground_target_idx,
+            torch.full_like(curr_ground_target_idx, -1),
+        )
         # Dense triangular approach bonus: peaks at the survivor, 0 beyond the
         # radius. curr_ground_dist is +inf when nothing is scouted -> bonus 0.
+        ground_approach_radius = self.ground_approach_radius_by_env.view(-1, 1)
         ground_approach = (
-            (1.0 - curr_ground_dist / self.ground_approach_radius).clamp(min=0.0)
+            (1.0 - curr_ground_dist_sim / ground_approach_radius).clamp(min=0.0)
             * self.r_ground_approach
         )
 
@@ -1416,7 +1568,7 @@ class WildfireSearchScenario(BaseScenario):
         scout_credit_mask    = drone_seen & newly_scouted.unsqueeze(1)
         scout_per_drone      = scout_credit_mask.float().sum(dim=2)         # [B, D]
 
-        ground_within        = within_confirm[:, self.n_drones:, :]
+        ground_within        = eligible_ground_confirmations
         confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
         confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
 
@@ -1430,6 +1582,23 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ugv_travel_cost.zero_()
 
         coverage_new = self._coverage_reward(drone_pos)  # [B, D] new-map fraction per drone
+
+        self.metric_new_scouts = newly_scouted.float().sum(dim=1)
+        self.metric_new_confirmations = newly_found.float().sum(dim=1)
+        self.metric_full_success = self.found_survivors.all(dim=1).float()
+        self.metric_reward_team = team_reward
+        self.metric_reward_drone_scout = (scout_per_drone * self.r_drone_scout).sum(dim=1)
+        self.metric_reward_drone_progress = drone_shaping.sum(dim=1)
+        self.metric_reward_ugv_progress = ground_shaping.sum(dim=1)
+        self.metric_reward_ugv_approach = ground_approach.sum(dim=1)
+        self.metric_reward_ground_confirm = (
+            confirm_per_ground * self.r_ground_confirm
+        ).sum(dim=1)
+        self.metric_reward_coverage = (coverage_new * self.r_coverage).sum(dim=1)
+        self.metric_cost_ugv_fire_exposure = ground_in_fire.float().sum(dim=1)
+        self.metric_cost_ugv_travel = self.step_ugv_travel_cost.sum(dim=1)
+        self.metric_cost_drone_energy = self.drone_energy_cost.sum(dim=1)
+        self.metric_cost_drone_climb = self.step_drone_climb.sum(dim=1)
 
         for i, agent in enumerate(self.world.agents):
             r = team_reward.clone()
@@ -1871,14 +2040,12 @@ class WildfireSearchScenario(BaseScenario):
 
         Both altitude and horizontal positions use simulation units, so this
         remains physically consistent across terrain scales. An optional
-        ``drone_min_footprint`` floor (default 0.0 = off) guarantees a usable
-        scout radius for training/large terrains without changing the default.
+        meter-based floor guarantees a usable scout radius for training while
+        remaining consistent across terrains.
         """
         physical = self.drone_altitude * self.drone_camera_half_angle_tan
-        floor = getattr(self, "drone_min_footprint", 0.0)
-        if floor > 0.0:
-            return physical.clamp_min(floor)
-        return physical
+        floor = self.drone_min_footprint_by_env.view(-1, 1)
+        return torch.maximum(physical, floor)
 
     def _grid_values_at_positions(
         self,
@@ -1917,10 +2084,77 @@ class WildfireSearchScenario(BaseScenario):
         fire_local = self._local_fire_density(agent)        # [B, 1]
         terrain_local = self._local_terrain_features(agent)  # [B, 27]
         flight_state = self._flight_state(agent)             # [B, 2]
-        neighbor   = self._neighbor_observations(agent)     # [B, (A-1)*2]
+        comms_keep = self._communication_keep(agent)
+        neighbor = self._neighbor_observations(agent, comms_keep)  # [B, (A-1)*2]
+        survivor_messages = self._survivor_message_observations(agent, comms_keep)
         return torch.cat(
-            [own_pos, own_vel, lidar_obs, fire_local, terrain_local, flight_state, neighbor], dim=-1,
+            [
+                own_pos,
+                own_vel,
+                lidar_obs,
+                fire_local,
+                terrain_local,
+                flight_state,
+                neighbor,
+                survivor_messages,
+            ],
+            dim=-1,
         )
+
+    def _record_local_survivor_knowledge(
+        self,
+        drone_detections: Tensor,
+        ground_confirmations: Tensor,
+    ) -> None:
+        """Persist mission events at the agent that directly observed them."""
+        if self.n_drones:
+            self.known_survivors_by_agent[:, :self.n_drones] |= drone_detections
+        if self.n_ground:
+            ground_slice = slice(self.n_drones, self.n_agents)
+            self.known_survivors_by_agent[:, ground_slice] |= ground_confirmations
+            self.confirmed_survivors_by_agent[:, ground_slice] |= ground_confirmations
+
+    def _communication_keep(self, agent: Agent) -> Tensor:
+        """Sample one receiver-level communication state for this observation."""
+        if self.comms_dropout > 0:
+            keep = (
+                torch.rand(self.world.batch_dim, 1, device=agent.state.pos.device)
+                > self.comms_dropout
+            )
+        else:
+            keep = torch.ones(
+                self.world.batch_dim, 1, dtype=torch.bool, device=agent.state.pos.device,
+            )
+        agent.comms_up = keep[:, 0]
+        return keep
+
+    def _survivor_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
+        """Encode locally known survivor candidates as [known, dx, dy, confirmed]."""
+        agent_idx = self.world.agents.index(agent)
+        local_known = self.known_survivors_by_agent[:, agent_idx]
+        local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
+
+        team_known = self.known_survivors_by_agent.any(dim=1)
+        team_confirmed = self.confirmed_survivors_by_agent.any(dim=1)
+        connected = comms_keep.expand_as(local_known)
+        local_known = torch.where(connected, team_known, local_known)
+        local_confirmed = torch.where(connected, team_confirmed, local_confirmed)
+
+        self.known_survivors_by_agent[:, agent_idx] = local_known
+        self.confirmed_survivors_by_agent[:, agent_idx] = local_confirmed
+
+        survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
+        relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
+        relative_pos = relative_pos * local_known.unsqueeze(-1).float()
+        features = torch.cat(
+            [
+                local_known.unsqueeze(-1).float(),
+                relative_pos,
+                local_confirmed.unsqueeze(-1).float(),
+            ],
+            dim=-1,
+        )
+        return features.flatten(start_dim=1)
 
     def _local_fire_density(self, agent: Agent) -> Tensor:
         pos = agent.state.pos
@@ -1975,7 +2209,7 @@ class WildfireSearchScenario(BaseScenario):
             state[:, 1] = self.drone_altitude_quality[:, drone_idx]
         return state
 
-    def _neighbor_observations(self, agent: Agent) -> Tensor:
+    def _neighbor_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
         deltas = []
         for other in self.world.agents:
             if other is agent:
@@ -1984,13 +2218,7 @@ class WildfireSearchScenario(BaseScenario):
         if not deltas:
             return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
         rel = torch.cat(deltas, dim=-1)
-        if self.comms_dropout > 0:
-            keep = (torch.rand_like(rel[..., :1]) > self.comms_dropout).float()
-            agent.comms_up = keep[..., 0].bool()
-            rel = rel * keep
-        else:
-            agent.comms_up = torch.ones(self.world.batch_dim, dtype=torch.bool, device=rel.device)
-        return rel
+        return rel * comms_keep.float()
 
     # ------------------------------------------------------------------
     # Done
@@ -2017,6 +2245,22 @@ class WildfireSearchScenario(BaseScenario):
         return {
             "n_found":   self.found_survivors.sum(dim=1).float(),
             "n_scouted": self.scouted_survivors.sum(dim=1).float(),
+            "mission/new_scouts": self.metric_new_scouts,
+            "mission/new_confirmations": self.metric_new_confirmations,
+            "mission/n_scouted": self.scouted_survivors.sum(dim=1).float(),
+            "mission/n_confirmed": self.found_survivors.sum(dim=1).float(),
+            "mission/full_success": self.metric_full_success,
+            "reward/team": self.metric_reward_team,
+            "reward/drone_scout": self.metric_reward_drone_scout,
+            "reward/drone_progress": self.metric_reward_drone_progress,
+            "reward/ugv_progress": self.metric_reward_ugv_progress,
+            "reward/ugv_approach": self.metric_reward_ugv_approach,
+            "reward/ground_confirm": self.metric_reward_ground_confirm,
+            "reward/coverage": self.metric_reward_coverage,
+            "cost/ugv_fire_exposure": self.metric_cost_ugv_fire_exposure,
+            "cost/ugv_travel": self.metric_cost_ugv_travel,
+            "cost/drone_energy": self.metric_cost_drone_energy,
+            "cost/drone_climb": self.metric_cost_drone_climb,
             "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
             "n_burned":  self.burned_grid.flatten(1).sum(dim=1).float(),
             "affected_fraction": self.burned_grid.float().flatten(1).mean(dim=1),

@@ -1,0 +1,202 @@
+"""
+Diagnose whether a HAPPO UGV actor moves toward a known survivor.
+
+This is intentionally narrower than full mission evaluation. It is meant for
+the UGV-known-survivor diagnostic task: one ground robot, one survivor already
+scouted/known at reset, and no fire.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+import vmas
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agents.happo_checkpoint import load_training_manifest
+from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+from envs.wildfire_search import WildfireSearchScenario
+
+
+def _checkpoint_path(path: str | None) -> Path:
+    return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
+
+
+def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
+    manifest = load_training_manifest(checkpoint_dir)
+    scenario_kwargs = {}
+    if manifest is not None:
+        scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
+
+    scenario_kwargs.update({
+        "max_steps": args.steps,
+        "n_drones": 0,
+        "n_ground": 1,
+        "n_survivors": 1,
+        "known_survivors_at_reset": True,
+        "disable_fire": True,
+        "comms_dropout": 0.0,
+    })
+    if args.terrain_cache_path:
+        scenario_kwargs["terrain_source"] = "real"
+        scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
+    if args.ground_min_confirm_radius_m is not None:
+        scenario_kwargs.pop("ground_confirm_min", None)
+        scenario_kwargs["ground_confirm_min_m"] = max(float(args.ground_min_confirm_radius_m), 0.0)
+    return scenario_kwargs
+
+
+def _distance_m(scenario: WildfireSearchScenario, ground_pos: torch.Tensor, survivor_pos: torch.Tensor) -> float:
+    dist_sim = torch.linalg.norm(ground_pos - survivor_pos, dim=-1)
+    scale = float(scenario.terrain_sim_units_per_meter[0])
+    return float(dist_sim[0] / scale) if scale > 1e-9 else float(dist_sim[0])
+
+
+def _action_alignment(action: torch.Tensor, ground_pos: torch.Tensor, survivor_pos: torch.Tensor) -> float | None:
+    target = survivor_pos - ground_pos
+    target_norm = torch.linalg.norm(target, dim=-1, keepdim=True).clamp_min(1e-9)
+    action_norm = torch.linalg.norm(action, dim=-1, keepdim=True)
+    if float(action_norm[0]) <= 1e-9:
+        return None
+    value = (action / action_norm.clamp_min(1e-9) * target / target_norm).sum(dim=-1)
+    return float(value[0])
+
+
+def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, deterministic: bool) -> dict:
+    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
+    env = vmas.make_env(
+        scenario=WildfireSearchScenario(),
+        num_envs=1,
+        device="cpu",
+        continuous_actions=True,
+        seed=seed,
+        **copy.deepcopy(scenario_kwargs),
+    )
+    env.reset()
+    policy.reset()
+    scenario = env.scenario
+    ground = env.agents[0]
+    survivor = scenario._survivors[0]
+
+    initial_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+    min_distance = initial_distance
+    alignments: list[float] = []
+
+    for _ in range(scenario_kwargs["max_steps"]):
+        actions = policy(env)
+        alignment = _action_alignment(actions[0], ground.state.pos, survivor.state.pos)
+        if alignment is not None:
+            alignments.append(alignment)
+        env.step(actions)
+        min_distance = min(min_distance, _distance_m(scenario, ground.state.pos, survivor.state.pos))
+        if bool(scenario.found_survivors[0, 0]):
+            break
+
+    final_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+    return {
+        "seed": seed,
+        "confirmed": float(scenario.found_survivors[0].sum().item()),
+        "full_success": float(bool(scenario.found_survivors[0].all())),
+        "initial_distance_m": initial_distance,
+        "final_distance_m": final_distance,
+        "min_distance_m": min_distance,
+        "mean_action_target_alignment": float(np.mean(alignments)) if alignments else 0.0,
+        "frac_action_toward_target": float(np.mean([a > 0.0 for a in alignments])) if alignments else 0.0,
+    }
+
+
+def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tuple[str, np.ndarray, float | None]]:
+    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=True)
+    env = vmas.make_env(
+        scenario=WildfireSearchScenario(),
+        num_envs=1,
+        device="cpu",
+        continuous_actions=True,
+        seed=123,
+        **copy.deepcopy(scenario_kwargs),
+    )
+    env.reset()
+    scenario = env.scenario
+    ground = env.agents[0]
+    survivor = scenario._survivors[0]
+
+    probes = {
+        "east": (0.5, 0.0),
+        "west": (-0.5, 0.0),
+        "north": (0.0, 0.5),
+        "south": (0.0, -0.5),
+        "northeast": (0.35, 0.35),
+        "southwest": (-0.35, -0.35),
+    }
+    out = []
+    for name, offset in probes.items():
+        policy.reset()
+        ground.state.pos[:] = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+        survivor.state.pos[:] = torch.tensor([offset], dtype=torch.float32)
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        scenario.found_survivors[0, 0] = False
+        action = policy(env)[0]
+        alignment = _action_alignment(action, ground.state.pos, survivor.state.pos)
+        out.append((name, action[0].cpu().numpy(), alignment))
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint-dir", default=None, help="Path to a HARL models/ checkpoint directory.")
+    parser.add_argument("--terrain-cache-path", default=None)
+    parser.add_argument("--steps", type=int, default=150)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[101, 102, 103, 104, 105])
+    parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
+    parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
+    args = parser.parse_args()
+
+    checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
+    scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)
+    print(f"checkpoint: {checkpoint_dir}")
+    print(f"steps: {args.steps}")
+    print("-" * 72)
+
+    rows = [
+        run_rollout(checkpoint_dir, scenario_kwargs, seed, deterministic=not args.stochastic)
+        for seed in args.seeds
+    ]
+    for row in rows:
+        print(
+            f"seed {row['seed']:>4}: confirmed={row['confirmed']:.0f} "
+            f"success={row['full_success']:.0f} "
+            f"initial={row['initial_distance_m']:.1f}m "
+            f"final={row['final_distance_m']:.1f}m "
+            f"min={row['min_distance_m']:.1f}m "
+            f"align={row['mean_action_target_alignment']:.3f} "
+            f"toward={row['frac_action_toward_target']:.3f}"
+        )
+
+    print("-" * 72)
+    print(
+        "means: "
+        f"confirmed={np.mean([r['confirmed'] for r in rows]):.3f} "
+        f"success={np.mean([r['full_success'] for r in rows]):.3f} "
+        f"final={np.mean([r['final_distance_m'] for r in rows]):.1f}m "
+        f"min={np.mean([r['min_distance_m'] for r in rows]):.1f}m "
+        f"align={np.mean([r['mean_action_target_alignment'] for r in rows]):.3f} "
+        f"toward={np.mean([r['frac_action_toward_target'] for r in rows]):.3f}"
+    )
+
+    print("-" * 72)
+    for name, action, alignment in run_direction_probe(checkpoint_dir, scenario_kwargs):
+        align_text = "none" if alignment is None else f"{alignment: .3f}"
+        print(f"probe {name:>9}: action=[{action[0]: .3f}, {action[1]: .3f}] align={align_text}")
+
+
+if __name__ == "__main__":
+    main()

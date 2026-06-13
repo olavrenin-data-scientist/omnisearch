@@ -10,6 +10,8 @@ from agents.happo_checkpoint import (
     merge_training_scenario,
     save_training_manifest,
 )
+from agents.happo_policy import _scenario_kwargs_from_manifest
+from scripts.train_happo_smoke import build_args
 
 
 class HappoCheckpointTests(unittest.TestCase):
@@ -21,8 +23,8 @@ class HappoCheckpointTests(unittest.TestCase):
             runner = types.SimpleNamespace(save_dir=models_dir)
             env_args = {
                 "scenario_kwargs": {
-                    "drone_min_footprint": 0.15,
-                    "ground_confirm_min": 0.12,
+                    "drone_min_footprint_m": 75.0,
+                    "ground_confirm_min_m": 10.0,
                 },
             }
 
@@ -84,6 +86,53 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(merged["ground_confirm_min"], 0.12)
         self.assertEqual(merged["max_steps"], 1_000)
         self.assertEqual(merged["comms_dropout"], 0.8)
+
+    def test_policy_loader_extracts_manifest_scenario_kwargs(self):
+        manifest = {
+            "env_args": {
+                "scenario_kwargs": {
+                    "n_drones": 0,
+                    "n_ground": 1,
+                    "n_survivors": 1,
+                    "known_survivors_at_reset": True,
+                },
+            },
+        }
+
+        scenario_kwargs = _scenario_kwargs_from_manifest(manifest)
+
+        self.assertEqual(scenario_kwargs["n_drones"], 0)
+        self.assertEqual(scenario_kwargs["n_ground"], 1)
+        self.assertEqual(scenario_kwargs["n_survivors"], 1)
+        self.assertTrue(scenario_kwargs["known_survivors_at_reset"])
+
+    def test_ugv_known_survivor_diagnostic_build_args(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="diag",
+            terrain_cache_path="terrain.npz",
+            ground_confirm_min_m=20.0,
+            ugv_known_survivor_diagnostic=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 0)
+        self.assertEqual(scenario["n_ground"], 1)
+        self.assertEqual(scenario["n_survivors"], 1)
+        self.assertTrue(scenario["known_survivors_at_reset"])
+        self.assertTrue(scenario["disable_fire"])
+        self.assertEqual(scenario["comms_dropout"], 0.0)
+        self.assertEqual(scenario["r_drone_scout"], 0.0)
+        self.assertEqual(scenario["r_drone_shaping"], 0.0)
+        self.assertEqual(scenario["r_coverage"], 0.0)
+        self.assertEqual(scenario["r_fire_penalty"], 0.0)
+        self.assertEqual(scenario["r_ground_travel_cost"], 0.0)
+        self.assertEqual(scenario["r_ground_shaping"], 0.50)
+        self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
 
 
 if __name__ == "__main__":

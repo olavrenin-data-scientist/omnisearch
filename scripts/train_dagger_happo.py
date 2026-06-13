@@ -50,15 +50,24 @@ def main():
     p.add_argument("--max-samples", type=int, default=400_000, help="Cap aggregated dataset size per agent.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--terrain-cache-path", default="data/terrain_cache/malibu_creek_1km_128.npz")
-    p.add_argument("--drone-min-footprint", type=float, default=0.15)
-    p.add_argument("--ground-confirm-min", type=float, default=0.20)
+    p.add_argument("--drone-min-footprint-radius-m",
+                   dest="drone_min_footprint_radius_m", type=float, default=75.0,
+                   help="Minimum drone scout-footprint radius in meters.")
+    p.add_argument("--drone-min-footprint", dest="drone_min_footprint_radius_m",
+                   type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p.add_argument("--ground-min-confirm-radius-m",
+                   dest="ground_min_confirm_radius_m", type=float, default=10.0,
+                   help="Minimum ground confirmation radius in meters.")
+    p.add_argument("--ground-confirm-min", dest="ground_min_confirm_radius_m",
+                   type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
     p.add_argument("--out", default="results/dagger_happo")
     args = p.parse_args()
 
     sk = dict(n_drones=3, n_ground=2, fire_grid_size=args.fire_grid_size,
               terrain_source="real", terrain_cache_path=args.terrain_cache_path,
-              drone_min_footprint=args.drone_min_footprint, ground_confirm_min=args.ground_confirm_min)
+              drone_min_footprint_m=args.drone_min_footprint_radius_m,
+              ground_confirm_min_m=args.ground_min_confirm_radius_m)
 
     # Architecture + spaces from the init checkpoint's config.
     algo_args = json.load(open(Path(args.init) / "config.json"))["algo_args"]

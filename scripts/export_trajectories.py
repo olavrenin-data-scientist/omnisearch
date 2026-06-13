@@ -100,18 +100,34 @@ def main():
     p.add_argument("--terrain-cache-dir", default=str(ROOT / "data" / "terrain_cache"))
     p.add_argument("--terrain-cache-path", default=None)
     p.add_argument(
-        "--drone-min-footprint",
+        "--drone-min-footprint-radius-m",
+        dest="drone_min_footprint_radius_m",
         type=float,
         default=None,
-        help="Override the HAPPO checkpoint's drone footprint floor. "
-             "Use 0 to disable it for legacy checkpoints.",
+        help="Override the HAPPO checkpoint's drone footprint floor in meters. "
+             "Use 0 to disable it.",
+    )
+    p.add_argument(
+        "--drone-min-footprint",
+        dest="drone_min_footprint_radius_m",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--ground-min-confirm-radius-m",
+        dest="ground_min_confirm_radius_m",
+        type=float,
+        default=None,
+        help="Override the HAPPO checkpoint's ground confirmation floor in meters. "
+             "Use 0 to disable it.",
     )
     p.add_argument(
         "--ground-confirm-min",
+        dest="ground_min_confirm_radius_m",
         type=float,
-        default=None,
-        help="Override the HAPPO checkpoint's ground confirmation floor. "
-             "Use 0 to disable it for legacy checkpoints.",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     p.add_argument(
         "--drone-flight-levels-m",
@@ -300,10 +316,16 @@ def main():
     except (ImportError, FileNotFoundError):
         training_manifest = None
 
-    if args.drone_min_footprint is not None:
-        scenario_kwargs["drone_min_footprint"] = max(args.drone_min_footprint, 0.0)
-    if args.ground_confirm_min is not None:
-        scenario_kwargs["ground_confirm_min"] = max(args.ground_confirm_min, 0.0)
+    if args.drone_min_footprint_radius_m is not None:
+        scenario_kwargs.pop("drone_min_footprint", None)
+        scenario_kwargs["drone_min_footprint_m"] = max(
+            args.drone_min_footprint_radius_m, 0.0,
+        )
+    if args.ground_min_confirm_radius_m is not None:
+        scenario_kwargs.pop("ground_confirm_min", None)
+        scenario_kwargs["ground_confirm_min_m"] = max(
+            args.ground_min_confirm_radius_m, 0.0,
+        )
     cv_options = None
     if args.enable_cv:
         if scenario_kwargs.get("terrain_cache_path") is None:
