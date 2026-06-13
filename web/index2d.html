@@ -171,7 +171,7 @@ const COVERAGE_TEXTURE_SIZE = 1024;
 // or by trying a known list. We keep it simple: try a known list, fall
 // back to silent skip per missing file.
 // ---------------------------------------------------------------------
-const STRATEGY_NAMES = ['random_action', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'ant_colony', 'happo_trained'];
+const STRATEGY_NAMES = ['random_action', 'random_walk', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'ant_colony', 'happo_trained'];
 
 async function loadTrajectory(name) {
   const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
@@ -1348,7 +1348,7 @@ function MetricsPanel({ meta, frame, frames, selectedSurvivor, setSelectedSurviv
 }
 
 function App() {
-  const [strategy, setStrategy] = useState(STRATEGY_NAMES[2]); // nearest_candidate
+  const [strategy, setStrategy] = useState('nearest_candidate');
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [selectedSurvivor, setSelectedSurvivor] = useState('');

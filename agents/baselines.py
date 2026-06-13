@@ -13,6 +13,7 @@ plan:
     Strategy              How drones decide        How ground robots decide
     --------------------  -----------------------  -------------------------
     RandomActionPolicy    random within range      random within range
+    RandomWalkPolicy      persistent random walk   persistent random walk
     LawnmowerPolicy       sweep a serpentine path  follow nearest scouted
     NearestCandidate      random walk              go to nearest survivor
     HighestConfidence     bias toward unscouted    go to most-recently scouted
@@ -60,6 +61,8 @@ DRONE_ARRIVAL_SLOWDOWN_M = 40.0
 DRONE_ARRIVAL_DAMPING = 0.65
 DRONE_CRUISE_ACTION = 0.95
 PHEROMONE_UNSEEN_STEP = -1
+RANDOM_WALK_PERSISTENCE_S = 20.0
+RANDOM_WALK_ACTION = 0.95
 
 
 def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
@@ -68,6 +71,23 @@ def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
     x = actions[:, X] * c - actions[:, Y] * s
     y = actions[:, X] * s + actions[:, Y] * c
     return torch.stack([x, y], dim=-1)
+
+
+def _reflect_random_walk_directions(
+    positions: torch.Tensor,
+    directions: torch.Tensor,
+    step_distance: torch.Tensor,
+    x_bound: float,
+    y_bound: float,
+) -> torch.Tensor:
+    """Reflect headings whose next nominal step would cross the world edge."""
+    proposed = positions + directions * step_distance
+    reflected = directions.clone()
+    hit_x = (proposed[..., X] < -x_bound) | (proposed[..., X] > x_bound)
+    hit_y = (proposed[..., Y] < -y_bound) | (proposed[..., Y] > y_bound)
+    reflected[..., X] = torch.where(hit_x, -reflected[..., X], reflected[..., X])
+    reflected[..., Y] = torch.where(hit_y, -reflected[..., Y], reflected[..., Y])
+    return reflected
 
 
 def _grid_to_world(sc: WildfireSearchScenario, gx: int, gy: int, device: torch.device) -> torch.Tensor:
@@ -376,6 +396,132 @@ class RandomActionPolicy:
 
     def __call__(self, env) -> List[torch.Tensor]:
         return env.get_random_actions()
+
+
+# ----------------------------------------------------------------------
+# Persistent random walk
+# ----------------------------------------------------------------------
+class RandomWalkPolicy:
+    """Uninformed correlated search with boundary and terrain reactions.
+
+    Each agent retains a heading whose angle follows rotational diffusion.
+    The policy does not inspect survivors, fire, coverage, or communication.
+    """
+
+    def __init__(self, env, persistence_s: float = RANDOM_WALK_PERSISTENCE_S):
+        if persistence_s <= 0.0:
+            raise ValueError("persistence_s must be positive")
+        self.scenario: WildfireSearchScenario = env.scenario
+        self.persistence_s = float(persistence_s)
+        sc = self.scenario
+        self.headings = torch.empty(
+            sc.world.batch_dim,
+            len(sc.world.agents),
+            device=sc.fire_grid.device,
+        )
+        self.previous_step_count = sc.step_count.clone()
+        self._randomize_environments(torch.ones_like(sc.step_count, dtype=torch.bool))
+
+    def __call__(self, env) -> List[torch.Tensor]:
+        del env
+        sc = self.scenario
+        reset = sc.step_count < self.previous_step_count
+        self._randomize_environments(reset)
+
+        angular_std = math.sqrt(2.0 * float(sc.sim_step_seconds) / self.persistence_s)
+        self.headings.add_(angular_std * torch.randn_like(self.headings))
+        directions = torch.stack(
+            (self.headings.cos(), self.headings.sin()),
+            dim=-1,
+        )
+
+        positions = torch.stack(
+            [agent.state.pos for agent in sc.world.agents],
+            dim=1,
+        )
+        sim_per_meter = sc.terrain_sim_units_per_meter.view(-1, 1, 1)
+        distances_m = torch.tensor(
+            [
+                sc.drone_speed_mps * sc.sim_step_seconds
+                if idx < sc.n_drones
+                else sc.ground_speed_mps * sc.sim_step_seconds
+                for idx in range(len(sc.world.agents))
+            ],
+            dtype=positions.dtype,
+            device=positions.device,
+        ).view(1, -1, 1)
+        step_distance = sim_per_meter * distances_m
+        x_bound = max(float(sc.x_semidim) - float(sc.agent_radius), 0.0)
+        y_bound = max(float(sc.y_semidim) - float(sc.agent_radius), 0.0)
+        directions = _reflect_random_walk_directions(
+            positions,
+            directions,
+            step_distance,
+            x_bound,
+            y_bound,
+        )
+        self.headings.copy_(torch.atan2(directions[..., Y], directions[..., X]))
+
+        actions = [
+            directions[:, idx] * RANDOM_WALK_ACTION
+            for idx in range(sc.n_drones)
+        ]
+        actions.extend(self._ground_actions(directions, step_distance))
+        self.previous_step_count = sc.step_count.clone()
+        return actions
+
+    def _randomize_environments(self, mask: torch.Tensor) -> None:
+        count = int(mask.sum().item())
+        if count:
+            self.headings[mask] = 2.0 * math.pi * torch.rand(
+                count,
+                self.headings.shape[1],
+                device=self.headings.device,
+            )
+
+    def _ground_actions(
+        self,
+        directions: torch.Tensor,
+        step_distance: torch.Tensor,
+    ) -> List[torch.Tensor]:
+        sc = self.scenario
+        actions: List[torch.Tensor] = []
+        for ground_idx in range(sc.n_ground):
+            agent_idx = sc.n_drones + ground_idx
+            position = sc.world.agents[agent_idx].state.pos
+            base = directions[:, agent_idx]
+            candidates = torch.stack(
+                [_rotate(base, angle) for angle in GROUND_RECOVERY_ANGLES],
+                dim=1,
+            )
+            endpoints = position.unsqueeze(1) + (
+                candidates * step_distance[:, agent_idx].unsqueeze(1)
+            )
+            in_bounds = (
+                (endpoints[..., X] >= -sc.x_semidim + sc.agent_radius)
+                & (endpoints[..., X] <= sc.x_semidim - sc.agent_radius)
+                & (endpoints[..., Y] >= -sc.y_semidim + sc.agent_radius)
+                & (endpoints[..., Y] <= sc.y_semidim - sc.agent_radius)
+            )
+            starts = position.unsqueeze(1).expand_as(endpoints)
+            safe = in_bounds & sc._path_is_traversable(starts, endpoints)
+            choice = safe.to(torch.int64).argmax(dim=1)
+            selected = candidates.gather(
+                1, choice.view(-1, 1, 1).expand(-1, 1, 2),
+            ).squeeze(1)
+            any_safe = safe.any(dim=1)
+            action = torch.where(
+                any_safe.unsqueeze(-1),
+                selected * RANDOM_WALK_ACTION,
+                torch.zeros_like(selected),
+            )
+            reverse = torch.atan2(-base[:, Y], -base[:, X])
+            selected_heading = torch.atan2(selected[:, Y], selected[:, X])
+            self.headings[:, agent_idx] = torch.where(
+                any_safe, selected_heading, reverse,
+            )
+            actions.append(action)
+        return actions
 
 
 # ----------------------------------------------------------------------
@@ -1059,6 +1205,7 @@ class AntColonyPolicy:
 # ----------------------------------------------------------------------
 BASELINES: dict[str, Callable] = {
     "random_action":       RandomActionPolicy,
+    "random_walk":         RandomWalkPolicy,
     "lawnmower":           LawnmowerPolicy,
     "nearest_candidate":   NearestCandidatePolicy,
     "highest_confidence":  HighestConfidencePolicy,

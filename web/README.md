@@ -57,7 +57,8 @@ steps 3–5 (export → serve → refresh).
   - **Light-green dots** — survivors confirmed by a ground robot
   - **Orange tiles** — burning fire cells (cellular-automata spread)
 - Strategy selector in the header — switch between `random_action` /
-  `lawnmower` / `nearest_candidate` / `highest_confidence` / `ant_colony`
+  `random_walk` / `lawnmower` / `nearest_candidate` /
+  `highest_confidence` / `ant_colony`
 - Playback controls — play / pause, scrubber, speed (1× → 8×)
 - Right panel — final mission metrics for the loaded run
 
