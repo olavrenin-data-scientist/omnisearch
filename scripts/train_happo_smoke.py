@@ -121,6 +121,7 @@ def build_args(
     fire_grid_size: int = 128,
     reward_search: bool = False,
     recurrent: bool = False,
+    model_dir: str | None = None,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -143,7 +144,7 @@ def build_args(
             "use_valuenorm":          True,
             "use_linear_lr_decay":    False,
             "use_proper_time_limits": True,
-            "model_dir":              None,
+            "model_dir":              model_dir,
         },
         "eval": {
             "use_eval":               False,
@@ -265,6 +266,8 @@ def main():
     p.add_argument("--ground-confirm-min", type=float, default=0.0,
                    help="Floor on ground confirm range (sim units). >0 gives ground robots a learnable confirm reward (e.g. 0.12).")
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument("--model-dir", default=None,
+                   help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--reward-search", action="store_true",
@@ -306,6 +309,7 @@ def main():
         fire_grid_size = args.fire_grid_size,
         reward_search = args.reward_search,
         recurrent = args.recurrent,
+        model_dir = args.model_dir,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
