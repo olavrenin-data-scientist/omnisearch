@@ -93,6 +93,7 @@ This produces one JSON file per strategy in `web/trajectories/`:
 | Strategy | Description |
 |---|---|
 | `random_action.json` | All agents take independent random actions |
+| `random_walk.json` | All agents follow persistent random headings with reactive boundary and terrain avoidance |
 | `lawnmower.json` | Drones sweep in terrain-aware lanes; ground robots head to nearest scouted survivor |
 | `nearest_candidate.json` | Drones random walk; ground robots go to nearest scouted survivor |
 | `highest_confidence.json` | Drones sweep; ground robots prioritise most recently scouted survivor |

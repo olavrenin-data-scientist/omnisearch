@@ -758,7 +758,8 @@ reliable).
 
 ```python
 BASELINES = {
-    "random_action": RandomActionPolicy, "lawnmower": LawnmowerPolicy,
+    "random_action": RandomActionPolicy, "random_walk": RandomWalkPolicy,
+    "lawnmower": LawnmowerPolicy,
     "nearest_candidate": NearestCandidatePolicy,
     "highest_confidence": HighestConfidencePolicy,
 }
@@ -1365,7 +1366,7 @@ const h = React.createElement;
 transpiler, the whole UI is written as `h(tag, props, ...children)` calls.
 
 ```js
-const STRATEGY_NAMES = ['random_action', 'lawnmower', 'nearest_candidate',
+const STRATEGY_NAMES = ['random_action', 'random_walk', 'lawnmower', 'nearest_candidate',
                         'highest_confidence', 'happo_trained'];
 
 async function loadTrajectory(name) {
