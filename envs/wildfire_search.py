@@ -367,6 +367,13 @@ class WildfireSearchScenario(BaseScenario):
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
         self.r_coverage = kwargs.pop("r_coverage", 0.0)
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
+        # Dense directed-approach reward for ground robots: a triangular bonus
+        # that grows as a robot nears a scouted-but-unconfirmed survivor and
+        # peaks at the survivor. Default 0.0 = off. Potential-based ground
+        # shaping only rewards distance *change*, leaving robots stalled just
+        # outside confirm range; this pulls them all the way in to confirm.
+        self.r_ground_approach = kwargs.pop("r_ground_approach", 0.0)
+        self.ground_approach_radius = max(float(kwargs.pop("ground_approach_radius", 0.4)), 1e-6)
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -1382,6 +1389,12 @@ class WildfireSearchScenario(BaseScenario):
             torch.zeros_like(curr_ground_dist),
         )
         self.prev_ground_dist = curr_ground_dist
+        # Dense triangular approach bonus: peaks at the survivor, 0 beyond the
+        # radius. curr_ground_dist is +inf when nothing is scouted -> bonus 0.
+        ground_approach = (
+            (1.0 - curr_ground_dist / self.ground_approach_radius).clamp(min=0.0)
+            * self.r_ground_approach
+        )
 
         team_reward = (
             newly_found.float().sum(dim=1) * self.r_found_survivor
@@ -1420,6 +1433,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + ground_in_fire[:, g].float() * self.r_fire_penalty
                 r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
                 r = r + ground_shaping[:, g]
+                r = r + ground_approach[:, g]
             agent.scenario_reward = r
 
     def _drone_survivor_detections(

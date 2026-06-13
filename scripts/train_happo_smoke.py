@@ -221,7 +221,9 @@ def build_args(
             "r_drone_scout":       2.0,   # was 0.3
             "r_ground_confirm":    4.0,   # was 0.5
             "r_drone_shaping":     0.30,  # was 0.05  (dense pull toward survivors)
-            "r_ground_shaping":    0.30,  # was 0.10
+            "r_ground_shaping":    0.50,  # was 0.10  (stronger directed pull)
+            "r_ground_approach":   0.10,  # dense bonus peaking ON a scouted survivor
+            "ground_approach_radius": 0.4,
             "r_fire_penalty":     -0.20,  # was -1.0  (no longer dominates)
             "r_ground_travel_cost": -0.01,  # was -0.05
             "r_drone_climb_cost":  -0.005,  # was -0.02
