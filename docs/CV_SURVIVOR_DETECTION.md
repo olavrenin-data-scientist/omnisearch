@@ -56,6 +56,12 @@ The detection backend is selectable:
 
 ## Results
 
+> ⚠️ The table below is on **synthetic (procedural) backgrounds**. These numbers
+> are good but **did not transfer to real NAIP** — see "The procedural-background
+> trap (and the NAIP fix)" below for the deployment-accurate eval (recall 0.95,
+> ~1.15 false positives/crop with the NAIP-trained model, which the adapter now
+> auto-prefers).
+
 Fine-tuned **YOLOv8s** (balanced fire data), robust eval — mean over 10 random
 assets/positions per scenario (not a single lucky image):
 
@@ -144,9 +150,10 @@ detector on the same imagery it will be deployed on.** The adapter auto-prefers
 - **No real people-in-fire imagery exists** in the dataset. "A survivor in fire"
   is a real drone-view person with a *synthetic* flame/smoke layer drawn over
   them — it does not reproduce soot, real smoke turbulence, or thermal effects.
-- **Training backgrounds are procedural,** not NAIP, so the fine-tuned model may
-  transfer imperfectly to real terrain. The right next step is to generate
-  training composites on real NAIP crops.
+- **NAIP training is in (`--naip-dir`), but only one ~1 km area was available**
+  (4 tiles), so the false-positive eval is partly in-distribution. On an unseen
+  region false positives would be higher; the next step is NAIP training data
+  spanning many regions.
 - **Visible-light only.** Real SAR drones see people through smoke with
   **thermal/IR**, not RGB. A thermal channel would be the largest real-world
   robustness gain but needs thermal survivor data we do not have.
@@ -163,8 +170,8 @@ python scripts/train_survivor_detector.py --epochs 30 --n-train 400 --fire-frac 
 python scripts/export_trajectories.py --enable-cv --cv-detector yolo \
   --terrain-cache-path data/terrain_cache/<cache>.npz --cv-image-size 1024
 
-# Visual + numeric check under fire and smoke:
-python scripts/verify_survivor_cv.py --model models/survivor_yolov8n.pt
+# Visual + numeric check under fire and smoke (uses the NAIP-trained model):
+python scripts/verify_survivor_cv.py --model models/survivor_naip_yolov8s.pt
 ```
 
 Generated training data (`data/cv_train/`) and weights (`models/`, `*.pt`) are
