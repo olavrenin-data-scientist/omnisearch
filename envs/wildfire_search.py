@@ -453,6 +453,12 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.n_survivors, dtype=torch.bool, device=device,
         )
         self.scouted_survivors = torch.zeros_like(self.found_survivors)
+        self.step_drone_detections = torch.zeros(
+            batch_dim, self.n_drones, self.n_survivors, dtype=torch.bool, device=device,
+        )
+        self.step_ground_confirmations = torch.zeros(
+            batch_dim, self.n_ground, self.n_survivors, dtype=torch.bool, device=device,
+        )
         self.coverage_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
         )
@@ -575,6 +581,8 @@ class WildfireSearchScenario(BaseScenario):
         if env_index is None:
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
+            self.step_drone_detections.zero_()
+            self.step_ground_confirmations.zero_()
             self.coverage_grid.zero_()
             self.fire_grid.zero_()
             self.burned_grid.zero_()
@@ -590,6 +598,8 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
+            self.step_drone_detections[env_index] = False
+            self.step_ground_confirmations[env_index] = False
             self.coverage_grid[env_index] = False
             self.fire_grid[env_index] = False
             self.burned_grid[env_index] = False
@@ -1347,6 +1357,8 @@ class WildfireSearchScenario(BaseScenario):
         confirm_range = self.detection_range_by_env.view(-1, 1, 1)
         within_confirm      = dists < confirm_range
         confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
+        self.step_drone_detections = drone_seen
+        self.step_ground_confirmations = within_confirm[:, self.n_drones:, :]
 
         newly_scouted = seen_by_drone       & ~self.scouted_survivors & ~self.found_survivors
         newly_found   = confirmed_by_ground & ~self.found_survivors

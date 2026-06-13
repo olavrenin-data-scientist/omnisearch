@@ -16,6 +16,7 @@ plan:
     LawnmowerPolicy       sweep a serpentine path  follow nearest scouted
     NearestCandidate      random walk              go to nearest survivor
     HighestConfidence     bias toward unscouted    go to most-recently scouted
+    AntColony             avoid fresh pheromone    follow locally known survivors
 
 The "candidate" abstraction in the plan (uncertain detections with
 confidence scores) is currently a stretch — for the MVP we use
@@ -58,6 +59,7 @@ DRONE_WAYPOINT_TOLERANCE_M = 5.0
 DRONE_ARRIVAL_SLOWDOWN_M = 40.0
 DRONE_ARRIVAL_DAMPING = 0.65
 DRONE_CRUISE_ACTION = 0.95
+PHEROMONE_UNSEEN_STEP = -1
 
 
 def _rotate(actions: torch.Tensor, angle: float) -> torch.Tensor:
@@ -296,6 +298,24 @@ def _drone_arrival_action(
     desired = direction * (DRONE_CRUISE_ACTION * proportional)
     brake = velocity / max(float(max_speed), 1e-6)
     return (desired - DRONE_ARRIVAL_DAMPING * brake).clamp(-1.0, 1.0)
+
+
+def _merge_local_timestamp_maps(
+    local_maps: torch.Tensor,
+    comms_up: torch.Tensor,
+) -> torch.Tensor:
+    """Merge team timestamps into agents that can currently receive comms."""
+    team_latest = local_maps.amax(dim=1, keepdim=True)
+    return torch.where(comms_up[:, :, None, None], team_latest, local_maps)
+
+
+def _merge_local_bool_knowledge(
+    local_knowledge: torch.Tensor,
+    comms_up: torch.Tensor,
+) -> torch.Tensor:
+    """Merge monotonic event knowledge into agents with a live receiver."""
+    team_knowledge = local_knowledge.any(dim=1, keepdim=True)
+    return torch.where(comms_up[:, :, None], team_knowledge, local_knowledge)
 
 
 def _coordinated_ground_actions(
@@ -732,6 +752,309 @@ class HighestConfidencePolicy:
 
 
 # ----------------------------------------------------------------------
+# Ant-colony-inspired distributed recency maps
+# ----------------------------------------------------------------------
+class AntColonyPolicy:
+    """Distributed stigmergic coverage with dropout-sensitive local memory.
+
+    Each drone stores the last observation step for every map cell and
+    deposits timestamps over its physical camera footprint. A receiver with
+    live communications merges the newest timestamps and survivor events from
+    the team; during dropout it retains that stale map and adds only its own
+    observations. Drones move toward the nearest least-recently-seen searchable
+    cell. UGVs route to survivors known in their own local event memory.
+    """
+
+    def __init__(self, env):
+        self.scenario: WildfireSearchScenario = env.scenario
+        sc = self.scenario
+        B = sc.world.batch_dim
+        A = len(sc.world.agents)
+        G = sc.fire_grid_size
+        device = sc.fire_grid.device
+
+        self.last_seen = torch.full(
+            (B, sc.n_drones, G, G),
+            PHEROMONE_UNSEEN_STEP,
+            dtype=torch.long,
+            device=device,
+        )
+        self.known_survivors = torch.zeros(
+            B, A, sc.n_survivors, dtype=torch.bool, device=device,
+        )
+        self.known_confirmed = torch.zeros_like(self.known_survivors)
+        self.drone_targets = torch.full(
+            (B, sc.n_drones, 2), -1, dtype=torch.long, device=device,
+        )
+        self.target_assignment_step = torch.full(
+            (B, sc.n_drones), -1, dtype=torch.long, device=device,
+        )
+        self.previous_step_count = sc.step_count.clone()
+        self.ground_route_cache = [dict() for _ in range(sc.n_ground)]
+
+        cell_w = 2.0 * float(sc.x_semidim) / G
+        cell_h = 2.0 * float(sc.y_semidim) / G
+        self.cell_w = cell_w
+        self.cell_h = cell_h
+        self.grid_xs = torch.linspace(
+            -float(sc.x_semidim) + cell_w / 2.0,
+            float(sc.x_semidim) - cell_w / 2.0,
+            G,
+            device=device,
+        )
+        self.grid_ys = torch.linspace(
+            -float(sc.y_semidim) + cell_h / 2.0,
+            float(sc.y_semidim) - cell_h / 2.0,
+            G,
+            device=device,
+        )
+
+    def __call__(self, env) -> List[torch.Tensor]:
+        del env
+        self._reset_finished_environments()
+        self._deposit_local_observations()
+        self._merge_connected_memories()
+
+        actions = self._drone_actions()
+        actions.extend(self._ground_actions())
+        self.previous_step_count = self.scenario.step_count.clone()
+        return actions
+
+    def _reset_finished_environments(self) -> None:
+        sc = self.scenario
+        reset = sc.step_count < self.previous_step_count
+        for b in reset.nonzero(as_tuple=False).flatten().tolist():
+            self.last_seen[b].fill_(PHEROMONE_UNSEEN_STEP)
+            self.known_survivors[b].zero_()
+            self.known_confirmed[b].zero_()
+            self.drone_targets[b].fill_(-1)
+            self.target_assignment_step[b].fill_(-1)
+            for cache in self.ground_route_cache:
+                cache.pop(int(b), None)
+
+    def _deposit_local_observations(self) -> None:
+        sc = self.scenario
+        if sc.n_drones > 0:
+            drone_pos = torch.stack(
+                [agent.state.pos for agent in sc.world.agents[:sc.n_drones]],
+                dim=1,
+            )
+            dx = (
+                (self.grid_xs.view(1, 1, 1, -1) - drone_pos[..., X].view(
+                    sc.world.batch_dim, sc.n_drones, 1, 1,
+                )).abs()
+                - self.cell_w / 2.0
+            ).clamp_min(0.0)
+            dy = (
+                (self.grid_ys.view(1, 1, -1, 1) - drone_pos[..., Y].view(
+                    sc.world.batch_dim, sc.n_drones, 1, 1,
+                )).abs()
+                - self.cell_h / 2.0
+            ).clamp_min(0.0)
+            footprint = sc._drone_camera_ranges().view(
+                sc.world.batch_dim, sc.n_drones, 1, 1,
+            )
+            observed = dx.square() + dy.square() <= footprint.square()
+            step = sc.step_count.view(-1, 1, 1, 1).expand_as(self.last_seen)
+            self.last_seen = torch.where(observed, step, self.last_seen)
+
+            detections = getattr(sc, "step_drone_detections", None)
+            if detections is not None:
+                self.known_survivors[:, :sc.n_drones] |= detections
+
+        confirmations = getattr(sc, "step_ground_confirmations", None)
+        if confirmations is not None and sc.n_ground > 0:
+            self.known_confirmed[:, sc.n_drones:] |= confirmations
+            self.known_survivors[:, sc.n_drones:] |= confirmations
+
+    def _communication_mask(self) -> torch.Tensor:
+        sc = self.scenario
+        flags = []
+        for agent in sc.world.agents:
+            comms_up = getattr(agent, "comms_up", None)
+            if comms_up is None:
+                comms_up = torch.ones(
+                    sc.world.batch_dim, dtype=torch.bool, device=sc.fire_grid.device,
+                )
+            flags.append(comms_up)
+        if not flags:
+            return torch.zeros(
+                sc.world.batch_dim, 0, dtype=torch.bool, device=sc.fire_grid.device,
+            )
+        return torch.stack(flags, dim=1)
+
+    def _merge_connected_memories(self) -> None:
+        sc = self.scenario
+        comms_up = self._communication_mask()
+        if sc.n_drones > 0:
+            self.last_seen = _merge_local_timestamp_maps(
+                self.last_seen,
+                comms_up[:, :sc.n_drones],
+            )
+        self.known_survivors = _merge_local_bool_knowledge(
+            self.known_survivors,
+            comms_up,
+        )
+        self.known_confirmed = _merge_local_bool_knowledge(
+            self.known_confirmed,
+            comms_up,
+        )
+
+    def _drone_actions(self) -> List[torch.Tensor]:
+        sc = self.scenario
+        B = sc.world.batch_dim
+        device = sc.fire_grid.device
+        searchable = (sc.land_cover_grid != LAND_WATER) & (sc.land_cover_grid != LAND_ROCK)
+        actions: List[torch.Tensor] = []
+
+        for drone_idx in range(sc.n_drones):
+            pos = sc.world.agents[drone_idx].state.pos
+            action = torch.zeros(B, 2, device=device)
+            for b in range(B):
+                target = self.drone_targets[b, drone_idx]
+                target_valid = bool((target >= 0).all().item())
+                if target_valid:
+                    tx, ty = int(target[X].item()), int(target[Y].item())
+                    target_world = _grid_to_world(sc, tx, ty, device)
+                    reached = float((target_world - pos[b]).norm().item()) <= max(
+                        0.5 * sc._drone_camera_ranges()[b, drone_idx].item(),
+                        max(self.cell_w, self.cell_h),
+                    )
+                    remotely_searched = (
+                        int(self.last_seen[b, drone_idx, ty, tx].item())
+                        > int(self.target_assignment_step[b, drone_idx].item())
+                    )
+                    target_valid = not reached and not remotely_searched
+
+                if not target_valid:
+                    tx, ty = self._select_drone_target(b, drone_idx, searchable[b], pos[b])
+                    self.drone_targets[b, drone_idx] = torch.tensor(
+                        [tx, ty], dtype=torch.long, device=device,
+                    )
+                    self.target_assignment_step[b, drone_idx] = sc.step_count[b]
+
+                tx = int(self.drone_targets[b, drone_idx, X].item())
+                ty = int(self.drone_targets[b, drone_idx, Y].item())
+                target_world = _grid_to_world(sc, tx, ty, device)
+                delta = target_world - pos[b]
+                distance = float(delta.norm().item())
+                direction = delta / delta.norm().clamp_min(1e-6)
+                slowdown = max(
+                    float(sc._drone_camera_ranges()[b, drone_idx].item()),
+                    max(self.cell_w, self.cell_h),
+                )
+                action[b] = _drone_arrival_action(
+                    direction=direction,
+                    distance=distance,
+                    velocity=sc.world.agents[drone_idx].state.vel[b],
+                    max_speed=float(sc.drone_max_speed_sim),
+                    slowdown_distance=slowdown,
+                )
+            actions.append(action)
+        return actions
+
+    def _select_drone_target(
+        self,
+        env_index: int,
+        drone_index: int,
+        searchable: torch.Tensor,
+        position: torch.Tensor,
+    ) -> tuple[int, int]:
+        timestamps = self.last_seen[env_index, drone_index]
+        available = searchable
+        if not bool(available.any().item()):
+            gx = int(
+                ((position[X] + self.scenario.x_semidim)
+                 / (2 * self.scenario.x_semidim)
+                 * self.scenario.fire_grid_size)
+                .clamp(0, self.scenario.fire_grid_size - 1)
+                .item()
+            )
+            gy = int(
+                ((position[Y] + self.scenario.y_semidim)
+                 / (2 * self.scenario.y_semidim)
+                 * self.scenario.fire_grid_size)
+                .clamp(0, self.scenario.fire_grid_size - 1)
+                .item()
+            )
+            return gx, gy
+
+        oldest = timestamps[available].min()
+        candidates = available & (timestamps == oldest)
+        distance_sq = (
+            (self.grid_xs.view(1, -1) - position[X]).square()
+            + (self.grid_ys.view(-1, 1) - position[Y]).square()
+        )
+        distance_sq = torch.where(
+            candidates,
+            distance_sq,
+            torch.full_like(distance_sq, float("inf")),
+        )
+        flat = int(distance_sq.argmin().item())
+        return flat % self.scenario.fire_grid_size, flat // self.scenario.fire_grid_size
+
+    def _ground_actions(self) -> List[torch.Tensor]:
+        sc = self.scenario
+        B = sc.world.batch_dim
+        device = sc.fire_grid.device
+        if sc.n_ground == 0:
+            return []
+
+        survivor_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
+        comms_up = self._communication_mask()
+        selected = torch.full(
+            (B, sc.n_ground), -1, dtype=torch.long, device=device,
+        )
+        actions: List[torch.Tensor] = []
+        batch_idx = torch.arange(B, device=device)
+
+        for gi in range(sc.n_ground):
+            agent_idx = sc.n_drones + gi
+            position = sc.world.agents[agent_idx].state.pos
+            available = (
+                self.known_survivors[:, agent_idx]
+                & ~self.known_confirmed[:, agent_idx]
+            )
+            for previous in range(gi):
+                mutually_connected = comms_up[:, agent_idx] & comms_up[:, sc.n_drones + previous]
+                previous_target = selected[:, previous]
+                valid_previous = mutually_connected & (previous_target >= 0)
+                if valid_previous.any():
+                    available[
+                        batch_idx[valid_previous],
+                        previous_target[valid_previous],
+                    ] = False
+
+            any_target = available.any(dim=-1)
+            distances = (survivor_pos - position.unsqueeze(1)).norm(dim=-1)
+            scores = torch.where(
+                available,
+                distances,
+                torch.full_like(distances, float("inf")),
+            )
+            target_idx = scores.argmin(dim=-1)
+            selected[:, gi] = torch.where(
+                any_target,
+                target_idx,
+                torch.full_like(target_idx, -1),
+            )
+            target_pos = survivor_pos.gather(
+                1, target_idx.view(B, 1, 1).expand(B, 1, 2),
+            ).squeeze(1)
+            waypoint = _route_ground_waypoints(
+                sc,
+                gi,
+                target_pos,
+                target_idx,
+                self.ground_route_cache,
+            )
+            hold = torch.zeros(B, 2, device=device)
+            move = _terrain_safe_ground_action(sc, gi, waypoint, hold)
+            actions.append(torch.where(any_target.unsqueeze(-1), move, hold))
+        return actions
+
+
+# ----------------------------------------------------------------------
 # Registry — for use from scripts/notebooks
 # ----------------------------------------------------------------------
 BASELINES: dict[str, Callable] = {
@@ -739,6 +1062,7 @@ BASELINES: dict[str, Callable] = {
     "lawnmower":           LawnmowerPolicy,
     "nearest_candidate":   NearestCandidatePolicy,
     "highest_confidence":  HighestConfidencePolicy,
+    "ant_colony":          AntColonyPolicy,
 }
 
 
