@@ -48,6 +48,11 @@ def _register_wildfire_with_harl():
     from harl.envs.env_wrappers import ShareDummyVecEnv, ShareSubprocVecEnv
     from harl.common.base_logger import BaseLogger
 
+    from agents.harl_metrics import (
+        accumulate_env_metrics,
+        init_env_metric_storage,
+        log_done_env_metrics,
+    )
     from agents.harl_env import WildfireHARLEnv
 
     def _wildfire_env_fn(rank: int, seed: int, env_args: dict):
@@ -101,6 +106,18 @@ def _register_wildfire_with_harl():
         def get_task_name(self):
             return "wildfire_search"
 
+        def init(self, episodes):
+            super().init(episodes)
+            init_env_metric_storage(self)
+
+        def per_step(self, data):
+            accumulate_env_metrics(self, data[4], data[3])
+            super().per_step(data)
+
+        def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
+            super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
+            log_done_env_metrics(self)
+
     harl_envs_pkg.LOGGER_REGISTRY["wildfire"] = WildfireLogger
 
 
@@ -116,12 +133,13 @@ def build_args(
     exp_name:       str,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
-    drone_min_footprint: float = 0.0,
-    ground_confirm_min: float = 0.0,
+    drone_min_footprint_m: float = 0.0,
+    ground_confirm_min_m: float = 0.0,
     fire_grid_size: int = 128,
     reward_search: bool = False,
     recurrent: bool = False,
     model_dir: str | None = None,
+    ugv_known_survivor_diagnostic: bool = False,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -203,10 +221,11 @@ def build_args(
         "max_steps":     episode_length,
         "n_drones":      3,
         "n_ground":      2,
+        "n_survivors":   5,
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
-        "drone_min_footprint": drone_min_footprint,
-        "ground_confirm_min": ground_confirm_min,
+        "drone_min_footprint_m": drone_min_footprint_m,
+        "ground_confirm_min_m": ground_confirm_min_m,
     }
     if terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -223,13 +242,33 @@ def build_args(
             "r_ground_confirm":    4.0,   # was 0.5
             "r_drone_shaping":     0.30,  # was 0.05  (dense pull toward survivors)
             "r_ground_shaping":    0.50,  # was 0.10  (stronger directed pull)
-            "r_ground_approach":   0.10,  # dense bonus peaking ON a scouted survivor
-            "ground_approach_radius": 0.4,
+            "r_ground_approach":   0.0,   # avoid double-counting with meter-normalized UGV progress
+            "ground_approach_radius_m": 25.0,
             "r_fire_penalty":     -0.20,  # was -1.0  (no longer dominates)
             "r_ground_travel_cost": -0.01,  # was -0.05
             "r_drone_climb_cost":  -0.005,  # was -0.02
             "r_time_penalty":     -0.0005,  # was -0.001
             "r_coverage":          5.0,    # max team bonus for covering the full map once
+        })
+    if ugv_known_survivor_diagnostic:
+        scenario_kwargs.update({
+            "n_drones": 0,
+            "n_ground": 1,
+            "n_survivors": 1,
+            "known_survivors_at_reset": True,
+            "disable_fire": True,
+            "comms_dropout": 0.0,
+            "r_found_survivor": 10.0,
+            "r_drone_scout": 0.0,
+            "r_ground_confirm": 4.0,
+            "r_drone_shaping": 0.0,
+            "r_ground_shaping": 0.50,
+            "r_ground_approach": 0.0,
+            "r_fire_penalty": 0.0,
+            "r_ground_travel_cost": 0.0,
+            "r_drone_climb_cost": 0.0,
+            "r_time_penalty": -0.0005,
+            "r_coverage": 0.0,
         })
     env_args = {
         "max_cycles":      episode_length,
@@ -260,11 +299,26 @@ def main():
     p.add_argument("--terrain-cache-path", default=None,
                    help="Train on this cached real terrain (recommended: match what you evaluate on, "
                         "e.g. data/terrain_cache/malibu_creek_1km_128.npz). Default uses the scenario default.")
-    p.add_argument("--drone-min-footprint", type=float, default=0.0,
-                   help="Floor on the drone scout footprint (sim units). >0 gives RL a learnable reward "
-                        "signal on large terrains by ensuring drones actually scout survivors (e.g. 0.15).")
-    p.add_argument("--ground-confirm-min", type=float, default=0.0,
-                   help="Floor on ground confirm range (sim units). >0 gives ground robots a learnable confirm reward (e.g. 0.12).")
+    p.add_argument(
+                   "--drone-min-footprint-radius-m",
+                   dest="drone_min_footprint_radius_m",
+                   type=float,
+                   default=0.0,
+                   help="Minimum drone scout-footprint radius in meters. "
+                        "The terrain scale converts it internally; 0 disables the floor.")
+    p.add_argument("--drone-min-footprint",
+                   dest="drone_min_footprint_radius_m",
+                   type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p.add_argument(
+                   "--ground-min-confirm-radius-m",
+                   dest="ground_min_confirm_radius_m",
+                   type=float,
+                   default=0.0,
+                   help="Minimum ground confirmation radius in meters. "
+                        "The terrain scale converts it internally; 0 disables the floor.")
+    p.add_argument("--ground-confirm-min",
+                   dest="ground_min_confirm_radius_m",
+                   type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
@@ -273,6 +327,8 @@ def main():
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
                         "to avoid the do-nothing degenerate policy.")
+    p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
+                   help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     args = p.parse_args()
 
     if args.research:
@@ -304,12 +360,13 @@ def main():
         entropy_coef   = args.entropy_coef,
         exp_name       = args.exp_name,
         terrain_cache_path = args.terrain_cache_path,
-        drone_min_footprint = args.drone_min_footprint,
-        ground_confirm_min = args.ground_confirm_min,
+        drone_min_footprint_m = args.drone_min_footprint_radius_m,
+        ground_confirm_min_m = args.ground_min_confirm_radius_m,
         fire_grid_size = args.fire_grid_size,
         reward_search = args.reward_search,
         recurrent = args.recurrent,
         model_dir = args.model_dir,
+        ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)

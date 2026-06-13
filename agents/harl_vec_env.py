@@ -146,7 +146,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
             a_i = np.clip(actions[:, i, :], -1.0, 1.0).astype(np.float32)
             action_list.append(torch.from_numpy(a_i))
 
-        obs_tensors, rew_tensors, dones_t, _ = self._env.step(action_list)
+        obs_tensors, rew_tensors, dones_t, raw_infos = self._env.step(action_list)
 
         obs       = self._stack_per_agent(obs_tensors)               # (N, A, obs_dim)
         share_obs = self._share_from_obs(obs)                        # (N, A, A*obs_dim)
@@ -164,7 +164,9 @@ class BatchedVMASVecEnv(ShareVecEnv):
         for i in range(self._num_envs):
             bad = bool(truncated[i] and done_per_env[i])
             for j in range(self.n_agents):
-                infos[i, j] = {"bad_transition": bad}
+                info = self._info_for_env_agent(raw_infos, i, j)
+                info["bad_transition"] = bad
+                infos[i, j] = info
 
         # Auto-reset any done envs and re-collect their observations
         done_idx = np.where(done_per_env)[0]
@@ -185,6 +187,26 @@ class BatchedVMASVecEnv(ShareVecEnv):
 
     def close_extras(self):
         pass
+
+    def _info_for_env_agent(self, raw_infos: Any, env_index: int, agent_id: int) -> Dict[str, Any]:
+        if not raw_infos:
+            return {}
+        raw = raw_infos[agent_id] if isinstance(raw_infos, list) else raw_infos
+        info: Dict[str, Any] = {}
+        for key, value in raw.items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach().cpu()
+                if value.ndim == 0:
+                    info[key] = float(value.item())
+                else:
+                    item = value[env_index]
+                    if item.numel() == 1:
+                        info[key] = float(item.reshape(-1)[0])
+                    else:
+                        info[key] = item.numpy()
+            else:
+                info[key] = value
+        return info
 
 
 # ----------------------------------------------------------------------

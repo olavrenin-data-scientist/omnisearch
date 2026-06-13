@@ -31,10 +31,24 @@ from agents.happo_checkpoint import load_training_manifest
 from agents.harl_runner import default_algo_args
 
 
+def _scenario_kwargs_from_manifest(manifest: Optional[dict]) -> dict:
+    if not manifest:
+        return {}
+    env_args = manifest.get("env_args", {})
+    scenario_kwargs = env_args.get("scenario_kwargs", {})
+    return copy.deepcopy(scenario_kwargs) if isinstance(scenario_kwargs, dict) else {}
+
+
 class HappoPolicy:
     """Trained HAPPO actor wrapped as a VMAS-style ``policy(env) -> actions``."""
 
-    def __init__(self, checkpoint_dir: Path, algo_args: dict, deterministic: bool = True):
+    def __init__(
+        self,
+        checkpoint_dir: Path,
+        algo_args: dict,
+        deterministic: bool = True,
+        scenario_kwargs: Optional[dict] = None,
+    ):
         from harl.algorithms.actors.happo import HAPPO
 
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -54,9 +68,14 @@ class HappoPolicy:
         # env to read them off (they're scenario-dependent).
         import vmas
         from envs.wildfire_search import WildfireSearchScenario
-        tmp = vmas.make_env(scenario=WildfireSearchScenario(),
-                            num_envs=1, device="cpu",
-                            continuous_actions=True, seed=0)
+        tmp = vmas.make_env(
+            scenario=WildfireSearchScenario(),
+            num_envs=1,
+            device="cpu",
+            continuous_actions=True,
+            seed=0,
+            **copy.deepcopy(scenario_kwargs or {}),
+        )
         tmp.reset()
         self.agent_names: List[str] = [a.name for a in tmp.agents]
         action_spaces: List[Box] = []
@@ -91,8 +110,9 @@ class HappoPolicy:
         algo_args: Optional[dict] = None,
         deterministic: bool = True,
     ) -> "HappoPolicy":
+        manifest = load_training_manifest(checkpoint_dir)
+        scenario_kwargs = _scenario_kwargs_from_manifest(manifest)
         if algo_args is None:
-            manifest = load_training_manifest(checkpoint_dir)
             if manifest is not None:
                 algo_args = manifest["algo_args"]
             else:
@@ -113,7 +133,7 @@ class HappoPolicy:
                         }
                     except (OSError, TypeError, ValueError):
                         pass
-        return cls(checkpoint_dir, algo_args, deterministic)
+        return cls(checkpoint_dir, algo_args, deterministic, scenario_kwargs=scenario_kwargs)
 
     # ------------------------------------------------------------------
     def reset(self) -> None:
