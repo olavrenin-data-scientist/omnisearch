@@ -12,7 +12,7 @@ plan:
 
     Strategy              How drones decide        How ground robots decide
     --------------------  -----------------------  -------------------------
-    RandomPolicy          random within range      random within range
+    RandomActionPolicy    random within range      random within range
     LawnmowerPolicy       sweep a serpentine path  follow nearest scouted
     NearestCandidate      random walk              go to nearest survivor
     HighestConfidence     bias toward unscouted    go to most-recently scouted
@@ -368,9 +368,9 @@ def _coordinated_ground_actions(
 
 
 # ----------------------------------------------------------------------
-# Random
+# Random action
 # ----------------------------------------------------------------------
-class RandomPolicy:
+class RandomActionPolicy:
     """All agents take random in-range actions. The reference 'do nothing
     smart' baseline."""
 
@@ -1058,7 +1058,7 @@ class AntColonyPolicy:
 # Registry — for use from scripts/notebooks
 # ----------------------------------------------------------------------
 BASELINES: dict[str, Callable] = {
-    "random":              RandomPolicy,
+    "random_action":       RandomActionPolicy,
     "lawnmower":           LawnmowerPolicy,
     "nearest_candidate":   NearestCandidatePolicy,
     "highest_confidence":  HighestConfidencePolicy,
@@ -1071,5 +1071,5 @@ def get_baseline(name: str, env) -> Callable:
     if name not in BASELINES:
         raise KeyError(f"Unknown baseline {name!r}. Available: {list(BASELINES)}")
     cls = BASELINES[name]
-    # RandomPolicy doesn't need env, others do
-    return cls(env) if cls is not RandomPolicy else cls()
+    # RandomActionPolicy doesn't need env, others do
+    return cls(env) if cls is not RandomActionPolicy else cls()

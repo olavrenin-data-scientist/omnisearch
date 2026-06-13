@@ -181,7 +181,7 @@ function cellNoise(gx, gy, seed = 0) {
 // ---------------------------------------------------------------------
 // Trajectory loading
 // ---------------------------------------------------------------------
-const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'ant_colony', 'happo_trained'];
+const STRATEGY_NAMES = ['random_action', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'ant_colony', 'happo_trained'];
 
 async function loadTrajectory(name) {
   const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
