@@ -73,7 +73,7 @@ Pure RL plateaus at recall ~0.20. To approach the heuristic, clone its behaviour
 | Behaviour cloning (feedforward), no RL | 0.74 | 0.30 | Clones the sweep well; ground-confirm precision doesn't transfer |
 | BC + RL fine-tune | 0.46 | 0.36 | RL erodes the cloned sweep |
 | **Recurrent BC (GRU, BPTT)** | **0.74** | **0.38** | **Best learned** — memory captures multi-step navigation |
-| DAgger (clone precision) | — | *in progress* | Re-label clone's own states with expert; fixes drift |
+| DAgger (clone precision, 8 iters) | 0.56 | 0.34 | Improves over feedforward BC (0.30); below recurrent BC |
 
 ---
 
