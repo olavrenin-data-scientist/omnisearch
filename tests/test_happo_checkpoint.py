@@ -119,6 +119,8 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_known_survivor_diagnostic=True,
             ugv_diagnostic_target_distance_m=80.0,
             local_map_patch_size=11,
+            slope_speed_weight=0.5,
+            land_cover_speeds=(1.0, 0.95, 0.8, 0.7, 0.0, 0.0),
         )
 
         scenario = env_args["scenario_kwargs"]
@@ -137,6 +139,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_ground_travel_cost"], 0.0)
         self.assertEqual(scenario["r_ground_shaping"], 0.50)
         self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
+        self.assertEqual(scenario["slope_speed_weight"], 0.5)
+        self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))
 
 
 if __name__ == "__main__":

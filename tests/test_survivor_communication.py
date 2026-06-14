@@ -52,6 +52,16 @@ class SurvivorCommunicationTests(unittest.TestCase):
             **params,
         )
 
+    def test_default_ground_speed_model_uses_spot_like_terrain_values(self):
+        env = self._diagnostic_env()
+        scenario = env.scenario
+
+        self.assertEqual(scenario.slope_speed_weight, 0.5)
+        self.assertTrue(torch.allclose(
+            scenario.land_cover_speed_values.cpu(),
+            torch.tensor([1.0, 0.95, 0.8, 0.7, 0.0, 0.0]),
+        ))
+
     def test_connected_ground_agent_receives_scouted_candidate(self):
         env = self._env()
         scenario = env.scenario
