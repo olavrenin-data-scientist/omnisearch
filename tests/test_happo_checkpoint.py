@@ -117,13 +117,17 @@ class HappoCheckpointTests(unittest.TestCase):
             terrain_cache_path="terrain.npz",
             ground_confirm_min_m=20.0,
             ugv_known_survivor_diagnostic=True,
+            ugv_diagnostic_target_distance_m=80.0,
+            local_map_patch_size=11,
         )
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["n_drones"], 0)
         self.assertEqual(scenario["n_ground"], 1)
         self.assertEqual(scenario["n_survivors"], 1)
+        self.assertEqual(scenario["local_map_patch_size"], 11)
         self.assertTrue(scenario["known_survivors_at_reset"])
+        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 80.0)
         self.assertTrue(scenario["disable_fire"])
         self.assertEqual(scenario["comms_dropout"], 0.0)
         self.assertEqual(scenario["r_drone_scout"], 0.0)

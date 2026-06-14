@@ -142,6 +142,33 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertTrue(bool(scenario.found_survivors[0, 0]))
         self.assertTrue(bool(scenario.step_ground_confirmations[0, 0, 0]))
 
+    def test_known_survivor_spawn_distance_places_candidate_near_ground(self):
+        env = self._diagnostic_env(
+            known_survivor_spawn_distance_m=80.0,
+            ground_confirm_min_m=20.0,
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
+
+        self.assertGreater(distance_m, 20.0)
+        self.assertLess(distance_m, 120.0)
+
+    def test_local_map_patch_size_expands_mobility_and_blocked_only(self):
+        env = self._diagnostic_env(local_map_patch_size=11)
+        obs = env.scenario.observation(env.agents[0])
+
+        # own pos/vel 4 + lidar 12 + fire 1 + terrain
+        # terrain = mobility 11x11 + blocked 11x11 + clearance 3x3
+        # flight 2 + no neighbors + one survivor message 4
+        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 121 + 121 + 9 + 2 + 4)
+
+    def test_local_map_patch_size_must_be_positive_odd(self):
+        with self.assertRaises(ValueError):
+            self._diagnostic_env(local_map_patch_size=10)
+
     def _configure_progress_case(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario

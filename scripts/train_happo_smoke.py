@@ -140,6 +140,8 @@ def build_args(
     recurrent: bool = False,
     model_dir: str | None = None,
     ugv_known_survivor_diagnostic: bool = False,
+    ugv_diagnostic_target_distance_m: float = 80.0,
+    local_map_patch_size: int = 3,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -224,6 +226,7 @@ def build_args(
         "n_survivors":   5,
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
+        "local_map_patch_size": local_map_patch_size,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
     }
@@ -256,6 +259,7 @@ def build_args(
             "n_ground": 1,
             "n_survivors": 1,
             "known_survivors_at_reset": True,
+            "known_survivor_spawn_distance_m": max(float(ugv_diagnostic_target_distance_m), 0.0),
             "disable_fire": True,
             "comms_dropout": 0.0,
             "r_found_survivor": 10.0,
@@ -320,6 +324,9 @@ def main():
                    dest="ground_min_confirm_radius_m",
                    type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument("--local-map-patch-size", type=int, default=3,
+                   help="Odd square patch size for UGV-relevant mobility and blocked-cell map observations. "
+                        "Aerial clearance remains fixed at 3x3.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -329,6 +336,8 @@ def main():
                         "to avoid the do-nothing degenerate policy.")
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
+    p.add_argument("--ugv-diagnostic-target-distance-m", type=float, default=80.0,
+                   help="Approximate known-survivor start distance from the UGV for the diagnostic task.")
     args = p.parse_args()
 
     if args.research:
@@ -363,10 +372,12 @@ def main():
         drone_min_footprint_m = args.drone_min_footprint_radius_m,
         ground_confirm_min_m = args.ground_min_confirm_radius_m,
         fire_grid_size = args.fire_grid_size,
+        local_map_patch_size = args.local_map_patch_size,
         reward_search = args.reward_search,
         recurrent = args.recurrent,
         model_dir = args.model_dir,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
+        ugv_diagnostic_target_distance_m = args.ugv_diagnostic_target_distance_m,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
