@@ -1446,13 +1446,20 @@ class WildfireSearchScenario(BaseScenario):
         return shifted
 
     def process_action(self, agent: Agent):
-        """Reduce ground-robot traction/speed on slow surfaces and slopes."""
+        """Normalize UGV command magnitude, then apply local terrain traction."""
         if agent.is_drone:
             return
+        max_action_norm = float(agent.u_range) * float(agent.u_multiplier)
+        action_norm = agent.action.u.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        action_scale = torch.minimum(
+            torch.ones_like(action_norm),
+            torch.full_like(action_norm, max_action_norm) / action_norm,
+        )
+        normalized_action = agent.action.u * action_scale
         speed = self._grid_values_at_positions(
             self.speed_multiplier_grid, agent.state.pos.unsqueeze(1),
         ).squeeze(1)
-        agent.action.u = agent.action.u * speed.unsqueeze(-1)
+        agent.action.u = normalized_action * speed.unsqueeze(-1)
 
     def post_step(self):
         """Apply blocked ground routes and auto-select safe drone altitude."""
