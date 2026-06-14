@@ -237,7 +237,7 @@ class WildfireSearchScenario(BaseScenario):
         self.terrain_cache_path = kwargs.pop("terrain_cache_path", None)
         self.max_ground_slope = kwargs.pop("max_ground_slope", 0.70)
         self.slope_cost_weight = kwargs.pop("slope_cost_weight", 2.0)
-        self.slope_speed_weight = kwargs.pop("slope_speed_weight", 1.5)
+        self.slope_speed_weight = kwargs.pop("slope_speed_weight", 0.5)
         self.terrain_path_samples = kwargs.pop("terrain_path_samples", 6)
         self.local_map_patch_size = int(kwargs.pop("local_map_patch_size", 3))
         if self.local_map_patch_size < 1 or self.local_map_patch_size % 2 != 1:
@@ -248,7 +248,7 @@ class WildfireSearchScenario(BaseScenario):
             name="land_cover_costs",
         )
         land_cover_speeds = _land_cover_values(
-            kwargs.pop("land_cover_speeds", (1.0, 0.9, 0.65, 0.45, 0.0, 0.0)),
+            kwargs.pop("land_cover_speeds", (1.0, 0.95, 0.8, 0.7, 0.0, 0.0)),
             water_value=0.0,
             name="land_cover_speeds",
         )

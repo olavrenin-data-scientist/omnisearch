@@ -142,6 +142,8 @@ def build_args(
     ugv_known_survivor_diagnostic: bool = False,
     ugv_diagnostic_target_distance_m: float = 80.0,
     local_map_patch_size: int = 3,
+    slope_speed_weight: float | None = None,
+    land_cover_speeds: tuple[float, ...] | None = None,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -230,6 +232,10 @@ def build_args(
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
     }
+    if slope_speed_weight is not None:
+        scenario_kwargs["slope_speed_weight"] = float(slope_speed_weight)
+    if land_cover_speeds is not None:
+        scenario_kwargs["land_cover_speeds"] = tuple(float(v) for v in land_cover_speeds)
     if terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = terrain_cache_path
@@ -338,7 +344,16 @@ def main():
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--ugv-diagnostic-target-distance-m", type=float, default=80.0,
                    help="Approximate known-survivor start distance from the UGV for the diagnostic task.")
+    p.add_argument("--slope-speed-weight", type=float, default=None,
+                   help="Override slope penalty in UGV speed multiplier. "
+                        "Default scenario value is 0.5; larger values make slopes slower.")
+    p.add_argument("--land-cover-speeds", type=float, nargs="+", default=None,
+                   help="Override UGV speed multipliers for road/open/brush/forest/rock[/water]. "
+                        "Example: --land-cover-speeds 1.0 0.95 0.8 0.7 0.0 0.0")
     args = p.parse_args()
+
+    if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
+        p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")
 
     if args.research:
         num_env_steps  = args.num_env_steps  or 80_000
@@ -378,6 +393,8 @@ def main():
         model_dir = args.model_dir,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         ugv_diagnostic_target_distance_m = args.ugv_diagnostic_target_distance_m,
+        slope_speed_weight = args.slope_speed_weight,
+        land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
