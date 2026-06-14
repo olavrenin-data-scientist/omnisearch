@@ -62,6 +62,25 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.tensor([1.0, 0.95, 0.8, 0.7, 0.0, 0.0]),
         ))
 
+    def test_ground_action_magnitude_is_normalized_before_terrain_speed(self):
+        env = self._diagnostic_env()
+        env.reset()
+        scenario = env.scenario
+        ground = env.agents[0]
+        scenario.speed_multiplier_grid.fill_(1.0)
+
+        ground.action.u = torch.tensor([[1.0, 0.0]])
+        scenario.process_action(ground)
+        cardinal_norm = ground.action.u.norm(dim=-1)
+
+        ground.action.u = torch.tensor([[1.0, 1.0]])
+        scenario.process_action(ground)
+        diagonal_norm = ground.action.u.norm(dim=-1)
+
+        expected_norm = torch.tensor([ground.u_range * ground.u_multiplier])
+        torch.testing.assert_close(cardinal_norm, expected_norm)
+        torch.testing.assert_close(diagonal_norm, expected_norm)
+
     def test_connected_ground_agent_receives_scouted_candidate(self):
         env = self._env()
         scenario = env.scenario
