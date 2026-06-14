@@ -42,6 +42,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         "n_ground": 1,
         "n_survivors": 1,
         "known_survivors_at_reset": True,
+        "known_survivor_spawn_distance_m": max(float(args.ugv_diagnostic_target_distance_m), 0.0),
         "disable_fire": True,
         "comms_dropout": 0.0,
     })
@@ -51,6 +52,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
     if args.ground_min_confirm_radius_m is not None:
         scenario_kwargs.pop("ground_confirm_min", None)
         scenario_kwargs["ground_confirm_min_m"] = max(float(args.ground_min_confirm_radius_m), 0.0)
+    if args.local_map_patch_size is not None:
+        scenario_kwargs["local_map_patch_size"] = int(args.local_map_patch_size)
     return scenario_kwargs
 
 
@@ -157,6 +160,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--seeds", type=int, nargs="+", default=[101, 102, 103, 104, 105])
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
+    parser.add_argument("--ugv-diagnostic-target-distance-m", type=float, default=80.0)
+    parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     args = parser.parse_args()
 

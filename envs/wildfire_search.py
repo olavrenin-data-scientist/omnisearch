@@ -239,6 +239,9 @@ class WildfireSearchScenario(BaseScenario):
         self.slope_cost_weight = kwargs.pop("slope_cost_weight", 2.0)
         self.slope_speed_weight = kwargs.pop("slope_speed_weight", 1.5)
         self.terrain_path_samples = kwargs.pop("terrain_path_samples", 6)
+        self.local_map_patch_size = int(kwargs.pop("local_map_patch_size", 3))
+        if self.local_map_patch_size < 1 or self.local_map_patch_size % 2 != 1:
+            raise ValueError("local_map_patch_size must be a positive odd integer")
         land_cover_costs = _land_cover_values(
             kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0, 8.0)),
             water_value=8.0,
@@ -363,6 +366,9 @@ class WildfireSearchScenario(BaseScenario):
         # Episode
         self.max_steps = kwargs.pop("max_steps", 500)
         self.known_survivors_at_reset = bool(kwargs.pop("known_survivors_at_reset", False))
+        self.known_survivor_spawn_distance_m = max(
+            float(kwargs.pop("known_survivor_spawn_distance_m", 0.0)), 0.0,
+        )
 
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)
@@ -707,6 +713,7 @@ class WildfireSearchScenario(BaseScenario):
         H = W = self.fire_grid_size
         for b in envs_to_seed:
             self._generate_terrain(b)
+            self._place_known_survivors_near_ground(b)
             if not self.disable_fire:
                 self._seed_initial_fire(b, H, W)
             self._initialize_known_survivors_at_reset(b)
@@ -745,6 +752,57 @@ class WildfireSearchScenario(BaseScenario):
         self.scouted_survivors[env_index] = True
         if self.n_ground > 0:
             self.known_survivors_by_agent[env_index, self.n_drones:, :] = True
+
+    def _place_known_survivors_near_ground(self, env_index: int) -> None:
+        """For diagnostic episodes, place known survivors near ground starts."""
+        if (
+            not self.known_survivors_at_reset
+            or self.known_survivor_spawn_distance_m <= 0.0
+            or self.n_ground <= 0
+            or self.n_survivors <= 0
+        ):
+            return
+
+        candidates = self._land_entity_spawn_candidate_mask(env_index)
+        if not bool(candidates.any().item()):
+            return
+
+        size = self.fire_grid_size
+        device = self.fire_grid.device
+        yy, xx = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
+        cell_size_sim = (2.0 * self.x_semidim) / float(size)
+        target_sim = (
+            self.known_survivor_spawn_distance_m
+            * float(self.terrain_sim_units_per_meter[env_index])
+        )
+        confirm_sim = float(self.detection_range_by_env[env_index])
+        min_sim = max(confirm_sim * 1.5, target_sim * 0.25)
+        available = candidates.clone()
+
+        ground_agents = self.world.agents[self.n_drones:]
+        for survivor_idx, survivor in enumerate(self._survivors):
+            ground = ground_agents[survivor_idx % self.n_ground]
+            gx, gy = self._positions_to_grid(ground.state.pos[env_index].view(1, 1, 2))
+            x, y = int(gx.item()), int(gy.item())
+            dist_sim = (
+                (xx - x).float().square() + (yy - y).float().square()
+            ).sqrt() * cell_size_sim
+            search_mask = available & (dist_sim >= min_sim)
+            if not bool(search_mask.any().item()):
+                search_mask = available if bool(available.any().item()) else candidates
+            score = (dist_sim - target_sim).abs()
+            score = torch.where(search_mask, score, torch.full_like(score, float("inf")))
+            best = int(score.flatten().argmin().item())
+            new_y, new_x = divmod(best, size)
+            new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
+            all_pos = survivor.state.pos.clone()
+            all_pos[env_index] = new_pos
+            survivor.set_pos(all_pos, batch_index=None)
+            available[new_y, new_x] = False
 
     def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
         """Start an irregular compact fire patch with resolution-independent area."""
@@ -2082,7 +2140,7 @@ class WildfireSearchScenario(BaseScenario):
         else:
             lidar_obs = agent.sensors[0].measure()     # [B, n_rays]
         fire_local = self._local_fire_density(agent)        # [B, 1]
-        terrain_local = self._local_terrain_features(agent)  # [B, 27]
+        terrain_local = self._local_terrain_features(agent)
         flight_state = self._flight_state(agent)             # [B, 2]
         comms_keep = self._communication_keep(agent)
         neighbor = self._neighbor_observations(agent, comms_keep)  # [B, (A-1)*2]
@@ -2179,27 +2237,27 @@ class WildfireSearchScenario(BaseScenario):
     def _local_terrain_features(self, agent: Agent) -> Tensor:
         """Expose mobility cost, blocked masks, and AGL air-clearance requirements."""
         pos = agent.state.pos
-        gx = ((pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
-            1, self.fire_grid_size - 2
-        ).long()
-        gy = ((pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
-            1, self.fire_grid_size - 2
-        ).long()
-        b_idx = torch.arange(self.world.batch_dim, device=pos.device)
-        nearby_costs = []
-        nearby_blocked = []
-        nearby_clearance = []
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                nearby_costs.append(self.mobility_cost_grid[b_idx, gy + dy, gx + dx])
-                nearby_blocked.append(~self.traversable_grid[b_idx, gy + dy, gx + dx])
-                nearby_clearance.append(self.required_clearance_grid[b_idx, gy + dy, gx + dx])
-        costs = torch.stack(nearby_costs, dim=-1)
-        blocked = torch.stack(nearby_blocked, dim=-1).float()
-        clearance = torch.stack(nearby_clearance, dim=-1)
+        costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
+        blocked = (~self._local_grid_patch(
+            self.traversable_grid, pos, self.local_map_patch_size,
+        )).float()
+        clearance = self._local_grid_patch(self.required_clearance_grid, pos, 3)
         normalized_costs = costs / self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1)
         normalized_clearance = clearance / self.drone_max_altitude_by_env.unsqueeze(-1).clamp_min(1e-6)
         return torch.cat([normalized_costs, blocked, normalized_clearance], dim=-1)
+
+    def _local_grid_patch(self, grid: Tensor, pos: Tensor, patch_size: int) -> Tensor:
+        """Return a flattened square patch around each position, clamped at edges."""
+        radius = patch_size // 2
+        gx, gy = self._positions_to_grid(pos)
+        b_idx = torch.arange(self.world.batch_dim, device=pos.device)
+        values = []
+        for dy in range(-radius, radius + 1):
+            py = (gy + dy).clamp(0, self.fire_grid_size - 1)
+            for dx in range(-radius, radius + 1):
+                px = (gx + dx).clamp(0, self.fire_grid_size - 1)
+                values.append(grid[b_idx, py, px])
+        return torch.stack(values, dim=-1)
 
     def _flight_state(self, agent: Agent) -> Tensor:
         state = torch.zeros(self.world.batch_dim, 2, device=self.fire_grid.device)
