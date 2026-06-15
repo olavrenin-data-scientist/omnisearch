@@ -9,13 +9,14 @@ HARL doesn't ship a VMAS interface, so this script:
   4. Runs HARL's OnPolicyHARunner
 
 Budgets:
-  smoke    (default)    ~2 000 steps, episode_length=150  ≈ 5-10 s on CPU
-  research (--research)  80 000 steps, episode_length=500  ≈ minutes on CPU
+  smoke    (default)    ~2 000 steps, episode_length=150   ≈ 5-10 s on CPU
+  research (--research)  400 000 steps, episode_length=500 ≈ tens of minutes on CPU
 
 Run from repo root:
 
     python scripts/train_happo_smoke.py
     python scripts/train_happo_smoke.py --research
+    python scripts/train_happo_smoke.py --research --preset tuned
     python scripts/train_happo_smoke.py --num-env-steps 20000 --comms-dropout 0.3
     python scripts/train_happo_smoke.py --entropy-coef 0.05 --seed 42
 
@@ -120,8 +121,13 @@ def build_args(
     ground_confirm_min: float = 0.0,
     fire_grid_size: int = 128,
     reward_search: bool = False,
+    reward_confirm: bool = False,
     recurrent: bool = False,
     model_dir: str | None = None,
+    drone_camera_fov_deg: float | None = None,
+    drone_flight_levels_m: tuple[float, ...] | None = None,
+    ground_confirmation_range_m: float | None = None,
+    coverage_obs_grid: int = 0,
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -211,6 +217,17 @@ def build_args(
     if terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = terrain_cache_path
+    # Physical (non-floor) sensor levers. On a small terrain these give a real
+    # detection footprint at floor 0: footprint ~ flight_altitude * tan(fov/2),
+    # both converted to sim units via sim_units_per_meter.
+    if drone_camera_fov_deg is not None:
+        scenario_kwargs["drone_camera_fov_deg"] = float(drone_camera_fov_deg)
+    if drone_flight_levels_m is not None:
+        scenario_kwargs["drone_flight_levels_m"] = tuple(float(v) for v in drone_flight_levels_m)
+    if ground_confirmation_range_m is not None:
+        scenario_kwargs["ground_confirmation_range_m"] = float(ground_confirmation_range_m)
+    if coverage_obs_grid and coverage_obs_grid > 0:
+        scenario_kwargs["coverage_obs_grid"] = int(coverage_obs_grid)
     if reward_search:
         # Search-dominant reward: make finding/scouting survivors clearly worth
         # more than any movement/hazard cost, and strengthen potential-based
@@ -231,6 +248,30 @@ def build_args(
             "r_time_penalty":     -0.0005,  # was -0.001
             "r_coverage":          5.0,    # max team bonus for covering the full map once
         })
+    if reward_confirm:
+        # Confirmation-dominant reward. Diagnosis: under reward_search the ground
+        # robots learn to stand still (UGV travel ~2.86 vs expert ~4.8) because
+        # confirming is rare/costly and idling is a safe zero. This makes ground
+        # confirmation the dominant signal, removes the costs that punish moving,
+        # strengthens the dense pull toward scouted survivors, and adds a per-step
+        # penalty for every scouted-but-unconfirmed survivor still waiting.
+        scenario_kwargs.update({
+            "r_found_survivor":      15.0,
+            "r_ground_confirm":      12.0,   # dominant term
+            "r_drone_scout":          1.0,   # was 2.0 (don't over-reward scouting alone)
+            "r_drone_shaping":        0.15,
+            "r_ground_shaping":       1.5,    # strong potential-based pull
+            "r_ground_approach":      1.0,    # strong dense bonus peaking ON a survivor
+            "ground_approach_radius": 0.6,
+            "r_fire_penalty":         0.0,    # cut: was making robots avoid moving
+            "r_ground_travel_cost":   0.0,    # cut: was making standing still optimal
+            "r_drone_climb_cost":     0.0,
+            "r_time_penalty":        -0.001,
+            "r_coverage":             0.5,    # small: encourage spread, don't farm it
+            "r_pending_penalty":     -0.005,  # per scouted-unconfirmed survivor per step
+            "r_ground_coverage":      3.0,    # ground robots sweep instead of waiting
+            "ground_coverage_radius": 0.08,
+        })
     env_args = {
         "max_cycles":      episode_length,
         "scenario_kwargs": scenario_kwargs,
@@ -245,9 +286,9 @@ def build_args(
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--research",       action="store_true",
-                   help="Larger budget: 80k steps, episode_length=500 (minutes on CPU).")
+                   help="Larger budget: 400k steps, episode_length=500 (tens of minutes on CPU).")
     p.add_argument("--num-env-steps",  type=int,   default=None,
-                   help="Total env steps override (default: 2000 smoke / 80000 research).")
+                   help="Total env steps override (default: 2000 smoke / 400000 research).")
     p.add_argument("--episode-length", type=int,   default=None,
                    help="Episode length override (default: 150 smoke / 500 research).")
     p.add_argument("--seed",           type=int,   default=1)
@@ -257,6 +298,9 @@ def main():
                    help="Higher (0.05+) encourages exploration — helps break "
                         "the drones-at-corners action-saturation pathology.")
     p.add_argument("--exp-name",       default="happo_smoke")
+    p.add_argument("--n-rollout-threads", type=int, default=1,
+                   help="Parallel rollout envs. More threads => more diverse data per "
+                        "update and faster wall-clock (e.g. 8).")
     p.add_argument("--terrain-cache-path", default=None,
                    help="Train on this cached real terrain (recommended: match what you evaluate on, "
                         "e.g. data/terrain_cache/malibu_creek_1km_128.npz). Default uses the scenario default.")
@@ -273,14 +317,83 @@ def main():
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
                         "to avoid the do-nothing degenerate policy.")
+    p.add_argument("--reward-confirm", action="store_true",
+                   help="Use a confirmation-dominant reward: ground confirmation is the dominant "
+                        "term, movement/fire costs are cut, and idling while survivors are scouted-"
+                        "but-unconfirmed is penalized. Fixes the 'ground robots don't move' optimum.")
+    p.add_argument("--drone-camera-fov-deg", type=float, default=None,
+                   help="Drone camera field of view (deg). Wider FOV => larger scout footprint. "
+                        "Lets RL get detection signal at floor 0 on small terrains (e.g. 140).")
+    p.add_argument("--drone-flight-levels-m", default=None,
+                   help="Comma-separated flight altitudes in meters (>=2 values), e.g. '50,80,100'. "
+                        "Higher altitude => larger scout footprint.")
+    p.add_argument("--ground-confirmation-range-m", type=float, default=None,
+                   help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
+    p.add_argument("--coverage-obs-grid", type=int, default=0,
+                   help="Add a KxK team-coverage map + global fraction to the observation so the "
+                        "policy can learn systematic sweeping (e.g. 6). 0 = off.")
+    p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
+                   help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
+                        "with wide-FOV/high-altitude sensors so detection works at floor 0.")
     args = p.parse_args()
 
+    drone_flight_levels_m = None
+    if args.drone_flight_levels_m:
+        drone_flight_levels_m = tuple(
+            float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
+        )
+
+    if args.preset == "floor0-1km":
+        # Validated floor-0 config: small (1km) terrain restores real detection
+        # geometry, wide FOV + high altitude enlarge the scout footprint, and
+        # long episodes give time to confirm. Expert recall ceiling ~0.47 here
+        # at floor 0 (scripts/diag_floor0_ceiling.py), so RL has signal to learn.
+        if args.terrain_cache_path is None:
+            args.terrain_cache_path = str(
+                ROOT / "data" / "terrain_cache" / "malibu_creek_1km_128.npz"
+            )
+        if args.drone_camera_fov_deg is None:
+            args.drone_camera_fov_deg = 140.0
+        if drone_flight_levels_m is None:
+            drone_flight_levels_m = (50.0, 80.0, 100.0)
+        if args.ground_confirmation_range_m is None:
+            args.ground_confirmation_range_m = 30.0
+        args.recurrent = True
+        # Confirmation-dominant reward is the default for this preset (search
+        # reward let the ground robots stand still). --reward-search still
+        # overrides if explicitly requested.
+        if not args.reward_search:
+            args.reward_confirm = True
+        # Floor stays 0 by design.
+        args.drone_min_footprint = 0.0
+        args.ground_confirm_min = 0.0
+        if args.entropy_coef == 0.01:
+            args.entropy_coef = 0.02
+        # Team-coverage observation: lets the policy learn systematic sweeping.
+        if args.coverage_obs_grid <= 0:
+            args.coverage_obs_grid = 6
+
     if args.research:
-        num_env_steps  = args.num_env_steps  or 80_000
-        episode_length = args.episode_length or 500
+        num_env_steps  = args.num_env_steps  or 400_000
+        episode_length = args.episode_length or (1_000 if args.preset == "floor0-1km" else 500)
+    elif args.preset == "floor0-1km":
+        num_env_steps  = args.num_env_steps  or 240_000
+        episode_length = args.episode_length or 1_000
     else:
         num_env_steps  = args.num_env_steps  or 2_000
         episode_length = args.episode_length or 150
+
+    if args.preset == "tuned":
+        # Keep explicit user values, but upgrade defaults to convergence-oriented
+        # settings that consistently beat the smoke profile.
+        if args.entropy_coef == 0.01:
+            args.entropy_coef = 0.02
+        if args.drone_min_footprint <= 0.0:
+            args.drone_min_footprint = 0.15
+        if args.ground_confirm_min <= 0.0:
+            args.ground_confirm_min = 0.12
+        args.recurrent = True
+        args.reward_search = True
 
     print("=" * 60)
     print(f" OmniSearch — HAPPO ({'RESEARCH' if args.research else 'SMOKE'})")
@@ -303,13 +416,19 @@ def main():
         comms_dropout  = args.comms_dropout,
         entropy_coef   = args.entropy_coef,
         exp_name       = args.exp_name,
+        n_rollout_threads = args.n_rollout_threads,
         terrain_cache_path = args.terrain_cache_path,
         drone_min_footprint = args.drone_min_footprint,
         ground_confirm_min = args.ground_confirm_min,
         fire_grid_size = args.fire_grid_size,
         reward_search = args.reward_search,
+        reward_confirm = args.reward_confirm,
         recurrent = args.recurrent,
         model_dir = args.model_dir,
+        drone_camera_fov_deg = args.drone_camera_fov_deg,
+        drone_flight_levels_m = drone_flight_levels_m,
+        ground_confirmation_range_m = args.ground_confirmation_range_m,
+        coverage_obs_grid = args.coverage_obs_grid,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
@@ -323,6 +442,8 @@ def main():
         env_args=env_args,
     )
     print(f" training config: {manifest_path}")
+    print(f" tensorboard log dir: {runner.log_dir}")
+    print(f" tensorboard: tensorboard --logdir \"{runner.log_dir}\" --port 6006")
     runner.run()
     runner.close()
 
