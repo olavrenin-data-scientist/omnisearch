@@ -171,7 +171,7 @@ class HappoPolicy:
                 a_np = actions.cpu().numpy()
             else:
                 a_np = np.asarray(actions)
-            # VMAS expects actions clipped to [-1, 1]
+            # Match the train-time HARL adapter's bounded action command.
             a_np = np.clip(a_np, -1.0, 1.0).astype(np.float32)
             out.append(torch.from_numpy(a_np))
         return out

@@ -114,7 +114,7 @@ class WildfireHARLEnv:
         for i, agent in enumerate(self._env.agents):
             a_size = self._env.get_agent_action_size(agent)
             a = np.asarray(actions[i][:a_size], dtype=np.float32)
-            # VMAS asserts actions are within range — clip just in case.
+            # VMAS asserts actions are within range.
             a = np.clip(a, -1.0, 1.0)
             action_list.append(torch.from_numpy(a).unsqueeze(0))
 

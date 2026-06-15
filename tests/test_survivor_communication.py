@@ -94,10 +94,14 @@ class SurvivorCommunicationTests(unittest.TestCase):
         message = scenario._survivor_message_observations(
             ground,
             torch.ones(1, 1, dtype=torch.bool),
-        ).view(1, scenario.n_survivors, 4)
+        ).view(1, scenario.n_survivors, 7)
 
-        self.assertTrue(torch.equal(message[0, 0], torch.tensor([1.0, 0.25, 0.30, 0.0])))
-        self.assertTrue(torch.equal(message[0, 1], torch.zeros(4)))
+        expected_unit = torch.tensor([0.25, 0.30]) / torch.linalg.norm(torch.tensor([0.25, 0.30]))
+        torch.testing.assert_close(message[0, 0, :3], torch.tensor([1.0, 0.25, 0.30]))
+        torch.testing.assert_close(message[0, 0, 3:5], expected_unit)
+        self.assertGreater(float(message[0, 0, 5]), 0.0)
+        self.assertEqual(float(message[0, 0, 6]), 0.0)
+        self.assertTrue(torch.equal(message[0, 1], torch.zeros(7)))
         self.assertTrue(scenario.known_survivors_by_agent[0, 1, 0])
 
     def test_dropout_blocks_new_team_message_but_keeps_local_memory(self):
@@ -110,7 +114,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         disconnected = scenario._survivor_message_observations(
             ground,
             torch.zeros(1, 1, dtype=torch.bool),
-        ).view(1, scenario.n_survivors, 4)
+        ).view(1, scenario.n_survivors, 7)
         self.assertEqual(float(disconnected[0, 0, 0]), 0.0)
         self.assertEqual(float(disconnected[0, 1, 0]), 1.0)
 
@@ -121,7 +125,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         disconnected_again = scenario._survivor_message_observations(
             ground,
             torch.zeros(1, 1, dtype=torch.bool),
-        ).view(1, scenario.n_survivors, 4)
+        ).view(1, scenario.n_survivors, 7)
         self.assertEqual(float(disconnected_again[0, 0, 0]), 1.0)
         self.assertEqual(float(disconnected_again[0, 1, 0]), 1.0)
 
@@ -148,7 +152,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertTrue(bool(scenario.known_survivors_by_agent[0, 0, 0]))
 
         obs = scenario.observation(env.agents[0])
-        survivor_block = obs[:, -4:].view(1, 1, 4)
+        survivor_block = obs[:, -7:].view(1, 1, 7)
         self.assertEqual(float(survivor_block[0, 0, 0]), 1.0)
 
     def test_disable_fire_leaves_hazard_fields_empty_after_reset(self):
@@ -185,14 +189,32 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertGreater(distance_m, 20.0)
         self.assertLess(distance_m, 120.0)
 
+    def test_known_survivor_spawn_distance_range_is_supported(self):
+        env = self._diagnostic_env(
+            known_survivor_spawn_distance_m=65.0,
+            known_survivor_spawn_distance_min_m=30.0,
+            known_survivor_spawn_distance_max_m=100.0,
+            ground_confirm_min_m=20.0,
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
+
+        self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
+        self.assertEqual(scenario.known_survivor_spawn_distance_max_m, 100.0)
+        self.assertGreater(distance_m, 20.0)
+        self.assertLess(distance_m, 130.0)
+
     def test_local_map_patch_size_expands_mobility_and_blocked_only(self):
         env = self._diagnostic_env(local_map_patch_size=11)
         obs = env.scenario.observation(env.agents[0])
 
         # own pos/vel 4 + lidar 12 + fire 1 + terrain
         # terrain = mobility 11x11 + blocked 11x11 + clearance 3x3
-        # flight 2 + no neighbors + one survivor message 4
-        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 121 + 121 + 9 + 2 + 4)
+        # flight 2 + no neighbors + one survivor message 7
+        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 121 + 121 + 9 + 2 + 7)
 
     def test_local_map_patch_size_must_be_positive_odd(self):
         with self.assertRaises(ValueError):
