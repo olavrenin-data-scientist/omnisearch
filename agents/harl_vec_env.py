@@ -39,6 +39,7 @@ from gymnasium.spaces import Box
 
 import vmas
 
+from agents.action_transform import transform_continuous_action
 from envs.wildfire_search import WildfireSearchScenario
 from harl.envs.env_wrappers import ShareVecEnv
 
@@ -52,12 +53,14 @@ class BatchedVMASVecEnv(ShareVecEnv):
         seed:            int = 0,
         max_cycles:      int = 200,
         scenario_kwargs: Optional[Dict[str, Any]] = None,
+        action_transform: str = "clip",
         device:          str = "cpu",
     ):
         self._num_envs       = int(num_envs)
         self._seed_val       = int(seed)
         self.max_cycles      = int(max_cycles)
         self._scenario_kwargs = copy.deepcopy(scenario_kwargs or {})
+        self.action_transform = action_transform
         self._device         = device
 
         self._build_env()
@@ -95,7 +98,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
         self.agents:   list[str] = [a.name for a in self._env.agents]
         self.n_agents: int       = len(self.agents)
 
-    def _stack_per_agent(self, tensor_list, last_dim_keep: bool = True) -> np.ndarray:
+    def _stack_per_agent(self, tensor_list) -> np.ndarray:
         """Stack list of (N, ...) per-agent tensors into (N, A, ...) ndarray."""
         np_list = [t.cpu().numpy() for t in tensor_list]
         return np.stack(np_list, axis=1)
@@ -143,7 +146,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
         # Convert (N, A, action_dim) → list of A tensors each (N, action_dim)
         action_list = []
         for i in range(self.n_agents):
-            a_i = np.clip(actions[:, i, :], -1.0, 1.0).astype(np.float32)
+            a_i = transform_continuous_action(actions[:, i, :], self.action_transform)
             action_list.append(torch.from_numpy(a_i))
 
         obs_tensors, rew_tensors, dones_t, raw_infos = self._env.step(action_list)
@@ -162,7 +165,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
         # Per-env, per-agent infos. infos[i][0] holds episode-terminal payload.
         infos = np.empty((self._num_envs, self.n_agents), dtype=object)
         for i in range(self._num_envs):
-            bad = bool(truncated[i] and done_per_env[i])
+            bad = bool(truncated[i] and not natural[i])
             for j in range(self.n_agents):
                 info = self._info_for_env_agent(raw_infos, i, j)
                 info["bad_transition"] = bad
@@ -224,5 +227,6 @@ def make_batched_wildfire_vec_env(
         seed            = seed,
         max_cycles      = env_args.get("max_cycles", 200),
         scenario_kwargs = env_args.get("scenario_kwargs", {}),
+        action_transform = env_args.get("action_transform", "clip"),
         device          = env_args.get("device", "cpu"),
     )
