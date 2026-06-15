@@ -28,7 +28,6 @@ Prerequisite: HARL must be installed in the active venv:
 from __future__ import annotations
 
 import argparse
-import copy
 import sys
 import time
 from pathlib import Path
@@ -42,83 +41,9 @@ if str(ROOT) not in sys.path:
 # Step 1 — monkey-patch HARL's env registry to recognise "wildfire"
 # ----------------------------------------------------------------------
 def _register_wildfire_with_harl():
-    import harl.envs as harl_envs_pkg
-    import harl.utils.envs_tools as envs_tools
-    import harl.utils.configs_tools as configs_tools
-    from harl.envs.env_wrappers import ShareDummyVecEnv, ShareSubprocVecEnv
-    from harl.common.base_logger import BaseLogger
+    from agents.harl_runner import register_wildfire_with_harl
 
-    from agents.harl_metrics import (
-        accumulate_env_metrics,
-        init_env_metric_storage,
-        log_done_env_metrics,
-    )
-    from agents.harl_env import WildfireHARLEnv
-
-    def _wildfire_env_fn(rank: int, seed: int, env_args: dict):
-        def init_env():
-            args = copy.deepcopy(env_args)
-            args["seed"] = seed + rank * 1000
-            return WildfireHARLEnv(args)
-        return init_env
-
-    _orig_train  = envs_tools.make_train_env
-    _orig_eval   = envs_tools.make_eval_env
-    _orig_render = envs_tools.make_render_env
-    _orig_nagent = envs_tools.get_num_agents
-
-    def make_train_env(env_name, seed, n_threads, env_args):
-        if env_name == "wildfire":
-            fns = [_wildfire_env_fn(i, seed, env_args) for i in range(n_threads)]
-            return ShareDummyVecEnv(fns) if n_threads == 1 else ShareSubprocVecEnv(fns)
-        return _orig_train(env_name, seed, n_threads, env_args)
-
-    def make_eval_env(env_name, seed, n_threads, env_args):
-        if env_name == "wildfire":
-            fns = [_wildfire_env_fn(i, seed + 10_000, env_args) for i in range(n_threads)]
-            return ShareDummyVecEnv(fns) if n_threads == 1 else ShareSubprocVecEnv(fns)
-        return _orig_eval(env_name, seed, n_threads, env_args)
-
-    def make_render_env(env_name, seed, env_args):
-        if env_name == "wildfire":
-            env = WildfireHARLEnv({**env_args, "seed": seed})
-            return env, env.n_agents, env.agents
-        return _orig_render(env_name, seed, env_args)
-
-    def get_num_agents(env_name, env_args, envs):
-        if env_name == "wildfire":
-            return envs.n_agents
-        return _orig_nagent(env_name, env_args, envs)
-
-    envs_tools.make_train_env  = make_train_env
-    envs_tools.make_eval_env   = make_eval_env
-    envs_tools.make_render_env = make_render_env
-    envs_tools.get_num_agents  = get_num_agents
-
-    _orig_task = configs_tools.get_task_name
-    def get_task_name(env_name, env_args):
-        if env_name == "wildfire":
-            return "wildfire_search"
-        return _orig_task(env_name, env_args)
-    configs_tools.get_task_name = get_task_name
-
-    class WildfireLogger(BaseLogger):
-        def get_task_name(self):
-            return "wildfire_search"
-
-        def init(self, episodes):
-            super().init(episodes)
-            init_env_metric_storage(self)
-
-        def per_step(self, data):
-            accumulate_env_metrics(self, data[4], data[3])
-            super().per_step(data)
-
-        def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
-            super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
-            log_done_env_metrics(self)
-
-    harl_envs_pkg.LOGGER_REGISTRY["wildfire"] = WildfireLogger
+    register_wildfire_with_harl()
 
 
 # ----------------------------------------------------------------------
@@ -140,12 +65,12 @@ def build_args(
     recurrent: bool = False,
     model_dir: str | None = None,
     ugv_known_survivor_diagnostic: bool = False,
-    ugv_diagnostic_target_distance_m: float = 80.0,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
+    action_transform: str = "clip",
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -262,25 +187,21 @@ def build_args(
             "r_coverage":          5.0,    # max team bonus for covering the full map once
         })
     if ugv_known_survivor_diagnostic:
+        distance_kwargs = {}
         if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
-            target_distance_m = max(float(ugv_diagnostic_target_distance_m), 0.0)
-            target_distance_min_m = target_distance_m
-            target_distance_max_m = target_distance_m
+            pass
         else:
+            if ugv_diagnostic_target_distance_min_m is None or ugv_diagnostic_target_distance_max_m is None:
+                raise ValueError(
+                    "ugv_diagnostic_target_distance_min_m and "
+                    "ugv_diagnostic_target_distance_max_m must be provided together"
+                )
             target_distance_min_m = max(
-                float(
-                    ugv_diagnostic_target_distance_m
-                    if ugv_diagnostic_target_distance_min_m is None
-                    else ugv_diagnostic_target_distance_min_m
-                ),
+                float(ugv_diagnostic_target_distance_min_m),
                 0.0,
             )
             target_distance_max_m = max(
-                float(
-                    target_distance_min_m
-                    if ugv_diagnostic_target_distance_max_m is None
-                    else ugv_diagnostic_target_distance_max_m
-                ),
+                float(ugv_diagnostic_target_distance_max_m),
                 0.0,
             )
             if target_distance_max_m < target_distance_min_m:
@@ -289,14 +210,16 @@ def build_args(
                     "ugv_diagnostic_target_distance_min_m"
                 )
             target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
+            distance_kwargs.update({
+                "known_survivor_spawn_distance_m": target_distance_m,
+                "known_survivor_spawn_distance_min_m": target_distance_min_m,
+                "known_survivor_spawn_distance_max_m": target_distance_max_m,
+            })
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1,
             "n_survivors": 1,
             "known_survivors_at_reset": True,
-            "known_survivor_spawn_distance_m": target_distance_m,
-            "known_survivor_spawn_distance_min_m": target_distance_min_m,
-            "known_survivor_spawn_distance_max_m": target_distance_max_m,
             "disable_fire": True,
             "comms_dropout": 0.0,
             "r_found_survivor": 10.0,
@@ -305,15 +228,18 @@ def build_args(
             "r_drone_shaping": 0.0,
             "r_ground_shaping": 0.50,
             "r_ground_approach": 0.0,
+            "r_ugv_movement_alignment": 0.10,
             "r_fire_penalty": 0.0,
             "r_ground_travel_cost": 0.0,
             "r_drone_climb_cost": 0.0,
             "r_time_penalty": -0.0005,
             "r_coverage": 0.0,
         })
+        scenario_kwargs.update(distance_kwargs)
     env_args = {
         "max_cycles":      episode_length,
         "scenario_kwargs": scenario_kwargs,
+        "action_transform": action_transform,
     }
 
     return args, algo_args, env_args
@@ -362,8 +288,8 @@ def main():
                    type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
     p.add_argument("--local-map-patch-size", type=int, default=3,
-                   help="Odd square patch size for UGV-relevant mobility and blocked-cell map observations. "
-                        "Aerial clearance remains fixed at 3x3.")
+                   help="Odd square patch size for local mobility and blocked-cell observations. "
+                        "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -373,22 +299,35 @@ def main():
                         "to avoid the do-nothing degenerate policy.")
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
-    p.add_argument("--ugv-diagnostic-target-distance-m", type=float, default=80.0,
-                   help="Approximate known-survivor start distance from the UGV for the diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
-                   help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task.")
+                   help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
+                        "Use min=max for an exact target distance.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
     p.add_argument("--land-cover-speeds", type=float, nargs="+", default=None,
                    help="Override UGV speed multipliers for road/open/brush/forest/rock[/water]. "
                         "Example: --land-cover-speeds 1.0 0.95 0.8 0.7 0.0 0.0")
+    p.add_argument("--action-transform", choices=("clip", "tanh"), default="clip",
+                   help="How to bound raw continuous HAPPO actions before VMAS. "
+                        "'clip' is the HARL-compatible default; 'tanh' is an experimental "
+                        "plain tanh post-transform.")
     args = p.parse_args()
 
     if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
         p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")
+    if args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1:
+        p.error("--local-map-patch-size must be a positive odd integer")
+    if not 0.0 <= args.comms_dropout <= 1.0:
+        p.error("--comms-dropout must be in [0, 1]")
+    if args.entropy_coef < 0.0:
+        p.error("--entropy-coef must be nonnegative")
+    if args.fire_grid_size < 2:
+        p.error("--fire-grid-size must be at least 2")
+    if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
+        p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
     if args.research:
         num_env_steps  = args.num_env_steps  or 80_000
@@ -396,6 +335,10 @@ def main():
     else:
         num_env_steps  = args.num_env_steps  or 2_000
         episode_length = args.episode_length or 150
+    if num_env_steps <= 0:
+        p.error("--num-env-steps must be positive")
+    if episode_length <= 0:
+        p.error("--episode-length must be positive")
 
     print("=" * 60)
     print(f" OmniSearch — HAPPO ({'RESEARCH' if args.research else 'SMOKE'})")
@@ -404,12 +347,14 @@ def main():
     print(f" seed:           {args.seed}")
     print(f" comms_dropout:  {args.comms_dropout}")
     print(f" entropy_coef:   {args.entropy_coef}")
+    print(f" action_transform: {args.action_transform}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
 
     _register_wildfire_with_harl()
-    from harl.runners.on_policy_ha_runner import OnPolicyHARunner
+    from agents.harl_runner import _build_diagnostic_happo_runner_class
     from agents.happo_checkpoint import save_training_manifest
+    OnPolicyHARunner = _build_diagnostic_happo_runner_class()
 
     harl_args, algo_args, env_args = build_args(
         num_env_steps  = num_env_steps,
@@ -427,11 +372,11 @@ def main():
         recurrent = args.recurrent,
         model_dir = args.model_dir,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
-        ugv_diagnostic_target_distance_m = args.ugv_diagnostic_target_distance_m,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
+        action_transform = args.action_transform,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)

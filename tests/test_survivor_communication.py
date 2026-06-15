@@ -1,4 +1,5 @@
 import unittest
+import math
 from pathlib import Path
 
 import torch
@@ -9,6 +10,7 @@ from envs.wildfire_search import WildfireSearchScenario
 
 ROOT = Path(__file__).resolve().parent.parent
 TERRAIN_CACHE = ROOT / "data" / "terrain_cache" / "malibu_creek_state_park_california_128.npz"
+TERRAIN_500M_CACHE = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
 
 
 class SurvivorCommunicationTests(unittest.TestCase):
@@ -207,14 +209,62 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertGreater(distance_m, 20.0)
         self.assertLess(distance_m, 130.0)
 
-    def test_local_map_patch_size_expands_mobility_and_blocked_only(self):
+    def test_known_survivor_spawn_distance_range_samples_angles(self):
+        labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+        counts = {label: 0 for label in labels}
+        distances_m = []
+        torch.manual_seed(123)
+        env = self._diagnostic_env(
+            known_survivor_spawn_distance_m=55.0,
+            known_survivor_spawn_distance_min_m=30.0,
+            known_survivor_spawn_distance_max_m=80.0,
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+
+        for _ in range(320):
+            env.reset()
+            ground_pos = env.agents[0].state.pos[0]
+            survivor_pos = scenario._survivors[0].state.pos[0]
+            offset = survivor_pos - ground_pos
+            angle = float(torch.atan2(offset[1], offset[0]))
+            bucket = int(((angle + math.pi / 8.0) % (2.0 * math.pi)) / (math.pi / 4.0))
+            counts[labels[bucket]] += 1
+            scale = float(scenario.terrain_sim_units_per_meter[0])
+            distances_m.append(float(torch.linalg.norm(offset) / scale))
+
+        self.assertEqual(set(counts.keys()), set(labels))
+        self.assertGreaterEqual(min(counts.values()), 20)
+        self.assertLessEqual(max(counts.values()), 70)
+        self.assertGreater(sum(counts[label] for label in ("S", "SW")), 0)
+        self.assertLessEqual(sum(counts[label] for label in ("S", "SW")), 130)
+        self.assertGreater(min(distances_m), 20.0)
+        self.assertLess(max(distances_m), 95.0)
+        self.assertGreater(sum(distances_m) / len(distances_m), 45.0)
+        self.assertLess(sum(distances_m) / len(distances_m), 65.0)
+
+    def test_local_map_patch_size_uses_flattened_patch_features_for_ugv(self):
         env = self._diagnostic_env(local_map_patch_size=11)
         obs = env.scenario.observation(env.agents[0])
 
         # own pos/vel 4 + lidar 12 + fire 1 + terrain
-        # terrain = mobility 11x11 + blocked 11x11 + clearance 3x3
+        # terrain = 11x11 normalized costs + 11x11 blocked indicators + 3x3 clearance
         # flight 2 + no neighbors + one survivor message 7
-        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 121 + 121 + 9 + 2 + 7)
+        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 2 * 11 * 11 + 9 + 2 + 7)
+
+    def test_local_map_patch_size_keeps_drone_and_ugv_observation_widths_equal(self):
+        env = self._env(n_survivors=1)
+        env.scenario.local_map_patch_size = 11
+        obs = env.scenario.observation(env.agents[0])
+        ground_obs = env.scenario.observation(env.agents[1])
+
+        # Both roles receive the same terrain block:
+        # 11x11 normalized costs + 11x11 blocked indicators + 3x3 clearance.
+        # own pos/vel 4 + lidar/dummy lidar 12 + fire 1 + terrain + flight 2
+        # + one teammate relative position 2 + one survivor message 7
+        expected = 4 + 12 + 1 + 2 * 11 * 11 + 9 + 2 + 2 + 7
+        self.assertEqual(obs.shape[-1], expected)
+        self.assertEqual(ground_obs.shape[-1], expected)
 
     def test_local_map_patch_size_must_be_positive_odd(self):
         with self.assertRaises(ValueError):
@@ -244,6 +294,12 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._compute_step_rewards()
 
         self.assertAlmostEqual(float(scenario.metric_reward_ugv_progress[0]), 0.5, places=5)
+        self.assertEqual(float(scenario.metric_ugv_known_target_valid[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_prev_distance_valid[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_same_target[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_progress_gate_active[0]), 1.0)
+        self.assertAlmostEqual(float(scenario.metric_ugv_ground_progress_m[0]), 3.2, places=3)
+        self.assertAlmostEqual(float(scenario.metric_ugv_ground_progress_scaled[0]), 1.0, places=5)
 
     def test_known_ground_progress_reward_is_negative_when_moving_away(self):
         scenario, ground = self._configure_progress_case()
@@ -265,6 +321,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._compute_step_rewards()
 
         self.assertEqual(float(scenario.metric_reward_ugv_progress[0]), 0.0)
+        self.assertEqual(float(scenario.metric_ugv_known_target_valid[0]), 0.0)
+        self.assertEqual(float(scenario.metric_ugv_progress_gate_active[0]), 0.0)
 
     def test_ground_progress_reward_is_zero_on_first_known_step(self):
         scenario, ground = self._configure_progress_case()
@@ -274,6 +332,9 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._compute_step_rewards()
 
         self.assertEqual(float(scenario.metric_reward_ugv_progress[0]), 0.0)
+        self.assertEqual(float(scenario.metric_ugv_known_target_valid[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_prev_distance_valid[0]), 0.0)
+        self.assertEqual(float(scenario.metric_ugv_progress_gate_active[0]), 0.0)
 
     def test_ground_progress_reward_is_clipped(self):
         scenario, ground = self._configure_progress_case()
@@ -304,12 +365,22 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "reward/drone_progress",
             "reward/ugv_progress",
             "reward/ugv_approach",
+            "reward/ugv_movement_alignment",
             "reward/ground_confirm",
             "reward/coverage",
             "cost/ugv_fire_exposure",
             "cost/ugv_travel",
             "cost/drone_energy",
             "cost/drone_climb",
+            "diagnostic/ugv_known_target_valid",
+            "diagnostic/ugv_same_target",
+            "diagnostic/ugv_prev_distance_valid",
+            "diagnostic/ugv_progress_gate_active",
+            "diagnostic/ugv_target_index",
+            "diagnostic/ugv_ground_progress_m",
+            "diagnostic/ugv_ground_progress_scaled",
+            "diagnostic/ugv_action_alignment",
+            "diagnostic/ugv_movement_alignment",
         ):
             self.assertIn(key, info)
 
