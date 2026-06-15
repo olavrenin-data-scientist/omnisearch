@@ -73,20 +73,32 @@ def _run_benchmarl(algo_name: str, seed: int, comms_dropout: float,
     return {"metric": float(exp.mean_return), "wall_sec": round(time.time() - t0, 2)}
 
 
-def _run_happo(seed: int, comms_dropout: float, num_env_steps: int, max_steps: int) -> dict:
+def _run_happo(
+    seed: int,
+    comms_dropout: float,
+    num_env_steps: int,
+    max_steps: int,
+    profile: str = "smoke",
+) -> dict:
     from agents.harl_runner import train_happo
     r = train_happo(
         seed              = seed,
         num_env_steps     = num_env_steps,
         comms_dropout     = comms_dropout,
         max_steps         = max_steps,
-        n_rollout_threads = 8,
+        n_rollout_threads = 16 if profile == "research" else 8,
         exp_name          = f"happo_d{int(comms_dropout*100)}_s{seed}",
+        profile           = profile,
+        recurrent         = (profile == "research"),
+        reward_search     = (profile == "research"),
+        drone_min_footprint = 0.15 if profile == "research" else 0.0,
+        ground_confirm_min = 0.12 if profile == "research" else 0.0,
+        entropy_coef      = 0.02 if profile == "research" else 0.01,
     )
     return {"metric": r["mean_episode_reward"], "wall_sec": r["wall_sec"]}
 
 
-def run_cell(algo: str, seed: int, dropout: float, budgets: dict) -> dict:
+def run_cell(algo: str, seed: int, dropout: float, budgets: dict, happo_profile: str = "smoke") -> dict:
     max_steps = budgets["max_steps"]
     if algo in ("mappo", "ippo"):
         return _run_benchmarl(algo, seed, dropout,
@@ -95,7 +107,7 @@ def run_cell(algo: str, seed: int, dropout: float, budgets: dict) -> dict:
                               max_steps=max_steps)
     if algo == "happo":
         return _run_happo(seed, dropout, num_env_steps=budgets["num_env_steps"],
-                          max_steps=max_steps)
+                          max_steps=max_steps, profile=happo_profile)
     raise ValueError(f"Unknown algo: {algo}")
 
 
@@ -129,9 +141,15 @@ def main():
     parser.add_argument("--dropouts", nargs="+", type=float, default=DROPOUTS)
     parser.add_argument("--research", action="store_true",
                         help="Bigger budget per cell (slower)")
+    parser.add_argument("--happo-profile", choices=("smoke", "research"), default="smoke",
+                        help="HAPPO-only training profile inside each sweep cell.")
     parser.add_argument("--max-steps", type=int, default=None,
                         help="Episode length override (default: 150 smoke / 500 research)")
     args = parser.parse_args()
+    if args.research and args.happo_profile == "smoke":
+        # Research sweeps should default to the stronger HAPPO profile unless
+        # explicitly overridden.
+        args.happo_profile = "research"
 
     if args.research:
         budgets = {"frames_per_iter": 6_000, "iters": 50, "num_env_steps": 80_000, "max_steps": 500}
@@ -157,7 +175,7 @@ def main():
         for dropout in args.dropouts:
             print(f"\n>>> {algo.upper():6s} comms_dropout={dropout}")
             for s in range(args.seeds):
-                r = run_cell(algo, s, dropout, budgets)
+                r = run_cell(algo, s, dropout, budgets, happo_profile=args.happo_profile)
                 r.update(algo=algo, comms_dropout=dropout, seed=s, **budgets)
                 cells.append(r)
                 print(f"  seed {s}: metric={r['metric']:+6.2f}  ({r['wall_sec']}s)")
@@ -256,6 +274,7 @@ def main():
                 "seeds":    args.seeds,
                 "algos":    args.algos,
                 "dropouts": args.dropouts,
+                "happo_profile": args.happo_profile,
                 "budgets":  budgets,
                 "research": args.research,
             },

@@ -118,37 +118,59 @@ def register_wildfire_with_harl():
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def default_algo_args() -> Dict[str, Any]:
-    """Smoke-budget HAPPO algo_args. Override fields before passing to train_happo."""
+def default_algo_args(profile: str = "smoke") -> Dict[str, Any]:
+    """
+    Return HAPPO algo_args for a named profile.
+
+    Profiles
+    --------
+    smoke:
+        Tiny budget for "does this run?" checks.
+    research:
+        Larger budget and stronger optimization defaults for better convergence.
+    """
+    if profile not in {"smoke", "research"}:
+        raise ValueError(f"Unsupported HAPPO profile: {profile!r}")
+
+    is_research = profile == "research"
     return {
         "seed":   {"seed_specify": True, "seed": 1},
         "device": {"cuda": False, "cuda_deterministic": True, "torch_threads": 4},
         "train": {
-            "n_rollout_threads":     8,
-            "num_env_steps":         8_000,
-            "episode_length":        100,
+            "n_rollout_threads":     16 if is_research else 8,
+            "num_env_steps":         400_000 if is_research else 8_000,
+            "episode_length":        500 if is_research else 100,
             "log_interval":          1,
-            "eval_interval":         1,
+            "eval_interval":         10 if is_research else 1,
             "use_valuenorm":         True,
-            "use_linear_lr_decay":   False,
+            "use_linear_lr_decay":   is_research,
             "use_proper_time_limits": True,
             "model_dir":             None,
         },
-        "eval":   {"use_eval": False, "n_eval_rollout_threads": 1, "eval_episodes": 2},
+        "eval": {
+            "use_eval": is_research,
+            "n_eval_rollout_threads": 2 if is_research else 1,
+            "eval_episodes": 8 if is_research else 2,
+        },
         "render": {"use_render": False, "render_episodes": 1},
         "model": {
             "hidden_sizes": [128, 128], "activation_func": "relu",
             "use_feature_normalization": True, "initialization_method": "orthogonal_",
             "gain": 0.01, "use_naive_recurrent_policy": False,
-            "use_recurrent_policy": False, "recurrent_n": 1, "data_chunk_length": 10,
+            "use_recurrent_policy": is_research,
+            "recurrent_n": 1,
+            "data_chunk_length": 20 if is_research else 10,
             "lr": 5e-4, "critic_lr": 5e-4, "opti_eps": 1e-5, "weight_decay": 0,
             "std_x_coef": 1, "std_y_coef": 0.5,
         },
         "algo": {
-            "ppo_epoch": 2, "critic_epoch": 2,
+            "ppo_epoch": 5 if is_research else 2,
+            "critic_epoch": 5 if is_research else 2,
             "use_clipped_value_loss": True, "clip_param": 0.2,
-            "actor_num_mini_batch": 1, "critic_num_mini_batch": 1,
-            "entropy_coef": 0.01, "value_loss_coef": 1,
+            "actor_num_mini_batch": 4 if is_research else 1,
+            "critic_num_mini_batch": 4 if is_research else 1,
+            "entropy_coef": 0.02 if is_research else 0.01,
+            "value_loss_coef": 1,
             "use_max_grad_norm": True, "max_grad_norm": 10.0,
             "use_gae": True, "gamma": 0.99, "gae_lambda": 0.95,
             "use_huber_loss": True, "use_policy_active_masks": True, "huber_delta": 10.0,
@@ -173,9 +195,15 @@ def train_happo(
     seed:           int   = 1,
     num_env_steps:  int   = 8_000,
     comms_dropout:  float = 0.0,
+    max_steps:      int   = 100,
     n_rollout_threads: int = 8,
     exp_name:       str   = "happo",
     entropy_coef:   float = 0.01,
+    profile:        str   = "smoke",
+    recurrent:      Optional[bool] = None,
+    reward_search:  bool  = False,
+    drone_min_footprint: float = 0.0,
+    ground_confirm_min: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Train HAPPO at the given seed + comms_dropout, return final metrics.
@@ -189,26 +217,71 @@ def train_happo(
         seed                   : int
         comms_dropout          : float
         wall_sec               : float
+        tensorboard_log_dir    : str  — TensorBoard events directory
+        tensorboard_cmd        : str  — ready-to-run TensorBoard command
     """
     register_wildfire_with_harl()
     from harl.runners.on_policy_ha_runner import OnPolicyHARunner
+    from agents.happo_checkpoint import save_training_manifest
 
     args = {
         "algo": "happo", "env": "wildfire",
         "exp_name": exp_name, "load_config": "",
     }
-    algo_args = default_algo_args()
+    # HARL computes episode count as:
+    #   episodes = num_env_steps // episode_length // n_rollout_threads
+    # If this is 0, training never runs and no checkpoint is produced.
+    min_env_steps = int(max_steps) * int(n_rollout_threads)
+    if num_env_steps < min_env_steps:
+        num_env_steps = min_env_steps
+
+    algo_args = default_algo_args(profile=profile)
     algo_args["seed"]["seed"] = seed
     algo_args["train"]["num_env_steps"]     = num_env_steps
     algo_args["train"]["n_rollout_threads"] = n_rollout_threads
     algo_args["algo"]["entropy_coef"]       = entropy_coef
+    algo_args["train"]["episode_length"]    = max_steps
+    if recurrent is not None:
+        algo_args["model"]["use_recurrent_policy"] = bool(recurrent)
 
     env_args = default_env_args()
-    env_args["scenario_kwargs"] = {**env_args["scenario_kwargs"],
-                                   "comms_dropout": comms_dropout}
+    env_args["max_cycles"] = max_steps
+    scenario_kwargs = {
+        **env_args["scenario_kwargs"],
+        "max_steps": max_steps,
+        "comms_dropout": comms_dropout,
+        "drone_min_footprint": float(max(drone_min_footprint, 0.0)),
+        "ground_confirm_min": float(max(ground_confirm_min, 0.0)),
+    }
+    if reward_search:
+        # Search-dominant shaping: promotes exploration and confirmation
+        # while reducing degeneracy toward low-movement policies.
+        scenario_kwargs.update({
+            "r_found_survivor": 10.0,
+            "r_drone_scout": 2.0,
+            "r_ground_confirm": 4.0,
+            "r_drone_shaping": 0.30,
+            "r_ground_shaping": 0.50,
+            "r_ground_approach": 0.10,
+            "ground_approach_radius": 0.4,
+            "r_fire_penalty": -0.20,
+            "r_ground_travel_cost": -0.01,
+            "r_drone_climb_cost": -0.005,
+            "r_time_penalty": -0.0005,
+            "r_coverage": 5.0,
+        })
+    env_args["scenario_kwargs"] = scenario_kwargs
 
     t0 = time.time()
     runner = OnPolicyHARunner(args, algo_args, env_args)
+    tb_log_dir = str(Path(getattr(runner, "log_dir", algo_args["logger"]["log_dir"])))
+    tb_cmd = f"tensorboard --logdir \"{tb_log_dir}\" --port 6006"
+    manifest_path = save_training_manifest(
+        runner,
+        harl_args=args,
+        algo_args=algo_args,
+        env_args=env_args,
+    )
     runner.run()
     wall = time.time() - t0
 
@@ -220,7 +293,12 @@ def train_happo(
         "mean_episode_reward": float(mean_ep) if mean_ep is not None else float("nan"),
         "mean_step_reward":    float(mean_step) if mean_step is not None else float("nan"),
         "num_env_steps":       int(num_env_steps),
+        "max_steps":           int(max_steps),
         "seed":                int(seed),
         "comms_dropout":       float(comms_dropout),
         "wall_sec":            round(wall, 2),
+        "manifest_path":       str(manifest_path),
+        "checkpoint_dir":      str(manifest_path.parent / "models"),
+        "tensorboard_log_dir": tb_log_dir,
+        "tensorboard_cmd":     tb_cmd,
     }

@@ -151,6 +151,7 @@ The detailed per-component instructions follow below.
 python scripts/train_mappo_smoke.py     # MAPPO — centralized critic, per-group actors (BenchMARL)
 python scripts/train_ippo_smoke.py      # IPPO  — fully decentralized              (BenchMARL)
 python scripts/train_happo_smoke.py     # HAPPO — sequential update + monotonic improvement (HARL)
+python scripts/tune_happo.py --research # HAPPO tuner on mission metrics (recall + DRR)
 ```
 
 Each trains a tiny budget. The successful exit is the milestone — the policy is far from converged.
@@ -161,6 +162,13 @@ For HAPPO, install HARL first (one-time):
 cd .. && git clone https://github.com/PKU-MARL/HARL.git
 cd HARL && pip install -e .
 cd ../omnisearch
+```
+
+HAPPO runs write TensorBoard events under `results/harl_runs/.../logs`. The
+training script prints the exact log directory and launch command; generic form:
+
+```bash
+tensorboard --logdir "results/harl_runs" --port 6006
 ```
 
 For a credible training run, edit the config in [agents/train_helpers.py](agents/train_helpers.py) (`research_config()`) for MAPPO/IPPO, or the `build_args()` function in `scripts/train_happo_smoke.py` for HAPPO.

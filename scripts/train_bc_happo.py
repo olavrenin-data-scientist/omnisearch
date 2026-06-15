@@ -90,8 +90,12 @@ def main():
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--terrain-cache-path", default="data/terrain_cache/malibu_creek_1km_128.npz")
-    p.add_argument("--drone-min-footprint", type=float, default=0.15)
-    p.add_argument("--ground-confirm-min", type=float, default=0.20)
+    p.add_argument("--drone-min-footprint", type=float, default=0.0)
+    p.add_argument("--ground-confirm-min", type=float, default=0.0)
+    p.add_argument("--drone-camera-fov-deg", type=float, default=140.0,
+                   help="Match the floor0-1km training config so demos share its detection geometry.")
+    p.add_argument("--drone-flight-levels-m", default="50,80,100")
+    p.add_argument("--ground-confirmation-range-m", type=float, default=30.0)
     p.add_argument("--fire-grid-size", type=int, default=128)
     p.add_argument("--recurrent", action="store_true",
                    help="Clone into a recurrent (GRU) policy via BPTT over sequences — "
@@ -101,10 +105,16 @@ def main():
     p.add_argument("--out", default=str(ROOT / "results" / "bc_happo"))
     args = p.parse_args()
 
+    drone_flight_levels_m = tuple(
+        float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
+    )
     scenario_kwargs = dict(
         n_drones=3, n_ground=2, fire_grid_size=args.fire_grid_size,
         terrain_source="real", terrain_cache_path=args.terrain_cache_path,
         drone_min_footprint=args.drone_min_footprint, ground_confirm_min=args.ground_confirm_min,
+        drone_camera_fov_deg=args.drone_camera_fov_deg,
+        drone_flight_levels_m=drone_flight_levels_m,
+        ground_confirmation_range_m=args.ground_confirmation_range_m,
     )
     print(f"Collecting {args.demos} lawnmower demos x {args.steps} steps ({'recurrent' if args.recurrent else 'feedforward'} BC) ...")
     obs_rollouts, act_rollouts = collect_demos(scenario_kwargs, args.demos, args.steps, args.seed)

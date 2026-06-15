@@ -106,6 +106,71 @@ Pure RL plateaus at recall ~0.20. To approach the heuristic, clone its behaviour
 
 ---
 
+## Addendum — Floor-0 investigation (no detection floor, physical sensors only)
+
+The runs above use opt-in detection **floors** (`drone_min_footprint = 0.15`,
+`ground_confirm_min = 0.20`) to make survivors detectable. A follow-up study imposed a hard
+constraint: **the floor must stay 0** — only *physical* variables (terrain size, camera FOV,
+flight altitude, episode length, sensor range in meters) may change. Everything below is at
+**floor 0** and is therefore **not directly comparable** to the floored numbers above.
+
+### Root cause of 0 recall at floor 0 (geometry, not the algorithm)
+
+Detection geometry is physical: the drone scout footprint is `flight_altitude · tan(FOV/2)` and the
+ground confirm radius is `ground_confirmation_range_m · sim_units_per_meter`, all in simulation units
+on a fixed `[-1, 1]²` map. `sim_units_per_meter` is set by the terrain's real-world extent:
+
+| Terrain | extent | `sim_units_per_meter` | confirm radius @10 m | footprint @50 m |
+|---|---|---|---|---|
+| Malibu Creek **State Park** (default) | ~22 km | 9.1e-05 | 0.0009 (~0.04 % of map) | 0.0045 |
+| Malibu Creek **small** | ~3 km | 6.6e-04 | 0.0066 | 0.033 |
+| Malibu Creek **1 km** | ~1.2 km | 1.7e-03 | 0.017 | 0.083 (~4 % of map) |
+
+On the default park terrain a survivor is a ~0.04 %-of-map pinpoint at floor 0 — **even the hand-coded
+experts score 0.00** there. It was never an algorithm problem; it was the map scale. Diagnostics:
+`scripts/diag_terrain_floor0.py`, `scripts/diag_floor0_ceiling.py`.
+
+### The fix that keeps floor 0: smaller terrain + stronger physical sensors
+
+On the **1 km** terrain with wider FOV (140°), higher flight (50/80/100 m) and longer episodes (1000
+steps), expert recall recovers to **0.47–0.60** at floor 0 — real, learnable signal. Packaged as
+`scripts/train_happo_smoke.py --preset floor0-1km` (sets terrain, sensors, recurrent policy,
+confirmation-dominant reward, coverage observation; floor stays 0). Eval: `scripts/eval_floor0_1km.py`.
+
+### Results at floor 0 (1 km, 1000 steps, 3 seeds)
+
+| Approach | recall @0.0 | recall @0.3 dropout | UGV travel |
+|---|---|---|---|
+| HAPPO from scratch (240k) | 0.07 | 0.07 | ~2.9 |
+| HAPPO more compute (3 M) | 0.07 | 0.00 | ~2.9 |
+| BC clone alone | 0.07 | — | — |
+| BC → RL fine-tune (1.2 M) | 0.00 | 0.07 | ~2.9 |
+| + team-coverage observation (obs 54→91) | 0.00 | 0.00 | 2.86 |
+| + confirmation-dominant reward | **0.10** | 0.00 | 2.48 |
+| + ground exploration reward | 0.07 | 0.00 | 2.30 |
+| lawnmower expert | **0.60** | 0.47 | 4.78 |
+| nearest_candidate expert | **0.47** | 0.13 | 4.81 |
+
+### Conclusion (floor 0)
+
+- The **environment bottleneck is solved**: at floor 0 the experts hit 0.47–0.60 once the terrain
+  scale and physical sensors are right (previously *everything*, experts included, was 0.00).
+- **RL plateaus at ≤ 0.10.** Across seven configurations — more compute, behaviour cloning, BC+RL,
+  a coverage observation, a confirmation-dominant reward, and an explicit ground-exploration reward —
+  the trained **ground robots refuse to sweep**: UGV travel stays ~2.3–2.9 vs the experts' ~4.8, even
+  after movement costs were cut to 0 and movement was directly rewarded. This is an
+  **optimization/coordination pathology** (low-velocity action collapse), not a reward-design gap.
+- **Recommendation:** at floor 0, deploy the hand-coded experts (0.60 recall) and treat learned MARL
+  coordination as open research. The contribution here is the diagnosis + the reproducible floor-0
+  harness, not a learned policy that beats the heuristics.
+
+New tooling added for this study: `scripts/diag_terrain_floor0.py`, `scripts/diag_floor0_ceiling.py`,
+`scripts/eval_floor0_1km.py`, `train_happo_smoke.py --preset floor0-1km` (+ flags
+`--coverage-obs-grid`, `--reward-confirm`, `--n-rollout-threads`, sensor flags); env additions
+`coverage_obs_grid`, `r_pending_penalty`, `r_ground_coverage`/`ground_coverage_radius`.
+
+---
+
 ## Code & commits
 
 Training scripts:
@@ -125,3 +190,46 @@ Key commits:
 
 > Note: all recall numbers are measured at the opt-in floors (0.15 / 0.20), not the physical defaults (0.0).
 > Standardize the floor values across the team for comparable results.
+
+---
+
+## TensorBoard (HAPPO)
+
+HARL already writes TensorBoard events for HAPPO runs. OmniSearch now surfaces the log path in
+training output and in `train_happo()` return values (`tensorboard_log_dir`, `tensorboard_cmd`).
+
+### Single run
+
+Run HAPPO training:
+
+```bash
+python scripts/train_happo_smoke.py --research --preset tuned
+```
+
+The script prints:
+- TensorBoard log directory
+- A ready-to-run command like:
+
+```bash
+tensorboard --logdir "results/harl_runs/.../logs" --port 6006
+```
+
+Open:
+
+```text
+http://localhost:6006
+```
+
+### All HAPPO runs
+
+To browse all HARL/HAPPO experiments at once:
+
+```bash
+tensorboard --logdir "results/harl_runs" --port 6006
+```
+
+### Tuning runs
+
+`scripts/tune_happo.py` records each trial's training metadata in the results JSON
+(`results/happo_tuning_*.json`), including the checkpoint/manifest path under `train_result`.
+Use those paths to locate corresponding HARL run dirs and inspect them in TensorBoard.

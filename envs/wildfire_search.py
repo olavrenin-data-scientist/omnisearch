@@ -367,6 +367,23 @@ class WildfireSearchScenario(BaseScenario):
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
         self.r_coverage = kwargs.pop("r_coverage", 0.0)
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
+        # Per-step penalty for each survivor that is scouted but not yet
+        # confirmed. This makes standing still cost something while survivors
+        # wait, breaking the degenerate "ground robots don't move" optimum.
+        # Default 0.0 keeps it off (applied to ground robots).
+        self.r_pending_penalty = kwargs.pop("r_pending_penalty", 0.0)
+        # Ground exploration reward: per-step fraction of NEW map area a ground
+        # robot visits. Gives ground robots a reason to sweep the map even before
+        # any survivor has been scouted (mirrors the expert's continuous sweep),
+        # instead of waiting near spawn. Default 0.0 keeps it off.
+        self.r_ground_coverage = kwargs.pop("r_ground_coverage", 0.0)
+        self.ground_coverage_radius = float(kwargs.pop("ground_coverage_radius", 0.08))
+        # Optional team-coverage observation: a KxK downsampled map of which
+        # cells drones have already scouted, plus a global covered-fraction
+        # scalar. This gives the policy the "where have I already searched"
+        # memory the hand-coded sweep expert has but a reactive policy lacks.
+        # 0 = off (observation dim unchanged); 6 gives a 6x6 map (+37 dims).
+        self.coverage_obs_grid = int(kwargs.pop("coverage_obs_grid", 0))
         # Dense directed-approach reward for ground robots: a triangular bonus
         # that grows as a robot nears a scouted-but-unconfirmed survivor and
         # peaks at the survivor. Default 0.0 = off. Potential-based ground
@@ -454,6 +471,10 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.scouted_survivors = torch.zeros_like(self.found_survivors)
         self.coverage_grid = torch.zeros(
+            batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
+        )
+        # Ground-robot visitation map (drives the ground exploration reward).
+        self.ground_coverage_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
         )
         self.fire_grid = torch.zeros(
@@ -576,6 +597,7 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.coverage_grid.zero_()
+            self.ground_coverage_grid.zero_()
             self.fire_grid.zero_()
             self.burned_grid.zero_()
             self.fire_age_grid.zero_()
@@ -591,6 +613,7 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.coverage_grid[env_index] = False
+            self.ground_coverage_grid[env_index] = False
             self.fire_grid[env_index] = False
             self.burned_grid[env_index] = False
             self.fire_age_grid[env_index] = 0
@@ -1408,12 +1431,21 @@ class WildfireSearchScenario(BaseScenario):
         confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
         confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
 
+        # Per-step pressure: number of scouted-but-unconfirmed survivors still
+        # waiting. Applied to ground robots so idling while survivors are pending
+        # is no longer a safe zero-reward option.
+        n_pending = unconfirmed_scouted.float().sum(dim=1)  # [B]
+
         ground_agents = self.world.agents[self.n_drones:]
         ground_in_fire = self._agents_in_fire(ground_agents)  # [B, G]
+        ground_cov_new = torch.zeros(
+            self.world.batch_dim, max(len(ground_agents), 1), device=device,
+        )
         if ground_agents:
             ground_pos = torch.stack([a.state.pos for a in ground_agents], dim=1)
             self.step_ugv_travel_cost = self._terrain_path_cost(self._prev_ground_pos, ground_pos)
             self._prev_ground_pos = ground_pos.clone()
+            ground_cov_new = self._ground_coverage_reward(ground_pos)  # [B, G]
         else:
             self.step_ugv_travel_cost.zero_()
 
@@ -1434,6 +1466,8 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
                 r = r + ground_shaping[:, g]
                 r = r + ground_approach[:, g]
+                r = r + n_pending * self.r_pending_penalty
+                r = r + ground_cov_new[:, g] * self.r_ground_coverage
             agent.scenario_reward = r
 
     def _drone_survivor_detections(
@@ -1809,7 +1843,11 @@ class WildfireSearchScenario(BaseScenario):
         """
         B = drone_pos.shape[0]
         new_per_drone = torch.zeros(B, self.n_drones, device=drone_pos.device)
-        if self.r_coverage <= 0.0 or self.n_drones == 0:
+        if self.n_drones == 0:
+            return new_per_drone
+        # The coverage grid is updated below even when the coverage reward is
+        # off, because it can also feed the team-coverage observation.
+        if self.r_coverage <= 0.0 and self.coverage_obs_grid <= 0:
             return new_per_drone
 
         G = self.fire_grid_size
@@ -1852,6 +1890,52 @@ class WildfireSearchScenario(BaseScenario):
             / claim_count.unsqueeze(1)
         )
         self.coverage_grid |= team_claims
+        return split_credit.sum(dim=(-1, -2)) / float(G * G)
+
+    def _ground_coverage_reward(self, ground_pos: Tensor) -> Tensor:
+        """Per-ground-robot fraction of NEW map area visited this step.
+
+        Mirrors the drone coverage reward but uses a fixed visitation radius, so
+        ground robots are rewarded for spreading out and sweeping the map rather
+        than waiting near spawn for a survivor to be scouted.
+        """
+        B = ground_pos.shape[0]
+        n_ground = ground_pos.shape[1]
+        new_per_ground = torch.zeros(B, n_ground, device=ground_pos.device)
+        if self.r_ground_coverage <= 0.0 or n_ground == 0:
+            return new_per_ground
+
+        G = self.fire_grid_size
+        cell_width = 2.0 * self.x_semidim / G
+        cell_height = 2.0 * self.y_semidim / G
+        xs = torch.linspace(
+            -self.x_semidim + cell_width / 2.0, self.x_semidim - cell_width / 2.0,
+            G, device=ground_pos.device, dtype=ground_pos.dtype,
+        )
+        ys = torch.linspace(
+            -self.y_semidim + cell_height / 2.0, self.y_semidim - cell_height / 2.0,
+            G, device=ground_pos.device, dtype=ground_pos.dtype,
+        )
+        dx = (
+            (xs.view(1, 1, 1, G) - ground_pos[..., X].view(B, n_ground, 1, 1)).abs()
+            - cell_width / 2.0
+        ).clamp_min(0.0)
+        dy = (
+            (ys.view(1, 1, G, 1) - ground_pos[..., Y].view(B, n_ground, 1, 1)).abs()
+            - cell_height / 2.0
+        ).clamp_min(0.0)
+        radius = max(self.ground_coverage_radius, 1e-6)
+        claims = dx.square() + dy.square() <= radius * radius
+
+        team_claims = claims.any(dim=1)
+        newly_covered = team_claims & ~self.ground_coverage_grid
+        claim_count = claims.sum(dim=1).clamp_min(1)
+        split_credit = (
+            claims.float()
+            * newly_covered.unsqueeze(1).float()
+            / claim_count.unsqueeze(1)
+        )
+        self.ground_coverage_grid |= team_claims
         return split_credit.sum(dim=(-1, -2)) / float(G * G)
 
     def _drone_camera_ranges(self) -> Tensor:
@@ -1906,9 +1990,25 @@ class WildfireSearchScenario(BaseScenario):
         terrain_local = self._local_terrain_features(agent)  # [B, 27]
         flight_state = self._flight_state(agent)             # [B, 2]
         neighbor   = self._neighbor_observations(agent)     # [B, (A-1)*2]
-        return torch.cat(
-            [own_pos, own_vel, lidar_obs, fire_local, terrain_local, flight_state, neighbor], dim=-1,
-        )
+        parts = [own_pos, own_vel, lidar_obs, fire_local, terrain_local, flight_state, neighbor]
+        if self.coverage_obs_grid > 0:
+            parts.append(self._coverage_observation())       # [B, K*K + 1]
+        return torch.cat(parts, dim=-1)
+
+    def _coverage_observation(self) -> Tensor:
+        """Team-coverage situational awareness: a downsampled absolute map of
+        already-scouted cells plus the global covered fraction.
+
+        Same for every agent (shared team memory). Lets the policy steer toward
+        not-yet-covered regions instead of re-sweeping covered ground.
+        """
+        import torch.nn.functional as F
+
+        K = self.coverage_obs_grid
+        cov = self.coverage_grid.float().unsqueeze(1)            # [B, 1, G, G]
+        pooled = F.adaptive_avg_pool2d(cov, (K, K)).flatten(1)   # [B, K*K]
+        global_frac = self.coverage_grid.float().mean(dim=(1, 2), keepdim=True).squeeze(1)  # [B, 1]
+        return torch.cat([pooled, global_frac], dim=-1)
 
     def _local_fire_density(self, agent: Agent) -> Tensor:
         pos = agent.state.pos
