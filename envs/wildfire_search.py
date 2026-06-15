@@ -362,6 +362,10 @@ class WildfireSearchScenario(BaseScenario):
 
         # Communication
         self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
+        self.survivor_message_distance_scale_m = max(
+            float(kwargs.pop("survivor_message_distance_scale_m", 100.0)),
+            1e-6,
+        )
 
         # Episode
         self.max_steps = kwargs.pop("max_steps", 500)
@@ -369,6 +373,23 @@ class WildfireSearchScenario(BaseScenario):
         self.known_survivor_spawn_distance_m = max(
             float(kwargs.pop("known_survivor_spawn_distance_m", 0.0)), 0.0,
         )
+        known_spawn_min_m = kwargs.pop("known_survivor_spawn_distance_min_m", None)
+        known_spawn_max_m = kwargs.pop("known_survivor_spawn_distance_max_m", None)
+        if known_spawn_min_m is None and known_spawn_max_m is None:
+            self.known_survivor_spawn_distance_min_m = self.known_survivor_spawn_distance_m
+            self.known_survivor_spawn_distance_max_m = self.known_survivor_spawn_distance_m
+        else:
+            self.known_survivor_spawn_distance_min_m = max(
+                float(self.known_survivor_spawn_distance_m if known_spawn_min_m is None else known_spawn_min_m),
+                0.0,
+            )
+            self.known_survivor_spawn_distance_max_m = max(
+                float(self.known_survivor_spawn_distance_min_m if known_spawn_max_m is None else known_spawn_max_m),
+                0.0,
+            )
+            if self.known_survivor_spawn_distance_max_m < self.known_survivor_spawn_distance_min_m:
+                raise ValueError("known_survivor_spawn_distance_max_m must be >= known_survivor_spawn_distance_min_m")
+        kwargs.pop("action_transform", None)  # obsolete diagnostic option, ignored for old manifests
 
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)
@@ -757,7 +778,7 @@ class WildfireSearchScenario(BaseScenario):
         """For diagnostic episodes, place known survivors near ground starts."""
         if (
             not self.known_survivors_at_reset
-            or self.known_survivor_spawn_distance_m <= 0.0
+            or self.known_survivor_spawn_distance_max_m <= 0.0
             or self.n_ground <= 0
             or self.n_survivors <= 0
         ):
@@ -775,12 +796,7 @@ class WildfireSearchScenario(BaseScenario):
             indexing="ij",
         )
         cell_size_sim = (2.0 * self.x_semidim) / float(size)
-        target_sim = (
-            self.known_survivor_spawn_distance_m
-            * float(self.terrain_sim_units_per_meter[env_index])
-        )
         confirm_sim = float(self.detection_range_by_env[env_index])
-        min_sim = max(confirm_sim * 1.5, target_sim * 0.25)
         available = candidates.clone()
 
         ground_agents = self.world.agents[self.n_drones:]
@@ -788,9 +804,26 @@ class WildfireSearchScenario(BaseScenario):
             ground = ground_agents[survivor_idx % self.n_ground]
             gx, gy = self._positions_to_grid(ground.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
+            if self.known_survivor_spawn_distance_max_m > self.known_survivor_spawn_distance_min_m:
+                sample = torch.rand((), device=device)
+                target_m = (
+                    self.known_survivor_spawn_distance_min_m
+                    + sample * (
+                        self.known_survivor_spawn_distance_max_m
+                        - self.known_survivor_spawn_distance_min_m
+                    )
+                )
+            else:
+                target_m = torch.tensor(
+                    self.known_survivor_spawn_distance_min_m,
+                    device=device,
+                    dtype=torch.float32,
+                )
+            target_sim = target_m * float(self.terrain_sim_units_per_meter[env_index])
             dist_sim = (
                 (xx - x).float().square() + (yy - y).float().square()
             ).sqrt() * cell_size_sim
+            min_sim = max(confirm_sim * 1.5, float(target_sim) * 0.25)
             search_mask = available & (dist_sim >= min_sim)
             if not bool(search_mask.any().item()):
                 search_mask = available if bool(available.any().item()) else candidates
@@ -2194,7 +2227,7 @@ class WildfireSearchScenario(BaseScenario):
         return keep
 
     def _survivor_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
-        """Encode locally known survivor candidates as [known, dx, dy, confirmed]."""
+        """Encode known candidates as [known, dx, dy, ux, uy, distance_norm, confirmed]."""
         agent_idx = self.world.agents.index(agent)
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
@@ -2211,10 +2244,16 @@ class WildfireSearchScenario(BaseScenario):
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
         relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
         relative_pos = relative_pos * local_known.unsqueeze(-1).float()
+        dist_sim = torch.linalg.norm(relative_pos, dim=-1, keepdim=True)
+        unit_direction = relative_pos / dist_sim.clamp_min(1e-9)
+        distance_m = dist_sim / self.terrain_sim_units_per_meter.view(-1, 1, 1).clamp_min(1e-9)
+        distance_norm = distance_m / self.survivor_message_distance_scale_m
         features = torch.cat(
             [
                 local_known.unsqueeze(-1).float(),
                 relative_pos,
+                unit_direction,
+                distance_norm,
                 local_confirmed.unsqueeze(-1).float(),
             ],
             dim=-1,

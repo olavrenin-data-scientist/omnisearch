@@ -141,6 +141,8 @@ def build_args(
     model_dir: str | None = None,
     ugv_known_survivor_diagnostic: bool = False,
     ugv_diagnostic_target_distance_m: float = 80.0,
+    ugv_diagnostic_target_distance_min_m: float | None = None,
+    ugv_diagnostic_target_distance_max_m: float | None = None,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
@@ -260,12 +262,41 @@ def build_args(
             "r_coverage":          5.0,    # max team bonus for covering the full map once
         })
     if ugv_known_survivor_diagnostic:
+        if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
+            target_distance_m = max(float(ugv_diagnostic_target_distance_m), 0.0)
+            target_distance_min_m = target_distance_m
+            target_distance_max_m = target_distance_m
+        else:
+            target_distance_min_m = max(
+                float(
+                    ugv_diagnostic_target_distance_m
+                    if ugv_diagnostic_target_distance_min_m is None
+                    else ugv_diagnostic_target_distance_min_m
+                ),
+                0.0,
+            )
+            target_distance_max_m = max(
+                float(
+                    target_distance_min_m
+                    if ugv_diagnostic_target_distance_max_m is None
+                    else ugv_diagnostic_target_distance_max_m
+                ),
+                0.0,
+            )
+            if target_distance_max_m < target_distance_min_m:
+                raise ValueError(
+                    "ugv_diagnostic_target_distance_max_m must be >= "
+                    "ugv_diagnostic_target_distance_min_m"
+                )
+            target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1,
             "n_survivors": 1,
             "known_survivors_at_reset": True,
-            "known_survivor_spawn_distance_m": max(float(ugv_diagnostic_target_distance_m), 0.0),
+            "known_survivor_spawn_distance_m": target_distance_m,
+            "known_survivor_spawn_distance_min_m": target_distance_min_m,
+            "known_survivor_spawn_distance_max_m": target_distance_max_m,
             "disable_fire": True,
             "comms_dropout": 0.0,
             "r_found_survivor": 10.0,
@@ -344,6 +375,10 @@ def main():
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--ugv-diagnostic-target-distance-m", type=float, default=80.0,
                    help="Approximate known-survivor start distance from the UGV for the diagnostic task.")
+    p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
+                   help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
+    p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
+                   help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
@@ -393,6 +428,8 @@ def main():
         model_dir = args.model_dir,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         ugv_diagnostic_target_distance_m = args.ugv_diagnostic_target_distance_m,
+        ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
+        ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
     )
