@@ -57,6 +57,30 @@ class HARLInfoMetricTests(unittest.TestCase):
         self.assertIn("reward/ugv_progress", infos[0, 0])
         self.assertIn("bad_transition", infos[0, 0])
 
+    def test_batched_harl_adapter_auto_reset_clears_vmas_step_counter(self):
+        scenario_kwargs = self._env_args()["scenario_kwargs"]
+        scenario_kwargs["max_steps"] = 5
+        env = BatchedVMASVecEnv(
+            num_envs=1,
+            seed=1,
+            max_cycles=2,
+            scenario_kwargs=scenario_kwargs,
+        )
+        env.reset()
+        actions = np.zeros((1, env.n_agents, 2), dtype=np.float32)
+
+        env.step_async(actions)
+        _, _, _, dones, _, _ = env.step_wait()
+        self.assertFalse(bool(dones[0, 0]))
+
+        env.step_async(actions)
+        _, _, _, dones, _, _ = env.step_wait()
+        self.assertTrue(bool(dones[0, 0]))
+
+        env.step_async(actions)
+        _, _, _, dones, _, _ = env.step_wait()
+        self.assertFalse(bool(dones[0, 0]))
+
     def test_metric_logger_accumulates_and_emits_episode_values(self):
         class DummyLogger:
             algo_args = {"train": {"n_rollout_threads": 1}}

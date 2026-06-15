@@ -175,7 +175,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
                 infos[i, 0]["original_obs"]           = obs[i].copy()
                 infos[i, 0]["original_state"]         = share_obs[i].copy()
                 infos[i, 0]["original_avail_actions"] = None
-                self._env.scenario.reset_world_at(env_index=int(i))
+                self._env.reset_at(index=int(i), return_observations=False)
                 self._step_counts[i] = 0
             # Re-collect obs (batched call; we'll overwrite only the rows we reset)
             fresh = self._collect_obs()
