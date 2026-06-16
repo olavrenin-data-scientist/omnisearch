@@ -53,6 +53,9 @@ X, Y = 0, 1
 # drones fly above it but observe the map to coordinate ground routes.
 LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK, LAND_WATER = range(6)
 OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE = range(3)
+DEFAULT_GROUND_APPROACH_REWARD = 0.05
+DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
+DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 
 
 def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
@@ -135,10 +138,8 @@ class WildfireSearchScenario(BaseScenario):
         self.ground_confirmation_range_m = max(
             float(kwargs.pop("ground_confirmation_range_m", GROUND_CONFIRMATION_RANGE_M)), 0.0,
         )
-        self.ground_approach_radius_sim_override = kwargs.pop("ground_approach_radius", None)
-        self.ground_approach_radius_m = max(
-            float(kwargs.pop("ground_approach_radius_m", 25.0)), 0.0,
-        )
+        kwargs.pop("ground_approach_radius", None)  # obsolete triangular approach reward option
+        kwargs.pop("ground_approach_radius_m", None)  # obsolete triangular approach reward option
         self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
         self.agent_radius = (
             max(float(self.agent_radius_sim_override), 1e-6)
@@ -405,6 +406,11 @@ class WildfireSearchScenario(BaseScenario):
         self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
         self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.0)
+        self.r_ugv_stall_penalty = max(float(kwargs.pop("r_ugv_stall_penalty", 0.0)), 0.0)
+        self.ugv_stall_displacement_threshold_m = max(
+            float(kwargs.pop("ugv_stall_displacement_threshold_m", 0.05)),
+            0.0,
+        )
         self.ground_progress_scale_m = max(
             float(kwargs.pop(
                 "ground_progress_scale_m",
@@ -417,12 +423,47 @@ class WildfireSearchScenario(BaseScenario):
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
         self.r_coverage = kwargs.pop("r_coverage", 0.0)
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
-        # Dense directed-approach reward for ground robots: a triangular bonus
-        # that grows as a robot nears a scouted-but-unconfirmed survivor and
-        # peaks at the survivor. Default 0.0 = off. Potential-based ground
-        # shaping only rewards distance *change*, leaving robots stalled just
-        # outside confirm range; this pulls them all the way in to confirm.
-        self.r_ground_approach = kwargs.pop("r_ground_approach", 0.0)
+        # One-time directed-approach milestones for ground robots. The scalar
+        # is the final/inner milestone reward; default fractions make 0.05 map
+        # to rewards [0.02, 0.025, 0.03, 0.04, 0.05] for 75/50/40/30/20m.
+        self.r_ground_approach = max(
+            float(kwargs.pop("r_ground_approach", DEFAULT_GROUND_APPROACH_REWARD)),
+            0.0,
+        )
+        milestone_radii_m = kwargs.pop(
+            "ground_approach_milestone_radii_m",
+            DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M,
+        )
+        if isinstance(milestone_radii_m, (int, float)):
+            milestone_radii_m = (float(milestone_radii_m),)
+        self.ground_approach_milestone_radii_m = tuple(float(v) for v in milestone_radii_m)
+        if any(v <= 0.0 for v in self.ground_approach_milestone_radii_m):
+            raise ValueError("ground_approach_milestone_radii_m must contain positive distances")
+
+        milestone_rewards = kwargs.pop("ground_approach_milestone_rewards", None)
+        if milestone_rewards is None:
+            if len(self.ground_approach_milestone_radii_m) == len(DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS):
+                reward_fractions = DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS
+            elif len(self.ground_approach_milestone_radii_m) == 1:
+                reward_fractions = (1.0,)
+            else:
+                span = len(self.ground_approach_milestone_radii_m) - 1
+                reward_fractions = tuple(0.4 + 0.6 * i / span for i in range(len(self.ground_approach_milestone_radii_m)))
+            self.ground_approach_milestone_rewards = tuple(
+                self.r_ground_approach * float(fraction)
+                for fraction in reward_fractions
+            )
+        else:
+            if isinstance(milestone_rewards, (int, float)):
+                milestone_rewards = (float(milestone_rewards),)
+            self.ground_approach_milestone_rewards = tuple(float(v) for v in milestone_rewards)
+            if len(self.ground_approach_milestone_rewards) != len(self.ground_approach_milestone_radii_m):
+                raise ValueError(
+                    "ground_approach_milestone_rewards must match "
+                    "ground_approach_milestone_radii_m length"
+                )
+            if any(v < 0.0 for v in self.ground_approach_milestone_rewards):
+                raise ValueError("ground_approach_milestone_rewards must be nonnegative")
 
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
@@ -572,13 +613,25 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_min_footprint_by_env = torch.full(
             (batch_dim,), initial_drone_footprint_floor, dtype=torch.float, device=device,
         )
-        initial_ground_approach_radius = (
-            max(float(self.ground_approach_radius_sim_override), 1e-6)
-            if self.ground_approach_radius_sim_override is not None
-            else 0.4
+        self.ground_approach_milestone_radii_m_tensor = torch.tensor(
+            self.ground_approach_milestone_radii_m,
+            dtype=torch.float,
+            device=device,
         )
-        self.ground_approach_radius_by_env = torch.full(
-            (batch_dim,), initial_ground_approach_radius, dtype=torch.float, device=device,
+        self.ground_approach_milestone_rewards_tensor = torch.tensor(
+            self.ground_approach_milestone_rewards,
+            dtype=torch.float,
+            device=device,
+        )
+        self.ground_approach_milestones_reached = torch.zeros(
+            (
+                batch_dim,
+                self.n_ground,
+                self.n_survivors,
+                len(self.ground_approach_milestone_radii_m),
+            ),
+            dtype=torch.bool,
+            device=device,
         )
         self.spawn_padding_by_env = torch.zeros(batch_dim, dtype=torch.float, device=device)
         self.drone_safety_clearance = initial_clearance
@@ -680,6 +733,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_action_alignment = torch.zeros(batch_dim, device=device)
         self.metric_ugv_movement_alignment = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_movement_alignment = torch.zeros(batch_dim, device=device)
+        self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
 
     def _reset_step_metric_buffers(self, env_index: int | None = None) -> None:
         buffers = [
@@ -712,6 +766,7 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_action_alignment,
             self.metric_ugv_movement_alignment,
             self.metric_reward_ugv_movement_alignment,
+            self.metric_reward_ugv_stall_penalty,
         ]
         for buffer in buffers:
             if env_index is None:
@@ -778,6 +833,7 @@ class WildfireSearchScenario(BaseScenario):
             self.prev_drone_dist.fill_(float("inf"))
             self.prev_ground_dist.fill_(float("inf"))
             self.prev_ground_target_idx.fill_(-1)
+            self.ground_approach_milestones_reached.zero_()
             self._reset_step_metric_buffers()
             self._reset_ground_motion_diagnostics()
             envs_to_seed = range(self.world.batch_dim)
@@ -800,6 +856,7 @@ class WildfireSearchScenario(BaseScenario):
             self.prev_drone_dist[env_index]  = float("inf")
             self.prev_ground_dist[env_index] = float("inf")
             self.prev_ground_target_idx[env_index] = -1
+            self.ground_approach_milestones_reached[env_index] = False
             self._reset_step_metric_buffers(env_index)
             self._reset_ground_motion_diagnostics(env_index)
             envs_to_seed = [env_index]
@@ -1206,17 +1263,10 @@ class WildfireSearchScenario(BaseScenario):
             if self.drone_min_footprint_sim_override is not None
             else self.drone_min_footprint_m * scale
         )
-        ground_approach_radius = (
-            max(float(self.ground_approach_radius_sim_override), 1e-6)
-            if self.ground_approach_radius_sim_override is not None
-            else max(self.ground_approach_radius_m * scale, 1e-6)
-        )
-
         self.agent_radius_by_env[env_index] = agent_radius
         self.survivor_radius_by_env[env_index] = survivor_radius
         self.detection_range_by_env[env_index] = detection_range
         self.drone_min_footprint_by_env[env_index] = drone_footprint_floor
-        self.ground_approach_radius_by_env[env_index] = ground_approach_radius
 
         # VMAS shape dimensions are shared across a vectorized batch. All
         # environments in this scenario load the same terrain configuration,
@@ -1900,6 +1950,53 @@ class WildfireSearchScenario(BaseScenario):
             action_alignment = torch.zeros_like(curr_ground_dist_m)
             movement_alignment = torch.zeros_like(curr_ground_dist_m)
         movement_alignment_reward = movement_alignment * self.r_ugv_movement_alignment
+        outside_confirm_range = valid_ground_target & (
+            curr_ground_dist_m >= confirm_range_m.view(-1, 1)
+        )
+        stalled_while_seeking = (
+            prev_known
+            & outside_confirm_range
+            & (self.step_ugv_actual_displacement_m < self.ugv_stall_displacement_threshold_m)
+        )
+        ugv_stall_penalty = -self.r_ugv_stall_penalty * stalled_while_seeking.float()
+        if (
+            self.n_ground > 0
+            and self.n_survivors > 0
+            and self.ground_approach_milestone_rewards_tensor.numel() > 0
+        ):
+            milestone_radii = self.ground_approach_milestone_radii_m_tensor.view(1, 1, -1)
+            milestone_rewards = self.ground_approach_milestone_rewards_tensor.view(1, 1, -1)
+            target_idx_safe = curr_ground_target_idx.clamp(min=0)
+            milestone_index = target_idx_safe.unsqueeze(-1).unsqueeze(-1).expand(
+                -1,
+                -1,
+                1,
+                milestone_radii.shape[-1],
+            )
+            target_milestones_reached = self.ground_approach_milestones_reached.gather(
+                dim=2,
+                index=milestone_index,
+            ).squeeze(2)
+            milestone_gate = (
+                (ground_progress_m > 0.0)
+                & (movement_alignment > 0.5)
+            )
+            milestone_crossed = (
+                milestone_gate.unsqueeze(-1)
+                & prev_known.unsqueeze(-1)
+                & (self.prev_ground_dist.unsqueeze(-1) >= milestone_radii)
+                & (curr_ground_dist_m.unsqueeze(-1) < milestone_radii)
+                & ~target_milestones_reached
+            )
+            ground_approach = (milestone_crossed.float() * milestone_rewards).sum(dim=-1)
+            updated_milestones = target_milestones_reached | milestone_crossed
+            self.ground_approach_milestones_reached.scatter_(
+                dim=2,
+                index=milestone_index,
+                src=updated_milestones.unsqueeze(2),
+            )
+        else:
+            ground_approach = torch.zeros_like(curr_ground_dist_m)
         self.prev_ground_dist = torch.where(
             valid_ground_target,
             curr_ground_dist_m,
@@ -1909,13 +2006,6 @@ class WildfireSearchScenario(BaseScenario):
             valid_ground_target,
             curr_ground_target_idx,
             torch.full_like(curr_ground_target_idx, -1),
-        )
-        # Dense triangular approach bonus: peaks at the survivor, 0 beyond the
-        # radius. curr_ground_dist is +inf when nothing is scouted -> bonus 0.
-        ground_approach_radius = self.ground_approach_radius_by_env.view(-1, 1)
-        ground_approach = (
-            (1.0 - curr_ground_dist_sim / ground_approach_radius).clamp(min=0.0)
-            * self.r_ground_approach
         )
 
         team_reward = (
@@ -1950,6 +2040,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_ugv_progress = ground_shaping.sum(dim=1)
         self.metric_reward_ugv_approach = ground_approach.sum(dim=1)
         self.metric_reward_ugv_movement_alignment = movement_alignment_reward.sum(dim=1)
+        self.metric_reward_ugv_stall_penalty = ugv_stall_penalty.sum(dim=1)
         self.metric_reward_ground_confirm = (
             confirm_per_ground * self.r_ground_confirm
         ).sum(dim=1)
@@ -2014,6 +2105,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + ground_shaping[:, g]
                 r = r + ground_approach[:, g]
                 r = r + movement_alignment_reward[:, g]
+                r = r + ugv_stall_penalty[:, g]
             agent.scenario_reward = r
 
     def _drone_survivor_detections(
@@ -2662,6 +2754,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/ugv_progress": self.metric_reward_ugv_progress,
             "reward/ugv_approach": self.metric_reward_ugv_approach,
             "reward/ugv_movement_alignment": self.metric_reward_ugv_movement_alignment,
+            "reward/ugv_stall_penalty": self.metric_reward_ugv_stall_penalty,
             "reward/ground_confirm": self.metric_reward_ground_confirm,
             "reward/coverage": self.metric_reward_coverage,
             "cost/ugv_fire_exposure": self.metric_cost_ugv_fire_exposure,

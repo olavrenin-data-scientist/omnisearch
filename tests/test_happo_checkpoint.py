@@ -117,6 +117,21 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(_action_transform_from_manifest(manifest), "tanh")
         self.assertEqual(_action_transform_from_manifest(None), "clip")
 
+    def test_build_args_includes_default_ugv_approach_reward(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="default",
+            reward_search=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_ground_approach"], 0.05)
+        self.assertEqual(scenario["ground_approach_milestone_radii_m"], (75.0, 50.0, 40.0, 30.0, 20.0))
+
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
             num_env_steps=100,
@@ -154,7 +169,11 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_fire_penalty"], 0.0)
         self.assertEqual(scenario["r_ground_travel_cost"], 0.0)
         self.assertEqual(scenario["r_ground_shaping"], 0.50)
+        self.assertEqual(scenario["r_ground_approach"], 0.05)
+        self.assertEqual(scenario["ground_approach_milestone_radii_m"], (75.0, 50.0, 40.0, 30.0, 20.0))
         self.assertEqual(scenario["r_ugv_movement_alignment"], 0.20)
+        self.assertEqual(scenario["r_ugv_stall_penalty"], 0.0)
+        self.assertEqual(scenario["ugv_stall_displacement_threshold_m"], 0.05)
         self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
         self.assertEqual(scenario["slope_speed_weight"], 0.5)
         self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))
