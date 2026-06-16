@@ -42,6 +42,7 @@ from gymnasium.spaces import Box
 
 import vmas
 
+from agents.action_transform import transform_continuous_action
 from envs.wildfire_search import WildfireSearchScenario
 
 
@@ -51,6 +52,7 @@ class WildfireHARLEnv:
     def __init__(self, args: Dict[str, Any]):
         args = copy.deepcopy(args)
         self.scenario_kwargs: Dict[str, Any] = args.get("scenario_kwargs", {}) or {}
+        self.action_transform: str = args.get("action_transform", "clip")
         self.seed_val: int = args.get("seed", 0)
         self.max_cycles: int = args.get("max_cycles", 200)
 
@@ -114,28 +116,31 @@ class WildfireHARLEnv:
         for i, agent in enumerate(self._env.agents):
             a_size = self._env.get_agent_action_size(agent)
             a = np.asarray(actions[i][:a_size], dtype=np.float32)
-            # VMAS asserts actions are within range — clip just in case.
-            a = np.clip(a, -1.0, 1.0)
+            # VMAS asserts actions are within range.
+            a = transform_continuous_action(a, self.action_transform)
             action_list.append(torch.from_numpy(a).unsqueeze(0))
 
-        obs, rewards, dones, _infos = self._env.step(action_list)
+        obs, rewards, dones, raw_infos = self._env.step(action_list)
 
         obs_list    = [o.cpu().numpy()[0] for o in obs]
         share_obs   = self._make_share_obs(obs_list)
         # Per-agent reward (HARL accepts shape [[r], ...])
         reward_list = [[float(r.cpu().numpy()[0])] for r in rewards]
 
-        done_bool = bool(dones[0].item())
+        natural_done = bool(dones[0].item())
+        done_bool = natural_done
         self._cur_step += 1
         # HARL's PettingZoo wrapper truncates at max_cycles; mirror that.
-        if not done_bool and self._cur_step >= self.max_cycles:
+        truncated = not natural_done and self._cur_step >= self.max_cycles
+        if truncated:
             done_bool = True
 
         done_list = [done_bool] * self.n_agents
-        info_list = [
-            {"bad_transition": (self._cur_step >= self.max_cycles and done_bool)}
-            for _ in range(self.n_agents)
-        ]
+        info_list = []
+        for agent_id in range(self.n_agents):
+            info = self._info_for_agent(raw_infos, agent_id)
+            info["bad_transition"] = truncated
+            info_list.append(info)
         return obs_list, share_obs, reward_list, done_list, info_list, self.get_avail_actions()
 
     # ------------------------------------------------------------------
@@ -166,3 +171,19 @@ class WildfireHARLEnv:
     def _make_share_obs(self, obs_list: List[np.ndarray]) -> List[np.ndarray]:
         shared = np.concatenate(obs_list, axis=0).astype(np.float32)
         return [shared for _ in range(self.n_agents)]
+
+    def _info_for_agent(self, raw_infos: Any, agent_id: int) -> Dict[str, Any]:
+        if not raw_infos:
+            return {}
+        raw = raw_infos[agent_id] if isinstance(raw_infos, list) else raw_infos
+        info: Dict[str, Any] = {}
+        for key, value in raw.items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach().cpu()
+                if value.numel() == 1:
+                    info[key] = float(value.reshape(-1)[0])
+                else:
+                    info[key] = value.numpy()
+            else:
+                info[key] = value
+        return info

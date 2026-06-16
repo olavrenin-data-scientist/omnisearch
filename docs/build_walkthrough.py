@@ -699,7 +699,7 @@ beat to be defensible. Each implements the same callable signature
 the same evaluation harness.
 
 ```python
-class RandomPolicy:
+class RandomActionPolicy:
     def __call__(self, env):
         return env.get_random_actions()
 ```
@@ -758,7 +758,8 @@ reliable).
 
 ```python
 BASELINES = {
-    "random": RandomPolicy, "lawnmower": LawnmowerPolicy,
+    "random_action": RandomActionPolicy, "random_walk": RandomWalkPolicy,
+    "lawnmower": LawnmowerPolicy,
     "nearest_candidate": NearestCandidatePolicy,
     "highest_confidence": HighestConfidencePolicy,
 }
@@ -1232,7 +1233,7 @@ def run_one(strategy_name, seed, steps):
                         num_envs=2, seed=seed, …)
     env.reset()
     cls = BASELINES[strategy_name]
-    policy = cls() if cls is RandomPolicy else cls(env)
+    policy = cls() if cls is RandomActionPolicy else cls(env)
     rec = EpisodeRecorder(env.scenario, env_index=0)
     for _ in range(steps):
         env.step(policy(env))
@@ -1265,7 +1266,7 @@ def main():
     args = p.parse_args()
     for name, cls in BASELINES.items():
         def make_policy(env, _cls=cls):
-            return _cls() if _cls is RandomPolicy else _cls(env)
+            return _cls() if _cls is RandomActionPolicy else _cls(env)
         export_trajectory(strategy_name=name, make_policy=make_policy,
                           output_path=out_dir / f"{name}.json",
                           n_steps=args.steps, seed=args.seed,
@@ -1365,7 +1366,7 @@ const h = React.createElement;
 transpiler, the whole UI is written as `h(tag, props, ...children)` calls.
 
 ```js
-const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate',
+const STRATEGY_NAMES = ['random_action', 'random_walk', 'lawnmower', 'nearest_candidate',
                         'highest_confidence', 'happo_trained'];
 
 async function loadTrajectory(name) {
