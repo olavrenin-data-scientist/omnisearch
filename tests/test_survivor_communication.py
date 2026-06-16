@@ -308,41 +308,6 @@ class SurvivorCommunicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._diagnostic_env(local_map_patch_size=10)
 
-    def test_target_lookahead_patch_shifts_world_window_toward_target(self):
-        env = self._diagnostic_env(
-            local_map_patch_size=7,
-            ugv_local_map_patch_shift="target_lookahead",
-        )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        device = scenario.fire_grid.device
-        size = scenario.fire_grid_size
-        gx = gy = size // 2
-        ground.state.pos[:] = scenario._grid_cell_center_to_world(gx, gy, device=device).view(1, 2)
-        survivor.state.pos[:] = scenario._grid_cell_center_to_world(gx + 10, gy, device=device).view(1, 2)
-        scenario.scouted_survivors[0, 0] = True
-        scenario.known_survivors_by_agent[0, 0, 0] = True
-        yy, xx = torch.meshgrid(
-            torch.arange(size, device=device),
-            torch.arange(size, device=device),
-            indexing="ij",
-        )
-        grid = (yy * size + xx).float().unsqueeze(0)
-
-        shift = scenario._local_patch_center_shift_cells(ground, 7)
-        patch = scenario._local_grid_patch(
-            grid,
-            ground.state.pos,
-            7,
-            center_shift_cells=shift,
-        ).view(7, 7)
-
-        torch.testing.assert_close(shift.cpu(), torch.tensor([[2, 0]]))
-        self.assertEqual(float(patch[3, 1]), float(gy * size + gx))
-        self.assertEqual(float(patch[3, 6]), float(gy * size + gx + 5))
-        self.assertEqual(float(patch[3, 0]), float(gy * size + gx - 1))
-
     def _configure_progress_case(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario

@@ -43,6 +43,21 @@ class HARLInfoMetricTests(unittest.TestCase):
         self.assertGreater(transformed[0, 2], 0.99)
         self.assertTrue(np.all(np.abs(transformed) < 1.0))
 
+    def test_radial_tanh_action_transform_preserves_direction(self):
+        raw = np.array([[6.0, 1.0], [0.0, 0.0], [-2.0, 2.0]], dtype=np.float32)
+
+        transformed = transform_continuous_action(raw, "radial_tanh")
+
+        self.assertLessEqual(np.linalg.norm(transformed[0]), 1.0)
+        self.assertLessEqual(np.linalg.norm(transformed[2]), 1.0)
+        self.assertTrue(np.allclose(transformed[1], 0.0))
+        self.assertAlmostEqual(
+            transformed[0, 1] / transformed[0, 0],
+            raw[0, 1] / raw[0, 0],
+            places=5,
+        )
+        self.assertTrue(np.allclose(transform_continuous_action(raw, "radial-tanh"), transformed))
+
     def test_single_harl_adapter_preserves_scenario_info(self):
         env = WildfireHARLEnv(self._env_args())
         actions = np.zeros((env.n_agents, 2), dtype=np.float32)

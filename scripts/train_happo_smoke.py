@@ -59,6 +59,9 @@ def build_args(
     comms_dropout:  float,
     entropy_coef:   float,
     exp_name:       str,
+    lr: float = 5e-4,
+    critic_lr: float = 5e-4,
+    linear_lr_decay: bool = False,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
     drone_min_footprint_m: float = 0.0,
@@ -76,7 +79,6 @@ def build_args(
     ugv_stall_penalty: float = 0.0,
     ugv_stall_displacement_threshold_m: float = 0.05,
     local_map_patch_size: int = 3,
-    ugv_local_map_patch_shift: str = "center",
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
     action_transform: str = "clip",
@@ -100,7 +102,7 @@ def build_args(
             "log_interval":           1,
             "eval_interval":          1,
             "use_valuenorm":          True,
-            "use_linear_lr_decay":    False,
+            "use_linear_lr_decay":    linear_lr_decay,
             "use_proper_time_limits": True,
             "model_dir":              model_dir,
         },
@@ -123,8 +125,8 @@ def build_args(
             "use_recurrent_policy":       recurrent,
             "recurrent_n":                1,
             "data_chunk_length":          10,
-            "lr":                         5e-4,
-            "critic_lr":                  5e-4,
+            "lr":                         lr,
+            "critic_lr":                  critic_lr,
             "opti_eps":                   1e-5,
             "weight_decay":               0,
             "std_x_coef":                 1,
@@ -165,7 +167,6 @@ def build_args(
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
-        "ugv_local_map_patch_shift": ugv_local_map_patch_shift,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
@@ -282,6 +283,12 @@ def main():
     p.add_argument("--entropy-coef",   type=float, default=0.01,
                    help="Higher (0.05+) encourages exploration — helps break "
                         "the drones-at-corners action-saturation pathology.")
+    p.add_argument("--lr", type=float, default=5e-4,
+                   help="Actor learning rate.")
+    p.add_argument("--critic-lr", type=float, default=5e-4,
+                   help="Critic learning rate.")
+    p.add_argument("--linear-lr-decay", action="store_true",
+                   help="Linearly decay actor/critic learning rates over training.")
     p.add_argument("--exp-name",       default="happo_smoke")
     p.add_argument("--terrain-cache-path", default=None,
                    help="Train on this cached real terrain (recommended: match what you evaluate on, "
@@ -310,9 +317,6 @@ def main():
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
-    p.add_argument("--ugv-local-map-patch-shift", choices=("center", "target_lookahead", "target-lookahead"),
-                   default="center",
-                   help="Shift the world-aligned UGV mobility patch toward the selected known target.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -349,11 +353,13 @@ def main():
     p.add_argument("--land-cover-speeds", type=float, nargs="+", default=None,
                    help="Override UGV speed multipliers for road/open/brush/forest/rock[/water]. "
                         "Example: --land-cover-speeds 1.0 0.95 0.8 0.7 0.0 0.0")
-    p.add_argument("--action-transform", choices=("clip", "tanh"), default="clip",
+    p.add_argument("--action-transform", choices=("clip", "tanh", "radial_tanh", "radial-tanh"), default="clip",
                    help="How to bound raw continuous HAPPO actions before VMAS. "
                         "'clip' is the HARL-compatible default; 'tanh' is an experimental "
-                        "plain tanh post-transform.")
+                        "plain tanh post-transform; 'radial_tanh' preserves raw action "
+                        "direction while smoothly bounding vector magnitude.")
     args = p.parse_args()
+    args.action_transform = args.action_transform.replace("-", "_")
 
     if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
         p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")
@@ -363,6 +369,10 @@ def main():
         p.error("--comms-dropout must be in [0, 1]")
     if args.entropy_coef < 0.0:
         p.error("--entropy-coef must be nonnegative")
+    if args.lr <= 0.0:
+        p.error("--lr must be positive")
+    if args.critic_lr <= 0.0:
+        p.error("--critic-lr must be positive")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
     if args.ugv_approach_reward < 0.0:
@@ -400,6 +410,9 @@ def main():
     print(f" seed:           {args.seed}")
     print(f" comms_dropout:  {args.comms_dropout}")
     print(f" entropy_coef:   {args.entropy_coef}")
+    print(f" lr:             {args.lr}")
+    print(f" critic_lr:      {args.critic_lr}")
+    print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" action_transform: {args.action_transform}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
@@ -415,6 +428,9 @@ def main():
         seed           = args.seed,
         comms_dropout  = args.comms_dropout,
         entropy_coef   = args.entropy_coef,
+        lr             = args.lr,
+        critic_lr      = args.critic_lr,
+        linear_lr_decay = args.linear_lr_decay,
         exp_name       = args.exp_name,
         terrain_cache_path = args.terrain_cache_path,
         drone_min_footprint_m = args.drone_min_footprint_radius_m,
@@ -432,7 +448,6 @@ def main():
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,
         ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
-        ugv_local_map_patch_shift = args.ugv_local_map_patch_shift.replace("-", "_"),
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,
