@@ -117,20 +117,40 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(_action_transform_from_manifest(manifest), "tanh")
         self.assertEqual(_action_transform_from_manifest(None), "clip")
 
-    def test_build_args_includes_default_ugv_approach_reward(self):
-        _, _, env_args = build_args(
+    def test_default_and_reward_search_use_same_reward_profile(self):
+        common_kwargs = dict(
             num_env_steps=100,
             episode_length=50,
             seed=1,
             comms_dropout=0.5,
             entropy_coef=0.01,
-            exp_name="default",
-            reward_search=True,
         )
+        _, _, default_env_args = build_args(exp_name="default", **common_kwargs)
+        _, _, search_env_args = build_args(exp_name="search", reward_search=True, **common_kwargs)
 
-        scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["r_ground_approach"], 0.05)
-        self.assertEqual(scenario["ground_approach_milestone_radii_m"], (75.0, 50.0, 40.0, 30.0, 20.0))
+        expected = {
+            "r_found_survivor": 10.0,
+            "ugv_local_map_patch_shift": "center",
+            "r_drone_scout": 2.0,
+            "r_ground_confirm": 4.0,
+            "r_drone_shaping": 0.30,
+            "r_ground_shaping": 0.50,
+            "r_ground_approach": 0.05,
+            "ground_approach_milestone_radii_m": (75.0, 50.0, 40.0, 30.0, 20.0),
+            "r_ugv_movement_alignment": 0.20,
+            "r_ugv_stall_penalty": 0.0,
+            "r_fire_penalty": -0.20,
+            "r_ground_travel_cost": -0.01,
+            "r_drone_climb_cost": -0.005,
+            "r_time_penalty": -0.0005,
+            "r_coverage": 5.0,
+        }
+        for scenario in (
+            default_env_args["scenario_kwargs"],
+            search_env_args["scenario_kwargs"],
+        ):
+            for key, value in expected.items():
+                self.assertEqual(scenario[key], value)
 
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
@@ -146,6 +166,7 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_diagnostic_target_distance_min_m=30.0,
             ugv_diagnostic_target_distance_max_m=100.0,
             local_map_patch_size=11,
+            ugv_local_map_patch_shift="target_lookahead",
             slope_speed_weight=0.5,
             land_cover_speeds=(1.0, 0.95, 0.8, 0.7, 0.0, 0.0),
             action_transform="tanh",
@@ -157,6 +178,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_ground"], 1)
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["local_map_patch_size"], 11)
+        self.assertEqual(scenario["ugv_local_map_patch_shift"], "target_lookahead")
         self.assertTrue(scenario["known_survivors_at_reset"])
         self.assertEqual(scenario["known_survivor_spawn_distance_m"], 65.0)
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)

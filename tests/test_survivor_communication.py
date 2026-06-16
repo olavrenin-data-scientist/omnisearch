@@ -64,11 +64,23 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.tensor([1.0, 0.95, 0.8, 0.7, 0.0, 0.0]),
         ))
 
-    def test_default_ground_approach_reward_is_enabled(self):
+    def test_default_reward_profile_uses_search_values(self):
         env = self._diagnostic_env()
         scenario = env.scenario
 
+        self.assertEqual(scenario.r_found_survivor, 10.0)
+        self.assertEqual(scenario.r_drone_scout, 2.0)
+        self.assertEqual(scenario.r_ground_confirm, 4.0)
+        self.assertEqual(scenario.r_drone_shaping, 0.30)
+        self.assertEqual(scenario.r_ground_shaping, 0.50)
         self.assertEqual(scenario.r_ground_approach, 0.05)
+        self.assertEqual(scenario.r_ugv_movement_alignment, 0.20)
+        self.assertEqual(scenario.r_ugv_stall_penalty, 0.0)
+        self.assertEqual(scenario.r_fire_penalty, -0.20)
+        self.assertEqual(scenario.r_ground_travel_cost, -0.01)
+        self.assertEqual(scenario.r_drone_climb_cost, -0.005)
+        self.assertEqual(scenario.r_time_penalty, -0.0005)
+        self.assertEqual(scenario.r_coverage, 5.0)
         self.assertEqual(scenario.ground_approach_milestone_radii_m, (75.0, 50.0, 40.0, 30.0, 20.0))
         torch.testing.assert_close(
             scenario.ground_approach_milestone_rewards_tensor.cpu(),
@@ -295,6 +307,41 @@ class SurvivorCommunicationTests(unittest.TestCase):
     def test_local_map_patch_size_must_be_positive_odd(self):
         with self.assertRaises(ValueError):
             self._diagnostic_env(local_map_patch_size=10)
+
+    def test_target_lookahead_patch_shifts_world_window_toward_target(self):
+        env = self._diagnostic_env(
+            local_map_patch_size=7,
+            ugv_local_map_patch_shift="target_lookahead",
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        device = scenario.fire_grid.device
+        size = scenario.fire_grid_size
+        gx = gy = size // 2
+        ground.state.pos[:] = scenario._grid_cell_center_to_world(gx, gy, device=device).view(1, 2)
+        survivor.state.pos[:] = scenario._grid_cell_center_to_world(gx + 10, gy, device=device).view(1, 2)
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        yy, xx = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
+        grid = (yy * size + xx).float().unsqueeze(0)
+
+        shift = scenario._local_patch_center_shift_cells(ground, 7)
+        patch = scenario._local_grid_patch(
+            grid,
+            ground.state.pos,
+            7,
+            center_shift_cells=shift,
+        ).view(7, 7)
+
+        torch.testing.assert_close(shift.cpu(), torch.tensor([[2, 0]]))
+        self.assertEqual(float(patch[3, 1]), float(gy * size + gx))
+        self.assertEqual(float(patch[3, 6]), float(gy * size + gx + 5))
+        self.assertEqual(float(patch[3, 0]), float(gy * size + gx - 1))
 
     def _configure_progress_case(self):
         env = self._env(n_survivors=1)

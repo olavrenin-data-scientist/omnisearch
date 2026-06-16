@@ -76,6 +76,7 @@ def build_args(
     ugv_stall_penalty: float = 0.0,
     ugv_stall_displacement_threshold_m: float = 0.05,
     local_map_patch_size: int = 3,
+    ugv_local_map_patch_shift: str = "center",
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
     action_transform: str = "clip",
@@ -164,10 +165,24 @@ def build_args(
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
+        "ugv_local_map_patch_shift": ugv_local_map_patch_shift,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
+        "r_found_survivor": 10.0,
+        "r_drone_scout": 2.0,
+        "r_ground_confirm": 4.0,
+        "r_drone_shaping": 0.30,
+        "r_ground_shaping": 0.50,
         "r_ground_approach": ugv_approach_reward,
         "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
+        "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+        "r_ugv_stall_penalty": ugv_stall_penalty,
+        "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
+        "r_fire_penalty": -0.20,
+        "r_ground_travel_cost": -0.01,
+        "r_drone_climb_cost": -0.005,
+        "r_time_penalty": -0.0005,
+        "r_coverage": 5.0,
     }
     if slope_speed_weight is not None:
         scenario_kwargs["slope_speed_weight"] = float(slope_speed_weight)
@@ -177,22 +192,20 @@ def build_args(
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = terrain_cache_path
     if reward_search:
-        # Search-dominant reward: make finding/scouting survivors clearly worth
-        # more than any movement/hazard cost, and strengthen potential-based
-        # shaping toward survivors, so the policy is rewarded for searching
-        # rather than for sitting still to avoid cost (the degenerate optimum
-        # under the default cost-heavy reward).
+        # Kept explicit for the legacy flag; these now match the default reward
+        # profile used by normal smoke training.
         scenario_kwargs.update({
-            "r_found_survivor":   10.0,   # was 1.0
-            "r_drone_scout":       2.0,   # was 0.3
-            "r_ground_confirm":    4.0,   # was 0.5
-            "r_drone_shaping":     0.30,  # was 0.05  (dense pull toward survivors)
-            "r_ground_shaping":    0.50,  # was 0.10  (stronger directed pull)
-            "r_fire_penalty":     -0.20,  # was -1.0  (no longer dominates)
-            "r_ground_travel_cost": -0.01,  # was -0.05
-            "r_drone_climb_cost":  -0.005,  # was -0.02
-            "r_time_penalty":     -0.0005,  # was -0.001
-            "r_coverage":          5.0,    # max team bonus for covering the full map once
+            "r_found_survivor": 10.0,
+            "r_drone_scout": 2.0,
+            "r_ground_confirm": 4.0,
+            "r_drone_shaping": 0.30,
+            "r_ground_shaping": 0.50,
+            "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_fire_penalty": -0.20,
+            "r_ground_travel_cost": -0.01,
+            "r_drone_climb_cost": -0.005,
+            "r_time_penalty": -0.0005,
+            "r_coverage": 5.0,
         })
     if ugv_known_survivor_diagnostic:
         distance_kwargs = {}
@@ -297,6 +310,9 @@ def main():
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
+    p.add_argument("--ugv-local-map-patch-shift", choices=("center", "target_lookahead", "target-lookahead"),
+                   default="center",
+                   help="Shift the world-aligned UGV mobility patch toward the selected known target.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -416,6 +432,7 @@ def main():
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,
         ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
+        ugv_local_map_patch_shift = args.ugv_local_map_patch_shift.replace("-", "_"),
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,
