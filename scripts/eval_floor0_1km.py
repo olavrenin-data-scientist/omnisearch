@@ -19,26 +19,42 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.happo_policy import HappoPolicy
+from agents.happo_checkpoint import load_training_manifest
 from agents.baselines import BASELINES
 from evaluation.mission_metrics import evaluate_policy
 
 TERRAIN = str(ROOT / "data" / "terrain_cache" / "malibu_creek_1km_128.npz")
 
 
-def scenario_kwargs(dropout: float, episode_length: int, coverage_obs_grid: int = 0) -> dict:
-    kw = {
-        "max_steps": episode_length,
-        "comms_dropout": float(dropout),
-        "drone_min_footprint": 0.0,   # floor stays 0
-        "ground_confirm_min": 0.0,    # floor stays 0
+def base_scenario_kwargs(checkpoint_dir: str) -> dict:
+    """Recover the exact scenario kwargs the policy was trained with so eval uses
+    the same terrain, sensors, and observation features. Falls back to the
+    floor0-1km defaults if no manifest is found."""
+    manifest = load_training_manifest(checkpoint_dir)
+    if manifest is not None:
+        kw = dict(manifest.get("env_args", {}).get("scenario_kwargs", {}) or {})
+        if kw:
+            return kw
+    return {
+        "drone_min_footprint": 0.0,
+        "ground_confirm_min": 0.0,
         "terrain_source": "real",
         "terrain_cache_path": TERRAIN,
         "drone_camera_fov_deg": 140.0,
         "drone_flight_levels_m": (50.0, 80.0, 100.0),
         "ground_confirmation_range_m": 30.0,
     }
-    if coverage_obs_grid and coverage_obs_grid > 0:
-        kw["coverage_obs_grid"] = int(coverage_obs_grid)
+
+
+def scenario_kwargs(base: dict, dropout: float, episode_length: int,
+                    confirm_requires_los: bool = False) -> dict:
+    kw = dict(base)
+    kw["max_steps"] = episode_length
+    kw["comms_dropout"] = float(dropout)
+    kw["drone_min_footprint"] = 0.0   # floor stays 0
+    kw["ground_confirm_min"] = 0.0    # floor stays 0
+    if confirm_requires_los:
+        kw["confirm_requires_los"] = True
     return kw
 
 
@@ -48,13 +64,15 @@ def main() -> None:
     p.add_argument("--episode-length", type=int, default=1000)
     p.add_argument("--eval-seeds", type=int, default=3)
     p.add_argument("--dropouts", type=str, default="0.0,0.3")
-    p.add_argument("--coverage-obs-grid", type=int, default=0,
-                   help="Must match the value used during training (e.g. 6 for floor0-1km preset).")
     p.add_argument("--with-baselines", action="store_true",
                    help="Also report lawnmower/nearest_candidate on the same config.")
+    p.add_argument("--confirm-requires-los", action="store_true",
+                   help="Require unobstructed terrain line-of-sight (not just range) "
+                        "for a ground robot to confirm a survivor.")
     args = p.parse_args()
 
     dropouts = [float(x) for x in args.dropouts.split(",") if x.strip()]
+    base = base_scenario_kwargs(args.checkpoint_dir)
 
     print(f"\nEval HAPPO @ floor 0 on 1km terrain "
           f"({args.eval_seeds} seeds x {args.episode_length} steps)\n")
@@ -74,7 +92,8 @@ def main() -> None:
                 seed=4242 + 100 * k,
                 num_envs=2, env_index=0,
                 action_fn=policy,
-                scenario_kwargs=scenario_kwargs(d, args.episode_length, args.coverage_obs_grid),
+                scenario_kwargs=scenario_kwargs(base, d, args.episode_length,
+                                                args.confirm_requires_los),
                 device="cpu",
             ))
         _row("happo(trained)", d, runs)
@@ -92,7 +111,8 @@ def main() -> None:
                         scenario=WildfireSearchScenario(),
                         num_envs=2, device="cpu", continuous_actions=True,
                         seed=4242 + 100 * k,
-                        **scenario_kwargs(d, args.episode_length, args.coverage_obs_grid),
+                        **scenario_kwargs(base, d, args.episode_length,
+                                          args.confirm_requires_los),
                     )
                     env.reset()
                     pol = BASELINES[name](env)
