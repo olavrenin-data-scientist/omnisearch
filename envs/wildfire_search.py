@@ -130,6 +130,18 @@ class WildfireSearchScenario(BaseScenario):
         self.ground_confirmation_range_m = max(
             float(kwargs.pop("ground_confirmation_range_m", GROUND_CONFIRMATION_RANGE_M)), 0.0,
         )
+        # Require an unobstructed terrain line-of-sight (not just proximity) for a
+        # ground robot to confirm a survivor. When True, confirmation needs both
+        # range AND that no intervening terrain ridge rises above the eye->target
+        # sight line. This removes the "confirm through a mountain" loophole that a
+        # pure-distance check allows, especially at large confirmation ranges.
+        self.confirm_requires_los = bool(kwargs.pop("confirm_requires_los", False))
+        # Observer (UGV sensor) eye height and survivor target height in meters,
+        # added to local terrain elevation when tracing the sight line.
+        self.confirm_observer_height_m = max(float(kwargs.pop("confirm_observer_height_m", 1.5)), 0.0)
+        self.confirm_target_height_m = max(float(kwargs.pop("confirm_target_height_m", 1.0)), 0.0)
+        # Number of samples along the sight line (more = finer occlusion detection).
+        self.confirm_los_samples = max(int(kwargs.pop("confirm_los_samples", 24)), 3)
         self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
         self.agent_radius = (
             max(float(self.agent_radius_sim_override), 1e-6)
@@ -1356,6 +1368,36 @@ class WildfireSearchScenario(BaseScenario):
             self._compute_step_rewards()
         return agent.scenario_reward
 
+    def _confirm_los_mask(self, ground_pos: Tensor, surv_pos: Tensor) -> Tensor:
+        """Boolean [B, G, S]: True when terrain does NOT occlude the sight line
+        from each ground robot (at eye height) to each survivor (at target
+        height). A segment is occluded if any interior sample's terrain elevation
+        rises above the straight eye->target sight line (all heights in meters)."""
+        samples = self.confirm_los_samples
+        # elevation_grid is in vertical SIM units; convert meter heights with the
+        # same per-env meters->sim scale used for the horizontal confirm range.
+        spm = self.terrain_sim_units_per_meter.view(-1, 1)                         # [B, 1]
+        g_elev = self._grid_values_at_positions(self.elevation_grid, ground_pos)  # [B, G]
+        s_elev = self._grid_values_at_positions(self.elevation_grid, surv_pos)    # [B, S]
+        eye = g_elev + self.confirm_observer_height_m * spm                        # [B, G]
+        tgt = s_elev + self.confirm_target_height_m * spm                          # [B, S]
+
+        path = self._sample_pair_paths(ground_pos, surv_pos, samples)             # [B, G, S, K, 2]
+        terrain = self._grid_values_at_positions(self.elevation_grid, path)       # [B, G, S, K]
+
+        alpha = torch.linspace(0.0, 1.0, samples, device=ground_pos.device).view(1, 1, 1, -1)
+        sight = (
+            eye.unsqueeze(2).unsqueeze(3) * (1.0 - alpha)
+            + tgt.unsqueeze(1).unsqueeze(3) * alpha
+        )                                                                          # [B, G, S, K]
+
+        interior = torch.ones(samples, dtype=torch.bool, device=ground_pos.device)
+        interior[0] = False
+        interior[-1] = False
+        eps = 0.5 * self.terrain_sim_units_per_meter.view(-1, 1, 1, 1)  # ~0.5 m tolerance
+        occluded = ((terrain > sight + eps) & interior.view(1, 1, 1, -1)).any(dim=-1)
+        return ~occluded
+
     def _compute_step_rewards(self):
         device = self.fire_grid.device
 
@@ -1369,7 +1411,12 @@ class WildfireSearchScenario(BaseScenario):
         seen_by_drone       = drone_seen.any(dim=1)
         confirm_range = self.detection_range_by_env.view(-1, 1, 1)
         within_confirm      = dists < confirm_range
-        confirmed_by_ground = within_confirm[:, self.n_drones:, :].any(dim=1)
+        ground_within       = within_confirm[:, self.n_drones:, :]
+        if self.confirm_requires_los:
+            ground_within = ground_within & self._confirm_los_mask(
+                agent_pos[:, self.n_drones:, :], surv_pos,
+            )
+        confirmed_by_ground = ground_within.any(dim=1)
 
         newly_scouted = seen_by_drone       & ~self.scouted_survivors & ~self.found_survivors
         newly_found   = confirmed_by_ground & ~self.found_survivors
@@ -1427,7 +1474,6 @@ class WildfireSearchScenario(BaseScenario):
         scout_credit_mask    = drone_seen & newly_scouted.unsqueeze(1)
         scout_per_drone      = scout_credit_mask.float().sum(dim=2)         # [B, D]
 
-        ground_within        = within_confirm[:, self.n_drones:, :]
         confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
         confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
 

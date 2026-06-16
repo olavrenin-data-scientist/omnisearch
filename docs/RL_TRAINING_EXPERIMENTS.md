@@ -164,10 +164,84 @@ confirmation-dominant reward, coverage observation; floor stays 0). Eval: `scrip
   coordination as open research. The contribution here is the diagnosis + the reproducible floor-0
   harness, not a learned policy that beats the heuristics.
 
+### Sensor-sensitivity sweep — what 90% recall actually costs (floor 0)
+
+Recall at floor 0 is dominated by *physical sensor generosity*, not by the algorithm. Holding the
+floor at 0 and pushing the physical sensors far beyond realistic values makes the search nearly
+trivial — and HAPPO then reaches ~0.90. This is reported as an **upper bound / sensitivity result**,
+not as the headline, because the sensors are not physically plausible for the platform.
+
+| Sensor config (floor 0, 1 km, 1000 steps) | FOV | flight | confirm range | HAPPO recall | realism |
+|---|---|---|---|---|---|
+| **Realistic (headline)** | 90° | 50/80/100 m | 60 m | learned ≤ 0.10; experts 0.47–0.60 | plausible camera + UGV |
+| Wide-sensor | 140° | 50/80/100 m | 30 m | ~0.07–0.10 | borderline |
+| Generous | 170° | 120/180/200 m | 300 m | **0.47** | implausible |
+| **Very generous (upper bound)** | 170° | 120/180/200 m | **600 m** | **0.90** (0.95 @0.3 dropout) | confirm range ≈ ½ the map; trivializes search |
+
+At 600 m confirm range on a ~1.2 km map, a single UGV "confirms" survivors across roughly half the
+map without traveling — the coordination/search problem the project is about has effectively been
+removed. The 0.90 number is therefore a measure of *how easy generous sensors make the task*, not of
+learned search competence. Checkpoint: `happo_c600_floor0_1km`. Diagnostic that finds the generous
+configs at which experts hit ~0.90: `scripts/diag_floor0_generous.py` (fixed at `n_ground = 2`).
+
+The exported viewer run (`web/trajectories/happo_trained.json`, seed 0) makes this concrete: the
+600 m confirm range is **0.99 in sim units on the `[-1, 1]²` map** (radius ≈ 1), i.e. one UGV's
+confirm disc nearly spans the whole map. That run hits `survivor_recall = 1.0` by **step 36** with
+**UGV travel ≈ 0.38** (vs experts' ~4.8) — the robots barely move and still find everyone. That is
+the definition of a trivialized search, and exactly why 90% is reported as an upper bound, not a
+result.
+
+### Confirmation realism — line-of-sight collapses the 90% (no retraining)
+
+The 0.90 is also propped up by a *second* unrealistic assumption: confirmation was a pure
+**proximity** check (`dists < confirm_range`), so a ground robot "confirms" a survivor even through a
+mountain. Adding `confirm_requires_los=True` keeps the same 600 m range but additionally requires an
+**unobstructed terrain sight line** (eye→target ray not blocked by intervening elevation). Evaluating
+the *same* `happo_c600_floor0_1km` checkpoint, 3 seeds × 1000 steps, floor 0:
+
+| confirmation rule | HAPPO recall | lawnmower | nearest | HAPPO UGV travel | HAPPO TTV |
+|---|---|---|---|---|---|
+| proximity only (600 m) | **0.93** | 1.00 | 1.00 | 2.45 | 62.8 |
+| proximity **+ line-of-sight** (600 m) | **0.40** | 0.73 | 0.73 | 4.04 | 248.8 |
+
+Just requiring the robot to actually *see* the survivor drops learned recall **0.93 → 0.40** and forces
+the UGVs to move (travel 2.45 → 4.04, TTV 4× longer) — the "confirm while standing still" behaviour
+disappears. (HAPPO falls further than the experts because it was trained without the LOS constraint
+and never learned to reposition for a clear view; the experts adapt.) Combined with a *realistic*
+range, recall would be lower still. Flag: `--confirm-requires-los` on `scripts/eval_floor0_1km.py`;
+env kwarg `confirm_requires_los` (+ `confirm_observer_height_m`, `confirm_target_height_m`,
+`confirm_los_samples`).
+
+### Honest headline
+
+- **Realistic sensors, floor 0:** experts 0.47–0.60, learned MARL ≤ 0.10 — the credible result.
+- **90% is achievable only by making the sensors unrealistically powerful** (confirm range ≈ half the
+  map) **and** by letting confirmation pass through terrain. Requiring line-of-sight alone drops it to
+  0.40. Report 90% explicitly as a sensor-sensitivity upper bound, never as the operating point.
+- Map size is a difficulty knob in the *opposite* direction: a larger map shrinks `sim_units_per_meter`
+  and pushes recall back toward 0 (the original park-terrain failure). Keep the 1 km map.
+
+### Viewing a true (realistic-sensor) search
+
+Export baselines under realistic sensors so the viewer shows a genuine partial-view sweep
+(footprint ≈ 16 % of map radius), not an instant solve:
+
+```bash
+python scripts/export_trajectories.py --approach all --skip-happo-manifest \
+  --terrain-cache-path data/terrain_cache/malibu_creek_1km_128.npz --grid-size 128 \
+  --drone-camera-fov-deg 90 --drone-flight-levels-m 50 80 100 \
+  --ground-confirmation-range-m 60 --steps 600
+python -m http.server -d web   # open http://localhost:8000
+```
+
+`--skip-happo-manifest` prevents the generous-sensor checkpoint's config from overriding the realistic
+flags; `--ground-confirmation-range-m` sets the physical confirm range (not a floor).
+
 New tooling added for this study: `scripts/diag_terrain_floor0.py`, `scripts/diag_floor0_ceiling.py`,
 `scripts/eval_floor0_1km.py`, `train_happo_smoke.py --preset floor0-1km` (+ flags
 `--coverage-obs-grid`, `--reward-confirm`, `--n-rollout-threads`, sensor flags); env additions
-`coverage_obs_grid`, `r_pending_penalty`, `r_ground_coverage`/`ground_coverage_radius`.
+`coverage_obs_grid`, `r_pending_penalty`, `r_ground_coverage`/`ground_coverage_radius`;
+`scripts/diag_floor0_generous.py`; export flags `--skip-happo-manifest`, `--ground-confirmation-range-m`.
 
 ---
 

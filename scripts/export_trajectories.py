@@ -120,6 +120,19 @@ def main():
         help="Downward drone camera field of view in degrees.",
     )
     p.add_argument(
+        "--ground-confirmation-range-m",
+        type=float,
+        default=None,
+        help="Physical ground confirmation range in meters (not a floor). "
+             "Overrides the checkpoint manifest when set.",
+    )
+    p.add_argument(
+        "--skip-happo-manifest",
+        action="store_true",
+        help="Do NOT merge the latest HAPPO checkpoint's training scenario config. "
+             "Use this to render baselines under explicit (e.g. realistic) sensor flags.",
+    )
+    p.add_argument(
         "--drone-safety-clearance-m",
         type=float,
         default=DRONE_SAFETY_CLEARANCE_M,
@@ -272,13 +285,17 @@ def main():
     # scenario configuration to HAPPO and all baselines so comparisons remain
     # apples-to-apples. Episode length and dropout stay evaluation controls.
     happo_checkpoint = None
+    training_manifest = None
     try:
         from agents.happo_checkpoint import load_training_manifest, merge_training_scenario
         from agents.happo_policy import find_latest_happo_checkpoint
 
         happo_checkpoint = find_latest_happo_checkpoint().resolve()
         training_manifest = load_training_manifest(happo_checkpoint)
-        if training_manifest is not None:
+        if args.skip_happo_manifest:
+            print(" HAPPO env:     manifest merge skipped (using explicit CLI sensors)")
+            training_manifest = None
+        elif training_manifest is not None:
             scenario_kwargs = merge_training_scenario(
                 scenario_kwargs,
                 training_manifest,
@@ -295,6 +312,8 @@ def main():
         scenario_kwargs["drone_min_footprint"] = max(args.drone_min_footprint, 0.0)
     if args.ground_confirm_min is not None:
         scenario_kwargs["ground_confirm_min"] = max(args.ground_confirm_min, 0.0)
+    if args.ground_confirmation_range_m is not None:
+        scenario_kwargs["ground_confirmation_range_m"] = max(args.ground_confirmation_range_m, 0.0)
     cv_options = None
     if args.enable_cv:
         if scenario_kwargs.get("terrain_cache_path") is None:
