@@ -209,6 +209,21 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertGreater(distance_m, 20.0)
         self.assertLess(distance_m, 130.0)
 
+    def test_known_survivor_spawn_distance_min_without_max_is_unbounded(self):
+        env = self._diagnostic_env(
+            known_survivor_spawn_distance_min_m=30.0,
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
+
+        self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
+        self.assertTrue(math.isinf(scenario.known_survivor_spawn_distance_max_m))
+        self.assertGreaterEqual(distance_m, 30.0)
+
     def test_known_survivor_spawn_distance_range_samples_angles(self):
         labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
         counts = {label: 0 for label in labels}

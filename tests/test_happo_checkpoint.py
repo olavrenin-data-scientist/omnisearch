@@ -154,7 +154,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_fire_penalty"], 0.0)
         self.assertEqual(scenario["r_ground_travel_cost"], 0.0)
         self.assertEqual(scenario["r_ground_shaping"], 0.50)
-        self.assertEqual(scenario["r_ugv_movement_alignment"], 0.10)
+        self.assertEqual(scenario["r_ugv_movement_alignment"], 0.20)
         self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
         self.assertEqual(scenario["slope_speed_weight"], 0.5)
         self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))
@@ -194,18 +194,22 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 80.0)
         self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 80.0)
 
-    def test_ugv_known_survivor_distance_range_requires_both_bounds(self):
-        with self.assertRaises(ValueError):
-            build_args(
-                num_env_steps=100,
-                episode_length=50,
-                seed=1,
-                comms_dropout=0.5,
-                entropy_coef=0.01,
-                exp_name="diag",
-                ugv_known_survivor_diagnostic=True,
-                ugv_diagnostic_target_distance_min_m=80.0,
-            )
+    def test_ugv_known_survivor_min_distance_can_omit_max(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="diag",
+            ugv_known_survivor_diagnostic=True,
+            ugv_diagnostic_target_distance_min_m=80.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 80.0)
+        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
 
 
 if __name__ == "__main__":

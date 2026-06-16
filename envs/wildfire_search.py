@@ -383,11 +383,15 @@ class WildfireSearchScenario(BaseScenario):
                 float(self.known_survivor_spawn_distance_m if known_spawn_min_m is None else known_spawn_min_m),
                 0.0,
             )
-            self.known_survivor_spawn_distance_max_m = max(
-                float(self.known_survivor_spawn_distance_min_m if known_spawn_max_m is None else known_spawn_max_m),
-                0.0,
+            self.known_survivor_spawn_distance_max_m = (
+                math.inf
+                if known_spawn_max_m is None
+                else max(float(known_spawn_max_m), 0.0)
             )
-            if self.known_survivor_spawn_distance_max_m < self.known_survivor_spawn_distance_min_m:
+            if (
+                math.isfinite(self.known_survivor_spawn_distance_max_m)
+                and self.known_survivor_spawn_distance_max_m < self.known_survivor_spawn_distance_min_m
+            ):
                 raise ValueError("known_survivor_spawn_distance_max_m must be >= known_survivor_spawn_distance_min_m")
         kwargs.pop("action_transform", None)  # obsolete diagnostic option, ignored for old manifests
 
@@ -847,7 +851,10 @@ class WildfireSearchScenario(BaseScenario):
         """For diagnostic episodes, place known survivors near ground starts."""
         if (
             not self.known_survivors_at_reset
-            or self.known_survivor_spawn_distance_max_m <= 0.0
+            or (
+                self.known_survivor_spawn_distance_min_m <= 0.0
+                and self.known_survivor_spawn_distance_max_m <= 0.0
+            )
             or self.n_ground <= 0
             or self.n_survivors <= 0
         ):
@@ -866,29 +873,39 @@ class WildfireSearchScenario(BaseScenario):
             ground = ground_agents[survivor_idx % self.n_ground]
             gx, gy = self._positions_to_grid(ground.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
-            if self.known_survivor_spawn_distance_max_m > self.known_survivor_spawn_distance_min_m:
-                sample = torch.rand((), device=device)
-                target_m = (
-                    self.known_survivor_spawn_distance_min_m
-                    + sample * (
-                        self.known_survivor_spawn_distance_max_m
-                        - self.known_survivor_spawn_distance_min_m
-                    )
+            if not math.isfinite(self.known_survivor_spawn_distance_max_m):
+                new_x, new_y = self._sample_known_survivor_cell_beyond_min_distance(
+                    env_index=env_index,
+                    ground_grid_x=x,
+                    ground_grid_y=y,
+                    available=available,
+                    fallback_candidates=candidates,
+                    min_distance_m=self.known_survivor_spawn_distance_min_m,
                 )
             else:
-                target_m = torch.tensor(
-                    self.known_survivor_spawn_distance_min_m,
-                    device=device,
-                    dtype=torch.float32,
+                if self.known_survivor_spawn_distance_max_m > self.known_survivor_spawn_distance_min_m:
+                    sample = torch.rand((), device=device)
+                    target_m = (
+                        self.known_survivor_spawn_distance_min_m
+                        + sample * (
+                            self.known_survivor_spawn_distance_max_m
+                            - self.known_survivor_spawn_distance_min_m
+                        )
+                    )
+                else:
+                    target_m = torch.tensor(
+                        self.known_survivor_spawn_distance_min_m,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                new_x, new_y = self._sample_known_survivor_cell_near_ground(
+                    env_index=env_index,
+                    ground_grid_x=x,
+                    ground_grid_y=y,
+                    available=available,
+                    fallback_candidates=candidates,
+                    target_distance_m=target_m,
                 )
-            new_x, new_y = self._sample_known_survivor_cell_near_ground(
-                env_index=env_index,
-                ground_grid_x=x,
-                ground_grid_y=y,
-                available=available,
-                fallback_candidates=candidates,
-                target_distance_m=target_m,
-            )
             new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
             all_pos = survivor.state.pos.clone()
             all_pos[env_index] = new_pos
@@ -951,6 +968,50 @@ class WildfireSearchScenario(BaseScenario):
             top_indices = torch.topk(radial_error, k=k, largest=False).indices
             choice = top_indices[torch.randint(k, (1,), device=device)].item()
             return int(choice % size), int(choice // size)
+
+        final_mask = available if bool(available.any().item()) else fallback_candidates
+        return self._sample_random_cell_from_mask(final_mask)
+
+    def _sample_known_survivor_cell_beyond_min_distance(
+        self,
+        *,
+        env_index: int,
+        ground_grid_x: int,
+        ground_grid_y: int,
+        available: Tensor,
+        fallback_candidates: Tensor,
+        min_distance_m: float,
+    ) -> tuple[int, int]:
+        """Sample a known survivor cell with a minimum distance and no max cap."""
+        size = self.fire_grid_size
+        device = self.fire_grid.device
+        yy, xx = torch.meshgrid(
+            torch.arange(size, device=device),
+            torch.arange(size, device=device),
+            indexing="ij",
+        )
+        cell_size_sim = (2.0 * self.x_semidim) / float(size)
+        scale = float(self.terrain_sim_units_per_meter[env_index])
+        cell_size_m = cell_size_sim / max(scale, 1e-9)
+
+        dx = (xx - int(ground_grid_x)).float()
+        dy = (yy - int(ground_grid_y)).float()
+        dist_m = torch.sqrt(dx.square() + dy.square()) * cell_size_m
+        angle = torch.atan2(dy, dx)
+        target_angle = torch.rand((), device=device) * (2.0 * math.pi) - math.pi
+        angular_error = torch.atan2(
+            torch.sin(angle - target_angle),
+            torch.cos(angle - target_angle),
+        ).abs()
+
+        confirm_m = float(self.detection_range_by_env[env_index]) / max(scale, 1e-9)
+        min_m = max(confirm_m * 1.5, float(min_distance_m))
+        base_mask = available & (dist_m >= min_m)
+
+        for tolerance_deg in (22.5, 45.0, 90.0, 180.0):
+            sector_mask = base_mask & (angular_error <= math.radians(tolerance_deg))
+            if bool(sector_mask.any().item()):
+                return self._sample_random_cell_from_mask(sector_mask)
 
         final_mask = available if bool(available.any().item()) else fallback_candidates
         return self._sample_random_cell_from_mask(final_mask)
