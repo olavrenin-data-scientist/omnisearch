@@ -23,12 +23,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
+import torch
 
 from agents.harl_metrics import (
     accumulate_env_metrics,
     init_env_metric_storage,
     log_done_env_metrics,
 )
+from agents.action_transform import transform_continuous_action
 
 # Module-level flag so monkey-patches run only once
 _REGISTERED = False
@@ -181,6 +183,320 @@ def default_env_args() -> Dict[str, Any]:
     }
 
 
+def _target_bucket_names() -> tuple[str, ...]:
+    return ("E", "NE", "N", "NW", "W", "SW", "S", "SE")
+
+
+def _target_angle_bucket(unit_xy: np.ndarray) -> np.ndarray:
+    angles = (np.degrees(np.arctan2(unit_xy[:, 1], unit_xy[:, 0])) + 360.0) % 360.0
+    buckets = np.zeros(unit_xy.shape[0], dtype=np.int64)
+    buckets[(angles >= 22.5) & (angles < 67.5)] = 1
+    buckets[(angles >= 67.5) & (angles < 112.5)] = 2
+    buckets[(angles >= 112.5) & (angles < 157.5)] = 3
+    buckets[(angles >= 157.5) & (angles < 202.5)] = 4
+    buckets[(angles >= 202.5) & (angles < 247.5)] = 5
+    buckets[(angles >= 247.5) & (angles < 292.5)] = 6
+    buckets[(angles >= 292.5) & (angles < 337.5)] = 7
+    return buckets
+
+
+def _advantage_alignment_diagnostics(
+    actor_buffer,
+    advantages: np.ndarray,
+    *,
+    n_survivors: int,
+    action_transform: str,
+    survivor_message_distance_scale_m: float,
+) -> dict[str, float]:
+    """Summarize whether target-aligned sampled actions get positive advantage.
+
+    The actor observation appends one 7-value survivor message per survivor:
+    [known, dx, dy, ux, uy, distance_norm, confirmed]. This diagnostic uses the
+    nearest known, unconfirmed survivor message and compares the sampled action
+    with that target unit vector.
+    """
+    if n_survivors <= 0:
+        return {}
+    obs = actor_buffer.obs[:-1]
+    next_obs = actor_buffer.obs[1:]
+    actions = actor_buffer.actions
+    if obs.shape[-1] < 7 * n_survivors or actions.shape[-1] < 2:
+        return {}
+
+    flat_obs = obs.reshape(-1, obs.shape[-1])
+    flat_next_obs = next_obs.reshape(-1, next_obs.shape[-1])
+    flat_actions = actions.reshape(-1, actions.shape[-1])
+    flat_adv = advantages.reshape(-1)
+    survivor_messages = flat_obs[:, -7 * n_survivors:].reshape(-1, n_survivors, 7)
+    next_survivor_messages = flat_next_obs[:, -7 * n_survivors:].reshape(-1, n_survivors, 7)
+
+    known = survivor_messages[:, :, 0] > 0.5
+    confirmed = survivor_messages[:, :, 6] > 0.5
+    valid = known & ~confirmed
+    if not np.any(valid):
+        return {"diag/target_known_frac": 0.0}
+
+    distance = survivor_messages[:, :, 5]
+    masked_distance = np.where(valid, distance, np.inf)
+    target_idx = np.argmin(masked_distance, axis=1)
+    row_idx = np.arange(flat_obs.shape[0])
+    has_target = np.isfinite(masked_distance[row_idx, target_idx])
+    if not np.any(has_target):
+        return {"diag/target_known_frac": 0.0}
+
+    target_unit = survivor_messages[row_idx[has_target], target_idx[has_target], 3:5]
+    next_target_message = next_survivor_messages[row_idx[has_target], target_idx[has_target]]
+    action = transform_continuous_action(flat_actions[has_target, :2], action_transform)
+    adv = flat_adv[has_target]
+    displacement = flat_next_obs[has_target, :2] - flat_obs[has_target, :2]
+    progress_m = (
+        survivor_messages[row_idx[has_target], target_idx[has_target], 5]
+        - next_target_message[:, 5]
+    ) * max(float(survivor_message_distance_scale_m), 1e-6)
+
+    target_norm = np.linalg.norm(target_unit, axis=1)
+    action_norm = np.linalg.norm(action, axis=1)
+    displacement_norm = np.linalg.norm(displacement, axis=1)
+    usable = (
+        (target_norm > 1e-6)
+        & (action_norm > 1e-6)
+        & np.isfinite(adv)
+        & np.isfinite(progress_m)
+    )
+    if not np.any(usable):
+        return {"diag/target_known_frac": float(np.mean(has_target))}
+
+    target_unit = target_unit[usable] / target_norm[usable, None]
+    action = action[usable]
+    displacement = displacement[usable]
+    displacement_norm = displacement_norm[usable]
+    adv = adv[usable]
+    progress_m = progress_m[usable]
+    alignment = np.sum(action * target_unit, axis=1) / np.linalg.norm(action, axis=1).clip(min=1e-6)
+    displacement_alignment = np.full_like(alignment, np.nan, dtype=np.float64)
+    moved = displacement_norm > 1e-9
+    displacement_alignment[moved] = (
+        np.sum(displacement[moved] * target_unit[moved], axis=1)
+        / displacement_norm[moved].clip(min=1e-6)
+    )
+    toward = alignment > 0.0
+    away = alignment < 0.0
+    displacement_toward = displacement_alignment > 0.0
+
+    out: dict[str, float] = {
+        "diag/target_known_frac": float(np.mean(has_target)),
+        "diag/action_target_alignment_mean": float(np.mean(alignment)),
+        "diag/action_toward_frac": float(np.mean(toward)),
+        "diag/adv_mean_all": float(np.mean(adv)),
+    }
+    if np.any(toward):
+        out["diag/adv_mean_toward"] = float(np.mean(adv[toward]))
+    if np.any(away):
+        out["diag/adv_mean_away"] = float(np.mean(adv[away]))
+    if np.any(toward) and np.any(away):
+        out["diag/adv_toward_minus_away"] = float(
+            out["diag/adv_mean_toward"] - out["diag/adv_mean_away"],
+        )
+    if np.std(alignment) > 1e-8 and np.std(adv) > 1e-8:
+        out["diag/adv_alignment_corr"] = float(np.corrcoef(alignment, adv)[0, 1])
+
+    bucket = _target_angle_bucket(target_unit)
+    for bucket_idx, bucket_name in enumerate(_target_bucket_names()):
+        mask = bucket == bucket_idx
+        if not np.any(mask):
+            continue
+        prefix = f"diag/bucket_{bucket_name.lower()}"
+        out[f"{prefix}_frac"] = float(np.mean(mask))
+        out[f"{prefix}_alignment"] = float(np.mean(alignment[mask]))
+        out[f"{prefix}_adv"] = float(np.mean(adv[mask]))
+        out[f"{prefix}_toward_frac"] = float(np.mean(toward[mask]))
+
+        table_prefix = f"diag_train/{bucket_name.lower()}"
+        bucket_alignment = alignment[mask]
+        bucket_progress = progress_m[mask]
+        bucket_adv = adv[mask]
+        bucket_toward = toward[mask]
+        bucket_away = away[mask]
+        bucket_disp_toward = displacement_toward[mask]
+        bucket_disp_valid = np.isfinite(displacement_alignment[mask])
+
+        out[f"{table_prefix}/n_steps"] = float(np.sum(mask))
+        out[f"{table_prefix}/pct_action_toward"] = float(np.mean(bucket_toward))
+        out[f"{table_prefix}/pct_displacement_toward"] = (
+            float(np.mean(bucket_disp_toward[bucket_disp_valid]))
+            if np.any(bucket_disp_valid)
+            else 0.0
+        )
+        out[f"{table_prefix}/pct_toward_positive_progress"] = (
+            float(np.mean(bucket_progress[bucket_toward] > 0.0))
+            if np.any(bucket_toward)
+            else 0.0
+        )
+        out[f"{table_prefix}/pct_away_negative_progress"] = (
+            float(np.mean(bucket_progress[bucket_away] < 0.0))
+            if np.any(bucket_away)
+            else 0.0
+        )
+        out[f"{table_prefix}/pct_toward_positive_advantage"] = (
+            float(np.mean(bucket_adv[bucket_toward] > 0.0))
+            if np.any(bucket_toward)
+            else 0.0
+        )
+        out[f"{table_prefix}/pct_away_positive_advantage"] = (
+            float(np.mean(bucket_adv[bucket_away] > 0.0))
+            if np.any(bucket_away)
+            else 0.0
+        )
+        out[f"{table_prefix}/alignment_p10"] = float(np.percentile(bucket_alignment, 10))
+        out[f"{table_prefix}/alignment_p50"] = float(np.percentile(bucket_alignment, 50))
+        out[f"{table_prefix}/alignment_p90"] = float(np.percentile(bucket_alignment, 90))
+        out[f"{table_prefix}/progress_m_p10"] = float(np.percentile(bucket_progress, 10))
+        out[f"{table_prefix}/progress_m_p50"] = float(np.percentile(bucket_progress, 50))
+        out[f"{table_prefix}/progress_m_p90"] = float(np.percentile(bucket_progress, 90))
+    return out
+
+
+def _build_diagnostic_happo_runner_class():
+    from harl.runners.on_policy_ha_runner import OnPolicyHARunner
+    from harl.utils.trans_tools import _t2n
+
+    class DiagnosticHAPPORunner(OnPolicyHARunner):
+        """OnPolicyHARunner plus per-update actor advantage diagnostics."""
+
+        def train(self):
+            actor_train_infos = []
+            factor = np.ones(
+                (
+                    self.algo_args["train"]["episode_length"],
+                    self.algo_args["train"]["n_rollout_threads"],
+                    1,
+                ),
+                dtype=np.float32,
+            )
+
+            if self.value_normalizer is not None:
+                advantages = self.critic_buffer.returns[:-1] - self.value_normalizer.denormalize(
+                    self.critic_buffer.value_preds[:-1],
+                )
+            else:
+                advantages = self.critic_buffer.returns[:-1] - self.critic_buffer.value_preds[:-1]
+
+            if self.state_type == "FP":
+                active_masks_collector = [
+                    self.actor_buffer[i].active_masks for i in range(self.num_agents)
+                ]
+                active_masks_array = np.stack(active_masks_collector, axis=2)
+                advantages_copy = advantages.copy()
+                advantages_copy[active_masks_array[:-1] == 0.0] = np.nan
+                mean_advantages = np.nanmean(advantages_copy)
+                std_advantages = np.nanstd(advantages_copy)
+                advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
+
+            if self.fixed_order:
+                agent_order = list(range(self.num_agents))
+            else:
+                agent_order = list(torch.randperm(self.num_agents).numpy())
+
+            scenario_kwargs = self.env_args.get("scenario_kwargs", {})
+            n_survivors = int(scenario_kwargs.get("n_survivors", 0))
+            action_transform = str(self.env_args.get("action_transform", "clip"))
+            survivor_message_distance_scale_m = float(
+                scenario_kwargs.get("survivor_message_distance_scale_m", 100.0),
+            )
+
+            for agent_id in agent_order:
+                self.actor_buffer[agent_id].update_factor(factor)
+                available_actions = (
+                    None
+                    if self.actor_buffer[agent_id].available_actions is None
+                    else self.actor_buffer[agent_id]
+                    .available_actions[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].available_actions.shape[2:])
+                )
+
+                old_actions_logprob, _, _ = self.actor[agent_id].evaluate_actions(
+                    self.actor_buffer[agent_id]
+                    .obs[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].obs.shape[2:]),
+                    self.actor_buffer[agent_id]
+                    .rnn_states[0:1]
+                    .reshape(-1, *self.actor_buffer[agent_id].rnn_states.shape[2:]),
+                    self.actor_buffer[agent_id].actions.reshape(
+                        -1, *self.actor_buffer[agent_id].actions.shape[2:]
+                    ),
+                    self.actor_buffer[agent_id]
+                    .masks[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].masks.shape[2:]),
+                    available_actions,
+                    self.actor_buffer[agent_id]
+                    .active_masks[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].active_masks.shape[2:]),
+                )
+
+                if self.state_type == "EP":
+                    agent_advantages = advantages.copy()
+                    actor_train_info = self.actor[agent_id].train(
+                        self.actor_buffer[agent_id],
+                        agent_advantages,
+                        "EP",
+                    )
+                elif self.state_type == "FP":
+                    agent_advantages = advantages[:, :, agent_id].copy()
+                    actor_train_info = self.actor[agent_id].train(
+                        self.actor_buffer[agent_id],
+                        agent_advantages,
+                        "FP",
+                    )
+                else:
+                    raise ValueError(f"unsupported state_type: {self.state_type}")
+
+                actor_train_info.update(
+                    _advantage_alignment_diagnostics(
+                        self.actor_buffer[agent_id],
+                        agent_advantages,
+                        n_survivors=n_survivors,
+                        action_transform=action_transform,
+                        survivor_message_distance_scale_m=survivor_message_distance_scale_m,
+                    ),
+                )
+
+                new_actions_logprob, _, _ = self.actor[agent_id].evaluate_actions(
+                    self.actor_buffer[agent_id]
+                    .obs[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].obs.shape[2:]),
+                    self.actor_buffer[agent_id]
+                    .rnn_states[0:1]
+                    .reshape(-1, *self.actor_buffer[agent_id].rnn_states.shape[2:]),
+                    self.actor_buffer[agent_id].actions.reshape(
+                        -1, *self.actor_buffer[agent_id].actions.shape[2:]
+                    ),
+                    self.actor_buffer[agent_id]
+                    .masks[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].masks.shape[2:]),
+                    available_actions,
+                    self.actor_buffer[agent_id]
+                    .active_masks[:-1]
+                    .reshape(-1, *self.actor_buffer[agent_id].active_masks.shape[2:]),
+                )
+
+                factor = factor * _t2n(
+                    getattr(torch, self.action_aggregation)(
+                        torch.exp(new_actions_logprob - old_actions_logprob),
+                        dim=-1,
+                    ).reshape(
+                        self.algo_args["train"]["episode_length"],
+                        self.algo_args["train"]["n_rollout_threads"],
+                        1,
+                    )
+                )
+                actor_train_infos.append(actor_train_info)
+
+            critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
+            return actor_train_infos, critic_train_info
+
+    return DiagnosticHAPPORunner
+
+
 # ----------------------------------------------------------------------
 # Public API — train HAPPO once, return metrics
 # ----------------------------------------------------------------------
@@ -206,7 +522,7 @@ def train_happo(
         wall_sec               : float
     """
     register_wildfire_with_harl()
-    from harl.runners.on_policy_ha_runner import OnPolicyHARunner
+    OnPolicyHARunner = _build_diagnostic_happo_runner_class()
 
     args = {
         "algo": "happo", "env": "wildfire",
