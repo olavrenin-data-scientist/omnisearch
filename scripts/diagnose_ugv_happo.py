@@ -36,25 +36,21 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
     if manifest is not None:
         scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
 
+    distance_kwargs = {}
     if args.ugv_diagnostic_target_distance_min_m is None and args.ugv_diagnostic_target_distance_max_m is None:
-        target_distance_m = max(float(args.ugv_diagnostic_target_distance_m), 0.0)
-        target_distance_min_m = target_distance_m
-        target_distance_max_m = target_distance_m
+        pass
     else:
+        if args.ugv_diagnostic_target_distance_min_m is None or args.ugv_diagnostic_target_distance_max_m is None:
+            raise ValueError(
+                "ugv_diagnostic_target_distance_min_m and "
+                "ugv_diagnostic_target_distance_max_m must be provided together"
+            )
         target_distance_min_m = max(
-            float(
-                args.ugv_diagnostic_target_distance_m
-                if args.ugv_diagnostic_target_distance_min_m is None
-                else args.ugv_diagnostic_target_distance_min_m
-            ),
+            float(args.ugv_diagnostic_target_distance_min_m),
             0.0,
         )
         target_distance_max_m = max(
-            float(
-                target_distance_min_m
-                if args.ugv_diagnostic_target_distance_max_m is None
-                else args.ugv_diagnostic_target_distance_max_m
-            ),
+            float(args.ugv_diagnostic_target_distance_max_m),
             0.0,
         )
         if target_distance_max_m < target_distance_min_m:
@@ -63,6 +59,11 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
                 "ugv_diagnostic_target_distance_min_m"
             )
         target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
+        distance_kwargs.update({
+            "known_survivor_spawn_distance_m": target_distance_m,
+            "known_survivor_spawn_distance_min_m": target_distance_min_m,
+            "known_survivor_spawn_distance_max_m": target_distance_max_m,
+        })
 
     scenario_kwargs.update({
         "max_steps": args.steps,
@@ -70,12 +71,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         "n_ground": 1,
         "n_survivors": 1,
         "known_survivors_at_reset": True,
-        "known_survivor_spawn_distance_m": target_distance_m,
-        "known_survivor_spawn_distance_min_m": target_distance_min_m,
-        "known_survivor_spawn_distance_max_m": target_distance_max_m,
         "disable_fire": True,
         "comms_dropout": 0.0,
     })
+    scenario_kwargs.update(distance_kwargs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
@@ -220,6 +219,14 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
     raw_mean_abs_max: list[float] = []
     raw_mean_oob: list[bool] = []
     raw_stds: list[float] = []
+    proposed_path_blocked: list[bool] = []
+    speed_limited: list[bool] = []
+    path_speeds: list[float] = []
+    speed_limit_scales: list[float] = []
+    proposed_displacements_m: list[float] = []
+    corrected_displacements_m: list[float] = []
+    actual_displacements_m: list[float] = []
+    motion_corrections_m: list[float] = []
 
     for _ in range(scenario_kwargs["max_steps"]):
         pos_before = ground.state.pos.clone()
@@ -238,6 +245,22 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         action_norms.append(float(torch.linalg.norm(actions[0], dim=-1)[0]))
         saturated_actions.append(bool((actions[0].abs() >= 0.98).any().item()))
         env.step(actions)
+        proposed_path_blocked.append(bool(scenario.step_ugv_proposed_path_blocked[0, 0].item()))
+        speed_limited.append(bool(scenario.step_ugv_speed_limited[0, 0].item()))
+        path_speeds.append(float(scenario.step_ugv_path_speed[0, 0].detach().cpu().item()))
+        speed_limit_scales.append(float(scenario.step_ugv_speed_limit_scale[0, 0].detach().cpu().item()))
+        proposed_displacements_m.append(
+            float(scenario.step_ugv_proposed_displacement_m[0, 0].detach().cpu().item())
+        )
+        corrected_displacements_m.append(
+            float(scenario.step_ugv_corrected_displacement_m[0, 0].detach().cpu().item())
+        )
+        actual_displacements_m.append(
+            float(scenario.step_ugv_actual_displacement_m[0, 0].detach().cpu().item())
+        )
+        motion_corrections_m.append(
+            float(scenario.step_ugv_motion_correction_m[0, 0].detach().cpu().item())
+        )
         displacement = ground.state.pos - pos_before
         target_before = survivor_before - pos_before
         disp_alignment = _cosine_alignment(displacement, target_before)
@@ -289,6 +312,20 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         "mean_raw_mean_abs_max": float(np.mean(raw_mean_abs_max)) if raw_mean_abs_max else 0.0,
         "frac_raw_mean_oob": float(np.mean(raw_mean_oob)) if raw_mean_oob else 0.0,
         "mean_raw_std": float(np.mean(raw_stds)) if raw_stds else 0.0,
+        "frac_proposed_path_blocked": float(np.mean(proposed_path_blocked)) if proposed_path_blocked else 0.0,
+        "frac_speed_limited": float(np.mean(speed_limited)) if speed_limited else 0.0,
+        "mean_path_speed": float(np.mean(path_speeds)) if path_speeds else 0.0,
+        "mean_speed_limit_scale": float(np.mean(speed_limit_scales)) if speed_limit_scales else 0.0,
+        "mean_proposed_displacement_m": (
+            float(np.mean(proposed_displacements_m)) if proposed_displacements_m else 0.0
+        ),
+        "mean_corrected_displacement_m": (
+            float(np.mean(corrected_displacements_m)) if corrected_displacements_m else 0.0
+        ),
+        "mean_actual_displacement_m": (
+            float(np.mean(actual_displacements_m)) if actual_displacements_m else 0.0
+        ),
+        "mean_motion_correction_m": float(np.mean(motion_corrections_m)) if motion_corrections_m else 0.0,
     }
 
 
@@ -372,6 +409,21 @@ def run_failure_trace(
             "disp_align": disp_align,
             "action_disp_align": action_disp_align,
             "path_speed": path_speed,
+            "proposed_path_blocked": bool(scenario.step_ugv_proposed_path_blocked[0, 0].item()),
+            "speed_limited": bool(scenario.step_ugv_speed_limited[0, 0].item()),
+            "speed_limit_scale": float(scenario.step_ugv_speed_limit_scale[0, 0].detach().cpu().item()),
+            "proposed_displacement_m": float(
+                scenario.step_ugv_proposed_displacement_m[0, 0].detach().cpu().item()
+            ),
+            "corrected_displacement_m": float(
+                scenario.step_ugv_corrected_displacement_m[0, 0].detach().cpu().item()
+            ),
+            "actual_displacement_m": float(
+                scenario.step_ugv_actual_displacement_m[0, 0].detach().cpu().item()
+            ),
+            "motion_correction_m": float(
+                scenario.step_ugv_motion_correction_m[0, 0].detach().cpu().item()
+            ),
             "actual_path_traversable": actual_path_traversable,
             **{f"before_{k}": v for k, v in cell_before.items()},
             **{f"after_{k}": v for k, v in cell_after.items()},
@@ -548,6 +600,8 @@ def _print_failure_trace(result: dict, tail: int, stride: int) -> None:
             row["progress_m"] < -0.5
             or row["displacement_m"] < 0.05
             or (row["action_disp_align"] is not None and row["action_disp_align"] < 0.5)
+            or row["proposed_path_blocked"]
+            or row["motion_correction_m"] > 0.5
             or row["before_blocked_frac"] > 0.25
             or row["path_speed"] < 0.55
         )
@@ -556,7 +610,7 @@ def _print_failure_trace(result: dict, tail: int, stride: int) -> None:
 
     print(
         " step dist->after progress act_align disp_align act_disp "
-        "move_m speed pathspd blocked cellspd action raw sat"
+        "move_m prop corr speed pathspd lim blocked cellspd action raw sat"
     )
     for step in sorted(selected):
         row = selected[step]
@@ -570,8 +624,12 @@ def _print_failure_trace(result: dict, tail: int, stride: int) -> None:
             f"{_fmt_optional(row['disp_align'])} "
             f"{_fmt_optional(row['action_disp_align'])} "
             f"{row['displacement_m']:6.2f} "
+            f"{row['proposed_displacement_m']:5.2f} "
+            f"{row['motion_correction_m']:5.2f} "
             f"{row['speed_mps']:5.2f} "
             f"{row['path_speed']:7.3f} "
+            f"{int(row['speed_limited'])}/{row['speed_limit_scale']:.2f} "
+            f"{int(row['proposed_path_blocked'])} "
             f"{row['before_blocked_count']:2d}/{row['before_blocked_frac']:.2f} "
             f"{row['before_cell_speed']:6.3f} "
             f"[{action[0]: .2f},{action[1]: .2f}] "
@@ -580,7 +638,9 @@ def _print_failure_trace(result: dict, tail: int, stride: int) -> None:
         )
     print(
         "  sat/raw columns are action_saturated/raw_mean_out_of_bounds; "
-        "blocked is blocked cells in the local map patch."
+        "prop is VMAS-proposed move, corr is final-vs-proposed correction; "
+        "lim is speed_limited/speed_limit_scale; blocked is proposed path blocked, "
+        "then blocked cells in the local map patch."
     )
 
 
@@ -591,7 +651,6 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--seeds", type=int, nargs="+", default=[101, 102, 103, 104, 105])
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
-    parser.add_argument("--ugv-diagnostic-target-distance-m", type=float, default=80.0)
     parser.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None)
     parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None)
     parser.add_argument("--local-map-patch-size", type=int, default=None)
@@ -630,7 +689,10 @@ def main() -> None:
             f"act_disp={row['mean_action_displacement_alignment']:.3f} "
             f"speed={row['mean_speed_mps']:.2f}m/s "
             f"sat={row['frac_action_saturated']:.3f} "
-            f"raw_oob={row['frac_raw_mean_oob']:.3f}"
+            f"raw_oob={row['frac_raw_mean_oob']:.3f} "
+            f"blocked={row['frac_proposed_path_blocked']:.3f} "
+            f"speedlim={row['frac_speed_limited']:.3f} "
+            f"corr={row['mean_motion_correction_m']:.2f}m"
         )
 
     print("-" * 72)
@@ -653,7 +715,15 @@ def main() -> None:
         f"raw_mean_norm={np.mean([r['mean_raw_mean_norm'] for r in rows]):.3f} "
         f"raw_absmax={np.mean([r['mean_raw_mean_abs_max'] for r in rows]):.3f} "
         f"raw_oob={np.mean([r['frac_raw_mean_oob'] for r in rows]):.3f} "
-        f"raw_std={np.mean([r['mean_raw_std'] for r in rows]):.3f}"
+        f"raw_std={np.mean([r['mean_raw_std'] for r in rows]):.3f} "
+        f"blocked={np.mean([r['frac_proposed_path_blocked'] for r in rows]):.3f} "
+        f"speedlim={np.mean([r['frac_speed_limited'] for r in rows]):.3f} "
+        f"path_speed={np.mean([r['mean_path_speed'] for r in rows]):.3f} "
+        f"limit_scale={np.mean([r['mean_speed_limit_scale'] for r in rows]):.3f} "
+        f"proposed_move={np.mean([r['mean_proposed_displacement_m'] for r in rows]):.2f}m "
+        f"corrected_move={np.mean([r['mean_corrected_displacement_m'] for r in rows]):.2f}m "
+        f"actual_move={np.mean([r['mean_actual_displacement_m'] for r in rows]):.2f}m "
+        f"correction={np.mean([r['mean_motion_correction_m'] for r in rows]):.2f}m"
     )
 
     print("-" * 72)
@@ -671,7 +741,7 @@ def main() -> None:
     for row in run_angle_bucket_probe(
         checkpoint_dir,
         scenario_kwargs,
-        radius_m=args.ugv_diagnostic_target_distance_m,
+        radius_m=80.0,
     ):
         action = row["action"]
         raw_mean = row["raw_mean"]
