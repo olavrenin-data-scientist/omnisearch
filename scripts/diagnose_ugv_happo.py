@@ -40,30 +40,32 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
     if args.ugv_diagnostic_target_distance_min_m is None and args.ugv_diagnostic_target_distance_max_m is None:
         pass
     else:
-        if args.ugv_diagnostic_target_distance_min_m is None or args.ugv_diagnostic_target_distance_max_m is None:
-            raise ValueError(
-                "ugv_diagnostic_target_distance_min_m and "
-                "ugv_diagnostic_target_distance_max_m must be provided together"
-            )
         target_distance_min_m = max(
-            float(args.ugv_diagnostic_target_distance_min_m),
+            float(0.0 if args.ugv_diagnostic_target_distance_min_m is None else args.ugv_diagnostic_target_distance_min_m),
             0.0,
         )
-        target_distance_max_m = max(
-            float(args.ugv_diagnostic_target_distance_max_m),
-            0.0,
-        )
-        if target_distance_max_m < target_distance_min_m:
-            raise ValueError(
-                "ugv_diagnostic_target_distance_max_m must be >= "
-                "ugv_diagnostic_target_distance_min_m"
+        distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
+        if args.ugv_diagnostic_target_distance_max_m is not None:
+            target_distance_max_m = max(
+                float(args.ugv_diagnostic_target_distance_max_m),
+                0.0,
             )
-        target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-        distance_kwargs.update({
-            "known_survivor_spawn_distance_m": target_distance_m,
-            "known_survivor_spawn_distance_min_m": target_distance_min_m,
-            "known_survivor_spawn_distance_max_m": target_distance_max_m,
-        })
+            if target_distance_max_m < target_distance_min_m:
+                raise ValueError(
+                    "ugv_diagnostic_target_distance_max_m must be >= "
+                    "ugv_diagnostic_target_distance_min_m"
+                )
+            target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
+            distance_kwargs.update({
+                "known_survivor_spawn_distance_m": target_distance_m,
+                "known_survivor_spawn_distance_max_m": target_distance_max_m,
+            })
+        for key in (
+            "known_survivor_spawn_distance_m",
+            "known_survivor_spawn_distance_min_m",
+            "known_survivor_spawn_distance_max_m",
+        ):
+            scenario_kwargs.pop(key, None)
 
     scenario_kwargs.update({
         "max_steps": args.steps,
@@ -652,7 +654,8 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[101, 102, 103, 104, 105])
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
     parser.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None)
-    parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None)
+    parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
+                        help="Omit for no upper bound when a min distance is provided.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--trace-failures", action="store_true",

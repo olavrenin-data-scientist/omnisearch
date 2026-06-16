@@ -36,6 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+DEFAULT_UGV_APPROACH_REWARD = 0.05
+DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
+
 
 # ----------------------------------------------------------------------
 # Step 1 — monkey-patch HARL's env registry to recognise "wildfire"
@@ -67,6 +70,11 @@ def build_args(
     ugv_known_survivor_diagnostic: bool = False,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
+    ugv_movement_alignment_reward: float = 0.20,
+    ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
+    ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
+    ugv_stall_penalty: float = 0.0,
+    ugv_stall_displacement_threshold_m: float = 0.05,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
@@ -158,6 +166,8 @@ def build_args(
         "local_map_patch_size": local_map_patch_size,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
+        "r_ground_approach": ugv_approach_reward,
+        "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
     }
     if slope_speed_weight is not None:
         scenario_kwargs["slope_speed_weight"] = float(slope_speed_weight)
@@ -178,8 +188,6 @@ def build_args(
             "r_ground_confirm":    4.0,   # was 0.5
             "r_drone_shaping":     0.30,  # was 0.05  (dense pull toward survivors)
             "r_ground_shaping":    0.50,  # was 0.10  (stronger directed pull)
-            "r_ground_approach":   0.0,   # avoid double-counting with meter-normalized UGV progress
-            "ground_approach_radius_m": 25.0,
             "r_fire_penalty":     -0.20,  # was -1.0  (no longer dominates)
             "r_ground_travel_cost": -0.01,  # was -0.05
             "r_drone_climb_cost":  -0.005,  # was -0.02
@@ -191,30 +199,26 @@ def build_args(
         if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
             pass
         else:
-            if ugv_diagnostic_target_distance_min_m is None or ugv_diagnostic_target_distance_max_m is None:
-                raise ValueError(
-                    "ugv_diagnostic_target_distance_min_m and "
-                    "ugv_diagnostic_target_distance_max_m must be provided together"
-                )
             target_distance_min_m = max(
-                float(ugv_diagnostic_target_distance_min_m),
+                float(0.0 if ugv_diagnostic_target_distance_min_m is None else ugv_diagnostic_target_distance_min_m),
                 0.0,
             )
-            target_distance_max_m = max(
-                float(ugv_diagnostic_target_distance_max_m),
-                0.0,
-            )
-            if target_distance_max_m < target_distance_min_m:
-                raise ValueError(
-                    "ugv_diagnostic_target_distance_max_m must be >= "
-                    "ugv_diagnostic_target_distance_min_m"
+            distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
+            if ugv_diagnostic_target_distance_max_m is not None:
+                target_distance_max_m = max(
+                    float(ugv_diagnostic_target_distance_max_m),
+                    0.0,
                 )
-            target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-            distance_kwargs.update({
-                "known_survivor_spawn_distance_m": target_distance_m,
-                "known_survivor_spawn_distance_min_m": target_distance_min_m,
-                "known_survivor_spawn_distance_max_m": target_distance_max_m,
-            })
+                if target_distance_max_m < target_distance_min_m:
+                    raise ValueError(
+                        "ugv_diagnostic_target_distance_max_m must be >= "
+                        "ugv_diagnostic_target_distance_min_m"
+                    )
+                target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
+                distance_kwargs.update({
+                    "known_survivor_spawn_distance_m": target_distance_m,
+                    "known_survivor_spawn_distance_max_m": target_distance_max_m,
+                })
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1,
@@ -227,8 +231,11 @@ def build_args(
             "r_ground_confirm": 4.0,
             "r_drone_shaping": 0.0,
             "r_ground_shaping": 0.50,
-            "r_ground_approach": 0.0,
-            "r_ugv_movement_alignment": 0.10,
+            "r_ground_approach": ugv_approach_reward,
+            "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
+            "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_ugv_stall_penalty": ugv_stall_penalty,
+            "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
             "r_fire_penalty": 0.0,
             "r_ground_travel_cost": 0.0,
             "r_drone_climb_cost": 0.0,
@@ -303,7 +310,23 @@ def main():
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
                    help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
-                        "Use min=max for an exact target distance.")
+                        "Omit for no upper bound; use min=max for an exact target distance.")
+    p.add_argument("--ugv-movement-alignment-reward", type=float, default=0.20,
+                   help="Reward scale for UGV actual-movement alignment toward a known survivor in the "
+                        "diagnostic task.")
+    p.add_argument("--ugv-approach-reward", type=float, default=DEFAULT_UGV_APPROACH_REWARD,
+                   help="Inner UGV approach milestone reward. "
+                        "Default fractions make this 0.05 produce 75/50/40/30/20m "
+                        "one-time rewards of 0.02/0.025/0.03/0.04/0.05.")
+    p.add_argument("--ugv-approach-milestone-radii-m", type=float, nargs="+",
+                   default=list(DEFAULT_UGV_APPROACH_MILESTONE_RADII_M),
+                   help="One-time UGV approach milestone radii in meters.")
+    p.add_argument("--ugv-approach-radius-m", type=float, default=argparse.SUPPRESS,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--ugv-stall-penalty", type=float, default=0.0,
+                   help="Penalty magnitude subtracted when a UGV barely moves while seeking a known target.")
+    p.add_argument("--ugv-stall-displacement-threshold-m", type=float, default=0.05,
+                   help="Actual per-step movement below this distance is treated as stalled.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
@@ -324,6 +347,20 @@ def main():
         p.error("--comms-dropout must be in [0, 1]")
     if args.entropy_coef < 0.0:
         p.error("--entropy-coef must be nonnegative")
+    if args.ugv_movement_alignment_reward < 0.0:
+        p.error("--ugv-movement-alignment-reward must be nonnegative")
+    if args.ugv_approach_reward < 0.0:
+        p.error("--ugv-approach-reward must be nonnegative")
+    if hasattr(args, "ugv_approach_radius_m"):
+        args.ugv_approach_milestone_radii_m = [args.ugv_approach_radius_m]
+    if not args.ugv_approach_milestone_radii_m or any(
+        value <= 0.0 for value in args.ugv_approach_milestone_radii_m
+    ):
+        p.error("--ugv-approach-milestone-radii-m must contain positive distances")
+    if args.ugv_stall_penalty < 0.0:
+        p.error("--ugv-stall-penalty must be nonnegative")
+    if args.ugv_stall_displacement_threshold_m < 0.0:
+        p.error("--ugv-stall-displacement-threshold-m must be nonnegative")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
@@ -374,6 +411,11 @@ def main():
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
+        ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
+        ugv_approach_reward = args.ugv_approach_reward,
+        ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
+        ugv_stall_penalty = args.ugv_stall_penalty,
+        ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,
