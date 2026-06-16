@@ -36,7 +36,7 @@ from envs.wildfire_defaults import (
     SIM_STEP_SECONDS,
 )
 from envs.wildfire_search import WildfireSearchScenario
-from agents.baselines import BASELINES, RandomPolicy
+from agents.baselines import BASELINES, RandomActionPolicy
 from evaluation.trajectory_export import export_trajectory
 
 
@@ -62,6 +62,13 @@ def main():
         choices=("all", "happo", *BASELINES),
         default="all",
         help="Export all approaches (default), only HAPPO, or one named baseline.",
+    )
+    p.add_argument(
+        "--ignore-happo-env",
+        action="store_true",
+        help="Use the CLI scenario settings exactly instead of restoring the "
+             "latest HAPPO checkpoint environment. Intended for baseline-only "
+             "terrain experiments.",
     )
     p.add_argument("--steps", type=int, default=500)
     p.add_argument("--frame-stride", type=int, default=1, help="Record every Nth frame (keeps long-run JSON loadable; physics still runs every step).")
@@ -93,18 +100,34 @@ def main():
     p.add_argument("--terrain-cache-dir", default=str(ROOT / "data" / "terrain_cache"))
     p.add_argument("--terrain-cache-path", default=None)
     p.add_argument(
-        "--drone-min-footprint",
+        "--drone-min-footprint-radius-m",
+        dest="drone_min_footprint_radius_m",
         type=float,
         default=None,
-        help="Override the HAPPO checkpoint's drone footprint floor. "
-             "Use 0 to disable it for legacy checkpoints.",
+        help="Override the HAPPO checkpoint's drone footprint floor in meters. "
+             "Use 0 to disable it.",
+    )
+    p.add_argument(
+        "--drone-min-footprint",
+        dest="drone_min_footprint_radius_m",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--ground-min-confirm-radius-m",
+        dest="ground_min_confirm_radius_m",
+        type=float,
+        default=None,
+        help="Override the HAPPO checkpoint's ground confirmation floor in meters. "
+             "Use 0 to disable it.",
     )
     p.add_argument(
         "--ground-confirm-min",
+        dest="ground_min_confirm_radius_m",
         type=float,
-        default=None,
-        help="Override the HAPPO checkpoint's ground confirmation floor. "
-             "Use 0 to disable it for legacy checkpoints.",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     p.add_argument(
         "--drone-flight-levels-m",
@@ -292,7 +315,7 @@ def main():
 
         happo_checkpoint = find_latest_happo_checkpoint().resolve()
         training_manifest = load_training_manifest(happo_checkpoint)
-        if args.skip_happo_manifest:
+        if args.skip_happo_manifest or args.ignore_happo_env:
             print(" HAPPO env:     manifest merge skipped (using explicit CLI sensors)")
             training_manifest = None
         elif training_manifest is not None:
@@ -308,12 +331,18 @@ def main():
     except (ImportError, FileNotFoundError):
         training_manifest = None
 
-    if args.drone_min_footprint is not None:
-        scenario_kwargs["drone_min_footprint"] = max(args.drone_min_footprint, 0.0)
-    if args.ground_confirm_min is not None:
-        scenario_kwargs["ground_confirm_min"] = max(args.ground_confirm_min, 0.0)
     if args.ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = max(args.ground_confirmation_range_m, 0.0)
+    if args.drone_min_footprint_radius_m is not None:
+        scenario_kwargs.pop("drone_min_footprint", None)
+        scenario_kwargs["drone_min_footprint_m"] = max(
+            args.drone_min_footprint_radius_m, 0.0,
+        )
+    if args.ground_min_confirm_radius_m is not None:
+        scenario_kwargs.pop("ground_confirm_min", None)
+        scenario_kwargs["ground_confirm_min_m"] = max(
+            args.ground_min_confirm_radius_m, 0.0,
+        )
     cv_options = None
     if args.enable_cv:
         if scenario_kwargs.get("terrain_cache_path") is None:
@@ -347,7 +376,7 @@ def main():
     for name in _selected_baselines(args.approach):
         cls = BASELINES[name]
         def make_policy(env, _cls=cls):
-            return _cls() if _cls is RandomPolicy else _cls(env)
+            return _cls() if _cls is RandomActionPolicy else _cls(env)
         run_cv_options = None
         if cv_options is not None:
             run_cv_options = dict(cv_options)

@@ -181,7 +181,7 @@ function cellNoise(gx, gy, seed = 0) {
 // ---------------------------------------------------------------------
 // Trajectory loading
 // ---------------------------------------------------------------------
-const STRATEGY_NAMES = ['random', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'happo_trained'];
+const STRATEGY_NAMES = ['random_action', 'random_walk', 'lawnmower', 'nearest_candidate', 'highest_confidence', 'ant_colony', 'happo_trained'];
 
 async function loadTrajectory(name) {
   const res = await fetch(`./trajectories/${name}.json?v=${Date.now()}`, { cache: 'no-store' });
@@ -1837,7 +1837,7 @@ function useThree3D(meta, frame, frames, histories, showCoverage) {
 // App
 // ---------------------------------------------------------------------
 function App() {
-  const [strategy, setStrategy] = useState(STRATEGY_NAMES[1]); // lawnmower
+  const [strategy, setStrategy] = useState('lawnmower');
   const [data, setData]         = useState(null);
   const [error, setError]       = useState(null);
   const [selectedDrone, setSelectedDrone] = useState('');

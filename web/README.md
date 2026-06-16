@@ -56,8 +56,9 @@ steps 3–5 (export → serve → refresh).
   - **Yellow dots** — survivors scouted by a drone but not yet confirmed
   - **Light-green dots** — survivors confirmed by a ground robot
   - **Orange tiles** — burning fire cells (cellular-automata spread)
-- Strategy selector in the header — switch between `random` /
-  `lawnmower` / `nearest_candidate` / `highest_confidence`
+- Strategy selector in the header — switch between `random_action` /
+  `random_walk` / `lawnmower` / `nearest_candidate` /
+  `highest_confidence` / `ant_colony`
 - Playback controls — play / pause, scrubber, speed (1× → 8×)
 - Right panel — final mission metrics for the loaded run
 
@@ -73,7 +74,7 @@ fix for each.
 | `FileNotFoundError: No cached real terrain ... malibu_creek_..._128.npz` | terrain cache not built, or built under the hash name only | Build it (step 2), then `cp` the hash-named `.npz` to the slug name |
 | **3D canvas is black, but the metrics panel, dropdown, and playback all work** | the loaded `trajectories/*.json` is **stale** — exported before terrain existed, so it has no `terrain` block and no agent altitude. The scene builder bails (`buildTerrainMesh` returns `null`) and there's nothing to draw | Re-run `python scripts/export_trajectories.py` to rewrite the JSONs **with** terrain, then hard-refresh the browser |
 | Black canvas, **no errors** in DevTools | the red console lines are usually browser-extension noise (`contentscript.js`, `ObjectMultiplex`, `MaxListenersExceeded`) — not the app. Confirms it's the stale-JSON case above, not a crash | same as above |
-| `happo_trained` is dark while the four baselines render | its checkpoint is incompatible (`size mismatch ... [25] vs [54]` — obs space grew), so the exporter **skips** it and leaves the old terrain-less JSON | Retrain to get a matching checkpoint, then re-export (see below) |
+| `happo_trained` is dark while the baselines render | its checkpoint is incompatible (`size mismatch ... [25] vs [54]` — obs space grew), so the exporter **skips** it and leaves the old terrain-less JSON | Retrain to get a matching checkpoint, then re-export (see below) |
 | Export aborts on the HAPPO step | an incompatible checkpoint raised `RuntimeError` mid-export | Already handled — the exporter now catches it and skips HAPPO gracefully. Update if you're on an older revision |
 | `Address already in use` on `http.server` | a server is already bound to that port | Reuse the running one, or pick another port: `... 8081` |
 

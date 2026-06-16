@@ -293,9 +293,10 @@ Every coordination strategy — hand-coded baseline or trained policy — is sco
 Definitions and implementation in [evaluation/mission_metrics.py](evaluation/mission_metrics.py).
 
 Baselines defined in [agents/baselines.py](agents/baselines.py):
-- **`random`** — both agent types take random actions (control)
+- **`random_action`** — both agent types take independent random actions (control)
+- **`random_walk`** — both agent types follow persistent random headings with reactive boundary and terrain avoidance
 - **`lawnmower`** — drones sweep a serpentine path; ground robots head to nearest scouted survivor
-- **`nearest_candidate`** — drones random; ground robots go to nearest scouted-not-confirmed survivor
+- **`nearest_candidate`** — drones use persistent random walks; ground robots go to nearest scouted-not-confirmed survivor
 - **`highest_confidence`** — drones lawnmower; ground robots prioritize freshest scout
 
 ### Smoke comparison (3 seeds × 200 steps)
@@ -303,7 +304,7 @@ Baselines defined in [agents/baselines.py](agents/baselines.py):
 ```
 strategy                recall     ttv   haz  ugv_dist
 ------------------------------------------------------
-random                    0.00     nan     0      1.11
+random_action             0.00     nan     0      1.11
 lawnmower                 0.27   154.3     0      1.76
 nearest_candidate         0.33   169.0     0      1.77
 highest_confidence        0.00     nan     0      3.33

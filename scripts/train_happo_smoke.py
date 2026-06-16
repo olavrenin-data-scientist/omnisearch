@@ -29,7 +29,6 @@ Prerequisite: HARL must be installed in the active venv:
 from __future__ import annotations
 
 import argparse
-import copy
 import sys
 import time
 from pathlib import Path
@@ -38,71 +37,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+DEFAULT_UGV_APPROACH_REWARD = 0.05
+DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
+
 
 # ----------------------------------------------------------------------
 # Step 1 — monkey-patch HARL's env registry to recognise "wildfire"
 # ----------------------------------------------------------------------
 def _register_wildfire_with_harl():
-    import harl.envs as harl_envs_pkg
-    import harl.utils.envs_tools as envs_tools
-    import harl.utils.configs_tools as configs_tools
-    from harl.envs.env_wrappers import ShareDummyVecEnv, ShareSubprocVecEnv
-    from harl.common.base_logger import BaseLogger
+    from agents.harl_runner import register_wildfire_with_harl
 
-    from agents.harl_env import WildfireHARLEnv
-
-    def _wildfire_env_fn(rank: int, seed: int, env_args: dict):
-        def init_env():
-            args = copy.deepcopy(env_args)
-            args["seed"] = seed + rank * 1000
-            return WildfireHARLEnv(args)
-        return init_env
-
-    _orig_train  = envs_tools.make_train_env
-    _orig_eval   = envs_tools.make_eval_env
-    _orig_render = envs_tools.make_render_env
-    _orig_nagent = envs_tools.get_num_agents
-
-    def make_train_env(env_name, seed, n_threads, env_args):
-        if env_name == "wildfire":
-            fns = [_wildfire_env_fn(i, seed, env_args) for i in range(n_threads)]
-            return ShareDummyVecEnv(fns) if n_threads == 1 else ShareSubprocVecEnv(fns)
-        return _orig_train(env_name, seed, n_threads, env_args)
-
-    def make_eval_env(env_name, seed, n_threads, env_args):
-        if env_name == "wildfire":
-            fns = [_wildfire_env_fn(i, seed + 10_000, env_args) for i in range(n_threads)]
-            return ShareDummyVecEnv(fns) if n_threads == 1 else ShareSubprocVecEnv(fns)
-        return _orig_eval(env_name, seed, n_threads, env_args)
-
-    def make_render_env(env_name, seed, env_args):
-        if env_name == "wildfire":
-            env = WildfireHARLEnv({**env_args, "seed": seed})
-            return env, env.n_agents, env.agents
-        return _orig_render(env_name, seed, env_args)
-
-    def get_num_agents(env_name, env_args, envs):
-        if env_name == "wildfire":
-            return envs.n_agents
-        return _orig_nagent(env_name, env_args, envs)
-
-    envs_tools.make_train_env  = make_train_env
-    envs_tools.make_eval_env   = make_eval_env
-    envs_tools.make_render_env = make_render_env
-    envs_tools.get_num_agents  = get_num_agents
-
-    _orig_task = configs_tools.get_task_name
-    def get_task_name(env_name, env_args):
-        if env_name == "wildfire":
-            return "wildfire_search"
-        return _orig_task(env_name, env_args)
-    configs_tools.get_task_name = get_task_name
-
-    class WildfireLogger(BaseLogger):
-        def get_task_name(self):
-            return "wildfire_search"
-
-    harl_envs_pkg.LOGGER_REGISTRY["wildfire"] = WildfireLogger
+    register_wildfire_with_harl()
 
 
 # ----------------------------------------------------------------------
@@ -115,10 +60,13 @@ def build_args(
     comms_dropout:  float,
     entropy_coef:   float,
     exp_name:       str,
+    lr: float = 5e-4,
+    critic_lr: float = 5e-4,
+    linear_lr_decay: bool = False,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
-    drone_min_footprint: float = 0.0,
-    ground_confirm_min: float = 0.0,
+    drone_min_footprint_m: float = 0.0,
+    ground_confirm_min_m: float = 0.0,
     fire_grid_size: int = 128,
     reward_search: bool = False,
     reward_confirm: bool = False,
@@ -128,6 +76,18 @@ def build_args(
     drone_flight_levels_m: tuple[float, ...] | None = None,
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int = 0,
+    ugv_known_survivor_diagnostic: bool = False,
+    ugv_diagnostic_target_distance_min_m: float | None = None,
+    ugv_diagnostic_target_distance_max_m: float | None = None,
+    ugv_movement_alignment_reward: float = 0.20,
+    ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
+    ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
+    ugv_stall_penalty: float = 0.0,
+    ugv_stall_displacement_threshold_m: float = 0.05,
+    local_map_patch_size: int = 3,
+    slope_speed_weight: float | None = None,
+    land_cover_speeds: tuple[float, ...] | None = None,
+    action_transform: str = "clip",
 ) -> tuple[dict, dict, dict]:
     args = {
         "algo":        "happo",
@@ -148,7 +108,7 @@ def build_args(
             "log_interval":           1,
             "eval_interval":          1,
             "use_valuenorm":          True,
-            "use_linear_lr_decay":    False,
+            "use_linear_lr_decay":    linear_lr_decay,
             "use_proper_time_limits": True,
             "model_dir":              model_dir,
         },
@@ -171,8 +131,8 @@ def build_args(
             "use_recurrent_policy":       recurrent,
             "recurrent_n":                1,
             "data_chunk_length":          10,
-            "lr":                         5e-4,
-            "critic_lr":                  5e-4,
+            "lr":                         lr,
+            "critic_lr":                  critic_lr,
             "opti_eps":                   1e-5,
             "weight_decay":               0,
             "std_x_coef":                 1,
@@ -209,11 +169,32 @@ def build_args(
         "max_steps":     episode_length,
         "n_drones":      3,
         "n_ground":      2,
+        "n_survivors":   5,
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
-        "drone_min_footprint": drone_min_footprint,
-        "ground_confirm_min": ground_confirm_min,
+        "local_map_patch_size": local_map_patch_size,
+        "drone_min_footprint_m": drone_min_footprint_m,
+        "ground_confirm_min_m": ground_confirm_min_m,
+        "r_found_survivor": 10.0,
+        "r_drone_scout": 2.0,
+        "r_ground_confirm": 4.0,
+        "r_drone_shaping": 0.30,
+        "r_ground_shaping": 0.50,
+        "r_ground_approach": ugv_approach_reward,
+        "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
+        "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+        "r_ugv_stall_penalty": ugv_stall_penalty,
+        "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
+        "r_fire_penalty": -0.20,
+        "r_ground_travel_cost": -0.01,
+        "r_drone_climb_cost": -0.005,
+        "r_time_penalty": -0.0005,
+        "r_coverage": 5.0,
     }
+    if slope_speed_weight is not None:
+        scenario_kwargs["slope_speed_weight"] = float(slope_speed_weight)
+    if land_cover_speeds is not None:
+        scenario_kwargs["land_cover_speeds"] = tuple(float(v) for v in land_cover_speeds)
     if terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = terrain_cache_path
@@ -229,24 +210,20 @@ def build_args(
     if coverage_obs_grid and coverage_obs_grid > 0:
         scenario_kwargs["coverage_obs_grid"] = int(coverage_obs_grid)
     if reward_search:
-        # Search-dominant reward: make finding/scouting survivors clearly worth
-        # more than any movement/hazard cost, and strengthen potential-based
-        # shaping toward survivors, so the policy is rewarded for searching
-        # rather than for sitting still to avoid cost (the degenerate optimum
-        # under the default cost-heavy reward).
+        # Kept explicit for the legacy flag; these now match the default reward
+        # profile used by normal smoke training.
         scenario_kwargs.update({
-            "r_found_survivor":   10.0,   # was 1.0
-            "r_drone_scout":       2.0,   # was 0.3
-            "r_ground_confirm":    4.0,   # was 0.5
-            "r_drone_shaping":     0.30,  # was 0.05  (dense pull toward survivors)
-            "r_ground_shaping":    0.50,  # was 0.10  (stronger directed pull)
-            "r_ground_approach":   0.10,  # dense bonus peaking ON a scouted survivor
-            "ground_approach_radius": 0.4,
-            "r_fire_penalty":     -0.20,  # was -1.0  (no longer dominates)
-            "r_ground_travel_cost": -0.01,  # was -0.05
-            "r_drone_climb_cost":  -0.005,  # was -0.02
-            "r_time_penalty":     -0.0005,  # was -0.001
-            "r_coverage":          5.0,    # max team bonus for covering the full map once
+            "r_found_survivor": 10.0,
+            "r_drone_scout": 2.0,
+            "r_ground_confirm": 4.0,
+            "r_drone_shaping": 0.30,
+            "r_ground_shaping": 0.50,
+            "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_fire_penalty": -0.20,
+            "r_ground_travel_cost": -0.01,
+            "r_drone_climb_cost": -0.005,
+            "r_time_penalty": -0.0005,
+            "r_coverage": 5.0,
         })
     if reward_confirm:
         # Confirmation-dominant reward. Diagnosis: under reward_search the ground
@@ -272,9 +249,59 @@ def build_args(
             "r_ground_coverage":      3.0,    # ground robots sweep instead of waiting
             "ground_coverage_radius": 0.08,
         })
+    if ugv_known_survivor_diagnostic:
+        distance_kwargs = {}
+        if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
+            pass
+        else:
+            target_distance_min_m = max(
+                float(0.0 if ugv_diagnostic_target_distance_min_m is None else ugv_diagnostic_target_distance_min_m),
+                0.0,
+            )
+            distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
+            if ugv_diagnostic_target_distance_max_m is not None:
+                target_distance_max_m = max(
+                    float(ugv_diagnostic_target_distance_max_m),
+                    0.0,
+                )
+                if target_distance_max_m < target_distance_min_m:
+                    raise ValueError(
+                        "ugv_diagnostic_target_distance_max_m must be >= "
+                        "ugv_diagnostic_target_distance_min_m"
+                    )
+                target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
+                distance_kwargs.update({
+                    "known_survivor_spawn_distance_m": target_distance_m,
+                    "known_survivor_spawn_distance_max_m": target_distance_max_m,
+                })
+        scenario_kwargs.update({
+            "n_drones": 0,
+            "n_ground": 1,
+            "n_survivors": 1,
+            "known_survivors_at_reset": True,
+            "disable_fire": True,
+            "comms_dropout": 0.0,
+            "r_found_survivor": 10.0,
+            "r_drone_scout": 0.0,
+            "r_ground_confirm": 4.0,
+            "r_drone_shaping": 0.0,
+            "r_ground_shaping": 0.50,
+            "r_ground_approach": ugv_approach_reward,
+            "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
+            "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_ugv_stall_penalty": ugv_stall_penalty,
+            "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
+            "r_fire_penalty": 0.0,
+            "r_ground_travel_cost": 0.0,
+            "r_drone_climb_cost": 0.0,
+            "r_time_penalty": -0.0005,
+            "r_coverage": 0.0,
+        })
+        scenario_kwargs.update(distance_kwargs)
     env_args = {
         "max_cycles":      episode_length,
         "scenario_kwargs": scenario_kwargs,
+        "action_transform": action_transform,
     }
 
     return args, algo_args, env_args
@@ -297,6 +324,12 @@ def main():
     p.add_argument("--entropy-coef",   type=float, default=0.01,
                    help="Higher (0.05+) encourages exploration — helps break "
                         "the drones-at-corners action-saturation pathology.")
+    p.add_argument("--lr", type=float, default=5e-4,
+                   help="Actor learning rate.")
+    p.add_argument("--critic-lr", type=float, default=5e-4,
+                   help="Critic learning rate.")
+    p.add_argument("--linear-lr-decay", action="store_true",
+                   help="Linearly decay actor/critic learning rates over training.")
     p.add_argument("--exp-name",       default="happo_smoke")
     p.add_argument("--n-rollout-threads", type=int, default=1,
                    help="Parallel rollout envs. More threads => more diverse data per "
@@ -304,12 +337,30 @@ def main():
     p.add_argument("--terrain-cache-path", default=None,
                    help="Train on this cached real terrain (recommended: match what you evaluate on, "
                         "e.g. data/terrain_cache/malibu_creek_1km_128.npz). Default uses the scenario default.")
-    p.add_argument("--drone-min-footprint", type=float, default=0.0,
-                   help="Floor on the drone scout footprint (sim units). >0 gives RL a learnable reward "
-                        "signal on large terrains by ensuring drones actually scout survivors (e.g. 0.15).")
-    p.add_argument("--ground-confirm-min", type=float, default=0.0,
-                   help="Floor on ground confirm range (sim units). >0 gives ground robots a learnable confirm reward (e.g. 0.12).")
+    p.add_argument(
+                   "--drone-min-footprint-radius-m",
+                   dest="drone_min_footprint_radius_m",
+                   type=float,
+                   default=0.0,
+                   help="Minimum drone scout-footprint radius in meters. "
+                        "The terrain scale converts it internally; 0 disables the floor.")
+    p.add_argument("--drone-min-footprint",
+                   dest="drone_min_footprint_radius_m",
+                   type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p.add_argument(
+                   "--ground-min-confirm-radius-m",
+                   dest="ground_min_confirm_radius_m",
+                   type=float,
+                   default=0.0,
+                   help="Minimum ground confirmation radius in meters. "
+                        "The terrain scale converts it internally; 0 disables the floor.")
+    p.add_argument("--ground-confirm-min",
+                   dest="ground_min_confirm_radius_m",
+                   type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument("--local-map-patch-size", type=int, default=3,
+                   help="Odd square patch size for local mobility and blocked-cell observations. "
+                        "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -335,7 +386,73 @@ def main():
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
+    p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
+                   help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
+    p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
+                   help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
+    p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
+                   help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
+                        "Omit for no upper bound; use min=max for an exact target distance.")
+    p.add_argument("--ugv-movement-alignment-reward", type=float, default=0.20,
+                   help="Reward scale for UGV actual-movement alignment toward a known survivor in the "
+                        "diagnostic task.")
+    p.add_argument("--ugv-approach-reward", type=float, default=DEFAULT_UGV_APPROACH_REWARD,
+                   help="Inner UGV approach milestone reward. "
+                        "Default fractions make this 0.05 produce 75/50/40/30/20m "
+                        "one-time rewards of 0.02/0.025/0.03/0.04/0.05.")
+    p.add_argument("--ugv-approach-milestone-radii-m", type=float, nargs="+",
+                   default=list(DEFAULT_UGV_APPROACH_MILESTONE_RADII_M),
+                   help="One-time UGV approach milestone radii in meters.")
+    p.add_argument("--ugv-approach-radius-m", type=float, default=argparse.SUPPRESS,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--ugv-stall-penalty", type=float, default=0.0,
+                   help="Penalty magnitude subtracted when a UGV barely moves while seeking a known target.")
+    p.add_argument("--ugv-stall-displacement-threshold-m", type=float, default=0.05,
+                   help="Actual per-step movement below this distance is treated as stalled.")
+    p.add_argument("--slope-speed-weight", type=float, default=None,
+                   help="Override slope penalty in UGV speed multiplier. "
+                        "Default scenario value is 0.5; larger values make slopes slower.")
+    p.add_argument("--land-cover-speeds", type=float, nargs="+", default=None,
+                   help="Override UGV speed multipliers for road/open/brush/forest/rock[/water]. "
+                        "Example: --land-cover-speeds 1.0 0.95 0.8 0.7 0.0 0.0")
+    p.add_argument("--action-transform", choices=("clip", "tanh", "radial_tanh", "radial-tanh"), default="clip",
+                   help="How to bound raw continuous HAPPO actions before VMAS. "
+                        "'clip' is the HARL-compatible default; 'tanh' is an experimental "
+                        "plain tanh post-transform; 'radial_tanh' preserves raw action "
+                        "direction while smoothly bounding vector magnitude.")
     args = p.parse_args()
+    args.action_transform = args.action_transform.replace("-", "_")
+
+    if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
+        p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")
+    if args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1:
+        p.error("--local-map-patch-size must be a positive odd integer")
+    if not 0.0 <= args.comms_dropout <= 1.0:
+        p.error("--comms-dropout must be in [0, 1]")
+    if args.entropy_coef < 0.0:
+        p.error("--entropy-coef must be nonnegative")
+    if args.lr <= 0.0:
+        p.error("--lr must be positive")
+    if args.critic_lr <= 0.0:
+        p.error("--critic-lr must be positive")
+    if args.ugv_movement_alignment_reward < 0.0:
+        p.error("--ugv-movement-alignment-reward must be nonnegative")
+    if args.ugv_approach_reward < 0.0:
+        p.error("--ugv-approach-reward must be nonnegative")
+    if hasattr(args, "ugv_approach_radius_m"):
+        args.ugv_approach_milestone_radii_m = [args.ugv_approach_radius_m]
+    if not args.ugv_approach_milestone_radii_m or any(
+        value <= 0.0 for value in args.ugv_approach_milestone_radii_m
+    ):
+        p.error("--ugv-approach-milestone-radii-m must contain positive distances")
+    if args.ugv_stall_penalty < 0.0:
+        p.error("--ugv-stall-penalty must be nonnegative")
+    if args.ugv_stall_displacement_threshold_m < 0.0:
+        p.error("--ugv-stall-displacement-threshold-m must be nonnegative")
+    if args.fire_grid_size < 2:
+        p.error("--fire-grid-size must be at least 2")
+    if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
+        p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
     drone_flight_levels_m = None
     if args.drone_flight_levels_m:
@@ -382,6 +499,10 @@ def main():
     else:
         num_env_steps  = args.num_env_steps  or 2_000
         episode_length = args.episode_length or 150
+    if num_env_steps <= 0:
+        p.error("--num-env-steps must be positive")
+    if episode_length <= 0:
+        p.error("--episode-length must be positive")
 
     if args.preset == "tuned":
         # Keep explicit user values, but upgrade defaults to convergence-oriented
@@ -402,12 +523,17 @@ def main():
     print(f" seed:           {args.seed}")
     print(f" comms_dropout:  {args.comms_dropout}")
     print(f" entropy_coef:   {args.entropy_coef}")
+    print(f" lr:             {args.lr}")
+    print(f" critic_lr:      {args.critic_lr}")
+    print(f" linear_lr_decay: {args.linear_lr_decay}")
+    print(f" action_transform: {args.action_transform}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
 
     _register_wildfire_with_harl()
-    from harl.runners.on_policy_ha_runner import OnPolicyHARunner
+    from agents.harl_runner import _build_diagnostic_happo_runner_class
     from agents.happo_checkpoint import save_training_manifest
+    OnPolicyHARunner = _build_diagnostic_happo_runner_class()
 
     harl_args, algo_args, env_args = build_args(
         num_env_steps  = num_env_steps,
@@ -415,12 +541,16 @@ def main():
         seed           = args.seed,
         comms_dropout  = args.comms_dropout,
         entropy_coef   = args.entropy_coef,
+        lr             = args.lr,
+        critic_lr      = args.critic_lr,
+        linear_lr_decay = args.linear_lr_decay,
         exp_name       = args.exp_name,
         n_rollout_threads = args.n_rollout_threads,
         terrain_cache_path = args.terrain_cache_path,
-        drone_min_footprint = args.drone_min_footprint,
-        ground_confirm_min = args.ground_confirm_min,
+        drone_min_footprint_m = args.drone_min_footprint_radius_m,
+        ground_confirm_min_m = args.ground_min_confirm_radius_m,
         fire_grid_size = args.fire_grid_size,
+        local_map_patch_size = args.local_map_patch_size,
         reward_search = args.reward_search,
         reward_confirm = args.reward_confirm,
         recurrent = args.recurrent,
@@ -429,6 +559,17 @@ def main():
         drone_flight_levels_m = drone_flight_levels_m,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
+        ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
+        ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
+        ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
+        ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
+        ugv_approach_reward = args.ugv_approach_reward,
+        ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
+        ugv_stall_penalty = args.ugv_stall_penalty,
+        ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
+        slope_speed_weight = args.slope_speed_weight,
+        land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
+        action_transform = args.action_transform,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
