@@ -243,6 +243,11 @@ class WildfireSearchScenario(BaseScenario):
         self.local_map_patch_size = int(kwargs.pop("local_map_patch_size", 3))
         if self.local_map_patch_size < 1 or self.local_map_patch_size % 2 != 1:
             raise ValueError("local_map_patch_size must be a positive odd integer")
+        self.ugv_local_map_patch_shift = str(
+            kwargs.pop("ugv_local_map_patch_shift", "center"),
+        ).lower().replace("-", "_")
+        if self.ugv_local_map_patch_shift not in ("center", "target_lookahead"):
+            raise ValueError("ugv_local_map_patch_shift must be 'center' or 'target_lookahead'")
         land_cover_costs = _land_cover_values(
             kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0, 8.0)),
             water_value=8.0,
@@ -358,7 +363,7 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_descent_rate_m = max(float(kwargs.pop("drone_descent_rate_m", 8.0)), 0.0)
         self.drone_altitude_release_margin_m = max(float(kwargs.pop("drone_altitude_release_margin_m", 10.0)), 0.0)
         self.drone_altitude_release_margin = max(float(kwargs.pop("drone_altitude_release_margin", 0.04)), 0.0)
-        self.r_drone_climb_cost = kwargs.pop("r_drone_climb_cost", -0.02)
+        self.r_drone_climb_cost = kwargs.pop("r_drone_climb_cost", -0.005)
         self.drone_sensor_max_range = float(max(drone_flight_levels) * self.drone_camera_half_angle_tan)
 
         # Communication
@@ -397,15 +402,15 @@ class WildfireSearchScenario(BaseScenario):
         kwargs.pop("action_transform", None)  # obsolete diagnostic option, ignored for old manifests
 
         # Reward weights
-        self.r_found_survivor = kwargs.pop("r_found_survivor", 1.0)
-        self.r_drone_scout    = kwargs.pop("r_drone_scout", 0.3)
-        self.r_ground_confirm = kwargs.pop("r_ground_confirm", 0.5)
-        self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.001)
-        self.r_fire_penalty   = kwargs.pop("r_fire_penalty", -1.0)
-        self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.05)
-        self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.05)
-        self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.10)
-        self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.0)
+        self.r_found_survivor = kwargs.pop("r_found_survivor", 10.0)
+        self.r_drone_scout    = kwargs.pop("r_drone_scout", 2.0)
+        self.r_ground_confirm = kwargs.pop("r_ground_confirm", 4.0)
+        self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.0005)
+        self.r_fire_penalty   = kwargs.pop("r_fire_penalty", -0.20)
+        self.r_ground_travel_cost = kwargs.pop("r_ground_travel_cost", -0.01)
+        self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.30)
+        self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.50)
+        self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.20)
         self.r_ugv_stall_penalty = max(float(kwargs.pop("r_ugv_stall_penalty", 0.0)), 0.0)
         self.ugv_stall_displacement_threshold_m = max(
             float(kwargs.pop("ugv_stall_displacement_threshold_m", 0.05)),
@@ -421,7 +426,7 @@ class WildfireSearchScenario(BaseScenario):
         # Coverage reward: maximum team bonus for covering the full map once.
         # Credit uses the physical camera footprint and is split when drones
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
-        self.r_coverage = kwargs.pop("r_coverage", 0.0)
+        self.r_coverage = kwargs.pop("r_coverage", 5.0)
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
         # One-time directed-approach milestones for ground robots. The scalar
         # is the final/inner milestone reward; default fractions make 0.05 map
@@ -2676,9 +2681,18 @@ class WildfireSearchScenario(BaseScenario):
     def _local_terrain_features(self, agent: Agent) -> Tensor:
         """Expose mobility cost, blocked masks, and AGL air-clearance requirements."""
         pos = agent.state.pos
-        costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
+        center_shift_cells = self._local_patch_center_shift_cells(agent, self.local_map_patch_size)
+        costs = self._local_grid_patch(
+            self.mobility_cost_grid,
+            pos,
+            self.local_map_patch_size,
+            center_shift_cells=center_shift_cells,
+        )
         blocked = (~self._local_grid_patch(
-            self.traversable_grid, pos, self.local_map_patch_size,
+            self.traversable_grid,
+            pos,
+            self.local_map_patch_size,
+            center_shift_cells=center_shift_cells,
         )).float()
         clearance = self._local_grid_patch(self.required_clearance_grid, pos, 3)
         cost_max = self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1).clamp_min(1e-12)
@@ -2686,10 +2700,53 @@ class WildfireSearchScenario(BaseScenario):
         normalized_clearance = clearance / self.drone_max_altitude_by_env.unsqueeze(-1).clamp_min(1e-6)
         return torch.cat([normalized_costs, blocked, normalized_clearance], dim=-1)
 
-    def _local_grid_patch(self, grid: Tensor, pos: Tensor, patch_size: int) -> Tensor:
+    def _local_patch_center_shift_cells(self, agent: Agent, patch_size: int) -> Tensor | None:
+        """Shift a world-aligned UGV patch toward its known target for extra lookahead."""
+        max_shift = patch_size // 2 - 1
+        if (
+            max_shift <= 0
+            or agent.is_drone
+            or self.ugv_local_map_patch_shift == "center"
+            or self.n_survivors <= 0
+        ):
+            return None
+
+        agent_idx = self.world.agents.index(agent)
+        local_known = self.known_survivors_by_agent[:, agent_idx]
+        unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
+        target_mask = local_known & unconfirmed_scouted
+        survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
+        relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
+        distance = relative_pos.norm(dim=-1)
+        masked_distance = torch.where(
+            target_mask,
+            distance,
+            torch.full_like(distance, float("inf")),
+        )
+        _, target_idx = masked_distance.min(dim=1)
+        target_rel = relative_pos.gather(
+            dim=1,
+            index=target_idx.view(-1, 1, 1).expand(-1, 1, 2),
+        ).squeeze(1)
+
+        valid = target_mask.any(dim=1) & (target_rel.norm(dim=-1) > 1e-9)
+        shift = torch.sign(target_rel).to(dtype=torch.long) * int(max_shift)
+        return torch.where(valid.unsqueeze(-1), shift, torch.zeros_like(shift))
+
+    def _local_grid_patch(
+        self,
+        grid: Tensor,
+        pos: Tensor,
+        patch_size: int,
+        *,
+        center_shift_cells: Tensor | None = None,
+    ) -> Tensor:
         """Return a flattened square patch around each position, clamped at edges."""
         radius = patch_size // 2
         gx, gy = self._positions_to_grid(pos)
+        if center_shift_cells is not None:
+            gx = gx + center_shift_cells[:, X]
+            gy = gy + center_shift_cells[:, Y]
         b_idx = torch.arange(self.world.batch_dim, device=pos.device)
         values = []
         for dy in range(-radius, radius + 1):
