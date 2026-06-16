@@ -150,6 +150,14 @@ class WildfireSearchScenario(BaseScenario):
         self.confirm_target_height_m = max(float(kwargs.pop("confirm_target_height_m", 1.0)), 0.0)
         # Number of samples along the sight line (more = finer occlusion detection).
         self.confirm_los_samples = max(int(kwargs.pop("confirm_los_samples", 24)), 3)
+        # Allow drones (EO/IR camera) to CONFIRM survivors from altitude, not just
+        # scout them. A drone confirms a survivor inside its camera footprint with a
+        # clear top-down sight line. This mirrors real aerial SAR (drones detect and
+        # confirm people from above) and is the realistic route to high recall with
+        # a fixed, small ground team. Default False keeps ground-only confirmation.
+        self.drone_can_confirm = bool(kwargs.pop("drone_can_confirm", False))
+        # Per-drone reward for a confirmation it makes (training signal). 0 = off.
+        self.r_drone_confirm = float(kwargs.pop("r_drone_confirm", 0.0))
         kwargs.pop("ground_approach_radius", None)  # obsolete triangular approach reward option
         kwargs.pop("ground_approach_radius_m", None)  # obsolete triangular approach reward option
         self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
@@ -1856,25 +1864,38 @@ class WildfireSearchScenario(BaseScenario):
         from each ground robot (at eye height) to each survivor (at target
         height). A segment is occluded if any interior sample's terrain elevation
         rises above the straight eye->target sight line (all heights in meters)."""
-        samples = self.confirm_los_samples
         # elevation_grid is in vertical SIM units; convert meter heights with the
         # same per-env meters->sim scale used for the horizontal confirm range.
         spm = self.terrain_sim_units_per_meter.view(-1, 1)                         # [B, 1]
-        g_elev = self._grid_values_at_positions(self.elevation_grid, ground_pos)  # [B, G]
+        g_elev = self._grid_values_at_positions(self.elevation_grid, ground_pos)  # [B, O]
+        eye_msl = g_elev + self.confirm_observer_height_m * spm                    # [B, O]
+        return self._los_mask(ground_pos, eye_msl, surv_pos)
+
+    def _drone_confirm_los_mask(self, drone_pos: Tensor, surv_pos: Tensor) -> Tensor:
+        """Boolean [B, D, S]: clear top-down sight line from each drone (at its MSL
+        flight altitude) to each survivor. Terrain rarely occludes a steep top-down
+        view, but a near ridge can — so this is still a real (if mild) constraint."""
+        return self._los_mask(drone_pos, self.drone_altitude_msl, surv_pos)
+
+    def _los_mask(self, obs_pos: Tensor, eye_msl: Tensor, surv_pos: Tensor) -> Tensor:
+        """Boolean [B, O, S]: True when terrain does NOT occlude the straight sight
+        line from each observer (xy at ``eye_msl`` height, sim units) to each
+        survivor (ground elevation + target height). Heights are in sim units."""
+        samples = self.confirm_los_samples
+        spm = self.terrain_sim_units_per_meter.view(-1, 1)                         # [B, 1]
         s_elev = self._grid_values_at_positions(self.elevation_grid, surv_pos)    # [B, S]
-        eye = g_elev + self.confirm_observer_height_m * spm                        # [B, G]
         tgt = s_elev + self.confirm_target_height_m * spm                          # [B, S]
 
-        path = self._sample_pair_paths(ground_pos, surv_pos, samples)             # [B, G, S, K, 2]
-        terrain = self._grid_values_at_positions(self.elevation_grid, path)       # [B, G, S, K]
+        path = self._sample_pair_paths(obs_pos, surv_pos, samples)               # [B, O, S, K, 2]
+        terrain = self._grid_values_at_positions(self.elevation_grid, path)       # [B, O, S, K]
 
-        alpha = torch.linspace(0.0, 1.0, samples, device=ground_pos.device).view(1, 1, 1, -1)
+        alpha = torch.linspace(0.0, 1.0, samples, device=obs_pos.device).view(1, 1, 1, -1)
         sight = (
-            eye.unsqueeze(2).unsqueeze(3) * (1.0 - alpha)
+            eye_msl.unsqueeze(2).unsqueeze(3) * (1.0 - alpha)
             + tgt.unsqueeze(1).unsqueeze(3) * alpha
-        )                                                                          # [B, G, S, K]
+        )                                                                          # [B, O, S, K]
 
-        interior = torch.ones(samples, dtype=torch.bool, device=ground_pos.device)
+        interior = torch.ones(samples, dtype=torch.bool, device=obs_pos.device)
         interior[0] = False
         interior[-1] = False
         eps = 0.5 * self.terrain_sim_units_per_meter.view(-1, 1, 1, 1)  # ~0.5 m tolerance
@@ -1909,7 +1930,20 @@ class WildfireSearchScenario(BaseScenario):
             )
         self.step_ground_confirmations = eligible_ground_confirmations
         confirmed_by_ground = eligible_ground_confirmations.any(dim=1)
-        newly_found = confirmed_by_ground & ~self.found_survivors
+
+        if self.drone_can_confirm:
+            # Drones confirm a survivor inside their camera footprint with a clear
+            # top-down sight line (realistic EO/IR aerial detection).
+            drone_conf = drone_seen
+            if self.confirm_requires_los:
+                drone_conf = drone_conf & self._drone_confirm_los_mask(drone_pos, surv_pos)
+            self.step_drone_confirmations = drone_conf
+            confirmed_by_drone = drone_conf.any(dim=1)
+        else:
+            self.step_drone_confirmations = torch.zeros_like(drone_seen)
+            confirmed_by_drone = torch.zeros_like(confirmed_by_ground)
+
+        newly_found = (confirmed_by_ground | confirmed_by_drone) & ~self.found_survivors
 
         self.scouted_survivors = self.scouted_survivors | newly_scouted
         self.found_survivors   = self.found_survivors   | newly_found
@@ -2088,6 +2122,9 @@ class WildfireSearchScenario(BaseScenario):
         scout_credit_mask    = drone_seen & newly_scouted.unsqueeze(1)
         scout_per_drone      = scout_credit_mask.float().sum(dim=2)         # [B, D]
 
+        drone_confirm_credit = self.step_drone_confirmations & newly_found.unsqueeze(1)
+        confirm_per_drone    = drone_confirm_credit.float().sum(dim=2)      # [B, D]
+
         ground_within        = eligible_ground_confirmations
         confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
         confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
@@ -2174,6 +2211,7 @@ class WildfireSearchScenario(BaseScenario):
             r = team_reward.clone()
             if agent.is_drone:
                 r = r + scout_per_drone[:, i] * self.r_drone_scout
+                r = r + confirm_per_drone[:, i] * self.r_drone_confirm
                 r = r - self.drone_energy_cost[:, i]
                 r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
                 r = r + drone_shaping[:, i]

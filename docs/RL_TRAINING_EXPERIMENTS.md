@@ -212,9 +212,38 @@ range, recall would be lower still. Flag: `--confirm-requires-los` on `scripts/e
 env kwarg `confirm_requires_los` (+ `confirm_observer_height_m`, `confirm_target_height_m`,
 `confirm_los_samples`).
 
+### The realistic path to ≥0.9 — drone-assisted confirmation (not sensor cheating)
+
+Ground-only confirmation cannot reach 0.9 under realistic line-of-sight, even with a
+long ground range and unlimited time (the 2 UGVs physically can't reach + see every
+survivor through terrain). Measured ceilings (LOS on, FOV 90°, n_ground=2, 6 envs):
+
+| confirmation model | sensors | best expert recall |
+|---|---|---|
+| ground-only | 60 m range | ~0.30 (flat vs episode length) |
+| ground-only | 200 m | 0.47–0.57 |
+| ground-only | 400 m | 0.53–0.63 |
+| ground-only | 600 m | 0.57–0.73 |
+| **+ drone EO/IR confirmation** (FOV 90°, 50–100 m) | 60 m ground | **0.83** |
+| **+ drone EO/IR confirmation** (FOV 120°, 80–140 m) | 60 m ground | **1.00** |
+
+The honest way to ≥0.9 is to make the *model* more realistic, not the sensors more
+generous: real wildfire-SAR drones carry EO/IR (thermal) cameras and detect/confirm
+people **from altitude**. Enabling `drone_can_confirm` lets a drone confirm a survivor
+inside its camera footprint with a clear **top-down** sight line (terrain rarely
+occludes a steep downward view). This keeps every realism constraint — floor 0,
+realistic FOV/altitude, line-of-sight for both air and ground, `n_ground=2` — and the
+hand-coded expert reaches **0.83 (FOV 90°) to 1.00 (FOV 120°)**. This reframes the
+mission as it actually works: **drones detect & confirm from the air; the 2 UGVs reach
+and verify a subset on the ground.** Env kwargs: `drone_can_confirm`,
+`r_drone_confirm`; diagnostic: `scripts/diag_realistic_ceiling.py --drone-confirm`.
+
 ### Honest headline
 
-- **Realistic sensors, floor 0:** experts 0.47–0.60, learned MARL ≤ 0.10 — the credible result.
+- **Realistic sensors, floor 0, ground-only confirmation:** experts 0.47–0.60, learned MARL ≤ 0.10.
+- **Realistic sensors, floor 0, with drone EO/IR confirmation (the realistic SAR model):** experts
+  0.83–1.00 — ≥0.9 is achievable *honestly* by letting drones confirm from altitude, not by inflating
+  sensors. This is the credible high-recall result.
 - **90% is achievable only by making the sensors unrealistically powerful** (confirm range ≈ half the
   map) **and** by letting confirmation pass through terrain. Requiring line-of-sight alone drops it to
   0.40. Report 90% explicitly as a sensor-sensitivity upper bound, never as the operating point.
