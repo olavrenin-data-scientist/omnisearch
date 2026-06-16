@@ -130,7 +130,6 @@ class HappoCheckpointTests(unittest.TestCase):
 
         expected = {
             "r_found_survivor": 10.0,
-            "ugv_local_map_patch_shift": "center",
             "r_drone_scout": 2.0,
             "r_ground_confirm": 4.0,
             "r_drone_shaping": 0.30,
@@ -152,6 +151,23 @@ class HappoCheckpointTests(unittest.TestCase):
             for key, value in expected.items():
                 self.assertEqual(scenario[key], value)
 
+    def test_build_args_exposes_learning_rate_schedule(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="lr",
+            lr=2.5e-4,
+            critic_lr=5e-4,
+            linear_lr_decay=True,
+        )
+
+        self.assertEqual(algo_args["model"]["lr"], 2.5e-4)
+        self.assertEqual(algo_args["model"]["critic_lr"], 5e-4)
+        self.assertTrue(algo_args["train"]["use_linear_lr_decay"])
+
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
             num_env_steps=100,
@@ -166,7 +182,6 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_diagnostic_target_distance_min_m=30.0,
             ugv_diagnostic_target_distance_max_m=100.0,
             local_map_patch_size=11,
-            ugv_local_map_patch_shift="target_lookahead",
             slope_speed_weight=0.5,
             land_cover_speeds=(1.0, 0.95, 0.8, 0.7, 0.0, 0.0),
             action_transform="tanh",
@@ -178,7 +193,6 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_ground"], 1)
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["local_map_patch_size"], 11)
-        self.assertEqual(scenario["ugv_local_map_patch_shift"], "target_lookahead")
         self.assertTrue(scenario["known_survivors_at_reset"])
         self.assertEqual(scenario["known_survivor_spawn_distance_m"], 65.0)
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
