@@ -83,8 +83,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_min_footprint_m = 75.0
         scenario.ground_confirm_min_sim_override = None
         scenario.ground_confirm_min_m = 20.0
-        scenario.ground_approach_radius_sim_override = None
-        scenario.ground_approach_radius_m = 25.0
         scenario.ground_lidar_range_sim_override = None
         scenario.ground_lidar_range_m = 20.0
         scenario.spawn_padding_m = 1.0
@@ -94,7 +92,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.survivor_radius_by_env = torch.zeros(1)
         scenario.detection_range_by_env = torch.zeros(1)
         scenario.drone_min_footprint_by_env = torch.zeros(1)
-        scenario.ground_approach_radius_by_env = torch.zeros(1)
         scenario.spawn_padding_by_env = torch.zeros(1)
         ground = _Entity(0.04)
         ground.sensors = [types.SimpleNamespace(_max_range=0.20)]
@@ -113,7 +110,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(scenario.survivor_radius, 0.35 * scale)
         self.assertAlmostEqual(scenario.detection_range, 20.0 * scale)
         self.assertAlmostEqual(float(scenario.drone_min_footprint_by_env[0]), 75.0 * scale)
-        self.assertAlmostEqual(float(scenario.ground_approach_radius_by_env[0]), 25.0 * scale)
         self.assertAlmostEqual(scenario.world.agents[0].shape.radius, 0.50 * scale)
         self.assertAlmostEqual(scenario._survivors[0].shape.radius, 0.35 * scale)
 
@@ -127,14 +123,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(footprint.item()), 50.0 * scale, places=7)
         self.assertLess(float(footprint.item()), 0.12)
-
-    def test_legacy_ground_approach_sim_override_takes_precedence(self):
-        scenario = self._scenario()
-        scenario.ground_approach_radius_sim_override = 0.05
-
-        scenario._refresh_physical_size_conversions(0, 2.0 / 1_000.0)
-
-        self.assertAlmostEqual(float(scenario.ground_approach_radius_by_env[0]), 0.05)
 
     def test_legacy_floor_sim_overrides_take_precedence(self):
         scenario = self._scenario()

@@ -64,6 +64,17 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.tensor([1.0, 0.95, 0.8, 0.7, 0.0, 0.0]),
         ))
 
+    def test_default_ground_approach_reward_is_enabled(self):
+        env = self._diagnostic_env()
+        scenario = env.scenario
+
+        self.assertEqual(scenario.r_ground_approach, 0.05)
+        self.assertEqual(scenario.ground_approach_milestone_radii_m, (75.0, 50.0, 40.0, 30.0, 20.0))
+        torch.testing.assert_close(
+            scenario.ground_approach_milestone_rewards_tensor.cpu(),
+            torch.tensor([0.02, 0.025, 0.03, 0.04, 0.05]),
+        )
+
     def test_ground_action_magnitude_is_normalized_before_terrain_speed(self):
         env = self._diagnostic_env()
         env.reset()
@@ -292,6 +303,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         survivor = scenario._survivors[0]
         scenario.r_ground_shaping = 0.5
         scenario.r_ground_approach = 0.0
+        scenario.ground_approach_milestone_rewards_tensor.zero_()
         scenario.ground_progress_scale_m = 3.2
         scenario.scouted_survivors[0, 0] = True
         drone.state.pos[:] = torch.tensor([[-1.0, -1.0]])
@@ -362,6 +374,75 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(scenario.metric_reward_ugv_progress[0]), 0.5, places=5)
 
+    def test_ground_approach_reward_pays_once_when_crossing_milestones(self):
+        scenario, ground = self._configure_progress_case()
+        scenario.known_survivors_by_agent[0, 1, 0] = True
+        scenario.ground_approach_milestone_radii_m_tensor = torch.tensor(
+            [75.0, 50.0, 40.0, 30.0, 20.0],
+            device=scenario.fire_grid.device,
+        )
+        scenario.ground_approach_milestone_rewards_tensor = torch.tensor(
+            [0.04, 0.05, 0.06, 0.08, 0.10],
+            device=scenario.fire_grid.device,
+        )
+        scenario.ground_approach_milestones_reached.zero_()
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+
+        ground.state.pos[:] = torch.tensor([[-80.0 * scale, 0.0]])
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_reward_ugv_approach[0]), 0.0)
+
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:] = torch.tensor([[-45.0 * scale, 0.0]])
+        scenario._compute_step_rewards()
+        self.assertAlmostEqual(float(scenario.metric_reward_ugv_approach[0]), 0.09, places=5)
+
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_reward_ugv_approach[0]), 0.0)
+
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:] = torch.tensor([[-19.0 * scale, 0.0]])
+        scenario._compute_step_rewards()
+        self.assertAlmostEqual(float(scenario.metric_reward_ugv_approach[0]), 0.24, places=5)
+
+    def test_ground_approach_reward_requires_aligned_progress(self):
+        scenario, ground = self._configure_progress_case()
+        scenario.known_survivors_by_agent[0, 1, 0] = True
+        scenario.ground_approach_milestone_radii_m_tensor = torch.tensor(
+            [75.0, 50.0],
+            device=scenario.fire_grid.device,
+        )
+        scenario.ground_approach_milestone_rewards_tensor = torch.tensor(
+            [0.04, 0.05],
+            device=scenario.fire_grid.device,
+        )
+        scenario.ground_approach_milestones_reached.zero_()
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+
+        ground.state.pos[:] = torch.tensor([[-80.0 * scale, 0.0]])
+        scenario._compute_step_rewards()
+
+        scenario._pre_step_ground_pos[:, 0, :] = torch.tensor([[-45.0 * scale, -10.0 * scale]])
+        ground.state.pos[:] = torch.tensor([[-45.0 * scale, 0.0]])
+        scenario._compute_step_rewards()
+
+        self.assertEqual(float(scenario.metric_reward_ugv_approach[0]), 0.0)
+        self.assertFalse(bool(scenario.ground_approach_milestones_reached.any()))
+
+    def test_ugv_stall_penalty_applies_after_known_target_gate(self):
+        scenario, _ = self._configure_progress_case()
+        scenario.known_survivors_by_agent[0, 1, 0] = True
+        scenario.r_ugv_stall_penalty = 0.02
+        scenario.ugv_stall_displacement_threshold_m = 0.05
+
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_reward_ugv_stall_penalty[0]), 0.0)
+
+        scenario.step_ugv_actual_displacement_m[0, 0] = 0.01
+        scenario._compute_step_rewards()
+
+        self.assertAlmostEqual(float(scenario.metric_reward_ugv_stall_penalty[0]), -0.02, places=5)
+
     def test_info_contains_training_debug_metrics(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario
@@ -381,6 +462,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "reward/ugv_progress",
             "reward/ugv_approach",
             "reward/ugv_movement_alignment",
+            "reward/ugv_stall_penalty",
             "reward/ground_confirm",
             "reward/coverage",
             "cost/ugv_fire_exposure",

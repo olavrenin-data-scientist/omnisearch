@@ -16,6 +16,7 @@ ADDITIVE_ENV_METRICS = (
     "reward/ugv_progress",
     "reward/ugv_approach",
     "reward/ugv_movement_alignment",
+    "reward/ugv_stall_penalty",
     "reward/ground_confirm",
     "reward/coverage",
     "cost/ugv_fire_exposure",
