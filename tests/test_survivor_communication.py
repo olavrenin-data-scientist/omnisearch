@@ -88,6 +88,19 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.tensor([0.02, 0.025, 0.03, 0.04, 0.05]),
         )
 
+    def test_legacy_drone_scouts_confirm_alias_enables_drone_confirmation(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=0,
+            known_survivors_at_reset=False,
+            survivor_spawn_reference="drone",
+            drone_scouts_confirm_survivors=True,
+        )
+        scenario = env.scenario
+
+        self.assertTrue(scenario.drone_can_confirm)
+        self.assertFalse(hasattr(scenario, "drone_scouts_confirm_survivors"))
+
     def test_ground_action_magnitude_is_normalized_before_terrain_speed(self):
         env = self._diagnostic_env()
         env.reset()

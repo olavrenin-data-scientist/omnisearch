@@ -80,7 +80,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "n_survivors": 5,
         "known_survivors_at_reset": False,
         "survivor_spawn_reference": "drone",
-        "drone_scouts_confirm_survivors": True,
+        "drone_can_confirm": True,
         "disable_fire": True,
         "comms_dropout": 0.0,
     })

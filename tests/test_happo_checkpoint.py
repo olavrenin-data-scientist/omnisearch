@@ -282,7 +282,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertFalse(scenario["known_survivors_at_reset"])
         self.assertEqual(scenario["survivor_spawn_reference"], "drone")
-        self.assertTrue(scenario["drone_scouts_confirm_survivors"])
+        self.assertTrue(scenario["drone_can_confirm"])
         self.assertEqual(scenario["known_survivor_spawn_distance_m"], 80.0)
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 40.0)
         self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 120.0)
