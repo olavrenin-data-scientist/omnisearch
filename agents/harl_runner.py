@@ -388,6 +388,37 @@ def _build_diagnostic_happo_runner_class():
     class DiagnosticHAPPORunner(OnPolicyHARunner):
         """OnPolicyHARunner plus per-update actor advantage diagnostics."""
 
+        def restore(self):
+            """Restore actors from model_dir; restore critic + value_normalizer
+            only if those files exist.
+
+            A behavioural-cloning warm-start dir (scripts/train_bc_happo.py) ships
+            actor_agent*.pt but no critic/normalizer — in that case we want to load
+            the cloned actors and let the critic learn from scratch, rather than
+            crashing on a missing critic_agent.pt.
+            """
+            import os
+
+            model_dir = str(self.algo_args["train"]["model_dir"])
+            for agent_id in range(self.num_agents):
+                actor_path = os.path.join(model_dir, f"actor_agent{agent_id}.pt")
+                self.actor[agent_id].actor.load_state_dict(torch.load(actor_path))
+
+            if self.algo_args["render"]["use_render"]:
+                return
+
+            critic_path = os.path.join(model_dir, "critic_agent.pt")
+            if os.path.isfile(critic_path):
+                self.critic.critic.load_state_dict(torch.load(critic_path))
+                vn_path = os.path.join(model_dir, "value_normalizer.pt")
+                if self.value_normalizer is not None and os.path.isfile(vn_path):
+                    self.value_normalizer.load_state_dict(torch.load(vn_path))
+            else:
+                print(
+                    f"[restore] No critic_agent.pt in {model_dir}; "
+                    "loaded BC actors only, critic will train from scratch."
+                )
+
         def train(self):
             actor_train_infos = []
             factor = np.ones(
