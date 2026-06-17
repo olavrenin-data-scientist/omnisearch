@@ -77,6 +77,9 @@ def _build_wildfire_logger_class():
 # ----------------------------------------------------------------------
 def register_wildfire_with_harl():
     global _REGISTERED
+    from agents.harl_terrain_cnn import install_harl_terrain_cnn_patch
+
+    install_harl_terrain_cnn_patch()
     if _REGISTERED:
         return
     _REGISTERED = True

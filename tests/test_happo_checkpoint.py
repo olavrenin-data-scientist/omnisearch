@@ -137,6 +137,7 @@ class HappoCheckpointTests(unittest.TestCase):
             "r_ground_approach": 0.05,
             "ground_approach_milestone_radii_m": (75.0, 50.0, 40.0, 30.0, 20.0),
             "r_ugv_movement_alignment": 0.20,
+            "r_ugv_planner_progress": 0.0,
             "r_ugv_stall_penalty": 0.0,
             "r_fire_penalty": -0.20,
             "r_ground_travel_cost": -0.01,
@@ -167,6 +168,49 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["model"]["lr"], 2.5e-4)
         self.assertEqual(algo_args["model"]["critic_lr"], 5e-4)
         self.assertTrue(algo_args["train"]["use_linear_lr_decay"])
+
+    def test_build_args_exposes_terrain_cnn_encoder(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="cnn",
+            ugv_known_survivor_diagnostic=True,
+            local_map_patch_size=7,
+            terrain_cnn_encoder=True,
+            terrain_cnn_embed_dim=12,
+        )
+
+        model = algo_args["model"]
+        self.assertTrue(model["use_terrain_cnn_encoder"])
+        self.assertEqual(model["terrain_cnn_patch_size"], 7)
+        self.assertEqual(model["terrain_cnn_embed_dim"], 12)
+        self.assertEqual(model["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 2 + 7)
+
+    def test_build_args_exposes_ugv_planner_hint(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="planner",
+            ugv_known_survivor_diagnostic=True,
+            local_map_patch_size=7,
+            ugv_planner_hint="local-astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=6,
+            ugv_planner_progress_reward=0.05,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_planner_hint"], "local_astar")
+        self.assertEqual(scenario["ugv_planner_patch_size"], 11)
+        self.assertEqual(scenario["ugv_planner_lookahead_cells"], 5)
+        self.assertEqual(scenario["r_ugv_planner_progress"], 0.05)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 7)
 
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
@@ -208,11 +252,62 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_ground_approach"], 0.05)
         self.assertEqual(scenario["ground_approach_milestone_radii_m"], (75.0, 50.0, 40.0, 30.0, 20.0))
         self.assertEqual(scenario["r_ugv_movement_alignment"], 0.20)
+        self.assertEqual(scenario["r_ugv_planner_progress"], 0.0)
         self.assertEqual(scenario["r_ugv_stall_penalty"], 0.0)
         self.assertEqual(scenario["ugv_stall_displacement_threshold_m"], 0.05)
         self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
         self.assertEqual(scenario["slope_speed_weight"], 0.5)
         self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))
+
+    def test_uav_survivor_diagnostic_build_args(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag",
+            terrain_cache_path="terrain.npz",
+            uav_survivor_diagnostic=True,
+            uav_diagnostic_target_distance_min_m=40.0,
+            uav_diagnostic_target_distance_max_m=120.0,
+            uav_coverage_reward=7.5,
+            action_transform="radial_tanh",
+        )
+
+        self.assertEqual(env_args["action_transform"], "radial_tanh")
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 3)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertFalse(scenario["known_survivors_at_reset"])
+        self.assertEqual(scenario["survivor_spawn_reference"], "drone")
+        self.assertTrue(scenario["drone_scouts_confirm_survivors"])
+        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 80.0)
+        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 40.0)
+        self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 120.0)
+        self.assertTrue(scenario["disable_fire"])
+        self.assertEqual(scenario["comms_dropout"], 0.0)
+        self.assertEqual(scenario["r_drone_scout"], 2.0)
+        self.assertEqual(scenario["r_drone_shaping"], 0.0)
+        self.assertEqual(scenario["r_ground_confirm"], 0.0)
+        self.assertEqual(scenario["r_ground_shaping"], 0.0)
+        self.assertEqual(scenario["r_coverage"], 7.5)
+        self.assertEqual(scenario["r_fire_penalty"], 0.0)
+        self.assertEqual(scenario["r_drone_climb_cost"], 0.0)
+
+    def test_diagnostic_modes_are_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="both_diag",
+                ugv_known_survivor_diagnostic=True,
+                uav_survivor_diagnostic=True,
+            )
 
     def test_ugv_known_survivor_diagnostic_uses_normal_placement_by_default(self):
         _, _, env_args = build_args(

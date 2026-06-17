@@ -75,6 +75,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.r_ground_shaping, 0.50)
         self.assertEqual(scenario.r_ground_approach, 0.05)
         self.assertEqual(scenario.r_ugv_movement_alignment, 0.20)
+        self.assertEqual(scenario.r_ugv_planner_progress, 0.0)
         self.assertEqual(scenario.r_ugv_stall_penalty, 0.0)
         self.assertEqual(scenario.r_fire_penalty, -0.20)
         self.assertEqual(scenario.r_ground_travel_cost, -0.01)
@@ -246,6 +247,63 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
         self.assertTrue(math.isinf(scenario.known_survivor_spawn_distance_max_m))
         self.assertGreaterEqual(distance_m, 30.0)
+
+    def test_ugv_planner_patch_size_must_be_positive_odd(self):
+        with self.assertRaises(ValueError):
+            self._diagnostic_env(ugv_planner_hint="local_astar", ugv_planner_patch_size=10)
+
+    def test_ugv_planner_lookahead_is_clamped_to_patch_radius(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=10,
+        )
+
+        self.assertEqual(env.scenario.ugv_planner_lookahead_cells, 5)
+
+    def test_local_astar_planner_hint_appends_features(self):
+        env = self._diagnostic_env(
+            local_map_patch_size=7,
+            ugv_planner_hint="local_astar",
+            ugv_planner_patch_size=11,
+        )
+        scenario = env.scenario
+
+        obs = scenario.observation(env.agents[0])
+
+        expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 7
+        self.assertEqual(obs.shape[-1], expected_width)
+
+    def test_local_astar_planner_hint_points_toward_clear_local_target(self):
+        env = self._diagnostic_env(
+            local_map_patch_size=7,
+            ugv_planner_hint="local_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=10,
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        device = ground.state.pos.device
+        dtype = ground.state.pos.dtype
+
+        scenario.traversable_grid.fill_(True)
+        scenario.mobility_cost_grid.fill_(1.0)
+        scenario.fire_grid.zero_()
+        ground.state.pos[:] = scenario._grid_cell_center_to_world((64, 64), device=device, dtype=dtype).view(1, 2)
+        survivor.state.pos[:] = scenario._grid_cell_center_to_world((67, 64), device=device, dtype=dtype).view(1, 2)
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+
+        obs = scenario.observation(ground)
+        hint_offset = 4 + 12 + 1 + 2 * 7 * 7 + 9
+        hint = obs[0, hint_offset : hint_offset + 5]
+
+        self.assertGreater(float(hint[0]), 0.8)
+        self.assertLess(abs(float(hint[1])), 0.2)
+        self.assertGreater(float(hint[2]), 0.0)
+        self.assertEqual(float(hint[3]), 1.0)
+        self.assertEqual(float(hint[4]), 0.0)
 
     def test_known_survivor_spawn_distance_range_samples_angles(self):
         labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
@@ -455,6 +513,62 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(scenario.metric_reward_ugv_stall_penalty[0]), -0.02, places=5)
 
+    def test_ugv_planner_progress_reward_uses_astar_waypoint_when_detouring(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        device = ground.state.pos.device
+        dtype = ground.state.pos.dtype
+        scenario.r_ground_shaping = 0.0
+        scenario.r_ground_approach = 0.0
+        scenario.ground_approach_milestone_rewards_tensor.zero_()
+        scenario.r_ugv_movement_alignment = 0.0
+        scenario.r_ugv_planner_progress = 0.05
+        scenario.ugv_planner_progress_scale_m = 1.0
+        scenario.detection_range_by_env.zero_()
+        scenario.traversable_grid.fill_(True)
+        scenario.mobility_cost_grid.fill_(1.0)
+        scenario.fire_grid.zero_()
+
+        start_cell = (64, 64)
+        target_cell = (69, 64)
+        scenario.traversable_grid[0, 64, 66] = False
+        ground.state.pos[:] = scenario._grid_cell_center_to_world(
+            start_cell, device=device, dtype=dtype,
+        ).view(1, 2)
+        survivor.state.pos[:] = scenario._grid_cell_center_to_world(
+            target_cell, device=device, dtype=dtype,
+        ).view(1, 2)
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        scenario.found_survivors.zero_()
+
+        route = scenario._local_astar_route_for_env(0, ground.state.pos[0], survivor.state.pos[0])
+        self.assertIsNotNone(route)
+        waypoint, direct_blocked, detour_needed = route
+        self.assertTrue(direct_blocked)
+        self.assertTrue(detour_needed)
+
+        scenario._compute_step_rewards()
+        waypoint_pos = scenario._grid_cell_center_to_world(waypoint, device=device, dtype=dtype)
+        direction = waypoint_pos - ground.state.pos[0]
+        direction = direction / direction.norm().clamp_min(1e-9)
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:] = ground.state.pos + direction.view(1, 2) * scale
+        scenario.step_ugv_actual_displacement_m[0, 0] = 1.0
+        scenario._compute_step_rewards()
+
+        self.assertGreater(float(scenario.metric_reward_ugv_planner_progress[0]), 0.0)
+        self.assertEqual(float(scenario.metric_ugv_planner_active[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_planner_direct_blocked[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_planner_detour_needed[0]), 1.0)
+
     def test_info_contains_training_debug_metrics(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario
@@ -474,6 +588,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "reward/ugv_progress",
             "reward/ugv_approach",
             "reward/ugv_movement_alignment",
+            "reward/ugv_planner_progress",
             "reward/ugv_stall_penalty",
             "reward/ground_confirm",
             "reward/coverage",
@@ -488,6 +603,11 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "diagnostic/ugv_target_index",
             "diagnostic/ugv_ground_progress_m",
             "diagnostic/ugv_ground_progress_scaled",
+            "diagnostic/ugv_planner_progress_m",
+            "diagnostic/ugv_planner_progress_scaled",
+            "diagnostic/ugv_planner_active",
+            "diagnostic/ugv_planner_direct_blocked",
+            "diagnostic/ugv_planner_detour_needed",
             "diagnostic/ugv_action_alignment",
             "diagnostic/ugv_movement_alignment",
         ):
