@@ -375,6 +375,42 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(obs.shape[-1], expected)
         self.assertEqual(ground_obs.shape[-1], expected)
 
+    def test_drone_terrain_features_zero_ground_mobility_channels(self):
+        env = self._env(n_survivors=1)
+        scenario = env.scenario
+        drone = env.agents[0]
+        ground = env.agents[1]
+        scenario.local_map_patch_size = 3
+        scenario.mobility_cost_grid.fill_(2.0)
+        scenario.traversable_grid.fill_(False)
+        scenario.required_clearance_grid[:] = scenario.drone_max_altitude_by_env.view(-1, 1, 1) * 0.5
+
+        drone_features = scenario._local_terrain_features(drone)
+        ground_features = scenario._local_terrain_features(ground)
+        patch_cells = scenario.local_map_patch_size * scenario.local_map_patch_size
+
+        torch.testing.assert_close(drone_features[:, :patch_cells], torch.zeros_like(drone_features[:, :patch_cells]))
+        torch.testing.assert_close(
+            drone_features[:, patch_cells : 2 * patch_cells],
+            torch.zeros_like(drone_features[:, patch_cells : 2 * patch_cells]),
+        )
+        torch.testing.assert_close(
+            drone_features[:, 2 * patch_cells :],
+            torch.full_like(drone_features[:, 2 * patch_cells :], 0.5),
+        )
+        torch.testing.assert_close(
+            ground_features[:, :patch_cells],
+            torch.ones_like(ground_features[:, :patch_cells]),
+        )
+        torch.testing.assert_close(
+            ground_features[:, patch_cells : 2 * patch_cells],
+            torch.ones_like(ground_features[:, patch_cells : 2 * patch_cells]),
+        )
+        torch.testing.assert_close(
+            ground_features[:, 2 * patch_cells :],
+            torch.zeros_like(ground_features[:, 2 * patch_cells :]),
+        )
+
     def test_local_map_patch_size_must_be_positive_odd(self):
         with self.assertRaises(ValueError):
             self._diagnostic_env(local_map_patch_size=10)
