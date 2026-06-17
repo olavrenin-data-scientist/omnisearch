@@ -82,6 +82,9 @@ def build_args(
     drone_flight_levels_m: tuple[float, ...] | None = None,
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int = 0,
+    confirm_requires_los: bool = False,
+    drone_can_confirm: bool = False,
+    r_drone_confirm: float = 0.0,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     ugv_diagnostic_target_distance_min_m: float | None = None,
@@ -257,6 +260,11 @@ def build_args(
         scenario_kwargs["ground_confirmation_range_m"] = float(ground_confirmation_range_m)
     if coverage_obs_grid and coverage_obs_grid > 0:
         scenario_kwargs["coverage_obs_grid"] = int(coverage_obs_grid)
+    if confirm_requires_los:
+        scenario_kwargs["confirm_requires_los"] = True
+    if drone_can_confirm:
+        scenario_kwargs["drone_can_confirm"] = True
+        scenario_kwargs["r_drone_confirm"] = float(r_drone_confirm)
     if reward_search:
         # Kept explicit for the legacy flag; these now match the default reward
         # profile used by normal smoke training.
@@ -504,6 +512,13 @@ def main():
     p.add_argument("--coverage-obs-grid", type=int, default=0,
                    help="Add a KxK team-coverage map + global fraction to the observation so the "
                         "policy can learn systematic sweeping (e.g. 6). 0 = off.")
+    p.add_argument("--confirm-requires-los", action="store_true",
+                   help="Require unobstructed terrain line-of-sight (not just range) for confirmation.")
+    p.add_argument("--drone-can-confirm", action="store_true",
+                   help="Let drones (EO/IR) confirm survivors from altitude with top-down line-of-sight "
+                        "(realistic aerial SAR; the honest route to >=0.9 recall).")
+    p.add_argument("--r-drone-confirm", type=float, default=0.0,
+                   help="Per-drone reward for a confirmation it makes (training signal for --drone-can-confirm).")
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
@@ -717,6 +732,9 @@ def main():
         drone_flight_levels_m = drone_flight_levels_m,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
+        confirm_requires_los = args.confirm_requires_los,
+        drone_can_confirm = args.drone_can_confirm,
+        r_drone_confirm = args.r_drone_confirm,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,

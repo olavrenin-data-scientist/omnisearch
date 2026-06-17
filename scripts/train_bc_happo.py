@@ -36,15 +36,17 @@ from agents.baselines import LawnmowerPolicy
 from agents.harl_runner import default_algo_args
 
 
-def collect_demos(scenario_kwargs, demos, steps, seed0):
+def collect_demos(scenario_kwargs, demos, steps, seed0, num_envs=2):
     """Roll out lawnmower; return per-agent list of (T, B, dim) rollout arrays.
 
     Sequences are kept intact (not concatenated) so recurrent BC can do
-    backprop-through-time over them.
+    backprop-through-time over them. ``num_envs`` batches many parallel rollouts
+    per demo (B dimension), which is far faster than collecting more sequential
+    demos for the same amount of demonstration data.
     """
     obs_rollouts, act_rollouts = None, None
     for d in range(demos):
-        e = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=2, device="cpu",
+        e = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=int(num_envs), device="cpu",
                           continuous_actions=True, seed=seed0 + d, max_steps=steps, **scenario_kwargs)
         e.reset(); sc = e.scenario
         n_agents = len(e.agents)
@@ -63,6 +65,7 @@ def collect_demos(scenario_kwargs, demos, steps, seed0):
         for i in range(n_agents):
             obs_rollouts[i].append(np.stack(o_steps[i], 0).astype(np.float32))               # (T, B, obs)
             act_rollouts[i].append(np.clip(np.stack(a_steps[i], 0), -1, 1).astype(np.float32))  # (T, B, act)
+        print(f"  collected demo {d + 1}/{demos}", flush=True)
     return obs_rollouts, act_rollouts
 
 
@@ -84,6 +87,8 @@ def _make_sequences(rollouts, chunk):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--demos", type=int, default=60, help="Number of lawnmower rollouts to collect.")
+    p.add_argument("--collect-envs", type=int, default=2,
+                   help="Parallel envs per demo (B dimension). Higher = much faster demo collection.")
     p.add_argument("--steps", type=int, default=500)
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch", type=int, default=512)
@@ -105,6 +110,12 @@ def main():
     p.add_argument("--drone-flight-levels-m", default="50,80,100")
     p.add_argument("--ground-confirmation-range-m", type=float, default=30.0)
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument("--coverage-obs-grid", type=int, default=0,
+                   help="Must match the RL fine-tune (e.g. 6) so BC actors have the same obs dim.")
+    p.add_argument("--confirm-requires-los", action="store_true",
+                   help="Collect demos under terrain line-of-sight confirmation (match RL config).")
+    p.add_argument("--drone-can-confirm", action="store_true",
+                   help="Collect demos with drones confirming from altitude (match RL config).")
     p.add_argument("--recurrent", action="store_true",
                    help="Clone into a recurrent (GRU) policy via BPTT over sequences — "
                         "captures the multi-step navigation (waypoint following) a feedforward clone misses.")
@@ -125,8 +136,16 @@ def main():
         drone_flight_levels_m=drone_flight_levels_m,
         ground_confirmation_range_m=args.ground_confirmation_range_m,
     )
-    print(f"Collecting {args.demos} lawnmower demos x {args.steps} steps ({'recurrent' if args.recurrent else 'feedforward'} BC) ...")
-    obs_rollouts, act_rollouts = collect_demos(scenario_kwargs, args.demos, args.steps, args.seed)
+    if args.coverage_obs_grid and args.coverage_obs_grid > 0:
+        scenario_kwargs["coverage_obs_grid"] = int(args.coverage_obs_grid)
+    if args.confirm_requires_los:
+        scenario_kwargs["confirm_requires_los"] = True
+    if args.drone_can_confirm:
+        scenario_kwargs["drone_can_confirm"] = True
+    print(f"Collecting {args.demos} lawnmower demos x {args.steps} steps x {args.collect_envs} envs "
+          f"({'recurrent' if args.recurrent else 'feedforward'} BC) ...")
+    obs_rollouts, act_rollouts = collect_demos(
+        scenario_kwargs, args.demos, args.steps, args.seed, num_envs=args.collect_envs)
 
     # Build HAPPO actors with the same architecture the fine-tune will use.
     from harl.algorithms.actors.happo import HAPPO

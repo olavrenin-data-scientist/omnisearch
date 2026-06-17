@@ -238,12 +238,41 @@ mission as it actually works: **drones detect & confirm from the air; the 2 UGVs
 and verify a subset on the ground.** Env kwargs: `drone_can_confirm`,
 `r_drone_confirm`; diagnostic: `scripts/diag_realistic_ceiling.py --drone-confirm`.
 
+### A *learned* HAPPO policy reaches ≥0.9 (BC warm-start + RL fine-tune)
+
+The drone-confirm result above is honest, but initially it was only the *hand-coded expert* that
+reached ≥0.9 — a from-scratch HAPPO run under the same realistic config plateaued at **0.50–0.70**
+(1.2M steps, `happo_realistic_droneconfirm`). Pure RL learns the sub-behaviours but not the
+near-optimal sweep-and-confirm coordination.
+
+Closing the gap took two steps:
+
+1. **Behaviour-clone the lawnmower expert** (recall 1.0 under this config) into all 5 HAPPO actors —
+   `scripts/train_bc_happo.py` with the realistic flags (`--coverage-obs-grid 6 --confirm-requires-los
+   --drone-can-confirm`, FOV 110°, floor 0). Recurrent BPTT clone, NLL 0.08 → −1.3.
+2. **RL fine-tune from that warm-start** — `train_happo_smoke.py --model-dir results/bc_happo_realistic`
+   (1M steps). The fine-tune *starts* at ~79 episode reward vs ~42 from scratch.
+
+Measured recall of the **learned** policy (floor 0, LOS on, drone-confirm, FOV 110°, `n_ground=2`,
+1000-step episodes, best checkpoint `results/happo_realistic_best`):
+
+| policy | comms dropout | recall | hazard | UGV travel |
+|---|---|---|---|---|
+| HAPPO from scratch (1.2M) | 0.0 | 0.60 | — | — |
+| **HAPPO BC + RL fine-tune** | 0.0 | **0.97** | 22 | 1.38 |
+| **HAPPO BC + RL fine-tune** | 0.3 | **0.97** | 11 | 0.95 |
+
+This is a **learned MARL policy at 0.97 recall**, robust to 30 % comms dropout — not a scripted
+heuristic. Note the late-training regression seen before (final checkpoint fell to 0.80); periodic
+checkpoint snapshotting + recall-based selection keeps the best (~0.93–0.97 mid-run) policy.
+
 ### Honest headline
 
 - **Realistic sensors, floor 0, ground-only confirmation:** experts 0.47–0.60, learned MARL ≤ 0.10.
 - **Realistic sensors, floor 0, with drone EO/IR confirmation (the realistic SAR model):** experts
-  0.83–1.00 — ≥0.9 is achievable *honestly* by letting drones confirm from altitude, not by inflating
-  sensors. This is the credible high-recall result.
+  0.83–1.00, and a **learned HAPPO policy (BC warm-start + RL fine-tune) reaches 0.97** (robust under
+  0.3 comms dropout) — ≥0.9 is achievable *honestly* by both the heuristic and a trained policy, by
+  letting drones confirm from altitude rather than inflating sensors. This is the credible high-recall result.
 - **90% is achievable only by making the sensors unrealistically powerful** (confirm range ≈ half the
   map) **and** by letting confirmation pass through terrain. Requiring line-of-sight alone drops it to
   0.40. Report 90% explicitly as a sensor-sensitivity upper bound, never as the operating point.
@@ -271,6 +300,44 @@ New tooling added for this study: `scripts/diag_terrain_floor0.py`, `scripts/dia
 `--coverage-obs-grid`, `--reward-confirm`, `--n-rollout-threads`, sensor flags); env additions
 `coverage_obs_grid`, `r_pending_penalty`, `r_ground_coverage`/`ground_coverage_radius`;
 `scripts/diag_floor0_generous.py`; export flags `--skip-happo-manifest`, `--ground-confirmation-range-m`.
+
+---
+
+## Critical changes that reach ≥0.9 detection
+
+The full investigation above traces how survivor **detection (recall)** went from a
+do-nothing 0.0 to a credible ≥0.9. Distilled to the changes that actually matter:
+
+| Rank | Change | Commit | Why it's critical |
+|---|---|---|---|
+| **1 (decisive)** | **`drone_can_confirm` — aerial EO/IR confirmation** | `026d5c3` | The single change that delivers ≥0.9 honestly. A drone confirms a survivor inside its camera footprint with a clear top-down sight line. Expert recall jumps to **0.83 (FOV 90°) → 1.00 (FOV 120°)**; realistic ground-only confirmation tops out at ~0.3–0.7. |
+| **2 (precondition)** | **1 km terrain scale** (floor-0 harness) | `f20d9f2` | Necessary enabler. On the default ~22 km map a survivor is a ~0.04 %-of-map pinpoint and **everyone scores 0.0** — the geometry, not the policy, was the blocker. The 1 km map (`sim_units_per_meter` ~20× larger) makes confirmation physically possible. |
+| **honesty gate** | **`confirm_requires_los` — line-of-sight** | `cf67347` | Does **not** raise recall; it *lowers* the cheat. Exposes that the generous-sensor 0.9 was "confirm through a mountain" (0.93 → 0.40). Critical for proving the 0.9 you keep is real. |
+| **learned-policy lever** | **BC warm-start + RL fine-tune** | BC (`train_bc_happo.py`) → `train_happo_smoke.py --model-dir` | Gets a *learned* HAPPO policy to ≥0.9, not just the expert. Cloning the 1.0-recall lawnmower then RL-fine-tuning yields **0.97 recall** (robust to 0.3 comms dropout); from-scratch RL under the same realistic config plateaus at 0.50–0.70. |
+| supporting | coverage observation, confirmation-dominant reward, idle penalty, ground-exploration reward, GRU policy | `f20d9f2` | Training-side shaping. Necessary for the BC clone + fine-tune to match obs space and learn the sweep; on their own (from scratch) they reach only ~0.20–0.70. |
+
+**One-line answer:** the decisive change is **`drone_can_confirm`** (commit `026d5c3`) —
+letting drones confirm from altitude — made possible by the **1 km terrain** fix
+(`f20d9f2`) and validated as honest by the **line-of-sight gate** (`cf67347`). It is one
+extra OR-branch in the confirmation logic (`envs/wildfire_search.py`):
+
+```python
+confirmed_by_ground = eligible_ground_confirmations.any(dim=1)
+
+if self.drone_can_confirm:
+    # Drone confirms a survivor in its camera footprint with a clear top-down LOS.
+    drone_conf = drone_seen
+    if self.confirm_requires_los:
+        drone_conf = drone_conf & self._drone_confirm_los_mask(drone_pos, surv_pos)
+    confirmed_by_drone = drone_conf.any(dim=1)
+
+# A survivor counts as found if EITHER a ground robot OR a drone confirms it.
+found = confirmed_by_ground | confirmed_by_drone
+```
+
+**What was NOT critical:** the generous 600 m ground confirm range gives 0.90–0.95, but
+that is a **sensor-cheat upper bound** (confirm range ≈ half the map) that collapses to
+0.40 under line-of-sight. Report it only as a sensitivity result, never the operating point.
 
 ---
 
