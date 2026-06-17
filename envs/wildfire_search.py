@@ -2966,12 +2966,18 @@ class WildfireSearchScenario(BaseScenario):
     def _local_terrain_features(self, agent: Agent) -> Tensor:
         """Expose mobility cost, blocked masks, and AGL air-clearance requirements."""
         pos = agent.state.pos
-        costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
-        blocked = (~self._local_grid_patch(self.traversable_grid, pos, self.local_map_patch_size)).float()
         clearance = self._local_grid_patch(self.required_clearance_grid, pos, 3)
-        cost_max = self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1).clamp_min(1e-12)
-        normalized_costs = (costs / cost_max).clamp(0.0, 1.0)
         normalized_clearance = clearance / self.drone_max_altitude_by_env.unsqueeze(-1).clamp_min(1e-6)
+        patch_cells = self.local_map_patch_size * self.local_map_patch_size
+        if agent.is_drone:
+            normalized_costs = torch.zeros(pos.shape[0], patch_cells, device=pos.device, dtype=pos.dtype)
+            blocked = torch.zeros_like(normalized_costs)
+        else:
+            costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
+            blocked = (~self._local_grid_patch(self.traversable_grid, pos, self.local_map_patch_size)).float()
+            cost_max = self.mobility_cost_grid.amax(dim=(1, 2), keepdim=False).unsqueeze(-1).clamp_min(1e-12)
+            normalized_costs = (costs / cost_max).clamp(0.0, 1.0)
+            normalized_clearance = torch.zeros_like(normalized_clearance)
         return torch.cat([normalized_costs, blocked, normalized_clearance], dim=-1)
 
     def _ugv_planner_hint_observations(self, agent: Agent) -> Tensor:
