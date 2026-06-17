@@ -134,6 +134,9 @@ class HappoPolicy:
         scenario_kwargs: Optional[dict] = None,
         action_transform: str = "clip",
     ):
+        from agents.harl_terrain_cnn import install_harl_terrain_cnn_patch
+
+        install_harl_terrain_cnn_patch()
         from harl.algorithms.actors.happo import HAPPO
 
         self.checkpoint_dir = Path(checkpoint_dir)

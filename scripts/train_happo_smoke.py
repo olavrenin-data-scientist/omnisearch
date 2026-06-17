@@ -37,6 +37,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agents.harl_terrain_cnn import (
+    TERRAIN_CNN_CHANNELS,
+    TERRAIN_CNN_OBS_OFFSET,
+    wildfire_single_observation_dim,
+)
+
 DEFAULT_UGV_APPROACH_REWARD = 0.05
 DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 
@@ -77,9 +83,14 @@ def build_args(
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int = 0,
     ugv_known_survivor_diagnostic: bool = False,
+    uav_survivor_diagnostic: bool = False,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
+    uav_diagnostic_target_distance_min_m: float | None = None,
+    uav_diagnostic_target_distance_max_m: float | None = None,
+    uav_coverage_reward: float = 5.0,
     ugv_movement_alignment_reward: float = 0.20,
+    ugv_planner_progress_reward: float = 0.0,
     ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
     ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
     ugv_stall_penalty: float = 0.0,
@@ -88,7 +99,34 @@ def build_args(
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
     action_transform: str = "clip",
+    terrain_cnn_encoder: bool = False,
+    terrain_cnn_embed_dim: int = 16,
+    ugv_planner_hint: str = "none",
+    ugv_planner_patch_size: int = 11,
+    ugv_planner_lookahead_cells: int = 10,
 ) -> tuple[dict, dict, dict]:
+    ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
+    if ugv_planner_hint not in {"none", "local_astar"}:
+        raise ValueError("ugv_planner_hint must be one of: none, local_astar")
+    ugv_planner_patch_size = int(ugv_planner_patch_size)
+    if ugv_planner_patch_size < 1 or ugv_planner_patch_size % 2 != 1:
+        raise ValueError("ugv_planner_patch_size must be a positive odd integer")
+    ugv_planner_lookahead_cells = int(ugv_planner_lookahead_cells)
+    if ugv_planner_lookahead_cells < 1:
+        raise ValueError("ugv_planner_lookahead_cells must be positive")
+    ugv_planner_lookahead_cells = min(
+        ugv_planner_lookahead_cells,
+        max(ugv_planner_patch_size // 2, 1),
+    )
+    ugv_planner_progress_reward = float(ugv_planner_progress_reward)
+    if ugv_planner_progress_reward < 0.0:
+        raise ValueError("ugv_planner_progress_reward must be nonnegative")
+    if ugv_planner_progress_reward > 0.0 and ugv_planner_hint != "local_astar":
+        raise ValueError("ugv_planner_progress_reward requires ugv_planner_hint='local_astar'")
+    uav_coverage_reward = float(uav_coverage_reward)
+    if uav_coverage_reward < 0.0:
+        raise ValueError("uav_coverage_reward must be nonnegative")
+
     args = {
         "algo":        "happo",
         "env":         "wildfire",
@@ -138,6 +176,12 @@ def build_args(
             "std_x_coef":                 1,
             "std_y_coef":                 1.0,  # was 0.5; higher keeps action std from
                                                 # collapsing into saturated corner-camping
+            "use_terrain_cnn_encoder":     terrain_cnn_encoder,
+            "terrain_cnn_patch_size":      local_map_patch_size,
+            "terrain_cnn_channels":        TERRAIN_CNN_CHANNELS,
+            "terrain_cnn_obs_offset":      TERRAIN_CNN_OBS_OFFSET,
+            "terrain_cnn_embed_dim":       terrain_cnn_embed_dim,
+            "terrain_cnn_hidden_channels": 8,
         },
         "algo": {
             "ppo_epoch":               2,
@@ -173,6 +217,9 @@ def build_args(
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
+        "ugv_planner_hint": ugv_planner_hint,
+        "ugv_planner_patch_size": ugv_planner_patch_size,
+        "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
@@ -183,6 +230,7 @@ def build_args(
         "r_ground_approach": ugv_approach_reward,
         "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
         "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+        "r_ugv_planner_progress": ugv_planner_progress_reward,
         "r_ugv_stall_penalty": ugv_stall_penalty,
         "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
         "r_fire_penalty": -0.20,
@@ -219,6 +267,7 @@ def build_args(
             "r_drone_shaping": 0.30,
             "r_ground_shaping": 0.50,
             "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_ugv_planner_progress": ugv_planner_progress_reward,
             "r_fire_penalty": -0.20,
             "r_ground_travel_cost": -0.01,
             "r_drone_climb_cost": -0.005,
@@ -249,6 +298,10 @@ def build_args(
             "r_ground_coverage":      3.0,    # ground robots sweep instead of waiting
             "ground_coverage_radius": 0.08,
         })
+
+    if ugv_known_survivor_diagnostic and uav_survivor_diagnostic:
+        raise ValueError("Choose only one diagnostic mode: UGV or UAV")
+
     if ugv_known_survivor_diagnostic:
         distance_kwargs = {}
         if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
@@ -289,6 +342,7 @@ def build_args(
             "r_ground_approach": ugv_approach_reward,
             "ground_approach_milestone_radii_m": tuple(float(v) for v in ugv_approach_milestone_radii_m),
             "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_ugv_planner_progress": ugv_planner_progress_reward,
             "r_ugv_stall_penalty": ugv_stall_penalty,
             "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
             "r_fire_penalty": 0.0,
@@ -298,6 +352,63 @@ def build_args(
             "r_coverage": 0.0,
         })
         scenario_kwargs.update(distance_kwargs)
+    if uav_survivor_diagnostic:
+        distance_kwargs = {}
+        if uav_diagnostic_target_distance_min_m is None and uav_diagnostic_target_distance_max_m is None:
+            pass
+        else:
+            target_distance_min_m = max(
+                float(0.0 if uav_diagnostic_target_distance_min_m is None else uav_diagnostic_target_distance_min_m),
+                0.0,
+            )
+            distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
+            if uav_diagnostic_target_distance_max_m is not None:
+                target_distance_max_m = max(
+                    float(uav_diagnostic_target_distance_max_m),
+                    0.0,
+                )
+                if target_distance_max_m < target_distance_min_m:
+                    raise ValueError(
+                        "uav_diagnostic_target_distance_max_m must be >= "
+                        "uav_diagnostic_target_distance_min_m"
+                    )
+                target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
+                distance_kwargs.update({
+                    "known_survivor_spawn_distance_m": target_distance_m,
+                    "known_survivor_spawn_distance_max_m": target_distance_max_m,
+                })
+        scenario_kwargs.update({
+            "n_drones": 3,
+            "n_ground": 0,
+            "n_survivors": 5,
+            "known_survivors_at_reset": False,
+            "survivor_spawn_reference": "drone",
+            "drone_scouts_confirm_survivors": True,
+            "disable_fire": True,
+            "comms_dropout": 0.0,
+            "r_found_survivor": 10.0,
+            "r_drone_scout": 2.0,
+            "r_ground_confirm": 0.0,
+            "r_drone_shaping": 0.0,
+            "r_ground_shaping": 0.0,
+            "r_ground_approach": 0.0,
+            "r_ugv_movement_alignment": 0.0,
+            "r_ugv_planner_progress": 0.0,
+            "r_ugv_stall_penalty": 0.0,
+            "r_fire_penalty": 0.0,
+            "r_ground_travel_cost": 0.0,
+            "r_drone_climb_cost": 0.0,
+            "r_time_penalty": -0.0005,
+            "r_coverage": uav_coverage_reward,
+        })
+        scenario_kwargs.update(distance_kwargs)
+    n_agents = int(scenario_kwargs["n_drones"]) + int(scenario_kwargs["n_ground"])
+    algo_args["model"]["terrain_cnn_single_obs_dim"] = wildfire_single_observation_dim(
+        local_map_patch_size=int(local_map_patch_size),
+        n_agents=n_agents,
+        n_survivors=int(scenario_kwargs["n_survivors"]),
+        ugv_planner_hint=ugv_planner_hint,
+    )
     env_args = {
         "max_cycles":      episode_length,
         "scenario_kwargs": scenario_kwargs,
@@ -330,6 +441,10 @@ def main():
                    help="Critic learning rate.")
     p.add_argument("--linear-lr-decay", action="store_true",
                    help="Linearly decay actor/critic learning rates over training.")
+    p.add_argument("--terrain-cnn-encoder", action="store_true",
+                   help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
+    p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
+                   help="Embedding size per local terrain patch when --terrain-cnn-encoder is enabled.")
     p.add_argument("--exp-name",       default="happo_smoke")
     p.add_argument("--n-rollout-threads", type=int, default=1,
                    help="Parallel rollout envs. More threads => more diverse data per "
@@ -361,6 +476,12 @@ def main():
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
+    p.add_argument("--ugv-planner-hint", choices=("none", "local_astar", "local-astar"), default="none",
+                   help="Optional UGV observation hint. local_astar exposes a local A* waypoint vector.")
+    p.add_argument("--ugv-planner-patch-size", type=int, default=11,
+                   help="Odd local grid size used by --ugv-planner-hint local_astar.")
+    p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
+                   help="Maximum number of A* route cells to skip ahead when forming the waypoint hint.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -388,14 +509,26 @@ def main():
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
+    p.add_argument("--uav-survivor-diagnostic", action="store_true",
+                   help="Train a UAV-only diagnostic task: 3 UAVs, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
                    help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
                         "Omit for no upper bound; use min=max for an exact target distance.")
+    p.add_argument("--uav-diagnostic-target-distance-min-m", type=float, default=None,
+                   help="Minimum survivor start distance sampled from the UAV at reset for the UAV diagnostic task.")
+    p.add_argument("--uav-diagnostic-target-distance-max-m", type=float, default=None,
+                   help="Maximum survivor start distance sampled from the UAV at reset for the UAV diagnostic task. "
+                        "Omit for no upper bound; use min=max for an exact target distance.")
+    p.add_argument("--uav-coverage-reward", type=float, default=5.0,
+                   help="Total reward scale for team-new UAV camera footprint coverage in the UAV diagnostic task.")
     p.add_argument("--ugv-movement-alignment-reward", type=float, default=0.20,
                    help="Reward scale for UGV actual-movement alignment toward a known survivor in the "
                         "diagnostic task.")
+    p.add_argument("--ugv-planner-progress-reward", type=float, default=0.0,
+                   help="Reward scale for actual UGV progress toward the local A* waypoint when "
+                        "the planner detects a detour. Requires --ugv-planner-hint local_astar.")
     p.add_argument("--ugv-approach-reward", type=float, default=DEFAULT_UGV_APPROACH_REWARD,
                    help="Inner UGV approach milestone reward. "
                         "Default fractions make this 0.05 produce 75/50/40/30/20m "
@@ -422,11 +555,20 @@ def main():
                         "direction while smoothly bounding vector magnitude.")
     args = p.parse_args()
     args.action_transform = args.action_transform.replace("-", "_")
+    args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
 
     if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
         p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")
     if args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1:
         p.error("--local-map-patch-size must be a positive odd integer")
+    if args.ugv_planner_patch_size < 1 or args.ugv_planner_patch_size % 2 != 1:
+        p.error("--ugv-planner-patch-size must be a positive odd integer")
+    if args.ugv_planner_lookahead_cells < 1:
+        p.error("--ugv-planner-lookahead-cells must be positive")
+    args.ugv_planner_lookahead_cells = min(
+        args.ugv_planner_lookahead_cells,
+        max(args.ugv_planner_patch_size // 2, 1),
+    )
     if not 0.0 <= args.comms_dropout <= 1.0:
         p.error("--comms-dropout must be in [0, 1]")
     if args.entropy_coef < 0.0:
@@ -435,8 +577,16 @@ def main():
         p.error("--lr must be positive")
     if args.critic_lr <= 0.0:
         p.error("--critic-lr must be positive")
+    if args.terrain_cnn_embed_dim <= 0:
+        p.error("--terrain-cnn-embed-dim must be positive")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
+    if args.uav_coverage_reward < 0.0:
+        p.error("--uav-coverage-reward must be nonnegative")
+    if args.ugv_planner_progress_reward < 0.0:
+        p.error("--ugv-planner-progress-reward must be nonnegative")
+    if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint != "local_astar":
+        p.error("--ugv-planner-progress-reward requires --ugv-planner-hint local_astar")
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -451,6 +601,8 @@ def main():
         p.error("--ugv-stall-displacement-threshold-m must be nonnegative")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
+    if args.ugv_known_survivor_diagnostic and args.uav_survivor_diagnostic:
+        p.error("Choose only one diagnostic mode: --ugv-known-survivor-diagnostic or --uav-survivor-diagnostic")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -526,6 +678,12 @@ def main():
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
+    print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
+    print(f" local_map_patch_size: {args.local_map_patch_size}")
+    print(f" ugv_planner_hint: {args.ugv_planner_hint}")
+    print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
+    print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
+    print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" action_transform: {args.action_transform}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
@@ -560,9 +718,14 @@ def main():
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
+        uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
+        uav_diagnostic_target_distance_min_m = args.uav_diagnostic_target_distance_min_m,
+        uav_diagnostic_target_distance_max_m = args.uav_diagnostic_target_distance_max_m,
+        uav_coverage_reward = args.uav_coverage_reward,
         ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
+        ugv_planner_progress_reward = args.ugv_planner_progress_reward,
         ugv_approach_reward = args.ugv_approach_reward,
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,
@@ -570,6 +733,11 @@ def main():
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,
+        terrain_cnn_encoder = args.terrain_cnn_encoder,
+        terrain_cnn_embed_dim = args.terrain_cnn_embed_dim,
+        ugv_planner_hint = args.ugv_planner_hint,
+        ugv_planner_patch_size = args.ugv_planner_patch_size,
+        ugv_planner_lookahead_cells = args.ugv_planner_lookahead_cells,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)

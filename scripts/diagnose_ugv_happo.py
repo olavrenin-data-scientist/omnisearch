@@ -85,6 +85,18 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ground_confirm_min_m"] = max(float(args.ground_min_confirm_radius_m), 0.0)
     if args.local_map_patch_size is not None:
         scenario_kwargs["local_map_patch_size"] = int(args.local_map_patch_size)
+    if args.ugv_planner_hint is not None:
+        scenario_kwargs["ugv_planner_hint"] = args.ugv_planner_hint.replace("-", "_")
+    if args.ugv_planner_patch_size is not None:
+        scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
+    if args.ugv_planner_lookahead_cells is not None:
+        scenario_kwargs["ugv_planner_lookahead_cells"] = int(args.ugv_planner_lookahead_cells)
+    if "ugv_planner_lookahead_cells" in scenario_kwargs:
+        patch_size = int(scenario_kwargs.get("ugv_planner_patch_size", 11))
+        scenario_kwargs["ugv_planner_lookahead_cells"] = min(
+            max(int(scenario_kwargs["ugv_planner_lookahead_cells"]), 1),
+            max(patch_size // 2, 1),
+        )
     return scenario_kwargs
 
 
@@ -112,6 +124,79 @@ def _action_alignment(action: torch.Tensor, ground_pos: torch.Tensor, survivor_p
     return _cosine_alignment(action, survivor_pos - ground_pos)
 
 
+def _planner_hint_from_observation(
+    scenario: WildfireSearchScenario,
+    obs: torch.Tensor,
+) -> tuple[torch.Tensor, bool] | None:
+    """Extract [unit_dx, unit_dy, ..., valid, direct_blocked] from one UGV obs."""
+    if getattr(scenario, "ugv_planner_hint", "none") != "local_astar":
+        return None
+    patch_size = int(getattr(scenario, "local_map_patch_size", 3))
+    offset = 4 + 12 + 1 + 2 * patch_size * patch_size + 9
+    if obs.shape[-1] < offset + 5:
+        return None
+    hint = obs[:, offset : offset + 5]
+    valid = bool((hint[0, 3] > 0.5).detach().cpu().item())
+    if not valid:
+        return None
+    planner_vec = hint[:, :2]
+    direct_blocked = bool((hint[0, 4] > 0.5).detach().cpu().item())
+    return planner_vec, direct_blocked
+
+
+def _empty_planner_bucket() -> dict:
+    return {
+        "steps": 0,
+        "speed_sum": 0.0,
+        "action_target_sum": 0.0,
+        "action_target_count": 0,
+        "movement_target_sum": 0.0,
+        "movement_target_count": 0,
+        "action_planner_sum": 0.0,
+        "action_planner_count": 0,
+        "movement_planner_sum": 0.0,
+        "movement_planner_count": 0,
+    }
+
+
+def _add_optional_metric(bucket: dict, name: str, value: float | None) -> None:
+    if value is None:
+        return
+    bucket[f"{name}_sum"] += float(value)
+    bucket[f"{name}_count"] += 1
+
+
+def _record_planner_bucket(
+    bucket: dict,
+    *,
+    action_target: float | None,
+    movement_target: float | None,
+    action_planner: float | None,
+    movement_planner: float | None,
+    speed_mps: float,
+) -> None:
+    bucket["steps"] += 1
+    bucket["speed_sum"] += float(speed_mps)
+    _add_optional_metric(bucket, "action_target", action_target)
+    _add_optional_metric(bucket, "movement_target", movement_target)
+    _add_optional_metric(bucket, "action_planner", action_planner)
+    _add_optional_metric(bucket, "movement_planner", movement_planner)
+
+
+def _merge_planner_bucket(dst: dict, src: dict) -> None:
+    for key, value in src.items():
+        dst[key] += value
+
+
+def _planner_metric(bucket: dict, name: str) -> float:
+    count = bucket[f"{name}_count"]
+    return float(bucket[f"{name}_sum"] / count) if count else 0.0
+
+
+def _planner_speed(bucket: dict) -> float:
+    return float(bucket["speed_sum"] / bucket["steps"]) if bucket["steps"] else 0.0
+
+
 def _ensure_policy_rnn(policy: HappoPolicy, env) -> None:
     B = env.scenario.world.batch_dim
     if getattr(policy, "_rnn_states", None) is None or policy._rnn_states[0].shape[0] != B:
@@ -121,11 +206,12 @@ def _ensure_policy_rnn(policy: HappoPolicy, env) -> None:
         ]
 
 
-def _actor_distribution(policy: HappoPolicy, env, agent_idx: int = 0):
+def _actor_distribution(policy: HappoPolicy, env, agent_idx: int = 0, *, return_obs: bool = False):
     """Return the current raw Gaussian action distribution for one actor."""
     _ensure_policy_rnn(policy, env)
     agent = env.agents[agent_idx]
-    obs = env.scenario.observation(agent).cpu().numpy()
+    obs_tensor = env.scenario.observation(agent)
+    obs = obs_tensor.cpu().numpy()
     action_dim = env.get_agent_action_size(agent)
     zeros = np.zeros((env.scenario.world.batch_dim, action_dim), dtype=np.float32)
     masks = np.ones((env.scenario.world.batch_dim, 1), dtype=np.float32)
@@ -138,6 +224,8 @@ def _actor_distribution(policy: HappoPolicy, env, agent_idx: int = 0):
             available_actions=None,
             active_masks=None,
         )
+    if return_obs:
+        return dist, obs_tensor
     return dist
 
 
@@ -229,11 +317,19 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
     corrected_displacements_m: list[float] = []
     actual_displacements_m: list[float] = []
     motion_corrections_m: list[float] = []
+    planner_buckets = {
+        "all": _empty_planner_bucket(),
+        "clear": _empty_planner_bucket(),
+        "blocked": _empty_planner_bucket(),
+    }
+    planner_total_steps = 0
+    step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
 
     for _ in range(scenario_kwargs["max_steps"]):
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
-        dist = _actor_distribution(policy, env, agent_idx=0)
+        dist, obs_before = _actor_distribution(policy, env, agent_idx=0, return_obs=True)
+        planner_hint = _planner_hint_from_observation(scenario, obs_before)
         raw_mean = dist.mean.detach().cpu().numpy()
         raw_std = dist.stddev.detach().cpu().numpy()
         raw_mean_norms.append(float(np.linalg.norm(raw_mean[0])))
@@ -241,9 +337,13 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         raw_mean_oob.append(bool(np.any(np.abs(raw_mean[0]) > 1.0)))
         raw_stds.append(float(np.mean(raw_std[0])))
         actions = policy(env)
-        alignment = _action_alignment(actions[0], ground.state.pos, survivor.state.pos)
-        if alignment is not None:
-            alignments.append(alignment)
+        action_target_alignment = _action_alignment(actions[0], ground.state.pos, survivor.state.pos)
+        if action_target_alignment is not None:
+            alignments.append(action_target_alignment)
+        action_planner_alignment = None
+        if planner_hint is not None:
+            planner_vec, direct_blocked = planner_hint
+            action_planner_alignment = _cosine_alignment(actions[0], planner_vec)
         action_norms.append(float(torch.linalg.norm(actions[0], dim=-1)[0]))
         saturated_actions.append(bool((actions[0].abs() >= 0.98).any().item()))
         env.step(actions)
@@ -271,13 +371,26 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         action_disp_alignment = _cosine_alignment(actions[0], displacement)
         if action_disp_alignment is not None:
             action_displacement_alignments.append(action_disp_alignment)
-        displacement_meters.append(_distance_sim_to_m(scenario, torch.linalg.norm(displacement, dim=-1)))
+        displacement_m = _distance_sim_to_m(scenario, torch.linalg.norm(displacement, dim=-1))
+        displacement_meters.append(displacement_m)
+        if planner_hint is not None:
+            movement_planner_alignment = _cosine_alignment(displacement, planner_vec)
+            speed_mps = displacement_m / step_seconds
+            planner_total_steps += 1
+            for bucket_name in ("all", "blocked" if direct_blocked else "clear"):
+                _record_planner_bucket(
+                    planner_buckets[bucket_name],
+                    action_target=action_target_alignment,
+                    movement_target=disp_alignment,
+                    action_planner=action_planner_alignment,
+                    movement_planner=movement_planner_alignment,
+                    speed_mps=speed_mps,
+                )
         min_distance = min(min_distance, _distance_m(scenario, ground.state.pos, survivor.state.pos))
         if bool(scenario.found_survivors[0, 0]):
             break
 
     final_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
-    step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     return {
         "seed": seed,
         "confirmed": float(scenario.found_survivors[0].sum().item()),
@@ -328,6 +441,8 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
             float(np.mean(actual_displacements_m)) if actual_displacements_m else 0.0
         ),
         "mean_motion_correction_m": float(np.mean(motion_corrections_m)) if motion_corrections_m else 0.0,
+        "planner_total_steps": planner_total_steps,
+        "planner_buckets": planner_buckets,
     }
 
 
@@ -574,6 +689,50 @@ def _fmt_optional(value: float | None, width: int = 6, precision: int = 3) -> st
     return f"{value:{width}.{precision}f}"
 
 
+def _aggregate_planner_buckets(rows: list[dict]) -> tuple[int, dict]:
+    buckets = {
+        "all": _empty_planner_bucket(),
+        "clear": _empty_planner_bucket(),
+        "blocked": _empty_planner_bucket(),
+    }
+    total_steps = 0
+    for row in rows:
+        total_steps += int(row.get("planner_total_steps", 0))
+        row_buckets = row.get("planner_buckets", {})
+        for name in buckets:
+            if name in row_buckets:
+                _merge_planner_bucket(buckets[name], row_buckets[name])
+    return total_steps, buckets
+
+
+def _print_planner_alignment_table(title: str, rows: list[dict]) -> None:
+    total_steps, buckets = _aggregate_planner_buckets(rows)
+    valid_steps = int(buckets["all"]["steps"])
+    if total_steps <= 0 or valid_steps <= 0:
+        return
+
+    print("-" * 72)
+    print(title)
+    print(
+        "condition  frac_steps steps act_target move_target act_astar "
+        "move_astar speed"
+    )
+    for name, label in (("all", "all"), ("clear", "clear"), ("blocked", "blocked")):
+        bucket = buckets[name]
+        steps = int(bucket["steps"])
+        frac = steps / valid_steps if valid_steps else 0.0
+        print(
+            f"{label:9s} "
+            f"{frac:10.3f} "
+            f"{steps:5d} "
+            f"{_planner_metric(bucket, 'action_target'):10.3f} "
+            f"{_planner_metric(bucket, 'movement_target'):11.3f} "
+            f"{_planner_metric(bucket, 'action_planner'):9.3f} "
+            f"{_planner_metric(bucket, 'movement_planner'):10.3f} "
+            f"{_planner_speed(bucket):5.2f}m/s"
+        )
+
+
 def _print_failure_trace(result: dict, tail: int, stride: int) -> None:
     trace = result["trace"]
     print("-" * 72)
@@ -657,6 +816,12 @@ def main() -> None:
     parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
                         help="Omit for no upper bound when a min distance is provided.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
+    parser.add_argument("--ugv-planner-hint", choices=("none", "local_astar", "local-astar"), default=None,
+                        help="Override the checkpoint's UGV planner hint setting.")
+    parser.add_argument("--ugv-planner-patch-size", type=int, default=None,
+                        help="Override the checkpoint's local A* planner patch size.")
+    parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
+                        help="Override the checkpoint's planner waypoint lookahead.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--trace-failures", action="store_true",
                         help="Print per-step diagnostics for seeds that fail to confirm.")
@@ -667,11 +832,31 @@ def main() -> None:
     parser.add_argument("--trace-stride", type=int, default=25,
                         help="Also print every Nth trace step; 0 disables periodic trace rows.")
     args = parser.parse_args()
+    if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
+        parser.error("--local-map-patch-size must be a positive odd integer")
+    if args.ugv_planner_patch_size is not None and (
+        args.ugv_planner_patch_size < 1 or args.ugv_planner_patch_size % 2 != 1
+    ):
+        parser.error("--ugv-planner-patch-size must be a positive odd integer")
+    if args.ugv_planner_lookahead_cells is not None and args.ugv_planner_lookahead_cells < 1:
+        parser.error("--ugv-planner-lookahead-cells must be positive")
+    if args.ugv_planner_lookahead_cells is not None:
+        patch_size = args.ugv_planner_patch_size if args.ugv_planner_patch_size is not None else 11
+        args.ugv_planner_lookahead_cells = min(
+            args.ugv_planner_lookahead_cells,
+            max(patch_size // 2, 1),
+        )
 
     checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
     scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)
     print(f"checkpoint: {checkpoint_dir}")
     print(f"steps: {args.steps}")
+    print(
+        "planner_hint: "
+        f"{scenario_kwargs.get('ugv_planner_hint', 'none')} "
+        f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
+        f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)}"
+    )
     print("-" * 72)
 
     rows = [
@@ -728,6 +913,10 @@ def main() -> None:
         f"actual_move={np.mean([r['mean_actual_displacement_m'] for r in rows]):.2f}m "
         f"correction={np.mean([r['mean_motion_correction_m'] for r in rows]):.2f}m"
     )
+    _print_planner_alignment_table("planner alignment by A* direct-path state:", rows)
+    failed_rows = [row for row in rows if row["full_success"] <= 0.0]
+    if failed_rows:
+        _print_planner_alignment_table("planner alignment by A* direct-path state, failures only:", failed_rows)
 
     print("-" * 72)
     print("fixed-command one-step motion probe:")

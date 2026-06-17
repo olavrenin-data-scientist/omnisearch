@@ -31,10 +31,13 @@ FINAL_ENV_METRICS = (
     "mission/full_success",
     "diagnostic/ugv_final_known_target_distance_m",
     "diagnostic/ugv_confirm_range_m",
+    "diagnostic/uav_final_target_distance_m",
+    "diagnostic/uav_footprint_radius_m",
 )
 
 MIN_ENV_METRICS = (
     "diagnostic/ugv_min_known_target_distance_m",
+    "diagnostic/uav_min_target_distance_m",
 )
 
 ADDITIVE_DIAGNOSTIC_METRICS = (
@@ -49,6 +52,7 @@ ADDITIVE_DIAGNOSTIC_METRICS = (
     "diagnostic/ugv_ground_progress_scaled",
     "diagnostic/ugv_action_alignment",
     "diagnostic/ugv_movement_alignment",
+    "diagnostic/uav_steps_with_target_in_footprint",
 )
 
 FINAL_DIAGNOSTIC_METRICS = (
