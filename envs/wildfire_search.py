@@ -407,7 +407,9 @@ class WildfireSearchScenario(BaseScenario):
         self.survivor_spawn_reference = str(kwargs.pop("survivor_spawn_reference", "auto")).lower()
         if self.survivor_spawn_reference not in {"auto", "ground", "drone"}:
             raise ValueError("survivor_spawn_reference must be one of: auto, ground, drone")
-        self.drone_scouts_confirm_survivors = bool(kwargs.pop("drone_scouts_confirm_survivors", False))
+        self.drone_can_confirm = self.drone_can_confirm or bool(
+            kwargs.pop("drone_scouts_confirm_survivors", False)
+        )
         self.known_survivor_spawn_distance_m = max(
             float(kwargs.pop("known_survivor_spawn_distance_m", 0.0)), 0.0,
         )
@@ -1994,10 +1996,7 @@ class WildfireSearchScenario(BaseScenario):
             self.step_drone_confirmations = torch.zeros_like(drone_seen)
             confirmed_by_drone = torch.zeros_like(confirmed_by_ground)
 
-        if self.drone_scouts_confirm_survivors:
-            newly_found = (confirmed_by_ground | confirmed_by_drone | newly_scouted) & ~self.found_survivors
-        else:
-            newly_found = (confirmed_by_ground | confirmed_by_drone) & ~self.found_survivors
+        newly_found = (confirmed_by_ground | confirmed_by_drone) & ~self.found_survivors
 
         self.scouted_survivors = self.scouted_survivors | newly_scouted
         self.found_survivors   = self.found_survivors   | newly_found
