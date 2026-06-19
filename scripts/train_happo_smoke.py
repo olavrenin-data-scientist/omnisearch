@@ -430,9 +430,9 @@ def build_args(
         })
         scenario_kwargs.update(distance_kwargs)
     if uav_survivor_diagnostic:
-        found_reward = 0.0 if uav_coverage_only else 10.0
+        found_reward = 0.0
         scout_reward = 0.0 if uav_coverage_only else 2.0
-        time_penalty = 0.0 if uav_coverage_only else -0.0005
+        time_penalty = 0.0
         if uav_found_survivor_reward is not None:
             found_reward = float(uav_found_survivor_reward)
         if uav_time_penalty is not None:
