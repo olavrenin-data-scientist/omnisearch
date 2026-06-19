@@ -12,6 +12,7 @@ from harl.utils.models_tools import get_active_func, get_init_method, init
 TERRAIN_CNN_OBS_OFFSET = 4 + 12 + 1
 TERRAIN_CNN_CHANNELS = 2
 UGV_PLANNER_HINT_DIM = 5
+BOUNDARY_OBS_DIM = 4
 
 
 def wildfire_single_observation_dim(
@@ -20,10 +21,16 @@ def wildfire_single_observation_dim(
     n_agents: int,
     n_survivors: int,
     ugv_planner_hint: str = "none",
+    coverage_obs_grid: int = 0,
+    local_coverage_obs_grid: int = 0,
 ) -> int:
     """Return the per-agent wildfire observation width for the current layout."""
     patch_size = int(local_map_patch_size)
     planner_hint_dim = UGV_PLANNER_HINT_DIM if str(ugv_planner_hint).replace("-", "_") == "local_astar" else 0
+    coverage_grid = max(int(coverage_obs_grid), 0)
+    coverage_obs_dim = coverage_grid * coverage_grid + 1 if coverage_grid > 0 else 0
+    local_coverage_grid = max(int(local_coverage_obs_grid), 0)
+    local_coverage_obs_dim = local_coverage_grid * local_coverage_grid
     return (
         4  # own pos + velocity
         + 12  # lidar or drone dummy lidar
@@ -32,8 +39,11 @@ def wildfire_single_observation_dim(
         + 9  # fixed 3x3 air-clearance patch
         + planner_hint_dim  # optional local A* waypoint hint
         + 2  # flight state
+        + BOUNDARY_OBS_DIM  # distances to left, right, bottom, top boundary
         + max(int(n_agents) - 1, 0) * 2  # teammate relative positions
         + max(int(n_survivors), 0) * 7  # survivor messages
+        + coverage_obs_dim  # optional downsampled team coverage map + global fraction
+        + local_coverage_obs_dim  # optional pooled local coverage map around this agent
     )
 
 

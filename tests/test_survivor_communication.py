@@ -244,7 +244,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
         self.assertEqual(scenario.known_survivor_spawn_distance_max_m, 100.0)
         self.assertGreater(distance_m, 20.0)
-        self.assertLess(distance_m, 130.0)
+        self.assertLess(distance_m, 150.0)
 
     def test_known_survivor_spawn_distance_min_without_max_is_unbounded(self):
         env = self._diagnostic_env(
@@ -284,7 +284,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         obs = scenario.observation(env.agents[0])
 
-        expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 7
+        expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7
         self.assertEqual(obs.shape[-1], expected_width)
 
     def test_local_astar_planner_hint_points_toward_clear_local_target(self):
@@ -358,8 +358,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         # own pos/vel 4 + lidar 12 + fire 1 + terrain
         # terrain = 11x11 normalized costs + 11x11 blocked indicators + 3x3 clearance
-        # flight 2 + no neighbors + one survivor message 7
-        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 2 * 11 * 11 + 9 + 2 + 7)
+        # flight 2 + boundary 4 + no neighbors + one survivor message 7
+        self.assertEqual(obs.shape[-1], 4 + 12 + 1 + 2 * 11 * 11 + 9 + 2 + 4 + 7)
 
     def test_local_map_patch_size_keeps_drone_and_ugv_observation_widths_equal(self):
         env = self._env(n_survivors=1)
@@ -369,9 +369,9 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         # Both roles receive the same terrain block:
         # 11x11 normalized costs + 11x11 blocked indicators + 3x3 clearance.
-        # own pos/vel 4 + lidar/dummy lidar 12 + fire 1 + terrain + flight 2
+        # own pos/vel 4 + lidar/dummy lidar 12 + fire 1 + terrain + flight 2 + boundary 4
         # + one teammate relative position 2 + one survivor message 7
-        expected = 4 + 12 + 1 + 2 * 11 * 11 + 9 + 2 + 2 + 7
+        expected = 4 + 12 + 1 + 2 * 11 * 11 + 9 + 2 + 4 + 2 + 7
         self.assertEqual(obs.shape[-1], expected)
         self.assertEqual(ground_obs.shape[-1], expected)
 

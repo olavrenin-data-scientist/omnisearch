@@ -45,6 +45,19 @@ from agents.harl_terrain_cnn import (
 
 DEFAULT_UGV_APPROACH_REWARD = 0.05
 DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
+DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID = 6
+DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID = 9
+DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M = 150.0
+DEFAULT_UAV_DIAG_COVERAGE_REWARD = 20.0
+DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD = 0.001
+DEFAULT_UAV_DIAG_OVERLAP_PENALTY = 0.10
+DEFAULT_UAV_DIAG_OVERLAP_ALLOWED = 0.50
+DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY = 0.10
+DEFAULT_UAV_DIAG_ENTROPY_COEF = 0.05
+DEFAULT_UAV_DIAG_EPISODE_LENGTH = 300
+DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS = 8
+DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
+DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
 
 
 # ----------------------------------------------------------------------
@@ -85,13 +98,23 @@ def build_args(
     confirm_requires_los: bool = False,
     drone_can_confirm: bool = False,
     r_drone_confirm: float = 0.0,
+    local_coverage_obs_grid: int = 0,
+    local_coverage_obs_radius_m: float = 150.0,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
-    uav_diagnostic_target_distance_min_m: float | None = None,
-    uav_diagnostic_target_distance_max_m: float | None = None,
+    uav_no_global_coverage_obs: bool = False,
+    uav_coverage_only: bool = False,
+    uav_found_survivor_reward: float | None = None,
+    uav_time_penalty: float | None = None,
     uav_coverage_reward: float = 5.0,
+    uav_move_coverage_reward: float = 0.0,
+    uav_move_coverage_cap: float = 0.1,
+    uav_overlap_penalty: float = 0.0,
+    uav_overlap_allowed: float = 0.60,
+    uav_outside_footprint_penalty: float = 0.0,
+    uav_boundary_soft_margin_m: float = 25.0,
     ugv_movement_alignment_reward: float = 0.20,
     ugv_planner_progress_reward: float = 0.0,
     ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
@@ -111,6 +134,29 @@ def build_args(
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     if ugv_planner_hint not in {"none", "local_astar"}:
         raise ValueError("ugv_planner_hint must be one of: none, local_astar")
+    if uav_survivor_diagnostic:
+        if terrain_cache_path is None:
+            terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
+        if local_map_patch_size == 3:
+            local_map_patch_size = DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE
+        if uav_no_global_coverage_obs:
+            coverage_obs_grid = 0
+        elif coverage_obs_grid <= 0:
+            coverage_obs_grid = DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID
+        if local_coverage_obs_grid <= 0:
+            local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
+            local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
+        if uav_coverage_reward == 5.0:
+            uav_coverage_reward = DEFAULT_UAV_DIAG_COVERAGE_REWARD
+        if uav_move_coverage_reward == 0.0:
+            uav_move_coverage_reward = DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD
+        if uav_overlap_penalty == 0.0:
+            uav_overlap_penalty = DEFAULT_UAV_DIAG_OVERLAP_PENALTY
+            uav_overlap_allowed = DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
+        if uav_outside_footprint_penalty == 0.0:
+            uav_outside_footprint_penalty = DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
+        if action_transform == "clip":
+            action_transform = "radial_tanh"
     ugv_planner_patch_size = int(ugv_planner_patch_size)
     if ugv_planner_patch_size < 1 or ugv_planner_patch_size % 2 != 1:
         raise ValueError("ugv_planner_patch_size must be a positive odd integer")
@@ -129,6 +175,20 @@ def build_args(
     uav_coverage_reward = float(uav_coverage_reward)
     if uav_coverage_reward < 0.0:
         raise ValueError("uav_coverage_reward must be nonnegative")
+    uav_move_coverage_reward = float(uav_move_coverage_reward)
+    if uav_move_coverage_reward < 0.0:
+        raise ValueError("uav_move_coverage_reward must be nonnegative")
+    uav_move_coverage_cap = max(float(uav_move_coverage_cap), 0.0)
+    uav_overlap_penalty = float(uav_overlap_penalty)
+    if uav_overlap_penalty < 0.0:
+        raise ValueError("uav_overlap_penalty must be nonnegative")
+    uav_overlap_allowed = float(uav_overlap_allowed)
+    if not 0.0 <= uav_overlap_allowed < 1.0:
+        raise ValueError("uav_overlap_allowed must be in [0, 1)")
+    uav_outside_footprint_penalty = float(uav_outside_footprint_penalty)
+    if uav_outside_footprint_penalty < 0.0:
+        raise ValueError("uav_outside_footprint_penalty must be nonnegative")
+    uav_boundary_soft_margin_m = max(float(uav_boundary_soft_margin_m), 1e-6)
 
     args = {
         "algo":        "happo",
@@ -265,6 +325,15 @@ def build_args(
     if drone_can_confirm:
         scenario_kwargs["drone_can_confirm"] = True
         scenario_kwargs["r_drone_confirm"] = float(r_drone_confirm)
+    local_coverage_obs_grid = int(local_coverage_obs_grid)
+    if local_coverage_obs_grid < 0 or (local_coverage_obs_grid > 0 and local_coverage_obs_grid % 2 != 1):
+        raise ValueError("local_coverage_obs_grid must be 0 or a positive odd integer")
+    local_coverage_obs_radius_m = float(local_coverage_obs_radius_m)
+    if local_coverage_obs_radius_m <= 0.0:
+        raise ValueError("local_coverage_obs_radius_m must be positive")
+    if local_coverage_obs_grid > 0:
+        scenario_kwargs["local_coverage_obs_grid"] = local_coverage_obs_grid
+        scenario_kwargs["local_coverage_obs_radius_m"] = local_coverage_obs_radius_m
     if reward_search:
         # Kept explicit for the legacy flag; these now match the default reward
         # profile used by normal smoke training.
@@ -361,41 +430,23 @@ def build_args(
         })
         scenario_kwargs.update(distance_kwargs)
     if uav_survivor_diagnostic:
-        distance_kwargs = {}
-        if uav_diagnostic_target_distance_min_m is None and uav_diagnostic_target_distance_max_m is None:
-            pass
-        else:
-            target_distance_min_m = max(
-                float(0.0 if uav_diagnostic_target_distance_min_m is None else uav_diagnostic_target_distance_min_m),
-                0.0,
-            )
-            distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
-            if uav_diagnostic_target_distance_max_m is not None:
-                target_distance_max_m = max(
-                    float(uav_diagnostic_target_distance_max_m),
-                    0.0,
-                )
-                if target_distance_max_m < target_distance_min_m:
-                    raise ValueError(
-                        "uav_diagnostic_target_distance_max_m must be >= "
-                        "uav_diagnostic_target_distance_min_m"
-                    )
-                target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-                distance_kwargs.update({
-                    "known_survivor_spawn_distance_m": target_distance_m,
-                    "known_survivor_spawn_distance_max_m": target_distance_max_m,
-                })
+        found_reward = 0.0 if uav_coverage_only else 10.0
+        scout_reward = 0.0 if uav_coverage_only else 2.0
+        time_penalty = 0.0 if uav_coverage_only else -0.0005
+        if uav_found_survivor_reward is not None:
+            found_reward = float(uav_found_survivor_reward)
+        if uav_time_penalty is not None:
+            time_penalty = float(uav_time_penalty)
         scenario_kwargs.update({
-            "n_drones": 3,
+            "n_drones": 1,
             "n_ground": 0,
             "n_survivors": 5,
             "known_survivors_at_reset": False,
-            "survivor_spawn_reference": "drone",
             "drone_can_confirm": True,
             "disable_fire": True,
             "comms_dropout": 0.0,
-            "r_found_survivor": 10.0,
-            "r_drone_scout": 2.0,
+            "r_found_survivor": found_reward,
+            "r_drone_scout": scout_reward,
             "r_ground_confirm": 0.0,
             "r_drone_shaping": 0.0,
             "r_ground_shaping": 0.0,
@@ -406,16 +457,23 @@ def build_args(
             "r_fire_penalty": 0.0,
             "r_ground_travel_cost": 0.0,
             "r_drone_climb_cost": 0.0,
-            "r_time_penalty": -0.0005,
+            "r_time_penalty": time_penalty,
             "r_coverage": uav_coverage_reward,
+            "r_uav_move_coverage": uav_move_coverage_reward,
+            "r_uav_move_coverage_cap": uav_move_coverage_cap,
+            "r_uav_overlap": uav_overlap_penalty,
+            "uav_overlap_allowed": uav_overlap_allowed,
+            "r_uav_outside_footprint": uav_outside_footprint_penalty,
+            "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
-        scenario_kwargs.update(distance_kwargs)
     n_agents = int(scenario_kwargs["n_drones"]) + int(scenario_kwargs["n_ground"])
     algo_args["model"]["terrain_cnn_single_obs_dim"] = wildfire_single_observation_dim(
         local_map_patch_size=int(local_map_patch_size),
         n_agents=n_agents,
         n_survivors=int(scenario_kwargs["n_survivors"]),
         ugv_planner_hint=ugv_planner_hint,
+        coverage_obs_grid=int(coverage_obs_grid),
+        local_coverage_obs_grid=int(local_coverage_obs_grid),
     )
     env_args = {
         "max_cycles":      episode_length,
@@ -519,25 +577,50 @@ def main():
                         "(realistic aerial SAR; the honest route to >=0.9 recall).")
     p.add_argument("--r-drone-confirm", type=float, default=0.0,
                    help="Per-drone reward for a confirmation it makes (training signal for --drone-can-confirm).")
+    p.add_argument("--local-coverage-obs-grid", type=int, default=0,
+                   help="Add a pooled KxK ego-centric coverage map around each agent. "
+                        "Use an odd value such as 9. 0 = off.")
+    p.add_argument("--local-coverage-obs-radius-m", type=float, default=150.0,
+                   help="Physical half-width/radius in meters for --local-coverage-obs-grid. "
+                        "Example: 150 with K=9 gives bins about 33m wide on a 500m map.")
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
-                   help="Train a UAV-only diagnostic task: 3 UAVs, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
+                   help="Train a UAV-only diagnostic task: 1 UAV, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
                    help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
                         "Omit for no upper bound; use min=max for an exact target distance.")
-    p.add_argument("--uav-diagnostic-target-distance-min-m", type=float, default=None,
-                   help="Minimum survivor start distance sampled from the UAV at reset for the UAV diagnostic task.")
-    p.add_argument("--uav-diagnostic-target-distance-max-m", type=float, default=None,
-                   help="Maximum survivor start distance sampled from the UAV at reset for the UAV diagnostic task. "
-                        "Omit for no upper bound; use min=max for an exact target distance.")
+    p.add_argument("--uav-coverage-only", action="store_true",
+                   help="In UAV diagnostic mode, disable survivor and time rewards; "
+                        "leave only coverage rewards and coverage-quality penalties.")
+    p.add_argument("--uav-no-global-coverage-obs", action="store_true",
+                   help="In UAV diagnostic mode, keep local coverage observation but disable the default global coverage map.")
+    p.add_argument("--uav-found-survivor-reward", type=float, default=None,
+                   help="Override r_found_survivor in UAV diagnostic mode.")
+    p.add_argument("--uav-time-penalty", type=float, default=None,
+                   help="Override r_time_penalty in UAV diagnostic mode.")
     p.add_argument("--uav-coverage-reward", type=float, default=5.0,
                    help="Total reward scale for team-new UAV camera footprint coverage in the UAV diagnostic task.")
+    p.add_argument("--uav-move-coverage-reward", type=float, default=0.0,
+                   help="Reward scale for UAV actual displacement in meters multiplied by newly covered cells. "
+                        "Default 0 disables the term.")
+    p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
+                   help="Per-drone, per-step cap for the UAV movement-coverage reward.")
+    p.add_argument("--uav-overlap-penalty", type=float, default=0.0,
+                   help="Maximum per-UAV per-step penalty at 100%% footprint overlap. "
+                        "Penalty ramps linearly above --uav-overlap-allowed.")
+    p.add_argument("--uav-overlap-allowed", type=float, default=0.60,
+                   help="Footprint overlap fraction that is allowed before overlap penalty starts.")
+    p.add_argument("--uav-outside-footprint-penalty", type=float, default=0.0,
+                   help="Maximum per-UAV per-step penalty when the camera footprint is fully outside the map. "
+                        "Penalty scales linearly with the estimated outside-footprint fraction.")
+    p.add_argument("--uav-boundary-soft-margin-m", type=float, default=25.0,
+                   help="Physical margin from map edge used for UAV boundary risk diagnostics.")
     p.add_argument("--ugv-movement-alignment-reward", type=float, default=0.20,
                    help="Reward scale for UGV actual-movement alignment toward a known survivor in the "
                         "diagnostic task.")
@@ -594,10 +677,30 @@ def main():
         p.error("--critic-lr must be positive")
     if args.terrain_cnn_embed_dim <= 0:
         p.error("--terrain-cnn-embed-dim must be positive")
+    if args.local_coverage_obs_grid < 0 or (
+        args.local_coverage_obs_grid > 0 and args.local_coverage_obs_grid % 2 != 1
+    ):
+        p.error("--local-coverage-obs-grid must be 0 or a positive odd integer")
+    if args.local_coverage_obs_radius_m <= 0.0:
+        p.error("--local-coverage-obs-radius-m must be positive")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
     if args.uav_coverage_reward < 0.0:
         p.error("--uav-coverage-reward must be nonnegative")
+    if args.uav_found_survivor_reward is not None and args.uav_found_survivor_reward < 0.0:
+        p.error("--uav-found-survivor-reward must be nonnegative")
+    if args.uav_move_coverage_reward < 0.0:
+        p.error("--uav-move-coverage-reward must be nonnegative")
+    if args.uav_move_coverage_cap < 0.0:
+        p.error("--uav-move-coverage-cap must be nonnegative")
+    if args.uav_overlap_penalty < 0.0:
+        p.error("--uav-overlap-penalty must be nonnegative")
+    if not 0.0 <= args.uav_overlap_allowed < 1.0:
+        p.error("--uav-overlap-allowed must be in [0, 1)")
+    if args.uav_outside_footprint_penalty < 0.0:
+        p.error("--uav-outside-footprint-penalty must be nonnegative")
+    if args.uav_boundary_soft_margin_m <= 0.0:
+        p.error("--uav-boundary-soft-margin-m must be positive")
     if args.ugv_planner_progress_reward < 0.0:
         p.error("--ugv-planner-progress-reward must be nonnegative")
     if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint != "local_astar":
@@ -626,6 +729,34 @@ def main():
         drone_flight_levels_m = tuple(
             float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
         )
+
+    if args.uav_survivor_diagnostic:
+        if args.terrain_cache_path is None:
+            args.terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
+        if args.local_map_patch_size == 3:
+            args.local_map_patch_size = DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE
+        if args.entropy_coef == 0.01:
+            args.entropy_coef = DEFAULT_UAV_DIAG_ENTROPY_COEF
+        if args.uav_no_global_coverage_obs:
+            args.coverage_obs_grid = 0
+        elif args.coverage_obs_grid <= 0:
+            args.coverage_obs_grid = DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID
+        if args.local_coverage_obs_grid <= 0:
+            args.local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
+            args.local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
+        if args.uav_coverage_reward == 5.0:
+            args.uav_coverage_reward = DEFAULT_UAV_DIAG_COVERAGE_REWARD
+        if args.uav_move_coverage_reward == 0.0:
+            args.uav_move_coverage_reward = DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD
+        if args.uav_overlap_penalty == 0.0:
+            args.uav_overlap_penalty = DEFAULT_UAV_DIAG_OVERLAP_PENALTY
+            args.uav_overlap_allowed = DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
+        if args.uav_outside_footprint_penalty == 0.0:
+            args.uav_outside_footprint_penalty = DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
+        if args.action_transform == "clip":
+            args.action_transform = "radial_tanh"
+        if args.n_rollout_threads == 1:
+            args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
 
     if args.preset == "floor0-1km":
         # Validated floor-0 config: small (1km) terrain restores real detection
@@ -660,6 +791,9 @@ def main():
     if args.research:
         num_env_steps  = args.num_env_steps  or 400_000
         episode_length = args.episode_length or (1_000 if args.preset == "floor0-1km" else 500)
+    elif args.uav_survivor_diagnostic:
+        num_env_steps  = args.num_env_steps  or 2_000
+        episode_length = args.episode_length or DEFAULT_UAV_DIAG_EPISODE_LENGTH
     elif args.preset == "floor0-1km":
         num_env_steps  = args.num_env_steps  or 240_000
         episode_length = args.episode_length or 1_000
@@ -695,10 +829,19 @@ def main():
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
+    print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
+    print(f" local_coverage_obs_radius_m: {args.local_coverage_obs_radius_m}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
+    print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
+    print(f" uav_move_coverage_reward: {args.uav_move_coverage_reward}")
+    print(f" uav_move_coverage_cap: {args.uav_move_coverage_cap}")
+    print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
+    print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
+    print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
+    print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
     print(f" action_transform: {args.action_transform}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
@@ -735,13 +878,23 @@ def main():
         confirm_requires_los = args.confirm_requires_los,
         drone_can_confirm = args.drone_can_confirm,
         r_drone_confirm = args.r_drone_confirm,
+        local_coverage_obs_grid = args.local_coverage_obs_grid,
+        local_coverage_obs_radius_m = args.local_coverage_obs_radius_m,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
-        uav_diagnostic_target_distance_min_m = args.uav_diagnostic_target_distance_min_m,
-        uav_diagnostic_target_distance_max_m = args.uav_diagnostic_target_distance_max_m,
+        uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
+        uav_coverage_only = args.uav_coverage_only,
+        uav_found_survivor_reward = args.uav_found_survivor_reward,
+        uav_time_penalty = args.uav_time_penalty,
         uav_coverage_reward = args.uav_coverage_reward,
+        uav_move_coverage_reward = args.uav_move_coverage_reward,
+        uav_move_coverage_cap = args.uav_move_coverage_cap,
+        uav_overlap_penalty = args.uav_overlap_penalty,
+        uav_overlap_allowed = args.uav_overlap_allowed,
+        uav_outside_footprint_penalty = args.uav_outside_footprint_penalty,
+        uav_boundary_soft_margin_m = args.uav_boundary_soft_margin_m,
         ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
         ugv_planner_progress_reward = args.ugv_planner_progress_reward,
         ugv_approach_reward = args.ugv_approach_reward,

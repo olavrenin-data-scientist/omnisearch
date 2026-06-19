@@ -296,6 +296,14 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_speed_mps = max(
             float(kwargs.pop("drone_speed_mps", DRONE_SPEED_MPS)), 0.0,
         )
+        self.uav_boundary_soft_margin_m = max(float(kwargs.pop("uav_boundary_soft_margin_m", 25.0)), 1e-6)
+        self.uav_boundary_escape_m = max(float(kwargs.pop("uav_boundary_escape_m", 0.0)), 0.0)
+        self.uav_boundary_escape_raw_threshold = max(
+            float(kwargs.pop("uav_boundary_escape_raw_threshold", 0.2)), 0.0,
+        )
+        self.uav_boundary_escape_projected_threshold = max(
+            float(kwargs.pop("uav_boundary_escape_projected_threshold", 0.05)), 0.0,
+        )
         # Calibrated so a 10 m/s drone reaches cruise speed in roughly one
         # environment step, matching ~8-10 m/s^2 Crazyflie acceleration.
         self.drone_u_multiplier = max(
@@ -466,6 +474,17 @@ class WildfireSearchScenario(BaseScenario):
         # Credit uses the physical camera footprint and is split when drones
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
         self.r_coverage = kwargs.pop("r_coverage", 5.0)
+        # UAV movement-coverage reward: actual drone displacement in meters
+        # times newly covered grid cells, capped per drone per step. This
+        # nudges sweeping motion without paying for movement over old coverage.
+        self.r_uav_move_coverage = max(float(kwargs.pop("r_uav_move_coverage", 0.0)), 0.0)
+        self.r_uav_move_coverage_cap = max(float(kwargs.pop("r_uav_move_coverage_cap", 0.1)), 0.0)
+        self.r_uav_overlap = max(float(kwargs.pop("r_uav_overlap", 0.0)), 0.0)
+        self.uav_overlap_allowed = min(
+            max(float(kwargs.pop("uav_overlap_allowed", 0.60)), 0.0),
+            0.999,
+        )
+        self.r_uav_outside_footprint = max(float(kwargs.pop("r_uav_outside_footprint", 0.0)), 0.0)
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
         # Per-step penalty for each survivor that is scouted but not yet
         # confirmed. This makes standing still cost something while survivors
@@ -484,6 +503,15 @@ class WildfireSearchScenario(BaseScenario):
         # memory the hand-coded sweep expert has but a reactive policy lacks.
         # 0 = off (observation dim unchanged); 6 gives a 6x6 map (+37 dims).
         self.coverage_obs_grid = int(kwargs.pop("coverage_obs_grid", 0))
+        self.local_coverage_obs_grid = int(kwargs.pop("local_coverage_obs_grid", 0))
+        if self.local_coverage_obs_grid < 0:
+            raise ValueError("local_coverage_obs_grid must be nonnegative")
+        if self.local_coverage_obs_grid > 0 and self.local_coverage_obs_grid % 2 != 1:
+            raise ValueError("local_coverage_obs_grid must be 0 or a positive odd integer")
+        self.local_coverage_obs_radius_m = max(
+            float(kwargs.pop("local_coverage_obs_radius_m", 150.0)),
+            1e-6,
+        )
         # One-time directed-approach milestones for ground robots. The scalar
         # is the final/inner milestone reward; default fractions make 0.05 map
         # to rewards [0.02, 0.025, 0.03, 0.04, 0.05] for 75/50/40/30/20m.
@@ -736,6 +764,9 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_altitude_quality = torch.ones(batch_dim, self.n_drones, device=device)
         self.drone_energy_cost = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_drone_climb = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.step_uav_boundary_projection_norm = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.step_uav_boundary_projection_count = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.step_uav_boundary_hit = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
         self._prev_ground_pos = torch.zeros(batch_dim, self.n_ground, 2, device=device)
         self._pre_step_ground_pos = torch.zeros_like(self._prev_ground_pos)
@@ -775,6 +806,15 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_team = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_move_coverage = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_overlap = torch.zeros(batch_dim, device=device)
+        self.metric_uav_overlap_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_outside_footprint = torch.zeros(batch_dim, device=device)
+        self.metric_uav_outside_footprint_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_boundary_soft_risk = torch.zeros(batch_dim, device=device)
+        self.metric_uav_boundary_distance_m = torch.zeros(batch_dim, device=device)
+        self.metric_uav_displacement_m = torch.zeros(batch_dim, device=device)
+        self.metric_uav_new_coverage_cells = torch.zeros(batch_dim, device=device)
         self.metric_uav_target_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_footprint_radius_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_target_within_footprint = torch.zeros(batch_dim, device=device)
@@ -817,6 +857,15 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_team,
             self.metric_reward_drone_scout,
             self.metric_reward_drone_progress,
+            self.metric_reward_uav_move_coverage,
+            self.metric_reward_uav_overlap,
+            self.metric_uav_overlap_fraction,
+            self.metric_reward_uav_outside_footprint,
+            self.metric_uav_outside_footprint_fraction,
+            self.metric_uav_boundary_soft_risk,
+            self.metric_uav_boundary_distance_m,
+            self.metric_uav_displacement_m,
+            self.metric_uav_new_coverage_cells,
             self.metric_uav_target_distance_m,
             self.metric_uav_footprint_radius_m,
             self.metric_uav_target_within_footprint,
@@ -1264,7 +1313,7 @@ class WildfireSearchScenario(BaseScenario):
     def _generate_terrain(self, env_index: int) -> None:
         """Load real terrain and place land entities on feasible cells."""
         self._load_real_terrain(env_index)
-        self._relocate_land_entities_to_valid_cells(env_index)
+        self._place_land_entities_uniformly_on_valid_cells(env_index)
         self._refresh_mobility_layers(env_index)
 
     def _load_real_terrain(self, env_index: int) -> None:
@@ -1470,33 +1519,18 @@ class WildfireSearchScenario(BaseScenario):
         except (TypeError, ValueError):
             return 0.0
 
-    def _relocate_land_entities_to_valid_cells(self, env_index: int) -> None:
-        """Move survivors and UGV starts onto feasible terrain without editing it."""
+    def _place_land_entities_uniformly_on_valid_cells(self, env_index: int) -> None:
+        """Place survivors and UGV starts by uniformly sampling feasible terrain cells."""
         candidates = self._land_entity_spawn_candidate_mask(env_index)
         if not bool(candidates.any().item()):
             return
 
-        size = self.fire_grid_size
         device = self.fire_grid.device
-        yy, xx = torch.meshgrid(
-            torch.arange(size, device=device),
-            torch.arange(size, device=device),
-            indexing="ij",
-        )
         available = candidates.clone()
         entities = self._survivors + self.world.agents[self.n_drones:]
         for entity in entities:
-            gx, gy = self._positions_to_grid(entity.state.pos[env_index].view(1, 1, 2))
-            x, y = int(gx.item()), int(gy.item())
-            if bool(candidates[y, x].item()):
-                available[y, x] = False
-                continue
-
             search_mask = available if bool(available.any().item()) else candidates
-            dist2 = (xx - x).float().square() + (yy - y).float().square()
-            dist2 = torch.where(search_mask, dist2, torch.full_like(dist2, float("inf")))
-            best = int(dist2.flatten().argmin().item())
-            new_y, new_x = divmod(best, size)
+            new_x, new_y = self._sample_random_cell_from_mask(search_mask)
             new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
             all_pos = entity.state.pos.clone()
             all_pos[env_index] = new_pos
@@ -1602,6 +1636,9 @@ class WildfireSearchScenario(BaseScenario):
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
             self._pre_step_drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1).clone()
+            self.step_uav_boundary_projection_norm.zero_()
+            self.step_uav_boundary_projection_count.zero_()
+            self.step_uav_boundary_hit.zero_()
         self.step_count += 1
 
         if int(self.step_count.max().item()) % self.fire_step_interval == 0:
@@ -1813,6 +1850,7 @@ class WildfireSearchScenario(BaseScenario):
     def process_action(self, agent: Agent):
         """Normalize UGV command magnitude, then apply local terrain traction."""
         if agent.is_drone:
+            self._project_drone_action_at_boundary(agent)
             return
         max_action_norm = float(agent.u_range) * float(agent.u_multiplier)
         action_norm = agent.action.u.norm(dim=-1, keepdim=True).clamp_min(1e-12)
@@ -1825,6 +1863,84 @@ class WildfireSearchScenario(BaseScenario):
             self.speed_multiplier_grid, agent.state.pos.unsqueeze(1),
         ).squeeze(1)
         agent.action.u = normalized_action * speed.unsqueeze(-1)
+
+    def _project_drone_action_at_boundary(self, agent: Agent) -> None:
+        """Remove outward drone command components near the search boundary."""
+        action = agent.action.u
+        if action is None:
+            return
+
+        try:
+            drone_idx = int(agent.name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            return
+        if drone_idx < 0 or drone_idx >= self.n_drones:
+            return
+
+        margin = self.agent_radius
+        x_min = -self.x_semidim + self.agent_radius + margin
+        x_max = self.x_semidim - self.agent_radius - margin
+        y_min = -self.y_semidim + self.agent_radius + margin
+        y_max = self.y_semidim - self.agent_radius - margin
+
+        pos = agent.state.pos
+        projected = action.clone()
+        zeros_x = torch.zeros_like(projected[:, X])
+        zeros_y = torch.zeros_like(projected[:, Y])
+
+        near_left = pos[:, X] <= x_min
+        near_right = pos[:, X] >= x_max
+        near_bottom = pos[:, Y] <= y_min
+        near_top = pos[:, Y] >= y_max
+
+        projected[:, X] = torch.where(
+            near_left & (projected[:, X] < 0.0),
+            zeros_x,
+            projected[:, X],
+        )
+        projected[:, X] = torch.where(
+            near_right & (projected[:, X] > 0.0),
+            zeros_x,
+            projected[:, X],
+        )
+        projected[:, Y] = torch.where(
+            near_bottom & (projected[:, Y] < 0.0),
+            zeros_y,
+            projected[:, Y],
+        )
+        projected[:, Y] = torch.where(
+            near_top & (projected[:, Y] > 0.0),
+            zeros_y,
+            projected[:, Y],
+        )
+
+        pure_projected = projected
+        raw_norm = action.norm(dim=-1)
+        projected_norm = pure_projected.norm(dim=-1)
+        inward = torch.zeros_like(projected)
+        inward[:, X] = torch.where(near_left, torch.ones_like(inward[:, X]), inward[:, X])
+        inward[:, X] = torch.where(near_right, -torch.ones_like(inward[:, X]), inward[:, X])
+        inward[:, Y] = torch.where(near_bottom, torch.ones_like(inward[:, Y]), inward[:, Y])
+        inward[:, Y] = torch.where(near_top, -torch.ones_like(inward[:, Y]), inward[:, Y])
+        inward_norm = inward.norm(dim=-1, keepdim=True)
+        inward_unit = inward / inward_norm.clamp_min(1e-12)
+
+        max_step_m = max(self.drone_speed_mps * self.sim_step_seconds, 1e-6)
+        escape_strength = min(self.uav_boundary_escape_m / max_step_m, 0.25)
+        escape_strength = max(escape_strength, 0.0)
+        needs_escape = (
+            (raw_norm > self.uav_boundary_escape_raw_threshold)
+            & (projected_norm < self.uav_boundary_escape_projected_threshold)
+            & (inward_norm.squeeze(-1) > 0.0)
+            & (escape_strength > 0.0)
+        )
+        escaped = pure_projected + inward_unit * escape_strength
+        projected = torch.where(needs_escape.unsqueeze(-1), escaped, pure_projected)
+
+        removed_norm = (action - pure_projected).norm(dim=-1)
+        self.step_uav_boundary_projection_norm[:, drone_idx] = removed_norm
+        self.step_uav_boundary_projection_count[:, drone_idx] = (removed_norm > 1e-12).float()
+        agent.action.u = projected
 
     def post_step(self):
         """Apply blocked ground routes and auto-select safe drone altitude."""
@@ -1884,21 +2000,35 @@ class WildfireSearchScenario(BaseScenario):
 
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
+            self._clamp_agents_to_world()
             drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
             self._update_drone_altitudes(self._pre_step_drone_pos, drone_pos)
-        self._clamp_agents_to_world()
+        else:
+            self._clamp_agents_to_world()
 
     def _clamp_agents_to_world(self) -> None:
         """Keep agent bodies inside the visible world bounds."""
         x_min, x_max = -self.x_semidim + self.agent_radius, self.x_semidim - self.agent_radius
         y_min, y_max = -self.y_semidim + self.agent_radius, self.y_semidim - self.agent_radius
-        for agent in self.world.agents:
+        for agent_idx, agent in enumerate(self.world.agents):
             pos = agent.state.pos
             clamped = pos.clone()
             clamped[:, X] = clamped[:, X].clamp(x_min, x_max)
             clamped[:, Y] = clamped[:, Y].clamp(y_min, y_max)
             hit_boundary = (clamped != pos).any(dim=-1, keepdim=True)
-            vel = torch.where(hit_boundary, torch.zeros_like(agent.state.vel), agent.state.vel)
+            if getattr(agent, "is_drone", False) and agent_idx < self.n_drones:
+                self.step_uav_boundary_hit[:, agent_idx] = hit_boundary.squeeze(-1).float()
+            vel = agent.state.vel.clone()
+            outward_x = (
+                ((clamped[:, X] <= x_min) & (vel[:, X] < 0.0))
+                | ((clamped[:, X] >= x_max) & (vel[:, X] > 0.0))
+            )
+            outward_y = (
+                ((clamped[:, Y] <= y_min) & (vel[:, Y] < 0.0))
+                | ((clamped[:, Y] >= y_max) & (vel[:, Y] > 0.0))
+            )
+            vel[:, X] = torch.where(outward_x, torch.zeros_like(vel[:, X]), vel[:, X])
+            vel[:, Y] = torch.where(outward_y, torch.zeros_like(vel[:, Y]), vel[:, Y])
             agent.set_pos(clamped, batch_index=None)
             agent.set_vel(vel, batch_index=None)
 
@@ -2234,7 +2364,17 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.step_ugv_travel_cost.zero_()
 
-        coverage_new = self._coverage_reward(drone_pos)  # [B, D] new-map fraction per drone
+        coverage_new, uav_overlap_fraction, uav_outside_footprint_fraction = self._coverage_reward(drone_pos)  # [B, D]
+        (
+            uav_move_coverage_reward,
+            drone_displacement_m,
+            coverage_new_cells,
+        ) = self._uav_move_coverage_reward(drone_pos, coverage_new)
+        uav_overlap_penalty = self._uav_overlap_penalty(uav_overlap_fraction)
+        uav_outside_footprint_penalty = self._uav_outside_footprint_penalty(
+            uav_outside_footprint_fraction,
+        )
+        boundary_soft_risk, boundary_distance_m = self._uav_boundary_risk_metrics(drone_pos)
 
         self.metric_new_scouts = newly_scouted.float().sum(dim=1)
         self.metric_new_confirmations = newly_found.float().sum(dim=1)
@@ -2242,6 +2382,27 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_team = team_reward
         self.metric_reward_drone_scout = (scout_per_drone * self.r_drone_scout).sum(dim=1)
         self.metric_reward_drone_progress = drone_shaping.sum(dim=1)
+        self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
+        self.metric_reward_uav_overlap = uav_overlap_penalty.sum(dim=1)
+        self.metric_uav_overlap_fraction = (
+            uav_overlap_fraction.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_reward_uav_outside_footprint = uav_outside_footprint_penalty.sum(dim=1)
+        self.metric_uav_outside_footprint_fraction = (
+            uav_outside_footprint_fraction.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_uav_boundary_soft_risk = boundary_soft_risk.sum(dim=1)
+        self.metric_uav_boundary_distance_m = (
+            boundary_distance_m.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_uav_displacement_m = drone_displacement_m.sum(dim=1)
+        self.metric_uav_new_coverage_cells = coverage_new_cells.sum(dim=1)
         self.metric_reward_ugv_progress = ground_shaping.sum(dim=1)
         self.metric_reward_ugv_approach = ground_approach.sum(dim=1)
         self.metric_reward_ugv_movement_alignment = movement_alignment_reward.sum(dim=1)
@@ -2317,6 +2478,9 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
                 r = r + drone_shaping[:, i]
                 r = r + coverage_new[:, i] * self.r_coverage
+                r = r + uav_move_coverage_reward[:, i]
+                r = r + uav_overlap_penalty[:, i]
+                r = r + uav_outside_footprint_penalty[:, i]
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
@@ -2695,7 +2859,7 @@ class WildfireSearchScenario(BaseScenario):
         any_safe = traversable.any(dim=-1)
         return torch.where(any_safe.unsqueeze(-1), chosen, start_pos)
 
-    def _coverage_reward(self, drone_pos: Tensor) -> Tensor:
+    def _coverage_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Per-drone fraction of the map newly covered by camera footprints.
 
         All drone claims are calculated before updating ``coverage_grid``.
@@ -2704,12 +2868,19 @@ class WildfireSearchScenario(BaseScenario):
         """
         B = drone_pos.shape[0]
         new_per_drone = torch.zeros(B, self.n_drones, device=drone_pos.device)
+        overlap_fraction = torch.zeros_like(new_per_drone)
+        outside_footprint_fraction = torch.zeros_like(new_per_drone)
         if self.n_drones == 0:
-            return new_per_drone
+            return new_per_drone, overlap_fraction, outside_footprint_fraction
         # The coverage grid is updated below even when the coverage reward is
         # off, because it can also feed the team-coverage observation.
-        if self.r_coverage <= 0.0 and self.coverage_obs_grid <= 0:
-            return new_per_drone
+        if (
+            self.r_coverage <= 0.0
+            and self.coverage_obs_grid <= 0
+            and self.r_uav_overlap <= 0.0
+            and self.r_uav_outside_footprint <= 0.0
+        ):
+            return new_per_drone, overlap_fraction, outside_footprint_fraction
 
         G = self.fire_grid_size
         cell_width = 2.0 * self.x_semidim / G
@@ -2742,6 +2913,15 @@ class WildfireSearchScenario(BaseScenario):
         footprint = self._drone_camera_ranges().view(B, self.n_drones, 1, 1)
         claims = dx.square() + dy.square() <= footprint.square()
 
+        footprint_cells = claims.sum(dim=(-1, -2)).clamp_min(1)
+        ideal_footprint_cells = (
+            math.pi * footprint.squeeze(-1).squeeze(-1).square() / max(cell_width * cell_height, 1e-12)
+        ).clamp_min(1e-6)
+        outside_footprint_fraction = (
+            (ideal_footprint_cells - footprint_cells.float()) / ideal_footprint_cells
+        ).clamp(min=0.0, max=1.0)
+        already_covered = claims & self.coverage_grid.unsqueeze(1)
+        overlap_fraction = already_covered.float().sum(dim=(-1, -2)) / footprint_cells.float()
         team_claims = claims.any(dim=1)
         newly_covered = team_claims & ~self.coverage_grid
         claim_count = claims.sum(dim=1).clamp_min(1)
@@ -2751,7 +2931,72 @@ class WildfireSearchScenario(BaseScenario):
             / claim_count.unsqueeze(1)
         )
         self.coverage_grid |= team_claims
-        return split_credit.sum(dim=(-1, -2)) / float(G * G)
+        return (
+            split_credit.sum(dim=(-1, -2)) / float(G * G),
+            overlap_fraction,
+            outside_footprint_fraction,
+        )
+
+    def _uav_move_coverage_reward(self, drone_pos: Tensor, coverage_new: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Reward actual UAV displacement only when it produces new coverage."""
+        if self.n_drones == 0:
+            empty = torch.zeros(self.world.batch_dim, 0, device=drone_pos.device)
+            return empty, empty, empty
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(drone_pos.device).clamp_min(1e-9)
+        meters_per_sim = 1.0 / sim_units_per_meter
+        displacement_sim = (drone_pos - self._pre_step_drone_pos).norm(dim=-1)
+        displacement_m = displacement_sim * meters_per_sim.view(-1, 1)
+        coverage_new_cells = coverage_new * float(self.fire_grid_size * self.fire_grid_size)
+        reward = (
+            displacement_m
+            * coverage_new_cells
+            * self.r_uav_move_coverage
+        ).clamp(max=self.r_uav_move_coverage_cap)
+        return reward, displacement_m, coverage_new_cells
+
+    def _uav_overlap_penalty(self, overlap_fraction: Tensor) -> Tensor:
+        """Penalize only the excess footprint overlap above an allowed fraction."""
+        if self.n_drones == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=overlap_fraction.device)
+        if self.r_uav_overlap <= 0.0:
+            return torch.zeros_like(overlap_fraction)
+        allowed = min(max(float(self.uav_overlap_allowed), 0.0), 0.999)
+        excess = (overlap_fraction - allowed).clamp(min=0.0)
+        normalized = (excess / max(1.0 - allowed, 1e-6)).clamp(max=1.0)
+        return -self.r_uav_overlap * normalized
+
+    def _uav_outside_footprint_penalty(self, outside_fraction: Tensor) -> Tensor:
+        """Penalize camera footprint area that falls outside the searchable map."""
+        if self.n_drones == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=outside_fraction.device)
+        if self.r_uav_outside_footprint <= 0.0:
+            return torch.zeros_like(outside_fraction)
+        return -self.r_uav_outside_footprint * outside_fraction.clamp(min=0.0, max=1.0)
+
+    def _uav_boundary_risk_metrics(self, drone_pos: Tensor) -> tuple[Tensor, Tensor]:
+        """Diagnostic UAV distance-to-boundary risk before the hard world clamp is hit."""
+        if self.n_drones == 0:
+            empty = torch.zeros(self.world.batch_dim, 0, device=drone_pos.device)
+            return empty, empty
+
+        x_min = -self.x_semidim + self.agent_radius
+        x_max = self.x_semidim - self.agent_radius
+        y_min = -self.y_semidim + self.agent_radius
+        y_max = self.y_semidim - self.agent_radius
+        distance_sim = torch.stack(
+            (
+                drone_pos[..., X] - x_min,
+                x_max - drone_pos[..., X],
+                drone_pos[..., Y] - y_min,
+                y_max - drone_pos[..., Y],
+            ),
+            dim=-1,
+        ).amin(dim=-1)
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(drone_pos.device).clamp_min(1e-9)
+        distance_m = distance_sim.clamp_min(0.0) / sim_units_per_meter.view(-1, 1)
+        margin_m = max(float(self.uav_boundary_soft_margin_m), 1e-6)
+        risk = ((margin_m - distance_m) / margin_m).clamp(0.0, 1.0)
+        return risk, distance_m
 
     def _ground_coverage_reward(self, ground_pos: Tensor) -> Tensor:
         """Per-ground-robot fraction of NEW map area visited this step.
@@ -2860,11 +3105,14 @@ class WildfireSearchScenario(BaseScenario):
             terrain_local,
             planner_hint,
             flight_state,
+            self._boundary_observation(agent),
             neighbor,
             survivor_messages,
         ]
         if self.coverage_obs_grid > 0:
             parts.append(self._coverage_observation())       # [B, K*K + 1]
+        if self.local_coverage_obs_grid > 0:
+            parts.append(self._local_coverage_observation(agent))  # [B, K*K]
         return torch.cat(parts, dim=-1)
 
     def _coverage_observation(self) -> Tensor:
@@ -2881,6 +3129,93 @@ class WildfireSearchScenario(BaseScenario):
         pooled = F.adaptive_avg_pool2d(cov, (K, K)).flatten(1)   # [B, K*K]
         global_frac = self.coverage_grid.float().mean(dim=(1, 2), keepdim=True).squeeze(1)  # [B, 1]
         return torch.cat([pooled, global_frac], dim=-1)
+
+    def _local_coverage_observation(self, agent: Agent) -> Tensor:
+        """Pooled ego-centric coverage patch extracted from the coverage grid.
+
+        ``local_coverage_obs_radius_m`` is converted to coverage-grid cells at
+        runtime, so the physical window stays stable across map sizes. Outside
+        map cells are filled as covered, then the raw patch is adaptively
+        average-pooled to KxK.
+        """
+        K = self.local_coverage_obs_grid
+        if K <= 0:
+            return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
+
+        import torch.nn.functional as F
+
+        pos = agent.state.pos
+        device = pos.device
+        dtype = pos.dtype
+        G = int(self.fire_grid_size)
+        cell_width_m = 1.0 / (
+            self.terrain_sim_units_per_meter.to(device=device, dtype=dtype).clamp_min(1e-9)
+            * (float(G) / (2.0 * float(self.x_semidim)))
+        )
+        radius_cells = torch.round(float(self.local_coverage_obs_radius_m) / cell_width_m).long().clamp_min(1)
+        max_radius = int(radius_cells.max().detach().cpu().item())
+        patch_size = 2 * max_radius + 1
+
+        coverage = self.coverage_grid.to(device=device, dtype=dtype)
+        gx, gy = self._positions_to_grid(pos)
+        out = torch.empty(self.world.batch_dim, K * K, device=device, dtype=dtype)
+        for env_idx in range(self.world.batch_dim):
+            radius = int(radius_cells[env_idx].detach().cpu().item())
+            raw_patch_size = 2 * radius + 1
+            patch = torch.ones(raw_patch_size, raw_patch_size, device=device, dtype=dtype)
+            x0 = int(gx[env_idx].item()) - radius
+            x1 = int(gx[env_idx].item()) + radius + 1
+            y0 = int(gy[env_idx].item()) - radius
+            y1 = int(gy[env_idx].item()) + radius + 1
+            sx0 = max(x0, 0)
+            sx1 = min(x1, G)
+            sy0 = max(y0, 0)
+            sy1 = min(y1, G)
+            if sx1 > sx0 and sy1 > sy0:
+                px0 = sx0 - x0
+                px1 = px0 + (sx1 - sx0)
+                py0 = sy0 - y0
+                py1 = py0 + (sy1 - sy0)
+                patch[py0:py1, px0:px1] = coverage[env_idx, sy0:sy1, sx0:sx1]
+            if raw_patch_size != patch_size:
+                padded = torch.ones(patch_size, patch_size, device=device, dtype=dtype)
+                offset = max_radius - radius
+                padded[offset : offset + raw_patch_size, offset : offset + raw_patch_size] = patch
+                patch = padded
+            pooled = F.adaptive_avg_pool2d(patch.view(1, 1, patch_size, patch_size), (K, K))
+            out[env_idx] = pooled.flatten()
+        return out
+
+    def _boundary_observation(self, agent: Agent) -> Tensor:
+        """Distances to left, right, bottom, top bounds, normalized by footprint."""
+        pos = agent.state.pos
+        if agent.is_drone and self.n_drones > 0:
+            try:
+                drone_idx = int(agent.name.rsplit("_", 1)[1])
+            except (IndexError, ValueError):
+                drone_idx = 0
+            drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
+            radius = self._drone_camera_ranges()[:, drone_idx]
+        elif self.n_drones > 0:
+            radius = self._drone_camera_ranges().mean(dim=1)
+        else:
+            radius = torch.full((self.world.batch_dim,), self.world_scale, device=pos.device, dtype=pos.dtype)
+
+        radius = radius.to(device=pos.device, dtype=pos.dtype).clamp_min(1e-6).unsqueeze(-1)
+        x_min = -self.x_semidim + self.agent_radius
+        x_max = self.x_semidim - self.agent_radius
+        y_min = -self.y_semidim + self.agent_radius
+        y_max = self.y_semidim - self.agent_radius
+        distances = torch.stack(
+            (
+                pos[:, X] - x_min,
+                x_max - pos[:, X],
+                pos[:, Y] - y_min,
+                y_max - pos[:, Y],
+            ),
+            dim=-1,
+        )
+        return (distances / radius).clamp(0.0, 1.0)
 
     def _record_local_survivor_knowledge(
         self,
@@ -2971,7 +3306,7 @@ class WildfireSearchScenario(BaseScenario):
         patch_cells = self.local_map_patch_size * self.local_map_patch_size
         if agent.is_drone:
             normalized_costs = torch.zeros(pos.shape[0], patch_cells, device=pos.device, dtype=pos.dtype)
-            blocked = torch.zeros_like(normalized_costs)
+            blocked = self._local_outside_map_patch(pos, self.local_map_patch_size)
         else:
             costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
             blocked = (~self._local_grid_patch(self.traversable_grid, pos, self.local_map_patch_size)).float()
@@ -3467,6 +3802,20 @@ class WildfireSearchScenario(BaseScenario):
                 values.append(grid[b_idx, py, px])
         return torch.stack(values, dim=-1)
 
+    def _local_outside_map_patch(self, pos: Tensor, patch_size: int) -> Tensor:
+        """Flattened local mask where 1 marks samples outside the search grid."""
+        radius = patch_size // 2
+        gx, gy = self._positions_to_grid(pos)
+        values = []
+        for dy in range(-radius, radius + 1):
+            py = gy + dy
+            for dx in range(-radius, radius + 1):
+                px = gx + dx
+                values.append(
+                    ((px < 0) | (px >= self.fire_grid_size) | (py < 0) | (py >= self.fire_grid_size)).float()
+                )
+        return torch.stack(values, dim=-1).to(device=pos.device, dtype=pos.dtype)
+
     def _flight_state(self, agent: Agent) -> Tensor:
         state = torch.zeros(self.world.batch_dim, 2, device=self.fire_grid.device)
         if agent.is_drone:
@@ -3519,6 +3868,9 @@ class WildfireSearchScenario(BaseScenario):
             "reward/team": self.metric_reward_team,
             "reward/drone_scout": self.metric_reward_drone_scout,
             "reward/drone_progress": self.metric_reward_drone_progress,
+            "reward/uav_move_coverage": self.metric_reward_uav_move_coverage,
+            "reward/uav_overlap": self.metric_reward_uav_overlap,
+            "reward/uav_outside_footprint": self.metric_reward_uav_outside_footprint,
             "reward/ugv_progress": self.metric_reward_ugv_progress,
             "reward/ugv_approach": self.metric_reward_ugv_approach,
             "reward/ugv_movement_alignment": self.metric_reward_ugv_movement_alignment,
@@ -3531,6 +3883,8 @@ class WildfireSearchScenario(BaseScenario):
             "cost/drone_energy": self.metric_cost_drone_energy,
             "cost/drone_climb": self.metric_cost_drone_climb,
             "diagnostic/ugv_proposed_path_blocked": self.step_ugv_proposed_path_blocked.float().sum(dim=1),
+            "diagnostic/uav_overlap_fraction": self.metric_uav_overlap_fraction,
+            "diagnostic/uav_outside_footprint_fraction": self.metric_uav_outside_footprint_fraction,
             "diagnostic/ugv_speed_limited": self.step_ugv_speed_limited.float().sum(dim=1),
             "diagnostic/ugv_path_speed": (
                 self.step_ugv_path_speed.mean(dim=1)
@@ -3570,6 +3924,13 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/uav_min_target_distance_m": self.metric_uav_target_distance_m,
             "diagnostic/uav_footprint_radius_m": self.metric_uav_footprint_radius_m,
             "diagnostic/uav_steps_with_target_in_footprint": self.metric_uav_target_within_footprint,
+            "diagnostic/uav_displacement_m": self.metric_uav_displacement_m,
+            "diagnostic/uav_new_coverage_cells": self.metric_uav_new_coverage_cells,
+            "diagnostic/uav_boundary_projection_count": self.step_uav_boundary_projection_count.sum(dim=1),
+            "diagnostic/uav_boundary_projection_norm": self.step_uav_boundary_projection_norm.sum(dim=1),
+            "diagnostic/uav_boundary_hit_count": self.step_uav_boundary_hit.sum(dim=1),
+            "diagnostic/uav_boundary_soft_risk": self.metric_uav_boundary_soft_risk,
+            "diagnostic/uav_boundary_distance_m": self.metric_uav_boundary_distance_m,
             "n_burning": self.fire_grid.flatten(1).sum(dim=1).float(),
             "n_burned":  self.burned_grid.flatten(1).sum(dim=1).float(),
             "affected_fraction": self.burned_grid.float().flatten(1).mean(dim=1),

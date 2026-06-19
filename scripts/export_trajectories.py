@@ -405,8 +405,14 @@ def main():
             except ValueError:
                 ckpt_disp = ckpt
             print(f"  · HAPPO checkpoint: {ckpt_disp}")
-            def make_happo(env, _ckpt=ckpt):
-                return HappoPolicy.from_checkpoint(_ckpt)
+            # Build the policy before export_trajectory creates and resets the
+            # eval env. Policy construction creates a temporary VMAS env to
+            # infer spaces; doing that after reset shifts torch RNG and changes
+            # probabilistic survivor detections for the same seed.
+            happo_policy = HappoPolicy.from_checkpoint(ckpt)
+            def make_happo(env, _policy=happo_policy):
+                _policy.reset()
+                return _policy
             run_cv_options = None
             if cv_options is not None:
                 run_cv_options = dict(cv_options)

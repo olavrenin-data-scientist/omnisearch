@@ -70,6 +70,22 @@ class _Entity:
         self.shape = sys.modules["vmas.simulator.core"].Sphere(radius)
 
 
+class _Agent:
+    def __init__(self, name, is_drone, pos, vel):
+        self.name = name
+        self.is_drone = is_drone
+        self.state = types.SimpleNamespace(
+            pos=torch.tensor(pos, dtype=torch.float32),
+            vel=torch.tensor(vel, dtype=torch.float32),
+        )
+
+    def set_pos(self, pos, batch_index=None):
+        self.state.pos = pos
+
+    def set_vel(self, vel, batch_index=None):
+        self.state.vel = vel
+
+
 class PhysicalUnitConversionTests(unittest.TestCase):
     def _scenario(self):
         scenario = WildfireSearchScenario()
@@ -156,14 +172,26 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
     def _coverage_scenario(self, n_drones=1, grid_size=32):
         scenario = self._scenario()
+        scenario._world = types.SimpleNamespace(batch_dim=1)
         scenario.n_drones = n_drones
         scenario.r_coverage = 1.0
+        scenario.r_uav_move_coverage = 0.001
+        scenario.r_uav_move_coverage_cap = 0.1
+        scenario.r_uav_outside_footprint = 0.0
+        scenario.uav_boundary_soft_margin_m = 25.0
+        scenario.sim_step_seconds = 2.0
+        scenario.drone_speed_mps = 10.0
+        scenario.uav_boundary_escape_m = 0.0
+        scenario.uav_boundary_escape_raw_threshold = 0.2
+        scenario.uav_boundary_escape_projected_threshold = 0.05
         scenario.fire_grid_size = grid_size
         scenario.x_semidim = 1.0
         scenario.y_semidim = 1.0
         scenario.coverage_grid = torch.zeros(1, grid_size, grid_size, dtype=torch.bool)
         scenario.drone_camera_half_angle_tan = 1.0
         scenario.drone_min_footprint_by_env = torch.zeros(1)
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.1])
+        scenario._pre_step_drone_pos = torch.zeros(1, n_drones, 2)
         return scenario
 
     def test_coverage_uses_camera_footprint(self):
@@ -171,11 +199,13 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         positions = torch.zeros(1, 1, 2)
 
         scenario.drone_altitude = torch.tensor([[0.05]])
-        small_footprint = float(scenario._coverage_reward(positions).sum())
+        small_credit, _, _ = scenario._coverage_reward(positions)
+        small_footprint = float(small_credit.sum())
 
         scenario.coverage_grid.zero_()
         scenario.drone_altitude = torch.tensor([[0.20]])
-        large_footprint = float(scenario._coverage_reward(positions).sum())
+        large_credit, _, _ = scenario._coverage_reward(positions)
+        large_footprint = float(large_credit.sum())
 
         self.assertGreater(large_footprint, small_footprint)
 
@@ -184,9 +214,11 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
         positions = torch.zeros(1, 2, 2)
 
-        credit = scenario._coverage_reward(positions)
+        credit, overlap, outside = scenario._coverage_reward(positions)
 
         self.assertAlmostEqual(float(credit[0, 0]), float(credit[0, 1]), places=7)
+        self.assertEqual(float(overlap.sum()), 0.0)
+        self.assertEqual(float(outside.sum()), 0.0)
         self.assertAlmostEqual(
             float(credit.sum()),
             float(scenario.coverage_grid.float().mean()),
@@ -198,11 +230,15 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10]])
         positions = torch.zeros(1, 1, 2)
 
-        first_credit = scenario._coverage_reward(positions)
-        revisit_credit = scenario._coverage_reward(positions)
+        first_credit, first_overlap, first_outside = scenario._coverage_reward(positions)
+        revisit_credit, revisit_overlap, revisit_outside = scenario._coverage_reward(positions)
 
         self.assertGreater(float(first_credit.sum()), 0.0)
+        self.assertEqual(float(first_overlap.sum()), 0.0)
+        self.assertEqual(float(first_outside.sum()), 0.0)
         self.assertEqual(float(revisit_credit.sum()), 0.0)
+        self.assertEqual(float(revisit_overlap[0, 0]), 1.0)
+        self.assertEqual(float(revisit_outside.sum()), 0.0)
 
     def test_total_episode_coverage_credit_is_bounded(self):
         scenario = self._coverage_scenario(grid_size=16)
@@ -211,9 +247,259 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         total = 0.0
         for x in (-0.75, -0.25, 0.25, 0.75):
             for y in (-0.75, -0.25, 0.25, 0.75):
-                total += float(scenario._coverage_reward(torch.tensor([[[x, y]]])).sum())
+                credit, _, _ = scenario._coverage_reward(torch.tensor([[[x, y]]]))
+                total += float(credit.sum())
 
         self.assertLessEqual(total, 1.0 + 1e-7)
+
+    def test_uav_overlap_penalty_uses_allowed_normalized_excess(self):
+        scenario = self._coverage_scenario()
+        scenario.r_uav_overlap = 0.05
+        scenario.uav_overlap_allowed = 0.60
+        overlap = torch.tensor([[0.50, 0.60, 0.80, 1.00]])
+        scenario.n_drones = overlap.shape[1]
+
+        penalty = scenario._uav_overlap_penalty(overlap)
+
+        self.assertAlmostEqual(float(penalty[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(float(penalty[0, 1]), 0.0, places=6)
+        self.assertAlmostEqual(float(penalty[0, 2]), -0.025, places=6)
+        self.assertAlmostEqual(float(penalty[0, 3]), -0.05, places=6)
+
+    def test_uav_outside_footprint_penalty_scales_with_footprint_outside_map(self):
+        scenario = self._coverage_scenario(grid_size=64)
+        scenario.r_uav_outside_footprint = 0.1
+        scenario.drone_altitude = torch.tensor([[0.20]])
+
+        _, _, center_outside = scenario._coverage_reward(torch.tensor([[[0.0, 0.0]]]))
+        center_penalty = scenario._uav_outside_footprint_penalty(center_outside)
+
+        scenario.coverage_grid.zero_()
+        _, _, corner_outside = scenario._coverage_reward(torch.tensor([[[0.95, 0.95]]]))
+        corner_penalty = scenario._uav_outside_footprint_penalty(corner_outside)
+
+        self.assertAlmostEqual(float(center_outside[0, 0]), 0.0, places=6)
+        self.assertEqual(float(center_penalty[0, 0]), 0.0)
+        self.assertGreater(float(corner_outside[0, 0]), 0.0)
+        self.assertLess(float(corner_penalty[0, 0]), 0.0)
+        self.assertGreaterEqual(float(corner_penalty[0, 0]), -0.1)
+
+    def test_local_coverage_observation_pools_physical_window_and_marks_outside(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.local_coverage_obs_grid = 3
+        scenario.local_coverage_obs_radius_m = 100.0
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.01])
+        scenario.coverage_grid.zero_()
+        scenario.coverage_grid[:, 3:5, 3:5] = True
+        agent = types.SimpleNamespace(
+            state=types.SimpleNamespace(pos=torch.tensor([[0.0, 0.0]], dtype=torch.float32)),
+        )
+
+        center_patch = scenario._local_coverage_observation(agent)
+
+        self.assertEqual(center_patch.shape[-1], 9)
+        self.assertGreater(float(center_patch[0, 4]), 0.0)
+        self.assertLess(float(center_patch[0, 4]), 1.0)
+        self.assertLess(float(center_patch[0, 0]), 1.0)
+
+        agent.state.pos = torch.tensor([[0.95, 0.95]], dtype=torch.float32)
+        edge_patch = scenario._local_coverage_observation(agent)
+
+        self.assertGreater(float(edge_patch[0, -1]), 0.5)
+
+    def test_uav_move_coverage_reward_scales_with_new_cells_and_displacement(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        drone_pos = torch.tensor([[[1.0, 0.0]]])  # 10 meters at 0.1 sim-units/m.
+        coverage_new = torch.tensor([[10.0 / (16 * 16)]])
+
+        reward, displacement_m, coverage_cells = scenario._uav_move_coverage_reward(
+            drone_pos,
+            coverage_new,
+        )
+
+        self.assertAlmostEqual(float(displacement_m[0, 0]), 10.0, places=6)
+        self.assertAlmostEqual(float(coverage_cells[0, 0]), 10.0, places=6)
+        self.assertAlmostEqual(float(reward[0, 0]), 0.1, places=6)
+
+    def test_uav_move_coverage_reward_zero_without_new_coverage(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        drone_pos = torch.tensor([[[1.0, 0.0]]])
+        coverage_new = torch.zeros(1, 1)
+
+        reward, _, coverage_cells = scenario._uav_move_coverage_reward(drone_pos, coverage_new)
+
+        self.assertEqual(float(coverage_cells[0, 0]), 0.0)
+        self.assertEqual(float(reward[0, 0]), 0.0)
+
+    def test_uav_boundary_risk_metrics_scale_with_meter_distance(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.01])
+
+        risk, distance_m = scenario._uav_boundary_risk_metrics(torch.tensor([[[0.0, 0.0]]]))
+        self.assertEqual(float(risk[0, 0]), 0.0)
+        self.assertGreater(float(distance_m[0, 0]), 25.0)
+
+        # x=0.825 is 0.125 sim-units from the x_max=0.95 body boundary.
+        # With 0.1 sim-units/m this is 12.5m, half of the 25m margin.
+        risk, distance_m = scenario._uav_boundary_risk_metrics(torch.tensor([[[0.825, 0.0]]]))
+        self.assertAlmostEqual(float(distance_m[0, 0]), 12.5, places=6)
+        self.assertAlmostEqual(float(risk[0, 0]), 0.5, places=6)
+
+        risk, distance_m = scenario._uav_boundary_risk_metrics(torch.tensor([[[0.95, 0.0]]]))
+        self.assertAlmostEqual(float(distance_m[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(float(risk[0, 0]), 1.0, places=6)
+
+    def test_drone_boundary_projection_removes_outward_component(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.step_uav_boundary_projection_norm = torch.zeros(1, 1)
+        scenario.step_uav_boundary_projection_count = torch.zeros(1, 1)
+        agent = types.SimpleNamespace(
+            name="drone_0",
+            is_drone=True,
+            state=types.SimpleNamespace(pos=torch.tensor([[-0.94, 0.0]])),
+            action=types.SimpleNamespace(u=torch.tensor([[-0.8, 0.3]])),
+        )
+
+        scenario._project_drone_action_at_boundary(agent)
+
+        torch.testing.assert_close(agent.action.u, torch.tensor([[0.0, 0.3]]))
+        self.assertEqual(float(scenario.step_uav_boundary_projection_count[0, 0]), 1.0)
+        self.assertAlmostEqual(float(scenario.step_uav_boundary_projection_norm[0, 0]), 0.8, places=6)
+
+    def test_drone_boundary_escape_uses_meter_scaled_inward_push(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.uav_boundary_escape_m = 2.0
+        scenario.step_uav_boundary_projection_norm = torch.zeros(1, 1)
+        scenario.step_uav_boundary_projection_count = torch.zeros(1, 1)
+        agent = types.SimpleNamespace(
+            name="drone_0",
+            is_drone=True,
+            state=types.SimpleNamespace(pos=torch.tensor([[-0.94, -0.94]])),
+            action=types.SimpleNamespace(u=torch.tensor([[-0.8, -0.6]])),
+        )
+
+        scenario._project_drone_action_at_boundary(agent)
+
+        expected = 0.1 / math.sqrt(2.0)
+        torch.testing.assert_close(
+            agent.action.u,
+            torch.tensor([[expected, expected]]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_drone_boundary_escape_is_off_by_default(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.step_uav_boundary_projection_norm = torch.zeros(1, 1)
+        scenario.step_uav_boundary_projection_count = torch.zeros(1, 1)
+        agent = types.SimpleNamespace(
+            name="drone_0",
+            is_drone=True,
+            state=types.SimpleNamespace(pos=torch.tensor([[-0.94, -0.94]])),
+            action=types.SimpleNamespace(u=torch.tensor([[-0.8, -0.6]])),
+        )
+
+        scenario._project_drone_action_at_boundary(agent)
+
+        torch.testing.assert_close(agent.action.u, torch.zeros(1, 2))
+        self.assertAlmostEqual(float(scenario.step_uav_boundary_projection_norm[0, 0]), 1.0, places=6)
+
+    def test_drone_boundary_escape_scales_with_physical_step_distance(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.uav_boundary_escape_m = 2.0
+        scenario.drone_speed_mps = 20.0
+        scenario.step_uav_boundary_projection_norm = torch.zeros(1, 1)
+        scenario.step_uav_boundary_projection_count = torch.zeros(1, 1)
+        agent = types.SimpleNamespace(
+            name="drone_0",
+            is_drone=True,
+            state=types.SimpleNamespace(pos=torch.tensor([[0.94, 0.94]])),
+            action=types.SimpleNamespace(u=torch.tensor([[0.8, 0.6]])),
+        )
+
+        scenario._project_drone_action_at_boundary(agent)
+
+        expected = 0.05 / math.sqrt(2.0)
+        torch.testing.assert_close(
+            agent.action.u,
+            torch.tensor([[-expected, -expected]]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_world_clamp_stops_outward_velocity_at_uav_boundary(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.step_uav_boundary_hit = torch.zeros(1, 1)
+        drone = _Agent(
+            name="drone_0",
+            is_drone=True,
+            pos=[[0.95, -0.95]],
+            vel=[[0.4, -0.3]],
+        )
+        scenario._world = types.SimpleNamespace(batch_dim=1, agents=[drone])
+
+        scenario._clamp_agents_to_world()
+
+        torch.testing.assert_close(drone.state.pos, torch.tensor([[0.95, -0.95]]))
+        torch.testing.assert_close(drone.state.vel, torch.zeros(1, 2))
+        self.assertEqual(float(scenario.step_uav_boundary_hit[0, 0]), 0.0)
+
+    def test_world_clamp_records_uav_boundary_hit_and_clamps_position(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.step_uav_boundary_hit = torch.zeros(1, 1)
+        drone = _Agent(
+            name="drone_0",
+            is_drone=True,
+            pos=[[1.10, 0.0]],
+            vel=[[0.4, 0.2]],
+        )
+        scenario._world = types.SimpleNamespace(batch_dim=1, agents=[drone])
+
+        scenario._clamp_agents_to_world()
+
+        torch.testing.assert_close(drone.state.pos, torch.tensor([[0.95, 0.0]]))
+        torch.testing.assert_close(drone.state.vel, torch.tensor([[0.0, 0.2]]))
+        self.assertEqual(float(scenario.step_uav_boundary_hit[0, 0]), 1.0)
+
+    def test_boundary_observation_is_normalized_by_drone_footprint(self):
+        scenario = self._coverage_scenario()
+        scenario.agent_radius = 0.05
+        scenario.drone_altitude = torch.tensor([[0.2]])
+        agent = types.SimpleNamespace(
+            name="drone_0",
+            is_drone=True,
+            state=types.SimpleNamespace(pos=torch.tensor([[-0.85, 0.0]])),
+        )
+
+        obs = scenario._boundary_observation(agent)
+
+        self.assertAlmostEqual(float(obs[0, 0]), 0.5, places=6)
+        torch.testing.assert_close(obs[0, 1:], torch.ones(3))
+
+    def test_drone_blocked_patch_marks_outside_map_cells(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.local_map_patch_size = 3
+        scenario.required_clearance_grid = torch.zeros(1, 8, 8)
+        scenario.drone_max_altitude_by_env = torch.ones(1)
+        agent = types.SimpleNamespace(
+            name="drone_0",
+            is_drone=True,
+            state=types.SimpleNamespace(pos=torch.tensor([[-0.99, 0.99]])),
+        )
+
+        features = scenario._local_terrain_features(agent)
+        patch_cells = scenario.local_map_patch_size * scenario.local_map_patch_size
+        blocked = features[:, patch_cells : 2 * patch_cells]
+
+        expected = torch.tensor([[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
+        torch.testing.assert_close(blocked, expected)
 
 
 if __name__ == "__main__":

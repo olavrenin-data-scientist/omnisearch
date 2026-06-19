@@ -187,7 +187,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(model["use_terrain_cnn_encoder"])
         self.assertEqual(model["terrain_cnn_patch_size"], 7)
         self.assertEqual(model["terrain_cnn_embed_dim"], 12)
-        self.assertEqual(model["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 2 + 7)
+        self.assertEqual(model["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 2 + 4 + 7)
 
     def test_build_args_exposes_ugv_planner_hint(self):
         _, algo_args, env_args = build_args(
@@ -210,7 +210,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_patch_size"], 11)
         self.assertEqual(scenario["ugv_planner_lookahead_cells"], 5)
         self.assertEqual(scenario["r_ugv_planner_progress"], 0.05)
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 7)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7)
 
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
@@ -268,24 +268,31 @@ class HappoCheckpointTests(unittest.TestCase):
             entropy_coef=0.01,
             exp_name="uav_diag",
             terrain_cache_path="terrain.npz",
+            coverage_obs_grid=6,
+            local_coverage_obs_grid=9,
+            local_coverage_obs_radius_m=150.0,
             uav_survivor_diagnostic=True,
-            uav_diagnostic_target_distance_min_m=40.0,
-            uav_diagnostic_target_distance_max_m=120.0,
             uav_coverage_reward=7.5,
+            uav_move_coverage_reward=0.001,
+            uav_move_coverage_cap=0.2,
+            uav_overlap_penalty=0.05,
+            uav_overlap_allowed=0.60,
+            uav_outside_footprint_penalty=0.1,
+            uav_boundary_soft_margin_m=30.0,
             action_transform="radial_tanh",
         )
 
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["n_drones"], 3)
+        self.assertEqual(scenario["n_drones"], 1)
         self.assertEqual(scenario["n_ground"], 0)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertFalse(scenario["known_survivors_at_reset"])
-        self.assertEqual(scenario["survivor_spawn_reference"], "drone")
+        self.assertNotIn("survivor_spawn_reference", scenario)
         self.assertTrue(scenario["drone_can_confirm"])
-        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 80.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 40.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 120.0)
+        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
         self.assertTrue(scenario["disable_fire"])
         self.assertEqual(scenario["comms_dropout"], 0.0)
         self.assertEqual(scenario["r_drone_scout"], 2.0)
@@ -293,8 +300,123 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_ground_confirm"], 0.0)
         self.assertEqual(scenario["r_ground_shaping"], 0.0)
         self.assertEqual(scenario["r_coverage"], 7.5)
+        self.assertEqual(scenario["coverage_obs_grid"], 6)
+        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
+        self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
+        self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
+        self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
+        self.assertEqual(scenario["r_uav_overlap"], 0.05)
+        self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
+        self.assertEqual(scenario["r_uav_outside_footprint"], 0.1)
+        self.assertEqual(scenario["uav_boundary_soft_margin_m"], 30.0)
         self.assertEqual(scenario["r_fire_penalty"], 0.0)
         self.assertEqual(scenario["r_drone_climb_cost"], 0.0)
+
+    def test_uav_survivor_diagnostic_uses_current_defaults(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_defaults",
+            uav_survivor_diagnostic=True,
+        )
+
+        self.assertEqual(env_args["action_transform"], "radial_tanh")
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 1)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["r_drone_scout"], 2.0)
+        self.assertEqual(scenario["r_found_survivor"], 10.0)
+        self.assertEqual(scenario["r_time_penalty"], -0.0005)
+        self.assertEqual(scenario["r_coverage"], 20.0)
+        self.assertEqual(scenario["coverage_obs_grid"], 6)
+        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
+        self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
+        self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
+        self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)
+        self.assertEqual(scenario["r_uav_overlap"], 0.10)
+        self.assertEqual(scenario["uav_overlap_allowed"], 0.50)
+        self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
+
+    def test_uav_coverage_only_diagnostic_build_args(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_coverage_only",
+            uav_survivor_diagnostic=True,
+            uav_coverage_only=True,
+            uav_coverage_reward=20.0,
+            uav_move_coverage_reward=0.001,
+            uav_move_coverage_cap=0.2,
+            uav_overlap_penalty=0.05,
+            uav_overlap_allowed=0.60,
+            uav_outside_footprint_penalty=0.1,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 1)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_drone_scout"], 0.0)
+        self.assertEqual(scenario["r_time_penalty"], 0.0)
+        self.assertEqual(scenario["r_coverage"], 20.0)
+        self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
+        self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
+        self.assertEqual(scenario["r_uav_overlap"], 0.05)
+        self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
+        self.assertEqual(scenario["r_uav_outside_footprint"], 0.1)
+
+    def test_uav_diagnostic_can_disable_team_found_and_time_reward(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_scout_only",
+            uav_survivor_diagnostic=True,
+            uav_found_survivor_reward=0.0,
+            uav_time_penalty=0.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_drone_scout"], 2.0)
+        self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_time_penalty"], 0.0)
+        self.assertEqual(scenario["r_coverage"], 20.0)
+        self.assertEqual(scenario["coverage_obs_grid"], 6)
+        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
+
+    def test_uav_diagnostic_can_disable_default_global_coverage_observation(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_local_only",
+            uav_survivor_diagnostic=True,
+            uav_coverage_only=True,
+            uav_no_global_coverage_obs=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertNotIn("coverage_obs_grid", scenario)
+        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
+        self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
+        self.assertEqual(scenario["local_map_patch_size"], 7)
+        self.assertEqual(scenario["terrain_source"], "real")
+        self.assertTrue(scenario["terrain_cache_path"].endswith("malibu_creek_500m_128.npz"))
+        self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_drone_scout"], 0.0)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 246)
 
     def test_diagnostic_modes_are_mutually_exclusive(self):
         with self.assertRaises(ValueError):

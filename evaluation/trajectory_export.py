@@ -369,7 +369,7 @@ def export_trajectory(
     output_path:   Path,
     n_steps:       int = 200,
     seed:          int = 0,
-    num_envs:      int = 2,
+    num_envs:      int = 1,
     env_index:     int = 0,
     scenario_kwargs: Optional[dict] = None,
     cv_options: Optional[dict] = None,
