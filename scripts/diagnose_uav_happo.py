@@ -106,12 +106,14 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     boundary_distance_m_values: list[float] = []
     footprint_radius_m_values: list[float] = []
     path_positions_sim: list[np.ndarray] = []
+    per_drone_stats = [_new_drone_stats(drone_idx) for drone_idx in range(scenario.n_drones)]
     low_action_high_motion = 0
     high_action_low_motion = 0
     moving_no_new_coverage = 0
     diagnostic_steps = 0
 
     for step in range(int(scenario_kwargs["max_steps"])):
+        prev_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool).copy()
         pre_drone_pos = [
             agent.state.pos[0].detach().cpu().numpy().astype(float).copy()
             for agent in scenario.world.agents[:scenario.n_drones]
@@ -126,12 +128,12 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         meters_per_sim = 1.0 / max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
         coverage_cells = _metric_array(
             scenario,
-            "metric_uav_new_coverage_cells",
+            "metric_uav_new_coverage_cells_by_drone",
             scenario.n_drones,
         )
         outside_footprint_fraction = _metric_array(
             scenario,
-            "metric_uav_outside_footprint_fraction",
+            "metric_uav_outside_footprint_fraction_by_drone",
             scenario.n_drones,
         )
         overlap_fraction = _metric_array(
@@ -151,14 +153,22 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         )
         boundary_distance_m = _metric_array(
             scenario,
-            "metric_uav_boundary_distance_m",
+            "metric_uav_boundary_distance_m_by_drone",
             scenario.n_drones,
         )
         footprint_radius_m = _metric_array(
             scenario,
-            "metric_uav_footprint_radius_m",
+            "metric_uav_footprint_radius_m_by_drone",
             scenario.n_drones,
         )
+        post_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
+        newly_scouted = post_scouted & ~prev_scouted
+        drone_detections = (
+            scenario.step_drone_detections[0].detach().cpu().numpy().astype(bool)
+            if scenario.n_drones > 0 and n_survivors > 0
+            else np.zeros((scenario.n_drones, n_survivors), dtype=bool)
+        )
+        scout_credit = drone_detections & newly_scouted.reshape(1, -1)
         for drone_idx, action_vec in enumerate(action_vectors):
             post_pos = scenario.world.agents[drone_idx].state.pos[0].detach().cpu().numpy().astype(float)
             path_positions_sim.append(post_pos.copy())
@@ -180,23 +190,45 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
             footprint_radius_m_values.append(footprint_radius)
             diagnostic_steps += 1
+            drone_stats = per_drone_stats[drone_idx]
+            drone_stats["positions_sim"].extend([pre_drone_pos[drone_idx], post_pos.copy()])
+            drone_stats["action_norms"].append(action_norm)
+            drone_stats["displacement_m"].append(displacement_m)
+            drone_stats["new_coverage_cells"].append(new_cells)
+            drone_stats["outside_footprint"].append(float(outside_footprint_fraction[drone_idx]))
+            drone_stats["overlap"].append(overlap)
+            drone_stats["expected_overlap"].append(expected_overlap)
+            drone_stats["excess_overlap"].append(excess_overlap)
+            drone_stats["boundary_distance_m"].append(float(boundary_distance_m[drone_idx]))
+            drone_stats["footprint_radius_m"].append(footprint_radius)
+            drone_stats["diagnostic_steps"] += 1
+            for survivor_idx in np.flatnonzero(scout_credit[drone_idx]):
+                drone_stats["scout_credit_count"] += 1
+                drone_stats["scouted_survivors"].add(int(survivor_idx))
+                drone_stats["first_scout_steps"].append(step + 1)
 
             if action_norm < 0.05 and displacement_m > 1.0:
                 low_action_high_motion += 1
+                drone_stats["low_action_high_motion"] += 1
             if action_norm > 0.5 and displacement_m < 0.25:
                 high_action_low_motion += 1
+                drone_stats["high_action_low_motion"] += 1
             if displacement_m > 1.0 and new_cells < 1.0:
                 moving_no_new_coverage += 1
+                drone_stats["moving_no_new_coverage"] += 1
 
             displacement_norm_sim = float(np.linalg.norm(displacement_vec))
             if action_norm > 1e-6 and displacement_norm_sim > 1e-9:
                 alignment = float(np.dot(action_vec[:2], displacement_vec[:2]) / (action_norm * displacement_norm_sim))
                 alignment = max(min(alignment, 1.0), -1.0)
                 action_displacement_alignments.append(alignment)
+                drone_stats["alignments"].append(alignment)
                 if new_cells >= 1.0:
                     action_displacement_alignments_new_cov.append(alignment)
+                    drone_stats["alignments_new_cov"].append(alignment)
                 else:
                     action_displacement_alignments_no_new_cov.append(alignment)
+                    drone_stats["alignments_no_new_cov"].append(alignment)
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         for survivor_idx, is_scouted in enumerate(scouted):
@@ -222,6 +254,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         scenario,
         _finite_mean(footprint_radius_m_values),
     )
+    per_drone = [
+        _finalize_drone_stats(stats, scenario)
+        for stats in per_drone_stats
+    ]
     row = {
         "seed": int(seed),
         "survivors": n_survivors,
@@ -273,6 +309,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "low_action_high_motion_frac": low_action_high_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "high_action_low_motion_frac": high_action_low_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "moving_no_new_coverage_frac": moving_no_new_coverage / diagnostic_steps if diagnostic_steps else 0.0,
+        "per_drone": per_drone,
         **start_metrics,
         **path_metrics,
         **coverage_shape_metrics,
@@ -299,6 +336,90 @@ def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) ->
     if arr.size == 1:
         return np.repeat(arr, n_drones)
     return np.resize(arr, n_drones)
+
+
+def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
+    return {
+        "drone": int(drone_idx),
+        "positions_sim": [],
+        "action_norms": [],
+        "displacement_m": [],
+        "alignments": [],
+        "alignments_new_cov": [],
+        "alignments_no_new_cov": [],
+        "new_coverage_cells": [],
+        "outside_footprint": [],
+        "overlap": [],
+        "expected_overlap": [],
+        "excess_overlap": [],
+        "boundary_distance_m": [],
+        "footprint_radius_m": [],
+        "scout_credit_count": 0,
+        "scouted_survivors": set(),
+        "first_scout_steps": [],
+        "diagnostic_steps": 0,
+        "low_action_high_motion": 0,
+        "high_action_low_motion": 0,
+        "moving_no_new_coverage": 0,
+    }
+
+
+def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenario) -> dict[str, Any]:
+    positions = stats["positions_sim"]
+    displacement = stats["displacement_m"]
+    boundary = stats["boundary_distance_m"]
+    footprint = stats["footprint_radius_m"]
+    path = _path_metrics(positions, displacement, boundary, footprint, scenario)
+    steps = int(stats["diagnostic_steps"])
+    final_position_m: list[float] | None = None
+    if positions:
+        meters_per_sim = 1.0 / max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
+        final_position_m = (np.asarray(positions[-1], dtype=float) * meters_per_sim).round(6).tolist()
+    new_cells = stats["new_coverage_cells"]
+    excess = stats["excess_overlap"]
+    outside = stats["outside_footprint"]
+    return {
+        "drone": int(stats["drone"]),
+        "scout_credit_count": int(stats["scout_credit_count"]),
+        "scouted_survivors": sorted(int(idx) for idx in stats["scouted_survivors"]),
+        "first_scout_steps": [int(step) for step in stats["first_scout_steps"]],
+        "final_position_m": final_position_m,
+        "avg_action_norm": _finite_mean(stats["action_norms"]),
+        "avg_displacement_m": _finite_mean(displacement),
+        "path_length_m": float(np.sum(displacement)) if displacement else 0.0,
+        "avg_action_displacement_alignment": _finite_mean(stats["alignments"]),
+        "avg_action_displacement_alignment_new_cov": _finite_mean(stats["alignments_new_cov"]),
+        "avg_action_displacement_alignment_no_new_cov": _finite_mean(stats["alignments_no_new_cov"]),
+        "avg_new_coverage_cells": _finite_mean(new_cells),
+        "total_new_coverage_cells": float(np.sum(new_cells)) if new_cells else 0.0,
+        "new_coverage_step_frac": (
+            float(np.mean([value >= 1.0 for value in new_cells]))
+            if new_cells else 0.0
+        ),
+        "avg_outside_footprint_fraction": _finite_mean(outside),
+        "max_outside_footprint_fraction": max(outside) if outside else 0.0,
+        "avg_overlap_fraction": _finite_mean(stats["overlap"]),
+        "avg_expected_overlap_fraction": _finite_mean(stats["expected_overlap"]),
+        "avg_excess_overlap_fraction": _finite_mean(excess),
+        "excess_overlap_step_frac_10": (
+            float(np.mean([value >= 0.10 for value in excess]))
+            if excess else 0.0
+        ),
+        "excess_overlap_step_frac_20": (
+            float(np.mean([value >= 0.20 for value in excess]))
+            if excess else 0.0
+        ),
+        "low_action_high_motion_frac": (
+            stats["low_action_high_motion"] / steps if steps else 0.0
+        ),
+        "high_action_low_motion_frac": (
+            stats["high_action_low_motion"] / steps if steps else 0.0
+        ),
+        "moving_no_new_coverage_frac": (
+            stats["moving_no_new_coverage"] / steps if steps else 0.0
+        ),
+        **path,
+    }
 
 
 def _start_metrics(scenario: WildfireSearchScenario) -> dict[str, Any]:
@@ -537,7 +658,7 @@ def _failure_label(row: dict[str, Any]) -> str:
     return "partial_search"
 
 
-def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
+def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     successful = [row for row in rows if row["all_scouted_step"] is not None]
     summary = {
         "episodes": float(len(rows)),
@@ -626,7 +747,57 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
         "mean_coverage_edge_bias": _finite_mean([row["coverage_edge_bias"] for row in rows]),
     }
     summary.update(_distribution_summary(rows))
+    summary["per_drone"] = _summarize_per_drone(rows)
     return summary
+
+
+def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    drone_indices = sorted({
+        int(drone["drone"])
+        for row in rows
+        for drone in row.get("per_drone", [])
+    })
+    metrics = (
+        "scout_credit_count",
+        "avg_action_norm",
+        "avg_displacement_m",
+        "path_length_m",
+        "avg_action_displacement_alignment",
+        "avg_new_coverage_cells",
+        "total_new_coverage_cells",
+        "new_coverage_step_frac",
+        "avg_outside_footprint_fraction",
+        "avg_overlap_fraction",
+        "avg_expected_overlap_fraction",
+        "avg_excess_overlap_fraction",
+        "excess_overlap_step_frac_10",
+        "edge_step_frac",
+        "corner_step_frac",
+        "stalled_step_frac",
+        "longest_stall_steps",
+        "moving_no_new_coverage_frac",
+        "mean_boundary_distance_m",
+        "min_boundary_distance_m",
+    )
+    summaries: list[dict[str, float]] = []
+    for drone_idx in drone_indices:
+        entries = [
+            drone
+            for row in rows
+            for drone in row.get("per_drone", [])
+            if int(drone.get("drone", -1)) == drone_idx
+        ]
+        summary: dict[str, Any] = {
+            "drone": int(drone_idx),
+            "episodes": float(len(entries)),
+        }
+        for metric in metrics:
+            summary[f"mean_{metric}"] = _finite_mean([
+                float(entry.get(metric, math.nan))
+                for entry in entries
+            ])
+        summaries.append(summary)
+    return summaries
 
 
 def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -680,9 +851,66 @@ def _label_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
+    parts = []
+    for drone in drones:
+        parts.append(
+            f"d{int(drone['drone'])}:"
+            f"scout={int(drone['scout_credit_count'])} "
+            f"path={drone['path_length_m']:.0f}m "
+            f"move={drone['avg_displacement_m']:.1f}m "
+            f"new={drone['avg_new_coverage_cells']:.1f} "
+            f"edge={drone['edge_step_frac']:.2f} "
+            f"corner={drone['corner_step_frac']:.2f} "
+            f"excess={drone['avg_excess_overlap_fraction']:.2f} "
+            f"stall={drone['stalled_step_frac']:.2f}"
+        )
+    return "; ".join(parts)
+
+
+def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for drone in drones:
+        lines.append(
+            f"  d{int(drone['drone'])}: "
+            f"scouts={drone['mean_scout_credit_count']:.2f} "
+            f"path={drone['mean_path_length_m']:.1f}m "
+            f"move={drone['mean_avg_displacement_m']:.2f}m "
+            f"new_cells={drone['mean_avg_new_coverage_cells']:.1f} "
+            f"edge={drone['mean_edge_step_frac']:.3f} "
+            f"corner={drone['mean_corner_step_frac']:.3f} "
+            f"outside={drone['mean_avg_outside_footprint_fraction']:.3f} "
+            f"excess={drone['mean_avg_excess_overlap_fraction']:.3f} "
+            f"stall={drone['mean_stalled_step_frac']:.3f}"
+        )
+    return lines
+
+
+def _plot_per_drone_bars(
+    ax: Any,
+    summary: dict[str, Any],
+    key: str,
+    title: str,
+    ylabel: str,
+) -> None:
+    per_drone = summary.get("per_drone", [])
+    if not per_drone:
+        ax.text(0.5, 0.5, "no drones", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=10)
+        return
+    labels = [f"d{int(row['drone'])}" for row in per_drone]
+    values = [float(row.get(key, math.nan)) for row in per_drone]
+    x = np.arange(len(labels))
+    ax.bar(x, values, color="#36a269", alpha=0.85)
+    ax.set_xticks(x, labels)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10)
+    ax.grid(axis="y", alpha=0.25)
+
+
 def write_distribution_plots(
     rows: list[dict[str, Any]],
-    summary: dict[str, float],
+    summary: dict[str, Any],
     label_counts: dict[str, int],
     output_path: str,
 ) -> None:
@@ -710,7 +938,7 @@ def write_distribution_plots(
         ("Start Edge Min (m)", "min_start_edge_distance_m", None),
     ]
 
-    fig, axes = plt.subplots(5, 3, figsize=(14, 15), constrained_layout=True)
+    fig, axes = plt.subplots(6, 3, figsize=(14, 18), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -733,6 +961,28 @@ def write_distribution_plots(
         ax.set_title(title, fontsize=10)
         ax.set_ylabel("episodes")
         ax.grid(axis="y", alpha=0.25)
+
+    _plot_per_drone_bars(
+        axes_flat[13],
+        summary,
+        "mean_path_length_m",
+        "Per-Drone Path Length",
+        "m",
+    )
+    _plot_per_drone_bars(
+        axes_flat[14],
+        summary,
+        "mean_edge_step_frac",
+        "Per-Drone Edge Fraction",
+        "fraction",
+    )
+    _plot_per_drone_bars(
+        axes_flat[15],
+        summary,
+        "mean_avg_excess_overlap_fraction",
+        "Per-Drone Excess Overlap",
+        "fraction",
+    )
 
     heat_ax = axes_flat[-2]
     heat_ax.clear()
@@ -886,6 +1136,8 @@ def main() -> None:
             f"label={row['failure_label']} "
             f"first_steps={row['first_scout_steps']}"
         )
+        if row.get("per_drone"):
+            print(f"  drones: {_format_per_drone_row(row['per_drone'])}")
 
     summary = summarize(rows)
     label_counts = _label_counts(rows)
@@ -952,6 +1204,10 @@ def main() -> None:
         f"min_pair={summary['mean_min_start_pair_distance_m']:.1f}m "
         f"min_edge={summary['mean_min_start_edge_distance_m']:.1f}m"
     )
+    if summary.get("per_drone"):
+        print("per-drone means:")
+        for line in _format_per_drone_summary(summary["per_drone"]):
+            print(line)
     print(
         "failure labels: "
         + ", ".join(f"{label}={count}" for label, count in label_counts.items())
