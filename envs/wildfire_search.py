@@ -704,60 +704,6 @@ class WildfireSearchScenario(BaseScenario):
             max(float(kwargs.pop("uav_overlap_allowed", 0.10)), 0.0),
             0.999,
         )
-        self.uav_overlap_penalty_normalization = str(
-            kwargs.pop("uav_overlap_penalty_normalization", "raw")
-        ).replace("-", "_").lower()
-        if self.uav_overlap_penalty_normalization not in {"raw", "opportunity"}:
-            raise ValueError("uav_overlap_penalty_normalization must be one of: raw, opportunity")
-        self.r_uav_confidence = max(float(kwargs.pop("r_uav_confidence", 0.0)), 0.0)
-        self.r_uav_team_confidence = max(float(kwargs.pop("r_uav_team_confidence", 0.0)), 0.0)
-        self.r_uav_team_confidence_overlap = max(
-            float(kwargs.pop("r_uav_team_confidence_overlap", 0.0)),
-            0.0,
-        )
-        self.r_uav_confidence_move = max(float(kwargs.pop("r_uav_confidence_move", 0.0)), 0.0)
-        self.r_uav_inefficient_move = max(
-            float(kwargs.pop("r_uav_inefficient_move", 0.0)),
-            0.0,
-        )
-        self.uav_inefficient_move_source = str(
-            kwargs.pop("uav_inefficient_move_source", "confidence")
-        ).replace("-", "_").lower()
-        if self.uav_inefficient_move_source not in {"coverage", "confidence"}:
-            raise ValueError("uav_inefficient_move_source must be one of: coverage, confidence")
-        self.r_uav_confidence_overlap = max(
-            float(kwargs.pop("r_uav_confidence_overlap", 0.0)),
-            0.0,
-        )
-        self.uav_confidence_overlap_mode = str(
-            kwargs.pop("uav_confidence_overlap_mode", "raw")
-        ).replace("-", "_").lower()
-        if self.uav_confidence_overlap_mode not in {"raw", "opportunity_regret"}:
-            raise ValueError(
-                "uav_confidence_overlap_mode must be one of: raw, opportunity_regret"
-            )
-        self.uav_confidence_overlap_allowed_regret = min(
-            max(float(kwargs.pop("uav_confidence_overlap_allowed_regret", 0.10)), 0.0),
-            1.0,
-        )
-        self.r_uav_cleanup_target_progress = max(
-            float(kwargs.pop("r_uav_cleanup_target_progress", 0.0)),
-            0.0,
-        )
-        self.r_uav_astar_progress = max(
-            float(kwargs.pop("r_uav_astar_progress", 0.0)),
-            0.0,
-        )
-        self.uav_confidence_overlap_threshold = min(
-            max(float(kwargs.pop("uav_confidence_overlap_threshold", 0.65)), 0.0),
-            0.999,
-        )
-        self.uav_confidence_opportunity_eps = max(
-            float(kwargs.pop("uav_confidence_opportunity_eps", 1e-6)),
-            0.0,
-        )
-        self.uav_confidence_gamma = max(float(kwargs.pop("uav_confidence_gamma", 2.0)), 0.0)
-        self.uav_confidence_eps = max(float(kwargs.pop("uav_confidence_eps", 0.05)), 0.0)
         self.r_uav_inter_uav_overlap = max(float(kwargs.pop("r_uav_inter_uav_overlap", 0.0)), 0.0)
         self.uav_inter_uav_overlap_allowed = min(
             max(float(kwargs.pop("uav_inter_uav_overlap_allowed", 0.20)), 0.0),
@@ -4614,112 +4560,11 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ugv_travel_cost.zero_()
 
         (
-            uav_frontier_alignment_reward,
-            uav_frontier_alignment,
-            uav_frontier_progress_fraction,
-            uav_frontier_uncovered_ratio,
-        ) = self._uav_frontier_alignment_reward(drone_pos)
-        previous_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
-        (
             coverage_new,
             uav_overlap_fraction,
             uav_outside_footprint_fraction,
             uav_inter_uav_overlap_fraction,
-            uav_coverage_opportunity_fraction,
-            uav_coverage_opportunity_cells,
-            uav_coverage_opportunity_available_fraction,
         ) = self._coverage_reward(drone_pos)  # [B, D]
-        uav_confidence_probability = None
-        uav_confidence_visible = None
-        if self._uav_confidence_active():
-            with torch.no_grad():
-                uav_confidence_probability, uav_confidence_visible = self._uav_cell_detection_probability(drone_pos)
-        uav_pre_confidence_grid = (
-            self.uav_confidence_grid.clone()
-            if (
-                self.r_uav_astar_progress > 0.0
-                or (
-                    (
-                        self.r_uav_confidence_overlap > 0.0
-                        or self.r_uav_team_confidence_overlap > 0.0
-                    )
-                    and self.uav_confidence_overlap_mode != "raw"
-                )
-            )
-            else self.uav_confidence_grid
-        )
-        if self.uav_confidence_overlap_mode == "raw":
-            uav_confidence_overlap_penalty = self._uav_confidence_overlap_penalty(
-                drone_pos,
-                visible=uav_confidence_visible,
-                previous=self.uav_confidence_grid,
-            )
-        else:
-            uav_confidence_overlap_penalty = torch.zeros(
-                self.world.batch_dim,
-                self.n_drones,
-                device=device,
-            )
-        uav_confidence_reward, uav_confidence_move_reward = self._update_uav_confidence(
-            drone_pos,
-            probability=uav_confidence_probability,
-            visible=uav_confidence_visible,
-        )
-        uav_team_confidence_reward = torch.zeros_like(uav_confidence_reward)
-        if self.n_drones > 0 and self.r_uav_team_confidence > 0.0:
-            team_confidence = uav_confidence_reward.mean(dim=1, keepdim=True)
-            uav_team_confidence_reward = (
-                team_confidence * float(self.r_uav_team_confidence)
-            ).expand_as(uav_confidence_reward).clone()
-        if self.uav_confidence_overlap_mode != "raw":
-            uav_confidence_overlap_penalty = self._uav_confidence_overlap_penalty(
-                drone_pos,
-                visible=uav_confidence_visible,
-                previous=uav_pre_confidence_grid,
-            )
-        uav_team_confidence_overlap_penalty = torch.zeros_like(uav_confidence_overlap_penalty)
-        if self.n_drones > 0 and self.r_uav_team_confidence_overlap > 0.0:
-            overlap_terms = (
-                self.metric_uav_confidence_overlap_fraction_by_drone.to(
-                    device=device,
-                    dtype=uav_confidence_overlap_penalty.dtype,
-                ).clamp(0.0, 1.0)
-                * self.metric_uav_confidence_overlap_regret_by_drone.to(
-                    device=device,
-                    dtype=uav_confidence_overlap_penalty.dtype,
-                ).clamp(0.0, 1.0)
-            )
-            team_overlap = -float(self.r_uav_team_confidence_overlap) * overlap_terms.mean(
-                dim=1,
-                keepdim=True,
-            )
-            uav_team_confidence_overlap_penalty = (
-                team_overlap.expand_as(uav_confidence_overlap_penalty).clone()
-            )
-        self._update_uav_cleanup_target_step_metrics(drone_pos)
-        (
-            uav_cleanup_target_progress_reward,
-            uav_cleanup_target_frontier_gate,
-        ) = self._uav_cleanup_target_progress_reward(drone_pos)
-        (
-            uav_astar_progress_reward,
-            uav_astar_frontier_gate,
-            uav_astar_progress_fraction,
-            uav_astar_path_cost_before,
-            uav_astar_path_cost_after,
-        ) = self._uav_astar_progress_reward(
-            drone_pos,
-            confidence_grid=uav_pre_confidence_grid,
-        )
-        current_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
-        coverage_threshold_crossed = (
-            (previous_coverage_fraction < self.uav_coverage_threshold_fraction)
-            & (current_coverage_fraction >= self.uav_coverage_threshold_fraction)
-        )
-        uav_coverage_threshold_reward = (
-            coverage_threshold_crossed.float() * self.r_uav_coverage_threshold
-        )
-        team_reward = team_reward + uav_coverage_threshold_reward
         (
             uav_move_coverage_reward,
             drone_displacement_m,
@@ -4746,6 +4591,9 @@ class WildfireSearchScenario(BaseScenario):
             uav_overlap_fraction,
             uav_expected_overlap_fraction,
             uav_coverage_opportunity_available_fraction,
+        )
+        uav_inter_uav_overlap_penalty = self._uav_inter_uav_overlap_penalty(
+            uav_inter_uav_overlap_fraction,
         )
         uav_inter_uav_overlap_penalty = self._uav_inter_uav_overlap_penalty(
             uav_inter_uav_overlap_fraction,
@@ -6992,7 +6840,7 @@ class WildfireSearchScenario(BaseScenario):
         any_safe = traversable.any(dim=-1)
         return torch.where(any_safe.unsqueeze(-1), chosen, start_pos)
 
-    def _coverage_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def _coverage_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Per-drone fraction of the map newly covered by camera footprints.
 
         All drone claims are calculated before updating ``coverage_grid``.
@@ -7004,19 +6852,8 @@ class WildfireSearchScenario(BaseScenario):
         overlap_fraction = torch.zeros_like(new_per_drone)
         outside_footprint_fraction = torch.zeros_like(new_per_drone)
         inter_uav_overlap_fraction = torch.zeros_like(new_per_drone)
-        opportunity_fraction = torch.zeros_like(new_per_drone)
-        opportunity_cells = torch.zeros_like(new_per_drone)
-        opportunity_available_fraction = torch.zeros_like(new_per_drone)
         if self.n_drones == 0:
-            return (
-                new_per_drone,
-                overlap_fraction,
-                outside_footprint_fraction,
-                inter_uav_overlap_fraction,
-                opportunity_fraction,
-                opportunity_cells,
-                opportunity_available_fraction,
-            )
+            return new_per_drone, overlap_fraction, outside_footprint_fraction, inter_uav_overlap_fraction
         # The coverage grid is updated below even when the coverage reward is
         # off, because it can also feed the team-coverage observation.
         if (
@@ -7034,15 +6871,7 @@ class WildfireSearchScenario(BaseScenario):
             and self.r_uav_inter_uav_overlap <= 0.0
             and self.r_uav_outside_footprint <= 0.0
         ):
-            return (
-                new_per_drone,
-                overlap_fraction,
-                outside_footprint_fraction,
-                inter_uav_overlap_fraction,
-                opportunity_fraction,
-                opportunity_cells,
-                opportunity_available_fraction,
-            )
+            return new_per_drone, overlap_fraction, outside_footprint_fraction, inter_uav_overlap_fraction
 
         G = self.fire_grid_size
         xs, ys, _, _, _, cell_width, cell_height, _ = self._uav_grid_geometry(
@@ -7128,9 +6957,6 @@ class WildfireSearchScenario(BaseScenario):
             overlap_fraction,
             outside_footprint_fraction,
             inter_uav_overlap_fraction,
-            opportunity_fraction,
-            opportunity_cells,
-            opportunity_available_fraction,
         )
 
     def _uav_coverage_reward(self, map_fraction: Tensor, opportunity_fraction: Tensor) -> Tensor:
@@ -10852,11 +10678,6 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_proposed_path_blocked": self.step_ugv_proposed_path_blocked.float().sum(dim=1),
             "diagnostic/uav_overlap_fraction": self.metric_uav_overlap_fraction,
             "diagnostic/uav_inter_uav_overlap_fraction": self.metric_uav_inter_uav_overlap_fraction,
-            "diagnostic/uav_frontier_alignment": self.metric_uav_frontier_alignment,
-            "diagnostic/uav_frontier_progress_fraction": self.metric_uav_frontier_progress_fraction,
-            "diagnostic/uav_frontier_uncovered_ratio": self.metric_uav_frontier_uncovered_ratio,
-            "diagnostic/uav_astar_progress_fraction": self.metric_uav_astar_progress_fraction,
-            "diagnostic/uav_astar_frontier_gate": self.metric_uav_astar_frontier_gate,
             "diagnostic/uav_outside_footprint_fraction": self.metric_uav_outside_footprint_fraction,
             "diagnostic/ugv_speed_limited": self.step_ugv_speed_limited.float().sum(dim=1),
             "diagnostic/ugv_path_speed": (
