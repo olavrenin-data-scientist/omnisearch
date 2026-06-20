@@ -51,7 +51,7 @@ DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M = 150.0
 DEFAULT_UAV_DIAG_COVERAGE_REWARD = 20.0
 DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD = 0.001
 DEFAULT_UAV_DIAG_OVERLAP_PENALTY = 0.10
-DEFAULT_UAV_DIAG_OVERLAP_ALLOWED = 0.50
+DEFAULT_UAV_DIAG_OVERLAP_ALLOWED = 0.10
 DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY = 0.10
 DEFAULT_UAV_DIAG_ENTROPY_COEF = 0.05
 DEFAULT_UAV_DIAG_EPISODE_LENGTH = 300
@@ -116,7 +116,7 @@ def build_args(
     uav_move_coverage_reward: float = 0.0,
     uav_move_coverage_cap: float = 0.1,
     uav_overlap_penalty: float = 0.0,
-    uav_overlap_allowed: float = 0.60,
+    uav_overlap_allowed: float = 0.10,
     uav_outside_footprint_penalty: float = 0.0,
     uav_boundary_soft_margin_m: float = 25.0,
     uav_start_min_separation_m: float | None = None,
@@ -638,10 +638,11 @@ def main():
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
     p.add_argument("--uav-overlap-penalty", type=float, default=0.0,
-                   help="Maximum per-UAV per-step penalty at 100%% footprint overlap. "
-                        "Penalty ramps linearly above --uav-overlap-allowed.")
-    p.add_argument("--uav-overlap-allowed", type=float, default=0.60,
-                   help="Footprint overlap fraction that is allowed before overlap penalty starts.")
+                   help="Maximum per-UAV per-step penalty at maximum excess footprint overlap. "
+                        "The expected overlap from actual movement is not penalized.")
+    p.add_argument("--uav-overlap-allowed", type=float, default=0.10,
+                   help="Excess footprint-overlap slack above the physics-expected overlap "
+                        "before the UAV overlap penalty starts.")
     p.add_argument("--uav-outside-footprint-penalty", type=float, default=0.0,
                    help="Maximum per-UAV per-step penalty when the camera footprint is fully outside the map. "
                         "Penalty scales linearly with the estimated outside-footprint fraction.")

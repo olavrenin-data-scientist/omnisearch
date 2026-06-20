@@ -136,7 +136,17 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         )
         overlap_fraction = _metric_array(
             scenario,
-            "metric_uav_overlap_fraction",
+            "metric_uav_overlap_fraction_by_drone",
+            scenario.n_drones,
+        )
+        expected_overlap_fraction = _metric_array(
+            scenario,
+            "metric_uav_expected_overlap_fraction_by_drone",
+            scenario.n_drones,
+        )
+        excess_overlap_fraction = _metric_array(
+            scenario,
+            "metric_uav_excess_overlap_fraction_by_drone",
             scenario.n_drones,
         )
         boundary_distance_m = _metric_array(
@@ -162,10 +172,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
             overlap = float(overlap_fraction[drone_idx])
             footprint_radius = float(footprint_radius_m[drone_idx])
-            expected_overlap = _circle_overlap_fraction(footprint_radius, displacement_m)
+            expected_overlap = float(expected_overlap_fraction[drone_idx])
+            excess_overlap = float(excess_overlap_fraction[drone_idx])
             overlap_values.append(overlap)
             expected_overlap_values.append(expected_overlap)
-            excess_overlap_values.append(max(overlap - expected_overlap, 0.0))
+            excess_overlap_values.append(excess_overlap)
             boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
             footprint_radius_m_values.append(footprint_radius)
             diagnostic_steps += 1
@@ -276,25 +287,6 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
 def _finite_mean(values: list[float]) -> float:
     finite = [value for value in values if math.isfinite(value)]
     return float(np.mean(finite)) if finite else math.nan
-
-
-def _circle_overlap_fraction(radius_m: float, displacement_m: float) -> float:
-    """Expected overlap of two equal circular footprints separated by movement."""
-    if not math.isfinite(radius_m) or radius_m <= 0.0:
-        return 0.0
-    if not math.isfinite(displacement_m):
-        return 0.0
-    d = max(float(displacement_m), 0.0)
-    r = float(radius_m)
-    if d <= 0.0:
-        return 1.0
-    if d >= 2.0 * r:
-        return 0.0
-    area = (
-        2.0 * r * r * math.acos(d / (2.0 * r))
-        - 0.5 * d * math.sqrt(max(4.0 * r * r - d * d, 0.0))
-    )
-    return max(min(area / (math.pi * r * r), 1.0), 0.0)
 
 
 def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) -> np.ndarray:

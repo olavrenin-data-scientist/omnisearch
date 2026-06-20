@@ -252,18 +252,27 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertLessEqual(total, 1.0 + 1e-7)
 
-    def test_uav_overlap_penalty_uses_allowed_normalized_excess(self):
+    def test_uav_expected_overlap_fraction_uses_circle_geometry(self):
+        scenario = self._coverage_scenario()
+        scenario.drone_altitude = torch.tensor([[2.5]])  # 25m footprint radius at 0.1 sim-units/m.
+
+        expected = scenario._uav_expected_overlap_fraction(torch.tensor([[16.0]]))
+
+        self.assertAlmostEqual(float(expected[0, 0]), 0.600, places=3)
+
+    def test_uav_overlap_penalty_uses_expected_overlap_and_allowed_slack(self):
         scenario = self._coverage_scenario()
         scenario.r_uav_overlap = 0.05
-        scenario.uav_overlap_allowed = 0.60
-        overlap = torch.tensor([[0.50, 0.60, 0.80, 1.00]])
+        scenario.uav_overlap_allowed = 0.10
+        overlap = torch.tensor([[0.50, 0.70, 0.80, 1.00]])
+        expected = torch.tensor([[0.60, 0.60, 0.60, 0.60]])
         scenario.n_drones = overlap.shape[1]
 
-        penalty = scenario._uav_overlap_penalty(overlap)
+        penalty = scenario._uav_overlap_penalty(overlap, expected)
 
         self.assertAlmostEqual(float(penalty[0, 0]), 0.0, places=6)
         self.assertAlmostEqual(float(penalty[0, 1]), 0.0, places=6)
-        self.assertAlmostEqual(float(penalty[0, 2]), -0.025, places=6)
+        self.assertAlmostEqual(float(penalty[0, 2]), -0.05 / 3.0, places=6)
         self.assertAlmostEqual(float(penalty[0, 3]), -0.05, places=6)
 
     def test_uav_outside_footprint_penalty_scales_with_footprint_outside_map(self):
