@@ -9,6 +9,25 @@ Author: Oleksii Lavrenin (seniorQAautomationEngineer). A formatted PDF of this r
 
 ---
 
+## How we reached ≥0.9 (summary)
+
+Survivor recall went from a do-nothing **0.0** to a **learned 0.97** through four kinds of change,
+in order. The first three are decisive; the fourth is supporting plumbing.
+
+| # | Kind of change | What | Why it mattered |
+|---|---|---|---|
+| 1 | **Fix the world geometry** (precondition) | 1 km terrain instead of the default ~22 km map | On the big map a survivor is a ~0.04 %-of-map pinpoint and **everyone scored 0.0**. The smaller map makes `sim_units_per_meter` ~20× larger so confirmation is physically possible — recall lifts off zero. |
+| 2 | **Fix the model, not the sensors** (decisive) | `drone_can_confirm` (aerial EO/IR confirmation from altitude) + `confirm_requires_los` (line-of-sight gate) | The honest route to ≥0.9: real wildfire-SAR drones detect/confirm people from above. Lifts the ceiling to **0.83–1.00** with realistic FOV/altitude. The LOS gate proves the recall is real (it collapsed the generous-sensor 0.90 to 0.40, exposing it as an artifact). |
+| 3 | **Fix how we learn** (got us to 0.9) | Behaviour-clone the 1.0-recall lawnmower into the actors, then RL fine-tune from that warm-start; keep the best checkpoint by recall | From-scratch RL plateaus at 0.50–0.70 under the realistic config. Cloning + fine-tuning lifts the **learned** policy to **0.97** (robust to 0.3 comms dropout). The fine-tune starts at ~79 reward vs ~42 from scratch; snapshotting avoids the late-run regression (final checkpoint fell to 0.80). |
+| 4 | **Reward & observation shaping** (supporting) | Team `coverage_obs_grid`, confirmation-dominant reward, idle/pending penalty, ground-exploration reward, recurrent GRU policy | Necessary so the clone matches the observation space and RL can express systematic sweep-and-confirm. On their own (from scratch) they reach only ~0.20–0.70. |
+
+**Recall journey:** pure RL ~0.20 → generous-sensor 0.90 *(artifact)* → +line-of-sight 0.40 → realistic
+from-scratch 0.60 → expert 1.00 → **BC + RL fine-tune 0.97 (learned)**. The credible headline is **≥0.9
+by realistic aerial confirmation**; the flat 0.90 from generous sensors + see-through terrain is only a
+sensor-sensitivity upper bound, never the operating point.
+
+---
+
 ## Goal & question
 
 **Can a trained MARL policy (HAPPO) match or beat hand-coded coordination heuristics** on the
