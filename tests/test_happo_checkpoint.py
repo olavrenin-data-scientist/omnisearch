@@ -362,6 +362,29 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
 
+    def test_uav_survivor_diagnostic_preserves_explicit_zero_reward_overrides(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_zeroes",
+            uav_survivor_diagnostic=True,
+            uav_coverage_reward=0.0,
+            uav_move_coverage_reward=0.0,
+            uav_overlap_penalty=0.0,
+            uav_overlap_allowed=0.0,
+            uav_outside_footprint_penalty=0.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_coverage"], 0.0)
+        self.assertEqual(scenario["r_uav_move_coverage"], 0.0)
+        self.assertEqual(scenario["r_uav_overlap"], 0.0)
+        self.assertEqual(scenario["uav_overlap_allowed"], 0.0)
+        self.assertEqual(scenario["r_uav_outside_footprint"], 0.0)
+
     def test_uav_survivor_diagnostic_can_use_two_drones(self):
         _, _, env_args = build_args(
             num_env_steps=100,

@@ -62,6 +62,63 @@ DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
 
 
+def _resolve_uav_reward_defaults(
+    *,
+    uav_survivor_diagnostic: bool,
+    uav_coverage_reward: float | None,
+    uav_move_coverage_reward: float | None,
+    uav_overlap_penalty: float | None,
+    uav_overlap_allowed: float | None,
+    uav_outside_footprint_penalty: float | None,
+) -> tuple[float, float, float, float, float]:
+    """Resolve omitted UAV reward flags while preserving explicit zeroes."""
+
+    if uav_survivor_diagnostic:
+        coverage_reward = (
+            DEFAULT_UAV_DIAG_COVERAGE_REWARD
+            if uav_coverage_reward is None
+            else uav_coverage_reward
+        )
+        move_coverage_reward = (
+            DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD
+            if uav_move_coverage_reward is None
+            else uav_move_coverage_reward
+        )
+        overlap_penalty = (
+            DEFAULT_UAV_DIAG_OVERLAP_PENALTY
+            if uav_overlap_penalty is None
+            else uav_overlap_penalty
+        )
+        overlap_allowed = (
+            DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
+            if uav_overlap_allowed is None
+            else uav_overlap_allowed
+        )
+        outside_footprint_penalty = (
+            DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
+            if uav_outside_footprint_penalty is None
+            else uav_outside_footprint_penalty
+        )
+    else:
+        coverage_reward = 5.0 if uav_coverage_reward is None else uav_coverage_reward
+        move_coverage_reward = 0.0 if uav_move_coverage_reward is None else uav_move_coverage_reward
+        overlap_penalty = 0.0 if uav_overlap_penalty is None else uav_overlap_penalty
+        overlap_allowed = 0.10 if uav_overlap_allowed is None else uav_overlap_allowed
+        outside_footprint_penalty = (
+            0.0
+            if uav_outside_footprint_penalty is None
+            else uav_outside_footprint_penalty
+        )
+
+    return (
+        float(coverage_reward),
+        float(move_coverage_reward),
+        float(overlap_penalty),
+        float(overlap_allowed),
+        float(outside_footprint_penalty),
+    )
+
+
 # ----------------------------------------------------------------------
 # Step 1 — monkey-patch HARL's env registry to recognise "wildfire"
 # ----------------------------------------------------------------------
@@ -112,12 +169,12 @@ def build_args(
     uav_coverage_only: bool = False,
     uav_found_survivor_reward: float | None = None,
     uav_time_penalty: float | None = None,
-    uav_coverage_reward: float = 5.0,
-    uav_move_coverage_reward: float = 0.0,
+    uav_coverage_reward: float | None = None,
+    uav_move_coverage_reward: float | None = None,
     uav_move_coverage_cap: float = 0.1,
-    uav_overlap_penalty: float = 0.0,
-    uav_overlap_allowed: float = 0.10,
-    uav_outside_footprint_penalty: float = 0.0,
+    uav_overlap_penalty: float | None = None,
+    uav_overlap_allowed: float | None = None,
+    uav_outside_footprint_penalty: float | None = None,
     uav_boundary_soft_margin_m: float = 25.0,
     uav_start_min_separation_m: float | None = None,
     uav_start_edge_margin_m: float | None = None,
@@ -155,21 +212,26 @@ def build_args(
         if local_coverage_obs_grid <= 0:
             local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
-        if uav_coverage_reward == 5.0:
-            uav_coverage_reward = DEFAULT_UAV_DIAG_COVERAGE_REWARD
-        if uav_move_coverage_reward == 0.0:
-            uav_move_coverage_reward = DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD
-        if uav_overlap_penalty == 0.0:
-            uav_overlap_penalty = DEFAULT_UAV_DIAG_OVERLAP_PENALTY
-            uav_overlap_allowed = DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
-        if uav_outside_footprint_penalty == 0.0:
-            uav_outside_footprint_penalty = DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
         if uav_start_min_separation_m is None:
             uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
         if uav_start_edge_margin_m is None:
             uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
         if action_transform == "clip":
             action_transform = "radial_tanh"
+    (
+        uav_coverage_reward,
+        uav_move_coverage_reward,
+        uav_overlap_penalty,
+        uav_overlap_allowed,
+        uav_outside_footprint_penalty,
+    ) = _resolve_uav_reward_defaults(
+        uav_survivor_diagnostic=uav_survivor_diagnostic,
+        uav_coverage_reward=uav_coverage_reward,
+        uav_move_coverage_reward=uav_move_coverage_reward,
+        uav_overlap_penalty=uav_overlap_penalty,
+        uav_overlap_allowed=uav_overlap_allowed,
+        uav_outside_footprint_penalty=uav_outside_footprint_penalty,
+    )
     ugv_planner_patch_size = int(ugv_planner_patch_size)
     if ugv_planner_patch_size < 1 or ugv_planner_patch_size % 2 != 1:
         raise ValueError("ugv_planner_patch_size must be a positive odd integer")
@@ -630,22 +692,25 @@ def main():
                    help="Override r_found_survivor in UAV diagnostic mode.")
     p.add_argument("--uav-time-penalty", type=float, default=None,
                    help="Override r_time_penalty in UAV diagnostic mode.")
-    p.add_argument("--uav-coverage-reward", type=float, default=5.0,
-                   help="Total reward scale for team-new UAV camera footprint coverage in the UAV diagnostic task.")
-    p.add_argument("--uav-move-coverage-reward", type=float, default=0.0,
+    p.add_argument("--uav-coverage-reward", type=float, default=None,
+                   help="Total reward scale for team-new UAV camera footprint coverage. "
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-move-coverage-reward", type=float, default=None,
                    help="Reward scale for UAV actual displacement in meters multiplied by newly covered cells. "
-                        "Default 0 disables the term.")
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
-    p.add_argument("--uav-overlap-penalty", type=float, default=0.0,
+    p.add_argument("--uav-overlap-penalty", type=float, default=None,
                    help="Maximum per-UAV per-step penalty at maximum excess footprint overlap. "
-                        "The expected overlap from actual movement is not penalized.")
-    p.add_argument("--uav-overlap-allowed", type=float, default=0.10,
+                        "The expected overlap from actual movement is not penalized. "
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-overlap-allowed", type=float, default=None,
                    help="Excess footprint-overlap slack above the physics-expected overlap "
                         "before the UAV overlap penalty starts.")
-    p.add_argument("--uav-outside-footprint-penalty", type=float, default=0.0,
+    p.add_argument("--uav-outside-footprint-penalty", type=float, default=None,
                    help="Maximum per-UAV per-step penalty when the camera footprint is fully outside the map. "
-                        "Penalty scales linearly with the estimated outside-footprint fraction.")
+                        "Penalty scales linearly with the estimated outside-footprint fraction. "
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-boundary-soft-margin-m", type=float, default=25.0,
                    help="Physical margin from map edge used for UAV boundary risk diagnostics.")
     p.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -718,19 +783,22 @@ def main():
         p.error("--local-coverage-obs-radius-m must be positive")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
-    if args.uav_coverage_reward < 0.0:
+    if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
         p.error("--uav-coverage-reward must be nonnegative")
     if args.uav_found_survivor_reward is not None and args.uav_found_survivor_reward < 0.0:
         p.error("--uav-found-survivor-reward must be nonnegative")
-    if args.uav_move_coverage_reward < 0.0:
+    if args.uav_move_coverage_reward is not None and args.uav_move_coverage_reward < 0.0:
         p.error("--uav-move-coverage-reward must be nonnegative")
     if args.uav_move_coverage_cap < 0.0:
         p.error("--uav-move-coverage-cap must be nonnegative")
-    if args.uav_overlap_penalty < 0.0:
+    if args.uav_overlap_penalty is not None and args.uav_overlap_penalty < 0.0:
         p.error("--uav-overlap-penalty must be nonnegative")
-    if not 0.0 <= args.uav_overlap_allowed < 1.0:
+    if args.uav_overlap_allowed is not None and not 0.0 <= args.uav_overlap_allowed < 1.0:
         p.error("--uav-overlap-allowed must be in [0, 1)")
-    if args.uav_outside_footprint_penalty < 0.0:
+    if (
+        args.uav_outside_footprint_penalty is not None
+        and args.uav_outside_footprint_penalty < 0.0
+    ):
         p.error("--uav-outside-footprint-penalty must be nonnegative")
     if args.uav_boundary_soft_margin_m <= 0.0:
         p.error("--uav-boundary-soft-margin-m must be positive")
@@ -783,15 +851,6 @@ def main():
         if args.local_coverage_obs_grid <= 0:
             args.local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             args.local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
-        if args.uav_coverage_reward == 5.0:
-            args.uav_coverage_reward = DEFAULT_UAV_DIAG_COVERAGE_REWARD
-        if args.uav_move_coverage_reward == 0.0:
-            args.uav_move_coverage_reward = DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD
-        if args.uav_overlap_penalty == 0.0:
-            args.uav_overlap_penalty = DEFAULT_UAV_DIAG_OVERLAP_PENALTY
-            args.uav_overlap_allowed = DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
-        if args.uav_outside_footprint_penalty == 0.0:
-            args.uav_outside_footprint_penalty = DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
         if args.uav_start_min_separation_m is None:
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
         if args.uav_start_edge_margin_m is None:
@@ -800,6 +859,21 @@ def main():
             args.action_transform = "radial_tanh"
         if args.n_rollout_threads == 1:
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
+
+    (
+        args.uav_coverage_reward,
+        args.uav_move_coverage_reward,
+        args.uav_overlap_penalty,
+        args.uav_overlap_allowed,
+        args.uav_outside_footprint_penalty,
+    ) = _resolve_uav_reward_defaults(
+        uav_survivor_diagnostic=args.uav_survivor_diagnostic,
+        uav_coverage_reward=args.uav_coverage_reward,
+        uav_move_coverage_reward=args.uav_move_coverage_reward,
+        uav_overlap_penalty=args.uav_overlap_penalty,
+        uav_overlap_allowed=args.uav_overlap_allowed,
+        uav_outside_footprint_penalty=args.uav_outside_footprint_penalty,
+    )
 
     if args.preset == "floor0-1km":
         # Validated floor-0 config: small (1km) terrain restores real detection
