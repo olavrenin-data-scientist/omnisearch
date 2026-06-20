@@ -103,6 +103,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     overlap_values: list[float] = []
     expected_overlap_values: list[float] = []
     excess_overlap_values: list[float] = []
+    inter_uav_overlap_values: list[float] = []
     boundary_distance_m_values: list[float] = []
     footprint_radius_m_values: list[float] = []
     path_positions_sim: list[np.ndarray] = []
@@ -151,6 +152,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             "metric_uav_excess_overlap_fraction_by_drone",
             scenario.n_drones,
         )
+        inter_uav_overlap_fraction = _metric_array(
+            scenario,
+            "metric_uav_inter_uav_overlap_fraction_by_drone",
+            scenario.n_drones,
+        )
         boundary_distance_m = _metric_array(
             scenario,
             "metric_uav_boundary_distance_m_by_drone",
@@ -184,9 +190,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             footprint_radius = float(footprint_radius_m[drone_idx])
             expected_overlap = float(expected_overlap_fraction[drone_idx])
             excess_overlap = float(excess_overlap_fraction[drone_idx])
+            inter_uav_overlap = float(inter_uav_overlap_fraction[drone_idx])
             overlap_values.append(overlap)
             expected_overlap_values.append(expected_overlap)
             excess_overlap_values.append(excess_overlap)
+            inter_uav_overlap_values.append(inter_uav_overlap)
             boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
             footprint_radius_m_values.append(footprint_radius)
             diagnostic_steps += 1
@@ -199,6 +207,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["overlap"].append(overlap)
             drone_stats["expected_overlap"].append(expected_overlap)
             drone_stats["excess_overlap"].append(excess_overlap)
+            drone_stats["inter_uav_overlap"].append(inter_uav_overlap)
             drone_stats["boundary_distance_m"].append(float(boundary_distance_m[drone_idx]))
             drone_stats["footprint_radius_m"].append(footprint_radius)
             drone_stats["diagnostic_steps"] += 1
@@ -290,9 +299,14 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_overlap_fraction": _finite_mean(overlap_values),
         "avg_expected_overlap_fraction": _finite_mean(expected_overlap_values),
         "avg_excess_overlap_fraction": _finite_mean(excess_overlap_values),
+        "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav_overlap_values),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess_overlap_values]))
             if excess_overlap_values else 0.0
+        ),
+        "inter_uav_overlap_step_frac_20": (
+            float(np.mean([value >= 0.20 for value in inter_uav_overlap_values]))
+            if inter_uav_overlap_values else 0.0
         ),
         "excess_overlap_step_frac_20": (
             float(np.mean([value >= 0.20 for value in excess_overlap_values]))
@@ -352,6 +366,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "overlap": [],
         "expected_overlap": [],
         "excess_overlap": [],
+        "inter_uav_overlap": [],
         "boundary_distance_m": [],
         "footprint_radius_m": [],
         "scout_credit_count": 0,
@@ -377,6 +392,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         final_position_m = (np.asarray(positions[-1], dtype=float) * meters_per_sim).round(6).tolist()
     new_cells = stats["new_coverage_cells"]
     excess = stats["excess_overlap"]
+    inter_uav = stats["inter_uav_overlap"]
     outside = stats["outside_footprint"]
     return {
         "drone": int(stats["drone"]),
@@ -401,9 +417,14 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_overlap_fraction": _finite_mean(stats["overlap"]),
         "avg_expected_overlap_fraction": _finite_mean(stats["expected_overlap"]),
         "avg_excess_overlap_fraction": _finite_mean(excess),
+        "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess]))
             if excess else 0.0
+        ),
+        "inter_uav_overlap_step_frac_20": (
+            float(np.mean([value >= 0.20 for value in inter_uav]))
+            if inter_uav else 0.0
         ),
         "excess_overlap_step_frac_20": (
             float(np.mean([value >= 0.20 for value in excess]))
@@ -702,8 +723,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_excess_overlap_fraction": _finite_mean([
             row["avg_excess_overlap_fraction"] for row in rows
         ]),
+        "mean_inter_uav_overlap_fraction": _finite_mean([
+            row["avg_inter_uav_overlap_fraction"] for row in rows
+        ]),
         "mean_excess_overlap_step_frac_10": _finite_mean([
             row["excess_overlap_step_frac_10"] for row in rows
+        ]),
+        "mean_inter_uav_overlap_step_frac_20": _finite_mean([
+            row["inter_uav_overlap_step_frac_20"] for row in rows
         ]),
         "mean_excess_overlap_step_frac_20": _finite_mean([
             row["excess_overlap_step_frac_20"] for row in rows
@@ -770,7 +797,9 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_overlap_fraction",
         "avg_expected_overlap_fraction",
         "avg_excess_overlap_fraction",
+        "avg_inter_uav_overlap_fraction",
         "excess_overlap_step_frac_10",
+        "inter_uav_overlap_step_frac_20",
         "edge_step_frac",
         "corner_step_frac",
         "stalled_step_frac",
@@ -810,6 +839,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "overlap": "avg_overlap_fraction",
         "expected_overlap": "avg_expected_overlap_fraction",
         "excess_overlap": "avg_excess_overlap_fraction",
+        "inter_uav_overlap": "avg_inter_uav_overlap_fraction",
         "edge_frac": "edge_step_frac",
         "corner_frac": "corner_step_frac",
         "center_cov": "coverage_center_fraction",
@@ -863,6 +893,7 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
             f"excess={drone['avg_excess_overlap_fraction']:.2f} "
+            f"inter={drone['avg_inter_uav_overlap_fraction']:.2f} "
             f"stall={drone['stalled_step_frac']:.2f}"
         )
     return "; ".join(parts)
@@ -881,6 +912,7 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"corner={drone['mean_corner_step_frac']:.3f} "
             f"outside={drone['mean_avg_outside_footprint_fraction']:.3f} "
             f"excess={drone['mean_avg_excess_overlap_fraction']:.3f} "
+            f"inter={drone['mean_avg_inter_uav_overlap_fraction']:.3f} "
             f"stall={drone['mean_stalled_step_frac']:.3f}"
         )
     return lines
@@ -1130,6 +1162,7 @@ def main() -> None:
             f"overlap={row['avg_overlap_fraction']:.2f} "
             f"exp_ov={row['avg_expected_overlap_fraction']:.2f} "
             f"excess_ov={row['avg_excess_overlap_fraction']:.2f} "
+            f"inter_ov={row['avg_inter_uav_overlap_fraction']:.2f} "
             f"center_cov={row['coverage_center_fraction']:.2f} "
             f"start_pair={_fmt_optional(row['min_start_pair_distance_m'])}m "
             f"start_edge={_fmt_optional(row['min_start_edge_distance_m'])}m "
@@ -1171,7 +1204,9 @@ def main() -> None:
         f"overlap={summary['mean_overlap_fraction']:.3f} "
         f"expected_overlap={summary['mean_expected_overlap_fraction']:.3f} "
         f"excess_overlap={summary['mean_excess_overlap_fraction']:.3f} "
+        f"inter_uav_overlap={summary['mean_inter_uav_overlap_fraction']:.3f} "
         f"excess10={summary['mean_excess_overlap_step_frac_10']:.3f} "
+        f"inter20={summary['mean_inter_uav_overlap_step_frac_20']:.3f} "
         f"excess20={summary['mean_excess_overlap_step_frac_20']:.3f} "
         f"overlap60={summary['mean_overlap_step_frac_60']:.3f}"
     )
@@ -1220,6 +1255,8 @@ def main() -> None:
         f"{summary['overlap_p25']:.3f}/{summary['overlap_p50']:.3f}/{summary['overlap_p75']:.3f} "
         f"excess p25/p50/p75="
         f"{summary['excess_overlap_p25']:.3f}/{summary['excess_overlap_p50']:.3f}/{summary['excess_overlap_p75']:.3f} "
+        f"inter p25/p50/p75="
+        f"{summary['inter_uav_overlap_p25']:.3f}/{summary['inter_uav_overlap_p50']:.3f}/{summary['inter_uav_overlap_p75']:.3f} "
         f"edge p25/p50/p75="
         f"{summary['edge_frac_p25']:.3f}/{summary['edge_frac_p50']:.3f}/{summary['edge_frac_p75']:.3f}"
     )

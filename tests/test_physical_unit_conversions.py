@@ -177,6 +177,10 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.r_coverage = 1.0
         scenario.r_uav_move_coverage = 0.001
         scenario.r_uav_move_coverage_cap = 0.1
+        scenario.r_uav_overlap = 0.0
+        scenario.uav_overlap_allowed = 0.10
+        scenario.r_uav_inter_uav_overlap = 0.0
+        scenario.uav_inter_uav_overlap_allowed = 0.20
         scenario.r_uav_outside_footprint = 0.0
         scenario.uav_boundary_soft_margin_m = 25.0
         scenario.sim_step_seconds = 2.0
@@ -199,12 +203,12 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         positions = torch.zeros(1, 1, 2)
 
         scenario.drone_altitude = torch.tensor([[0.05]])
-        small_credit, _, _ = scenario._coverage_reward(positions)
+        small_credit, _, _, _ = scenario._coverage_reward(positions)
         small_footprint = float(small_credit.sum())
 
         scenario.coverage_grid.zero_()
         scenario.drone_altitude = torch.tensor([[0.20]])
-        large_credit, _, _ = scenario._coverage_reward(positions)
+        large_credit, _, _, _ = scenario._coverage_reward(positions)
         large_footprint = float(large_credit.sum())
 
         self.assertGreater(large_footprint, small_footprint)
@@ -214,11 +218,13 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
         positions = torch.zeros(1, 2, 2)
 
-        credit, overlap, outside = scenario._coverage_reward(positions)
+        credit, overlap, outside, inter_uav = scenario._coverage_reward(positions)
 
         self.assertAlmostEqual(float(credit[0, 0]), float(credit[0, 1]), places=7)
         self.assertEqual(float(overlap.sum()), 0.0)
         self.assertEqual(float(outside.sum()), 0.0)
+        self.assertEqual(float(inter_uav[0, 0]), 1.0)
+        self.assertEqual(float(inter_uav[0, 1]), 1.0)
         self.assertAlmostEqual(
             float(credit.sum()),
             float(scenario.coverage_grid.float().mean()),
@@ -230,15 +236,17 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10]])
         positions = torch.zeros(1, 1, 2)
 
-        first_credit, first_overlap, first_outside = scenario._coverage_reward(positions)
-        revisit_credit, revisit_overlap, revisit_outside = scenario._coverage_reward(positions)
+        first_credit, first_overlap, first_outside, first_inter_uav = scenario._coverage_reward(positions)
+        revisit_credit, revisit_overlap, revisit_outside, revisit_inter_uav = scenario._coverage_reward(positions)
 
         self.assertGreater(float(first_credit.sum()), 0.0)
         self.assertEqual(float(first_overlap.sum()), 0.0)
         self.assertEqual(float(first_outside.sum()), 0.0)
+        self.assertEqual(float(first_inter_uav.sum()), 0.0)
         self.assertEqual(float(revisit_credit.sum()), 0.0)
         self.assertEqual(float(revisit_overlap[0, 0]), 1.0)
         self.assertEqual(float(revisit_outside.sum()), 0.0)
+        self.assertEqual(float(revisit_inter_uav.sum()), 0.0)
 
     def test_total_episode_coverage_credit_is_bounded(self):
         scenario = self._coverage_scenario(grid_size=16)
@@ -247,7 +255,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         total = 0.0
         for x in (-0.75, -0.25, 0.25, 0.75):
             for y in (-0.75, -0.25, 0.25, 0.75):
-                credit, _, _ = scenario._coverage_reward(torch.tensor([[[x, y]]]))
+                credit, _, _, _ = scenario._coverage_reward(torch.tensor([[[x, y]]]))
                 total += float(credit.sum())
 
         self.assertLessEqual(total, 1.0 + 1e-7)
@@ -275,16 +283,30 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(penalty[0, 2]), -0.05 / 3.0, places=6)
         self.assertAlmostEqual(float(penalty[0, 3]), -0.05, places=6)
 
+    def test_uav_inter_uav_overlap_penalty_uses_same_step_overlap_slack(self):
+        scenario = self._coverage_scenario(n_drones=2)
+        scenario.r_uav_inter_uav_overlap = 0.03
+        scenario.uav_inter_uav_overlap_allowed = 0.20
+        scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
+
+        _, _, _, inter_uav = scenario._coverage_reward(torch.zeros(1, 2, 2))
+        penalty = scenario._uav_inter_uav_overlap_penalty(inter_uav)
+
+        self.assertEqual(float(inter_uav[0, 0]), 1.0)
+        self.assertEqual(float(inter_uav[0, 1]), 1.0)
+        self.assertAlmostEqual(float(penalty[0, 0]), -0.03, places=6)
+        self.assertAlmostEqual(float(penalty[0, 1]), -0.03, places=6)
+
     def test_uav_outside_footprint_penalty_scales_with_footprint_outside_map(self):
         scenario = self._coverage_scenario(grid_size=64)
         scenario.r_uav_outside_footprint = 0.1
         scenario.drone_altitude = torch.tensor([[0.20]])
 
-        _, _, center_outside = scenario._coverage_reward(torch.tensor([[[0.0, 0.0]]]))
+        _, _, center_outside, _ = scenario._coverage_reward(torch.tensor([[[0.0, 0.0]]]))
         center_penalty = scenario._uav_outside_footprint_penalty(center_outside)
 
         scenario.coverage_grid.zero_()
-        _, _, corner_outside = scenario._coverage_reward(torch.tensor([[[0.95, 0.95]]]))
+        _, _, corner_outside, _ = scenario._coverage_reward(torch.tensor([[[0.95, 0.95]]]))
         corner_penalty = scenario._uav_outside_footprint_penalty(corner_outside)
 
         self.assertAlmostEqual(float(center_outside[0, 0]), 0.0, places=6)

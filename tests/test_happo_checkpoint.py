@@ -294,6 +294,8 @@ class HappoCheckpointTests(unittest.TestCase):
             uav_move_coverage_cap=0.2,
             uav_overlap_penalty=0.05,
             uav_overlap_allowed=0.60,
+            uav_inter_uav_overlap_penalty=0.03,
+            uav_inter_uav_overlap_allowed=0.25,
             uav_outside_footprint_penalty=0.1,
             uav_boundary_soft_margin_m=30.0,
             action_transform="radial_tanh",
@@ -324,6 +326,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
+        self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.03)
+        self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.25)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.1)
         self.assertEqual(scenario["uav_boundary_soft_margin_m"], 30.0)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
@@ -358,6 +362,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)
         self.assertEqual(scenario["r_uav_overlap"], 0.10)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.10)
+        self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.0)
+        self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.20)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
@@ -375,6 +381,8 @@ class HappoCheckpointTests(unittest.TestCase):
             uav_move_coverage_reward=0.0,
             uav_overlap_penalty=0.0,
             uav_overlap_allowed=0.0,
+            uav_inter_uav_overlap_penalty=0.0,
+            uav_inter_uav_overlap_allowed=0.0,
             uav_outside_footprint_penalty=0.0,
         )
 
@@ -383,6 +391,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage"], 0.0)
         self.assertEqual(scenario["r_uav_overlap"], 0.0)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.0)
+        self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.0)
+        self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.0)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.0)
 
     def test_uav_survivor_diagnostic_can_use_two_drones(self):

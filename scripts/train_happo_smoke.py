@@ -174,6 +174,8 @@ def build_args(
     uav_move_coverage_cap: float = 0.1,
     uav_overlap_penalty: float | None = None,
     uav_overlap_allowed: float | None = None,
+    uav_inter_uav_overlap_penalty: float = 0.0,
+    uav_inter_uav_overlap_allowed: float = 0.20,
     uav_outside_footprint_penalty: float | None = None,
     uav_boundary_soft_margin_m: float = 25.0,
     uav_start_min_separation_m: float | None = None,
@@ -260,6 +262,12 @@ def build_args(
     uav_overlap_allowed = float(uav_overlap_allowed)
     if not 0.0 <= uav_overlap_allowed < 1.0:
         raise ValueError("uav_overlap_allowed must be in [0, 1)")
+    uav_inter_uav_overlap_penalty = float(uav_inter_uav_overlap_penalty)
+    if uav_inter_uav_overlap_penalty < 0.0:
+        raise ValueError("uav_inter_uav_overlap_penalty must be nonnegative")
+    uav_inter_uav_overlap_allowed = float(uav_inter_uav_overlap_allowed)
+    if not 0.0 <= uav_inter_uav_overlap_allowed < 1.0:
+        raise ValueError("uav_inter_uav_overlap_allowed must be in [0, 1)")
     uav_outside_footprint_penalty = float(uav_outside_footprint_penalty)
     if uav_outside_footprint_penalty < 0.0:
         raise ValueError("uav_outside_footprint_penalty must be nonnegative")
@@ -546,6 +554,8 @@ def build_args(
             "r_uav_move_coverage_cap": uav_move_coverage_cap,
             "r_uav_overlap": uav_overlap_penalty,
             "uav_overlap_allowed": uav_overlap_allowed,
+            "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
+            "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
@@ -707,6 +717,12 @@ def main():
     p.add_argument("--uav-overlap-allowed", type=float, default=None,
                    help="Excess footprint-overlap slack above the physics-expected overlap "
                         "before the UAV overlap penalty starts.")
+    p.add_argument("--uav-inter-uav-overlap-penalty", type=float, default=0.0,
+                   help="Maximum per-UAV per-step penalty for same-step footprint overlap with "
+                        "other UAVs. Default 0 disables this optional coordination penalty.")
+    p.add_argument("--uav-inter-uav-overlap-allowed", type=float, default=0.20,
+                   help="Same-step inter-UAV footprint-overlap slack before "
+                        "--uav-inter-uav-overlap-penalty starts.")
     p.add_argument("--uav-outside-footprint-penalty", type=float, default=None,
                    help="Maximum per-UAV per-step penalty when the camera footprint is fully outside the map. "
                         "Penalty scales linearly with the estimated outside-footprint fraction. "
@@ -795,6 +811,10 @@ def main():
         p.error("--uav-overlap-penalty must be nonnegative")
     if args.uav_overlap_allowed is not None and not 0.0 <= args.uav_overlap_allowed < 1.0:
         p.error("--uav-overlap-allowed must be in [0, 1)")
+    if args.uav_inter_uav_overlap_penalty < 0.0:
+        p.error("--uav-inter-uav-overlap-penalty must be nonnegative")
+    if not 0.0 <= args.uav_inter_uav_overlap_allowed < 1.0:
+        p.error("--uav-inter-uav-overlap-allowed must be in [0, 1)")
     if (
         args.uav_outside_footprint_penalty is not None
         and args.uav_outside_footprint_penalty < 0.0
@@ -959,6 +979,8 @@ def main():
     print(f" uav_move_coverage_cap: {args.uav_move_coverage_cap}")
     print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
     print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
+    print(f" uav_inter_uav_overlap_penalty: {args.uav_inter_uav_overlap_penalty}")
+    print(f" uav_inter_uav_overlap_allowed: {args.uav_inter_uav_overlap_allowed}")
     print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
     print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
     print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
@@ -1016,6 +1038,8 @@ def main():
         uav_move_coverage_cap = args.uav_move_coverage_cap,
         uav_overlap_penalty = args.uav_overlap_penalty,
         uav_overlap_allowed = args.uav_overlap_allowed,
+        uav_inter_uav_overlap_penalty = args.uav_inter_uav_overlap_penalty,
+        uav_inter_uav_overlap_allowed = args.uav_inter_uav_overlap_allowed,
         uav_outside_footprint_penalty = args.uav_outside_footprint_penalty,
         uav_boundary_soft_margin_m = args.uav_boundary_soft_margin_m,
         uav_start_min_separation_m = args.uav_start_min_separation_m,
