@@ -501,6 +501,43 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         expected = torch.tensor([[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
         torch.testing.assert_close(blocked, expected)
 
+    def test_uav_start_sampling_enforces_spacing_and_edge_margin(self):
+        scenario = WildfireSearchScenario()
+        scenario.n_drones = 3
+        scenario.x_semidim = 1.0
+        scenario.y_semidim = 1.0
+        scenario.agent_radius = 0.0
+        scenario.uav_start_min_separation_m = 150.0
+        scenario.uav_start_edge_margin_m = 50.0
+        scenario.uav_start_max_attempts = 4096
+        scenario.terrain_sim_units_per_meter = torch.tensor([2.0 / 500.0])
+        drones = [
+            _Agent(name=f"drone_{idx}", is_drone=True, pos=[[0.0, 0.0]], vel=[[1.0, -1.0]])
+            for idx in range(3)
+        ]
+        scenario._world = types.SimpleNamespace(agents=drones, batch_dim=1)
+
+        torch.manual_seed(7)
+        scenario._place_drones_jointly_uniform_interior(0)
+
+        positions_sim = torch.stack([drone.state.pos[0] for drone in drones])
+        positions_m = positions_sim / scenario.terrain_sim_units_per_meter[0]
+        pairwise_m = torch.pdist(positions_m)
+        edge_distances_m = torch.stack(
+            [
+                positions_m[:, 0] + 250.0,
+                250.0 - positions_m[:, 0],
+                positions_m[:, 1] + 250.0,
+                250.0 - positions_m[:, 1],
+            ],
+            dim=1,
+        )
+
+        self.assertGreaterEqual(float(pairwise_m.min()), 150.0 - 1e-5)
+        self.assertGreaterEqual(float(edge_distances_m.min()), 50.0 - 1e-5)
+        for drone in drones:
+            torch.testing.assert_close(drone.state.vel, torch.zeros(1, 2))
+
 
 if __name__ == "__main__":
     unittest.main()
