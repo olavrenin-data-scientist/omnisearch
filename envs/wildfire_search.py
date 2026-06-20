@@ -821,12 +821,17 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_excess_overlap_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_reward_uav_outside_footprint = torch.zeros(batch_dim, device=device)
         self.metric_uav_outside_footprint_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_outside_footprint_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_boundary_soft_risk = torch.zeros(batch_dim, device=device)
         self.metric_uav_boundary_distance_m = torch.zeros(batch_dim, device=device)
+        self.metric_uav_boundary_distance_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_displacement_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_new_coverage_cells = torch.zeros(batch_dim, device=device)
+        self.metric_uav_displacement_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_new_coverage_cells_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_target_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_footprint_radius_m = torch.zeros(batch_dim, device=device)
+        self.metric_uav_footprint_radius_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_target_within_footprint = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_progress = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_approach = torch.zeros(batch_dim, device=device)
@@ -875,12 +880,17 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_uav_excess_overlap_fraction_by_drone,
             self.metric_reward_uav_outside_footprint,
             self.metric_uav_outside_footprint_fraction,
+            self.metric_uav_outside_footprint_fraction_by_drone,
             self.metric_uav_boundary_soft_risk,
             self.metric_uav_boundary_distance_m,
+            self.metric_uav_boundary_distance_m_by_drone,
             self.metric_uav_displacement_m,
             self.metric_uav_new_coverage_cells,
+            self.metric_uav_displacement_m_by_drone,
+            self.metric_uav_new_coverage_cells_by_drone,
             self.metric_uav_target_distance_m,
             self.metric_uav_footprint_radius_m,
+            self.metric_uav_footprint_radius_m_by_drone,
             self.metric_uav_target_within_footprint,
             self.metric_reward_ugv_progress,
             self.metric_reward_ugv_approach,
@@ -2224,10 +2234,14 @@ class WildfireSearchScenario(BaseScenario):
             ).any(dim=(1, 2))
             self.metric_uav_target_distance_m = nearest_drone_dist_sim * meters_per_sim_env
             self.metric_uav_footprint_radius_m = drone_footprint_m.mean(dim=1)
+            self.metric_uav_footprint_radius_m_by_drone = drone_footprint_m
             self.metric_uav_target_within_footprint = target_within_footprint.float()
         else:
             self.metric_uav_target_distance_m = torch.zeros(self.world.batch_dim, device=device)
             self.metric_uav_footprint_radius_m = torch.zeros(self.world.batch_dim, device=device)
+            self.metric_uav_footprint_radius_m_by_drone = torch.zeros(
+                self.world.batch_dim, self.n_drones, device=device,
+            )
             self.metric_uav_target_within_footprint = torch.zeros(self.world.batch_dim, device=device)
         all_scouted = ~unscouted.any(dim=1, keepdim=True)
         prev_known = ~torch.isinf(self.prev_drone_dist) & ~all_scouted
@@ -2474,17 +2488,21 @@ class WildfireSearchScenario(BaseScenario):
             else torch.zeros(self.world.batch_dim, device=device)
         )
         self.metric_reward_uav_outside_footprint = uav_outside_footprint_penalty.sum(dim=1)
+        self.metric_uav_outside_footprint_fraction_by_drone = uav_outside_footprint_fraction
         self.metric_uav_outside_footprint_fraction = (
             uav_outside_footprint_fraction.mean(dim=1)
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=device)
         )
         self.metric_uav_boundary_soft_risk = boundary_soft_risk.sum(dim=1)
+        self.metric_uav_boundary_distance_m_by_drone = boundary_distance_m
         self.metric_uav_boundary_distance_m = (
             boundary_distance_m.mean(dim=1)
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=device)
         )
+        self.metric_uav_displacement_m_by_drone = drone_displacement_m
+        self.metric_uav_new_coverage_cells_by_drone = coverage_new_cells
         self.metric_uav_displacement_m = drone_displacement_m.sum(dim=1)
         self.metric_uav_new_coverage_cells = coverage_new_cells.sum(dim=1)
         self.metric_reward_ugv_progress = ground_shaping.sum(dim=1)

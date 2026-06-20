@@ -11,7 +11,10 @@ from agents.happo_checkpoint import (
     save_training_manifest,
 )
 from agents.happo_policy import _action_transform_from_manifest, _scenario_kwargs_from_manifest
-from scripts.diagnose_uav_happo import _scenario_kwargs as diagnose_uav_scenario_kwargs
+from scripts.diagnose_uav_happo import (
+    _scenario_kwargs as diagnose_uav_scenario_kwargs,
+    _summarize_per_drone,
+)
 from scripts.train_happo_smoke import build_args
 
 
@@ -431,6 +434,96 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_ground"], 0)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["max_steps"], 123)
+
+    def test_uav_diagnostics_summarizes_per_drone_metrics(self):
+        rows = [
+            {
+                "per_drone": [
+                    {
+                        "drone": 0,
+                        "scout_credit_count": 2,
+                        "avg_action_norm": 0.5,
+                        "avg_displacement_m": 10.0,
+                        "path_length_m": 100.0,
+                        "avg_action_displacement_alignment": 0.8,
+                        "avg_new_coverage_cells": 20.0,
+                        "total_new_coverage_cells": 200.0,
+                        "new_coverage_step_frac": 0.9,
+                        "avg_outside_footprint_fraction": 0.01,
+                        "avg_overlap_fraction": 0.7,
+                        "avg_expected_overlap_fraction": 0.6,
+                        "avg_excess_overlap_fraction": 0.1,
+                        "excess_overlap_step_frac_10": 0.2,
+                        "edge_step_frac": 0.1,
+                        "corner_step_frac": 0.0,
+                        "stalled_step_frac": 0.0,
+                        "longest_stall_steps": 1.0,
+                        "moving_no_new_coverage_frac": 0.05,
+                        "mean_boundary_distance_m": 100.0,
+                        "min_boundary_distance_m": 50.0,
+                    },
+                    {
+                        "drone": 1,
+                        "scout_credit_count": 0,
+                        "avg_action_norm": 0.2,
+                        "avg_displacement_m": 2.0,
+                        "path_length_m": 20.0,
+                        "avg_action_displacement_alignment": 0.1,
+                        "avg_new_coverage_cells": 2.0,
+                        "total_new_coverage_cells": 20.0,
+                        "new_coverage_step_frac": 0.2,
+                        "avg_outside_footprint_fraction": 0.2,
+                        "avg_overlap_fraction": 0.9,
+                        "avg_expected_overlap_fraction": 0.8,
+                        "avg_excess_overlap_fraction": 0.1,
+                        "excess_overlap_step_frac_10": 0.3,
+                        "edge_step_frac": 0.8,
+                        "corner_step_frac": 0.4,
+                        "stalled_step_frac": 0.3,
+                        "longest_stall_steps": 20.0,
+                        "moving_no_new_coverage_frac": 0.4,
+                        "mean_boundary_distance_m": 10.0,
+                        "min_boundary_distance_m": 0.0,
+                    },
+                ],
+            },
+            {
+                "per_drone": [
+                    {
+                        "drone": 0,
+                        "scout_credit_count": 4,
+                        "avg_action_norm": 0.7,
+                        "avg_displacement_m": 12.0,
+                        "path_length_m": 120.0,
+                        "avg_action_displacement_alignment": 0.9,
+                        "avg_new_coverage_cells": 30.0,
+                        "total_new_coverage_cells": 300.0,
+                        "new_coverage_step_frac": 1.0,
+                        "avg_outside_footprint_fraction": 0.02,
+                        "avg_overlap_fraction": 0.6,
+                        "avg_expected_overlap_fraction": 0.5,
+                        "avg_excess_overlap_fraction": 0.1,
+                        "excess_overlap_step_frac_10": 0.1,
+                        "edge_step_frac": 0.2,
+                        "corner_step_frac": 0.0,
+                        "stalled_step_frac": 0.0,
+                        "longest_stall_steps": 2.0,
+                        "moving_no_new_coverage_frac": 0.03,
+                        "mean_boundary_distance_m": 120.0,
+                        "min_boundary_distance_m": 60.0,
+                    },
+                ],
+            },
+        ]
+
+        summary = _summarize_per_drone(rows)
+
+        self.assertEqual([row["drone"] for row in summary], [0, 1])
+        self.assertEqual(summary[0]["episodes"], 2.0)
+        self.assertEqual(summary[1]["episodes"], 1.0)
+        self.assertAlmostEqual(summary[0]["mean_scout_credit_count"], 3.0)
+        self.assertAlmostEqual(summary[0]["mean_path_length_m"], 110.0)
+        self.assertAlmostEqual(summary[1]["mean_edge_step_frac"], 0.8)
 
     def test_uav_coverage_only_diagnostic_build_args(self):
         _, _, env_args = build_args(
