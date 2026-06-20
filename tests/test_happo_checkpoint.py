@@ -11,6 +11,7 @@ from agents.happo_checkpoint import (
     save_training_manifest,
 )
 from agents.happo_policy import _action_transform_from_manifest, _scenario_kwargs_from_manifest
+from scripts.diagnose_uav_happo import _scenario_kwargs as diagnose_uav_scenario_kwargs
 from scripts.train_happo_smoke import build_args
 
 
@@ -168,6 +169,19 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["model"]["lr"], 2.5e-4)
         self.assertEqual(algo_args["model"]["critic_lr"], 5e-4)
         self.assertTrue(algo_args["train"]["use_linear_lr_decay"])
+
+    def test_build_args_exposes_global_parameter_sharing(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="share",
+            share_param=True,
+        )
+
+        self.assertTrue(algo_args["algo"]["share_param"])
 
     def test_build_args_exposes_terrain_cnn_encoder(self):
         _, algo_args, _ = build_args(
@@ -340,6 +354,60 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_overlap"], 0.10)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.50)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
+
+    def test_uav_survivor_diagnostic_can_use_two_drones(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_2d",
+            uav_survivor_diagnostic=True,
+            uav_diagnostic_drones=2,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 2)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["r_drone_scout"], 2.0)
+        self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_time_penalty"], 0.0)
+
+    def test_uav_diagnostics_preserves_manifest_drone_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 2,
+                        "n_ground": 0,
+                        "n_survivors": 5,
+                        "max_steps": 300,
+                    },
+                },
+            )
+            args = types.SimpleNamespace(
+                steps=123,
+                n_drones=None,
+                terrain_cache_path=None,
+                local_map_patch_size=None,
+                drone_min_footprint_radius_m=None,
+            )
+
+            scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_drones"], 2)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["max_steps"], 123)
 
     def test_uav_coverage_only_diagnostic_build_args(self):
         _, _, env_args = build_args(

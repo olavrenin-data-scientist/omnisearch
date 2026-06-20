@@ -2,9 +2,9 @@
 Diagnose HAPPO UAV-only survivor scouting checkpoints.
 
 This is intentionally focused on the UAV survivor diagnostic task:
-one drone, no UGVs, five survivors, no fire, and drone scouting counts as
-mission success. The first metrics are recall-oriented: how many survivors are
-scouted, how many are missed, and how long scouting takes.
+one or more drones, no UGVs, five survivors, no fire, and drone scouting
+counts as mission success. The first metrics are recall-oriented: how many
+survivors are scouted, how many are missed, and how long scouting takes.
 """
 
 from __future__ import annotations
@@ -49,7 +49,6 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
 
     scenario_kwargs.update({
         "max_steps": args.steps,
-        "n_drones": 1,
         "n_ground": 0,
         "n_survivors": 5,
         "known_survivors_at_reset": False,
@@ -57,6 +56,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "disable_fire": True,
         "comms_dropout": 0.0,
     })
+    if args.n_drones is not None:
+        scenario_kwargs["n_drones"] = int(args.n_drones)
+    else:
+        scenario_kwargs.setdefault("n_drones", 1)
 
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -116,10 +119,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         ]
         env.step(actions)
         meters_per_sim = 1.0 / max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
-        coverage_cells = (
-            scenario.metric_uav_new_coverage_cells.detach().cpu().numpy().astype(float)
-            if scenario.n_drones > 0
-            else np.zeros(1, dtype=float)
+        coverage_cells = _metric_array(
+            scenario,
+            "metric_uav_new_coverage_cells",
+            scenario.n_drones,
         )
         outside_footprint_fraction = _metric_array(
             scenario,
@@ -147,7 +150,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             displacement_vec = post_pos - pre_drone_pos[drone_idx]
             action_norm = float(np.linalg.norm(action_vec))
             displacement_m = float(np.linalg.norm(displacement_vec) * meters_per_sim)
-            new_cells = float(coverage_cells[drone_idx] if coverage_cells.ndim > 0 else coverage_cells)
+            new_cells = float(coverage_cells[drone_idx])
             action_norms.append(action_norm)
             displacement_m_values.append(displacement_m)
             new_coverage_cells_values.append(new_cells)
@@ -705,6 +708,8 @@ def main() -> None:
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
+    parser.add_argument("--n-drones", type=int, default=None,
+                        help="Override UAV count for legacy checkpoints. Default preserves the checkpoint manifest.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=None)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
@@ -714,6 +719,8 @@ def main() -> None:
 
     if args.steps <= 0:
         parser.error("--steps must be positive")
+    if args.n_drones is not None and args.n_drones < 1:
+        parser.error("--n-drones must be positive")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
@@ -734,6 +741,13 @@ def main() -> None:
     print("-" * 88)
 
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=not args.stochastic)
+    expected_agents = int(scenario_kwargs["n_drones"]) + int(scenario_kwargs["n_ground"])
+    if len(policy.actors) != expected_agents:
+        parser.error(
+            f"checkpoint contains {len(policy.actors)} actors, but diagnostics scenario "
+            f"contains {expected_agents} agents; use the checkpoint manifest settings or "
+            "a matching --n-drones override for legacy checkpoints"
+        )
     rows = [
         run_rollout(policy, scenario_kwargs, seed)
         for seed in args.seeds
