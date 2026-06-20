@@ -163,6 +163,13 @@ class WildfireSearchScenario(BaseScenario):
         kwargs.pop("ground_approach_radius", None)  # obsolete triangular approach reward option
         kwargs.pop("ground_approach_radius_m", None)  # obsolete triangular approach reward option
         self.spawn_padding_m = max(float(kwargs.pop("spawn_padding_m", 1.0)), 0.0)
+        self.uav_start_min_separation_m = max(
+            float(kwargs.pop("uav_start_min_separation_m", 0.0)), 0.0,
+        )
+        self.uav_start_edge_margin_m = max(
+            float(kwargs.pop("uav_start_edge_margin_m", 0.0)), 0.0,
+        )
+        self.uav_start_max_attempts = max(int(kwargs.pop("uav_start_max_attempts", 512)), 1)
         self.agent_radius = (
             max(float(self.agent_radius_sim_override), 1e-6)
             if self.agent_radius_sim_override is not None
@@ -998,6 +1005,7 @@ class WildfireSearchScenario(BaseScenario):
         H = W = self.fire_grid_size
         for b in envs_to_seed:
             self._generate_terrain(b)
+            self._place_drones_jointly_uniform_interior(b)
             self._place_diagnostic_survivors_near_reference_agents(b)
             if not self.disable_fire:
                 self._seed_initial_fire(b, H, W)
@@ -1536,6 +1544,66 @@ class WildfireSearchScenario(BaseScenario):
             all_pos[env_index] = new_pos
             entity.set_pos(all_pos, batch_index=None)
             available[new_y, new_x] = False
+
+    def _place_drones_jointly_uniform_interior(self, env_index: int) -> None:
+        """Jointly sample UAV starts, rejecting the whole team if spacing fails."""
+        if self.n_drones <= 0:
+            return
+        if self.uav_start_min_separation_m <= 0.0 and self.uav_start_edge_margin_m <= 0.0:
+            return
+
+        drone_agents = self.world.agents[:self.n_drones]
+        if not drone_agents:
+            return
+
+        device = drone_agents[0].state.pos.device
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        if scale <= 0.0:
+            return
+
+        margin_sim = self.agent_radius + self.uav_start_edge_margin_m * scale
+        x_min = -self.x_semidim + margin_sim
+        x_max = self.x_semidim - margin_sim
+        y_min = -self.y_semidim + margin_sim
+        y_max = self.y_semidim - margin_sim
+        if x_min > x_max or y_min > y_max:
+            raise ValueError(
+                "uav_start_edge_margin_m leaves no valid interior start area "
+                f"({self.uav_start_edge_margin_m:.1f}m on this terrain)"
+            )
+
+        min_sep_sim = self.uav_start_min_separation_m * scale
+        best_min_distance = -1.0
+        for _ in range(self.uav_start_max_attempts):
+            xs = x_min + torch.rand(self.n_drones, device=device) * max(x_max - x_min, 0.0)
+            ys = y_min + torch.rand(self.n_drones, device=device) * max(y_max - y_min, 0.0)
+            positions = torch.stack([xs, ys], dim=-1)
+            pairwise = torch.pdist(positions) if self.n_drones > 1 else torch.empty(0, device=device)
+            min_distance = float(pairwise.min().detach().cpu().item()) if pairwise.numel() else math.inf
+            if min_distance > best_min_distance:
+                best_min_distance = min_distance
+            if min_distance + 1e-9 >= min_sep_sim:
+                perm = torch.randperm(self.n_drones, device=device)
+                self._set_drone_start_positions(env_index, positions[perm])
+                return
+
+        best_m = best_min_distance / max(scale, 1e-9)
+        raise ValueError(
+            "Could not sample UAV starts satisfying "
+            f"uav_start_min_separation_m={self.uav_start_min_separation_m:.1f} "
+            f"after {self.uav_start_max_attempts} attempts; best was {best_m:.1f}m. "
+            "Reduce the separation/margin or increase uav_start_max_attempts."
+        )
+
+    def _set_drone_start_positions(self, env_index: int, positions: Tensor) -> None:
+        for drone_idx, agent in enumerate(self.world.agents[:self.n_drones]):
+            all_pos = agent.state.pos.clone()
+            all_pos[env_index] = positions[drone_idx]
+            agent.set_pos(all_pos, batch_index=None)
+            if hasattr(agent.state, "vel"):
+                all_vel = agent.state.vel.clone()
+                all_vel[env_index] = 0.0
+                agent.set_vel(all_vel, batch_index=None)
 
     def _land_entity_candidate_mask(self, env_index: int) -> Tensor:
         cover = self.land_cover_grid[env_index]

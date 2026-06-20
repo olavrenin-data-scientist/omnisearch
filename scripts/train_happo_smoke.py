@@ -57,6 +57,8 @@ DEFAULT_UAV_DIAG_ENTROPY_COEF = 0.05
 DEFAULT_UAV_DIAG_EPISODE_LENGTH = 300
 DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS = 8
 DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
+DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M = 150.0
+DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
 
 
@@ -117,6 +119,8 @@ def build_args(
     uav_overlap_allowed: float = 0.60,
     uav_outside_footprint_penalty: float = 0.0,
     uav_boundary_soft_margin_m: float = 25.0,
+    uav_start_min_separation_m: float | None = None,
+    uav_start_edge_margin_m: float | None = None,
     ugv_movement_alignment_reward: float = 0.20,
     ugv_planner_progress_reward: float = 0.0,
     ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
@@ -160,6 +164,10 @@ def build_args(
             uav_overlap_allowed = DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
         if uav_outside_footprint_penalty == 0.0:
             uav_outside_footprint_penalty = DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
+        if uav_start_min_separation_m is None:
+            uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
+        if uav_start_edge_margin_m is None:
+            uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
         if action_transform == "clip":
             action_transform = "radial_tanh"
     ugv_planner_patch_size = int(ugv_planner_patch_size)
@@ -194,6 +202,10 @@ def build_args(
     if uav_outside_footprint_penalty < 0.0:
         raise ValueError("uav_outside_footprint_penalty must be nonnegative")
     uav_boundary_soft_margin_m = max(float(uav_boundary_soft_margin_m), 1e-6)
+    if uav_start_min_separation_m is not None:
+        uav_start_min_separation_m = max(float(uav_start_min_separation_m), 0.0)
+    if uav_start_edge_margin_m is not None:
+        uav_start_edge_margin_m = max(float(uav_start_edge_margin_m), 0.0)
 
     args = {
         "algo":        "happo",
@@ -339,6 +351,10 @@ def build_args(
     if local_coverage_obs_grid > 0:
         scenario_kwargs["local_coverage_obs_grid"] = local_coverage_obs_grid
         scenario_kwargs["local_coverage_obs_radius_m"] = local_coverage_obs_radius_m
+    if uav_start_min_separation_m is not None:
+        scenario_kwargs["uav_start_min_separation_m"] = uav_start_min_separation_m
+    if uav_start_edge_margin_m is not None:
+        scenario_kwargs["uav_start_edge_margin_m"] = uav_start_edge_margin_m
     if reward_search:
         # Kept explicit for the legacy flag; these now match the default reward
         # profile used by normal smoke training.
@@ -631,6 +647,12 @@ def main():
                         "Penalty scales linearly with the estimated outside-footprint fraction.")
     p.add_argument("--uav-boundary-soft-margin-m", type=float, default=25.0,
                    help="Physical margin from map edge used for UAV boundary risk diagnostics.")
+    p.add_argument("--uav-start-min-separation-m", type=float, default=None,
+                   help="Minimum pairwise UAV start distance in meters. In UAV diagnostic mode, "
+                        "default is 150m; pass 0 to disable.")
+    p.add_argument("--uav-start-edge-margin-m", type=float, default=None,
+                   help="Minimum UAV start-center distance from each map edge in meters. In UAV "
+                        "diagnostic mode, default is 50m; pass 0 to disable.")
     p.add_argument("--ugv-movement-alignment-reward", type=float, default=0.20,
                    help="Reward scale for UGV actual-movement alignment toward a known survivor in the "
                         "diagnostic task.")
@@ -711,6 +733,10 @@ def main():
         p.error("--uav-outside-footprint-penalty must be nonnegative")
     if args.uav_boundary_soft_margin_m <= 0.0:
         p.error("--uav-boundary-soft-margin-m must be positive")
+    if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
+        p.error("--uav-start-min-separation-m must be nonnegative")
+    if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
+        p.error("--uav-start-edge-margin-m must be nonnegative")
     if args.uav_diagnostic_drones < 1:
         p.error("--uav-diagnostic-drones must be positive")
     if args.ugv_planner_progress_reward < 0.0:
@@ -765,6 +791,10 @@ def main():
             args.uav_overlap_allowed = DEFAULT_UAV_DIAG_OVERLAP_ALLOWED
         if args.uav_outside_footprint_penalty == 0.0:
             args.uav_outside_footprint_penalty = DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY
+        if args.uav_start_min_separation_m is None:
+            args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
+        if args.uav_start_edge_margin_m is None:
+            args.uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
         if args.action_transform == "clip":
             args.action_transform = "radial_tanh"
         if args.n_rollout_threads == 1:
@@ -856,6 +886,8 @@ def main():
     print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
     print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
     print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
+    print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
+    print(f" uav_start_edge_margin_m: {args.uav_start_edge_margin_m}")
     print(f" action_transform: {args.action_transform}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
@@ -911,6 +943,8 @@ def main():
         uav_overlap_allowed = args.uav_overlap_allowed,
         uav_outside_footprint_penalty = args.uav_outside_footprint_penalty,
         uav_boundary_soft_margin_m = args.uav_boundary_soft_margin_m,
+        uav_start_min_separation_m = args.uav_start_min_separation_m,
+        uav_start_edge_margin_m = args.uav_start_edge_margin_m,
         ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
         ugv_planner_progress_reward = args.ugv_planner_progress_reward,
         ugv_approach_reward = args.ugv_approach_reward,

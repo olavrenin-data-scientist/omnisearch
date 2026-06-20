@@ -323,6 +323,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.1)
         self.assertEqual(scenario["uav_boundary_soft_margin_m"], 30.0)
+        self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
+        self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
         self.assertEqual(scenario["r_fire_penalty"], 0.0)
         self.assertEqual(scenario["r_drone_climb_cost"], 0.0)
 
@@ -354,6 +356,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_overlap"], 0.10)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.50)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
+        self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
+        self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
 
     def test_uav_survivor_diagnostic_can_use_two_drones(self):
         _, _, env_args = build_args(
@@ -374,6 +378,25 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_drone_scout"], 2.0)
         self.assertEqual(scenario["r_found_survivor"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
+        self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
+        self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
+
+    def test_uav_survivor_diagnostic_start_constraints_can_be_disabled(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_no_start_constraints",
+            uav_survivor_diagnostic=True,
+            uav_start_min_separation_m=0.0,
+            uav_start_edge_margin_m=0.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["uav_start_min_separation_m"], 0.0)
+        self.assertEqual(scenario["uav_start_edge_margin_m"], 0.0)
 
     def test_uav_diagnostics_preserves_manifest_drone_count(self):
         with tempfile.TemporaryDirectory() as tmp:

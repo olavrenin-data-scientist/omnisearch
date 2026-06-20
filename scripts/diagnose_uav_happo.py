@@ -69,6 +69,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     if args.drone_min_footprint_radius_m is not None:
         scenario_kwargs.pop("drone_min_footprint", None)
         scenario_kwargs["drone_min_footprint_m"] = max(float(args.drone_min_footprint_radius_m), 0.0)
+    if getattr(args, "uav_start_min_separation_m", None) is not None:
+        scenario_kwargs["uav_start_min_separation_m"] = max(float(args.uav_start_min_separation_m), 0.0)
+    if getattr(args, "uav_start_edge_margin_m", None) is not None:
+        scenario_kwargs["uav_start_edge_margin_m"] = max(float(args.uav_start_edge_margin_m), 0.0)
     return scenario_kwargs
 
 
@@ -84,6 +88,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     env.reset()
     policy.reset()
     scenario = env.scenario
+    start_metrics = _start_metrics(scenario)
 
     n_survivors = int(scenario.n_survivors)
     first_scout_steps: list[int | None] = [None] * n_survivors
@@ -257,6 +262,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "low_action_high_motion_frac": low_action_high_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "high_action_low_motion_frac": high_action_low_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "moving_no_new_coverage_frac": moving_no_new_coverage / diagnostic_steps if diagnostic_steps else 0.0,
+        **start_metrics,
         **path_metrics,
         **coverage_shape_metrics,
     }
@@ -301,6 +307,56 @@ def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) ->
     if arr.size == 1:
         return np.repeat(arr, n_drones)
     return np.resize(arr, n_drones)
+
+
+def _start_metrics(scenario: WildfireSearchScenario) -> dict[str, Any]:
+    n_drones = int(getattr(scenario, "n_drones", 0))
+    if n_drones <= 0:
+        return {
+            "start_positions_m": [],
+            "min_start_pair_distance_m": math.nan,
+            "mean_start_pair_distance_m": math.nan,
+            "min_start_edge_distance_m": math.nan,
+            "mean_start_edge_distance_m": math.nan,
+            "start_map_width_m": math.nan,
+            "start_map_height_m": math.nan,
+        }
+
+    positions_sim = np.asarray([
+        agent.state.pos[0].detach().cpu().numpy().astype(float)
+        for agent in scenario.world.agents[:n_drones]
+    ])
+    meters_per_sim = 1.0 / max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
+    positions_m = positions_sim * meters_per_sim
+    if n_drones > 1:
+        deltas = positions_m[:, None, :] - positions_m[None, :, :]
+        pairwise = np.linalg.norm(deltas, axis=-1)
+        pairwise = pairwise[np.triu_indices(n_drones, k=1)]
+    else:
+        pairwise = np.asarray([], dtype=float)
+
+    x_half_m = float(scenario.x_semidim) * meters_per_sim
+    y_half_m = float(scenario.y_semidim) * meters_per_sim
+    edge_distances = np.stack(
+        [
+            positions_m[:, 0] + x_half_m,
+            x_half_m - positions_m[:, 0],
+            positions_m[:, 1] + y_half_m,
+            y_half_m - positions_m[:, 1],
+        ],
+        axis=1,
+    ).clip(min=0.0)
+    nearest_edge = edge_distances.min(axis=1)
+
+    return {
+        "start_positions_m": positions_m.round(6).tolist(),
+        "min_start_pair_distance_m": float(pairwise.min()) if pairwise.size else math.nan,
+        "mean_start_pair_distance_m": float(pairwise.mean()) if pairwise.size else math.nan,
+        "min_start_edge_distance_m": float(nearest_edge.min()) if nearest_edge.size else math.nan,
+        "mean_start_edge_distance_m": float(nearest_edge.mean()) if nearest_edge.size else math.nan,
+        "start_map_width_m": float(2.0 * x_half_m),
+        "start_map_height_m": float(2.0 * y_half_m),
+    }
 
 
 def _path_metrics(
@@ -550,6 +606,12 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
         "mean_moving_no_new_coverage_frac": _finite_mean([
             row["moving_no_new_coverage_frac"] for row in rows
         ]),
+        "mean_min_start_pair_distance_m": _finite_mean([
+            row["min_start_pair_distance_m"] for row in rows
+        ]),
+        "mean_min_start_edge_distance_m": _finite_mean([
+            row["min_start_edge_distance_m"] for row in rows
+        ]),
         "mean_path_bbox_area_fraction": _finite_mean([row["path_bbox_area_fraction"] for row in rows]),
         "mean_path_length_m": _finite_mean([row["path_length_m"] for row in rows]),
         "mean_boundary_distance_m": _finite_mean([row["mean_boundary_distance_m"] for row in rows]),
@@ -589,6 +651,8 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "corner_frac": "corner_step_frac",
         "center_cov": "coverage_center_fraction",
         "moving_no_new": "moving_no_new_coverage_frac",
+        "start_pair": "min_start_pair_distance_m",
+        "start_edge": "min_start_edge_distance_m",
     }
     out: dict[str, float] = {}
     for prefix, key in metrics.items():
@@ -650,9 +714,11 @@ def write_distribution_plots(
         ("Corner Step Fraction", "corner_step_frac", (0.0, 1.0)),
         ("Center Coverage", "coverage_center_fraction", (0.0, 1.0)),
         ("Moving No New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0)),
+        ("Start Pair Min (m)", "min_start_pair_distance_m", None),
+        ("Start Edge Min (m)", "min_start_edge_distance_m", None),
     ]
 
-    fig, axes = plt.subplots(4, 3, figsize=(14, 12), constrained_layout=True)
+    fig, axes = plt.subplots(5, 3, figsize=(14, 15), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -675,6 +741,41 @@ def write_distribution_plots(
         ax.set_title(title, fontsize=10)
         ax.set_ylabel("episodes")
         ax.grid(axis="y", alpha=0.25)
+
+    heat_ax = axes_flat[-2]
+    heat_ax.clear()
+    starts = [
+        position
+        for row in rows
+        for position in row.get("start_positions_m", [])
+        if len(position) >= 2
+    ]
+    if starts:
+        start_array = np.asarray(starts, dtype=float)
+        map_width = _finite_mean([float(row.get("start_map_width_m", math.nan)) for row in rows])
+        map_height = _finite_mean([float(row.get("start_map_height_m", math.nan)) for row in rows])
+        if not math.isfinite(map_width):
+            map_width = max(float(np.abs(start_array[:, 0]).max()) * 2.0, 1.0)
+        if not math.isfinite(map_height):
+            map_height = max(float(np.abs(start_array[:, 1]).max()) * 2.0, 1.0)
+        heat = heat_ax.hist2d(
+            start_array[:, 0],
+            start_array[:, 1],
+            bins=12,
+            range=[
+                [-0.5 * map_width, 0.5 * map_width],
+                [-0.5 * map_height, 0.5 * map_height],
+            ],
+            cmap="Blues",
+        )
+        fig.colorbar(heat[3], ax=heat_ax, fraction=0.046, pad=0.04)
+        heat_ax.set_aspect("equal", adjustable="box")
+        heat_ax.set_xlabel("x start (m)")
+        heat_ax.set_ylabel("y start (m)")
+        heat_ax.set_title("UAV Start Heatmap", fontsize=10)
+    else:
+        heat_ax.text(0.5, 0.5, "no starts", ha="center", va="center", transform=heat_ax.transAxes)
+        heat_ax.set_title("UAV Start Heatmap", fontsize=10)
 
     label_ax = axes_flat[-1]
     label_ax.clear()
@@ -712,6 +813,10 @@ def main() -> None:
                         help="Override UAV count for legacy checkpoints. Default preserves the checkpoint manifest.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=None)
+    parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
+                        help="Override checkpoint UAV start min separation in meters; pass 0 to disable.")
+    parser.add_argument("--uav-start-edge-margin-m", type=float, default=None,
+                        help="Override checkpoint UAV start edge margin in meters; pass 0 to disable.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--json-output", default=None, help="Optional path to write per-seed rows and summary as JSON.")
     parser.add_argument("--plots-output", default=None, help="Optional path to write histogram diagnostics as a PNG.")
@@ -723,6 +828,10 @@ def main() -> None:
         parser.error("--n-drones must be positive")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
+    if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
+        parser.error("--uav-start-min-separation-m must be nonnegative")
+    if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
+        parser.error("--uav-start-edge-margin-m must be nonnegative")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -737,6 +846,11 @@ def main() -> None:
         f"{scenario_kwargs['n_ground']} UGVs, "
         f"{scenario_kwargs['n_survivors']} survivors, "
         f"dt={scenario_kwargs.get('sim_step_seconds', 'scenario-default')}s"
+    )
+    print(
+        "uav starts: "
+        f"min_sep={scenario_kwargs.get('uav_start_min_separation_m', 0.0)}m "
+        f"edge_margin={scenario_kwargs.get('uav_start_edge_margin_m', 0.0)}m"
     )
     print("-" * 88)
 
@@ -775,6 +889,8 @@ def main() -> None:
             f"exp_ov={row['avg_expected_overlap_fraction']:.2f} "
             f"excess_ov={row['avg_excess_overlap_fraction']:.2f} "
             f"center_cov={row['coverage_center_fraction']:.2f} "
+            f"start_pair={_fmt_optional(row['min_start_pair_distance_m'])}m "
+            f"start_edge={_fmt_optional(row['min_start_edge_distance_m'])}m "
             f"label={row['failure_label']} "
             f"first_steps={row['first_scout_steps']}"
         )
@@ -838,6 +954,11 @@ def main() -> None:
         f"low_action_high_motion={summary['mean_low_action_high_motion_frac']:.3f} "
         f"high_action_low_motion={summary['mean_high_action_low_motion_frac']:.3f} "
         f"moving_no_new_coverage={summary['mean_moving_no_new_coverage_frac']:.3f}"
+    )
+    print(
+        "start means: "
+        f"min_pair={summary['mean_min_start_pair_distance_m']:.1f}m "
+        f"min_edge={summary['mean_min_start_edge_distance_m']:.1f}m"
     )
     print(
         "failure labels: "
