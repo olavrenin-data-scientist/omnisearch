@@ -123,6 +123,20 @@
   footer .speed, footer .toggle { color: var(--muted); font-size: 13px; }
   footer .toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   footer input[type="checkbox"] { accent-color: var(--accent); }
+  .boot-fallback {
+    min-height: 100vh; display: grid; place-items: center;
+    padding: 24px; background: var(--bg); color: var(--text);
+  }
+  .boot-fallback > div {
+    max-width: 680px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel); padding: 20px 22px; line-height: 1.5;
+  }
+  .boot-fallback h1 { margin: 0 0 10px; font-size: 18px; }
+  .boot-fallback p { margin: 8px 0; color: var(--muted); }
+  .boot-fallback code {
+    color: var(--text); background: #090c12; border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px;
+  }
 </style>
 
 <script type="importmap">
@@ -138,7 +152,24 @@
 </script>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <div class="boot-fallback">
+    <div>
+      <h1>OmniSearch viewer is loading...</h1>
+      <p>
+        If this message stays visible, the browser did not start the JavaScript
+        app. The viewer currently imports React and Three.js from
+        <code>https://esm.sh</code>, so an offline browser, blocked CDN, or
+        module-load error can otherwise look like a plain black page.
+      </p>
+      <p>
+        Serve the folder with <code>python -m http.server -d web</code>, open
+        <code>http://localhost:8000</code>, then check the browser console for
+        the first red module/import error.
+      </p>
+    </div>
+  </div>
+</div>
 
 <script type="module">
 import * as THREE from 'three';

@@ -82,6 +82,7 @@ def build_args(
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
     linear_lr_decay: bool = False,
+    share_param: bool = False,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
     drone_min_footprint_m: float = 0.0,
@@ -102,6 +103,7 @@ def build_args(
     local_coverage_obs_radius_m: float = 150.0,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
+    uav_diagnostic_drones: int = 1,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
     uav_no_global_coverage_obs: bool = False,
@@ -135,6 +137,9 @@ def build_args(
     if ugv_planner_hint not in {"none", "local_astar"}:
         raise ValueError("ugv_planner_hint must be one of: none, local_astar")
     if uav_survivor_diagnostic:
+        uav_diagnostic_drones = int(uav_diagnostic_drones)
+        if uav_diagnostic_drones < 1:
+            raise ValueError("uav_diagnostic_drones must be positive")
         if terrain_cache_path is None:
             terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
         if local_map_patch_size == 3:
@@ -264,7 +269,7 @@ def build_args(
             "use_policy_active_masks": True,
             "huber_delta":             10.0,
             "action_aggregation":      "prod",
-            "share_param":             False,
+            "share_param":             bool(share_param),
             "fixed_order":             False,
         },
         "logger": {
@@ -438,7 +443,7 @@ def build_args(
         if uav_time_penalty is not None:
             time_penalty = float(uav_time_penalty)
         scenario_kwargs.update({
-            "n_drones": 1,
+            "n_drones": uav_diagnostic_drones,
             "n_ground": 0,
             "n_survivors": 5,
             "known_survivors_at_reset": False,
@@ -507,6 +512,9 @@ def main():
                    help="Critic learning rate.")
     p.add_argument("--linear-lr-decay", action="store_true",
                    help="Linearly decay actor/critic learning rates over training.")
+    p.add_argument("--share-param", action="store_true",
+                   help="Enable HARL global actor parameter sharing. Use only for homogeneous-agent "
+                        "runs such as UAV-only diagnostics; mixed UAV/UGV sharing needs class-wise sharing.")
     p.add_argument("--terrain-cnn-encoder", action="store_true",
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
@@ -589,7 +597,9 @@ def main():
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
-                   help="Train a UAV-only diagnostic task: 1 UAV, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
+                   help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
+    p.add_argument("--uav-diagnostic-drones", type=int, default=1,
+                   help="Number of UAVs in --uav-survivor-diagnostic mode.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
@@ -701,6 +711,8 @@ def main():
         p.error("--uav-outside-footprint-penalty must be nonnegative")
     if args.uav_boundary_soft_margin_m <= 0.0:
         p.error("--uav-boundary-soft-margin-m must be positive")
+    if args.uav_diagnostic_drones < 1:
+        p.error("--uav-diagnostic-drones must be positive")
     if args.ugv_planner_progress_reward < 0.0:
         p.error("--ugv-planner-progress-reward must be nonnegative")
     if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint != "local_astar":
@@ -827,10 +839,12 @@ def main():
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
+    print(f" share_param:    {args.share_param}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
     print(f" local_coverage_obs_radius_m: {args.local_coverage_obs_radius_m}")
+    print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
@@ -860,6 +874,7 @@ def main():
         lr             = args.lr,
         critic_lr      = args.critic_lr,
         linear_lr_decay = args.linear_lr_decay,
+        share_param    = args.share_param,
         exp_name       = args.exp_name,
         n_rollout_threads = args.n_rollout_threads,
         terrain_cache_path = args.terrain_cache_path,
@@ -882,6 +897,7 @@ def main():
         local_coverage_obs_radius_m = args.local_coverage_obs_radius_m,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
+        uav_diagnostic_drones = args.uav_diagnostic_drones,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
