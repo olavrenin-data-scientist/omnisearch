@@ -354,7 +354,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)
         self.assertEqual(scenario["r_uav_overlap"], 0.10)
-        self.assertEqual(scenario["uav_overlap_allowed"], 0.50)
+        self.assertEqual(scenario["uav_overlap_allowed"], 0.10)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
