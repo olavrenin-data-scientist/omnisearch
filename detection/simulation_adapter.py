@@ -302,8 +302,21 @@ class SimulationCvAdapter:
                         confs.append(float(c))
 
         merged = self._nms(boxes, confs, self.person_iou)
-        merged.sort(key=lambda bc: bc[1], reverse=True)
-        return merged
+        # Clip every box to the actual image boundary.  YOLO can return slightly
+        # out-of-bounds coordinates due to letter-boxing artefacts in the resize
+        # path, and tiled inference adds per-tile offsets that can push boxes past
+        # the right/bottom edge.  Drop degenerate boxes that collapse to zero area
+        # after clipping rather than passing them to the IoU matcher.
+        clipped: list[tuple[tuple, float]] = []
+        for (bx1, by1, bx2, by2), c in merged:
+            bx1 = max(0.0, min(float(W), bx1))
+            by1 = max(0.0, min(float(H), by1))
+            bx2 = max(0.0, min(float(W), bx2))
+            by2 = max(0.0, min(float(H), by2))
+            if bx2 > bx1 and by2 > by1:
+                clipped.append(((bx1, by1, bx2, by2), c))
+        clipped.sort(key=lambda bc: bc[1], reverse=True)
+        return clipped
 
     def _match_truth_index(self, box, truth_boxes, truth):
         """Return the survivor_index of the best-overlapping ground-truth box."""

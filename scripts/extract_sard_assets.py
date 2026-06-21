@@ -103,6 +103,11 @@ def main() -> None:
             if min(box.x2 - box.x1, box.y2 - box.y1) < int(args.min_box_px):
                 continue
             padded = _pad_box(box, image.size, float(args.padding))
+            # After clamping to image bounds the padded box can become degenerate
+            # (zero or negative area) when the annotation was near or outside an
+            # image edge.  Skip rather than passing an invalid region to PIL.crop.
+            if padded.x2 - padded.x1 < int(args.min_box_px) or padded.y2 - padded.y1 < int(args.min_box_px):
+                continue
             crop = image.crop((padded.x1, padded.y1, padded.x2, padded.y2))
             asset = _to_rgba_asset(
                 crop,
@@ -141,14 +146,20 @@ def _boxes_for_image(
     sard_root: Path,
     coco_boxes: dict[str, list[Box]],
 ) -> Iterable[Box]:
+    # YOLO boxes are already clamped inside _yolo_boxes_for_image.
     yield from _yolo_boxes_for_image(image_path, image_size, sard_root)
-    yield from _voc_boxes_for_image(image_path, sard_root)
-    yield from coco_boxes.get(image_path.name, [])
+    # VOC/COCO boxes are NOT pre-clamped — clamp here so that _pad_box and
+    # the GrabCut foreground-box coordinates are always within the image.
+    for box in _voc_boxes_for_image(image_path, sard_root):
+        yield _clamp_box(box, image_size)
     try:
         relative = str(image_path.relative_to(sard_root))
     except ValueError:
         relative = image_path.name
-    yield from coco_boxes.get(relative, [])
+    for box in coco_boxes.get(image_path.name, []):
+        yield _clamp_box(box, image_size)
+    for box in coco_boxes.get(relative, []):
+        yield _clamp_box(box, image_size)
 
 
 def _yolo_boxes_for_image(image_path: Path, image_size: tuple[int, int], sard_root: Path) -> Iterable[Box]:

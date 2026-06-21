@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import random
 import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -50,7 +51,7 @@ def _procedural_background(size: int, rng: np.random.Generator) -> Image.Image:
     return Image.fromarray(np.clip(arr, 0, 255).astype("uint8")).convert("RGB")
 
 
-def _load_naip_tiles(naip_dir: str):
+def _load_naip_tiles(naip_dir: str) -> list[Image.Image]:
     """Load cached NAIP tiles to sample real aerial backgrounds from."""
     paths = sorted(glob.glob(str(Path(naip_dir) / "**" / "*.png"), recursive=True))
     tiles = []
@@ -64,7 +65,20 @@ def _load_naip_tiles(naip_dir: str):
     return tiles
 
 
-def _naip_background(tiles, size: int, rng: np.random.Generator) -> Image.Image:
+def _split_tiles(
+    tiles: list[Image.Image], val_frac: float = 0.20
+) -> tuple[list[Image.Image], list[Image.Image]]:
+    """Deterministic geographic split so train and val never share the same tile.
+
+    The tiles list is already sorted by path, so consecutive tiles from the same
+    geographic area stay together.  The first (1-val_frac) fraction is used for
+    training; the remainder provides an independent validation background pool.
+    """
+    n_train = max(1, int(len(tiles) * (1.0 - val_frac)))
+    return tiles[:n_train], tiles[n_train:]
+
+
+def _naip_background(tiles: list[Image.Image], size: int, rng: np.random.Generator) -> Image.Image:
     """Random crop from a real NAIP tile (with light scale/flip augmentation)."""
     tile = tiles[int(rng.integers(0, len(tiles)))]
     W, H = tile.size
@@ -82,7 +96,7 @@ def _disc(size: int, cx: float, cy: float, r: float) -> np.ndarray:
     return np.clip(1.0 - np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max(r, 1.0), 0, 1).astype(np.float32)
 
 
-def _wildfire_masks(size, rng, centers):
+def _wildfire_masks(size: int, rng: np.random.Generator, centers: list) -> WildfireMasks:
     """Build burn/flame/smoke masks, biased to sit ON survivors.
 
     ``centers`` are pixel (cx, cy) of placed survivors; fire is centered on a
@@ -105,10 +119,212 @@ def _wildfire_masks(size, rng, centers):
     return WildfireMasks(burned=burned, active=active, intensity=active.copy(), smoke=smoke)
 
 
-def _generate_split(out_dir: Path, n: int, assets, size, rng, cfg, fire_frac=0.65, surv_px=(45, 230), naip_tiles=None):
+# ---------------------------------------------------------------------------
+# Compositing helpers — each reduces a specific class of artifact that arises
+# when sharp close-up SARD cutouts are pasted onto 0.6 m/px NAIP terrain.
+# ---------------------------------------------------------------------------
+
+def _erode_alpha_edge(sprite: Image.Image, rng: np.random.Generator) -> Image.Image:
+    """Erode and feather the alpha channel to soften hard GrabCut boundary pixels.
+
+    GrabCut produces a binary silhouette with an abrupt edge.  Varying the
+    erosion (0-2 px) and Gaussian feather prevents the model from memorising
+    a fixed ring of transitional pixels as a person cue.
+    """
+    a = sprite.getchannel("A")
+    erode_px = int(rng.integers(0, 3))
+    if erode_px > 0:
+        a = a.filter(ImageFilter.MinFilter(size=erode_px * 2 + 1))
+    a = a.filter(ImageFilter.GaussianBlur(radius=rng.uniform(0.5, 1.5)))
+    return Image.merge("RGBA", (*sprite.convert("RGB").split(), a))
+
+
+def _harmonize_color(
+    sprite: Image.Image, bg_patch: Image.Image, rng: np.random.Generator
+) -> Image.Image:
+    """Shift the survivor's per-channel mean toward the local background patch.
+
+    SARD images are taken in a range of lighting conditions unrelated to the
+    NAIP tile.  Blending a fraction of the background mean into the survivor
+    makes the composite look less like a foreign object, reducing the risk
+    that the model learns 'bright/saturated blob on muted NAIP' as the signal.
+    """
+    alpha = np.asarray(sprite.getchannel("A"), dtype=np.float32) / 255.0
+    fg_mask = alpha > 0.5
+    if fg_mask.sum() < 5:
+        return sprite
+    spr = np.asarray(sprite.convert("RGB"), dtype=np.float32)
+    bg = np.asarray(bg_patch.convert("RGB"), dtype=np.float32)
+    blend = rng.uniform(0.25, 0.55)
+    for c in range(3):
+        src_mean = float(spr[:, :, c][fg_mask].mean())
+        tgt_mean = float(bg[:, :, c].mean())
+        spr[:, :, c] = np.clip(spr[:, :, c] + (tgt_mean - src_mean) * blend, 0, 255)
+    # Per-image random brightness / contrast so all survivors do not look the same tone.
+    brightness = rng.uniform(0.82, 1.18)
+    contrast = rng.uniform(0.88, 1.12)
+    mid = 127.5
+    spr = np.clip((spr - mid) * contrast + mid * brightness, 0, 255)
+    result = Image.fromarray(spr.astype(np.uint8))
+    return Image.merge("RGBA", (*result.split(), sprite.getchannel("A")))
+
+
+def _resolution_blur(sprite: Image.Image, w: int, rng: np.random.Generator) -> Image.Image:
+    """Blur the survivor to approximate NAIP's 0.6 m/px ground-sample distance.
+
+    A SARD image is captured at close range and is much sharper than anything
+    in a NAIP tile at the same pixel size.  Blurring proportionally to apparent
+    size removes the sharpness discontinuity at the survivor boundary so the
+    model cannot rely on 'sharp island in a blurry tile' as a shortcut cue.
+    """
+    if w < 30:
+        r = rng.uniform(0.9, 1.8)
+    elif w < 80:
+        r = rng.uniform(0.4, 1.2)
+    else:
+        r = rng.uniform(0.0, 0.7)
+    if r < 0.05:
+        return sprite
+    rgb = sprite.convert("RGB").filter(ImageFilter.GaussianBlur(radius=r))
+    return Image.merge("RGBA", (*rgb.split(), sprite.getchannel("A")))
+
+
+# ---------------------------------------------------------------------------
+# Real hard-negative decoy asset loading
+# ---------------------------------------------------------------------------
+
+def _load_decoy_assets(decoy_dir: str) -> list[Image.Image]:
+    """Load pre-extracted RGBA decoy PNGs (VisDrone vehicles, SARD rejected, etc.)."""
+    paths = sorted(glob.glob(str(Path(decoy_dir) / "*.png")))
+    assets = []
+    for p in paths:
+        try:
+            img = Image.open(p).convert("RGBA")
+        except Exception:
+            continue
+        if min(img.size) >= 8:
+            assets.append(img)
+    return assets
+
+
+# ---------------------------------------------------------------------------
+# Synthetic hard-negative decoy objects
+# ---------------------------------------------------------------------------
+
+def _synthetic_decoy_rgba(
+    target_w: int, target_h: int, rng: np.random.Generator
+) -> Image.Image:
+    """Generate a procedural non-human top-down object (rock / stump / debris) as RGBA.
+
+    These are composited onto training images using the same pipeline as
+    survivor assets (harmonize → erode → blur) but carry no YOLO label.
+    This forces the model to learn a genuine human silhouette rather than the
+    shortcut cue of 'any composited object on NAIP terrain'.
+
+    Four synthetic object archetypes are drawn from overlapping ellipses with
+    earth-tone colour palettes that approximate what rocks, stumps, gear piles,
+    and debris look like from 30–300 m altitude.
+    """
+    # Randomise dimensions slightly from the requested target so objects are not
+    # all exactly person-width — rocks and stumps vary more in aspect ratio.
+    w = max(8, int(target_w * rng.uniform(0.6, 1.4)))
+    h = max(8, int(target_h * rng.uniform(0.5, 1.6)))
+
+    # Earth-tone palette.
+    archetype = int(rng.integers(0, 4))
+    if archetype == 0:      # rock — cool gray
+        r0 = int(rng.integers(80, 160)); g0 = int(rng.integers(75, 155)); b0 = int(rng.integers(70, 150))
+    elif archetype == 1:    # soil / dirt — warm brown
+        r0 = int(rng.integers(100, 170)); g0 = int(rng.integers(65, 125)); b0 = int(rng.integers(35, 85))
+    elif archetype == 2:    # dead vegetation / stump — tan / ochre
+        r0 = int(rng.integers(140, 200)); g0 = int(rng.integers(115, 165)); b0 = int(rng.integers(55, 105))
+    else:                   # dark gear / debris — dark olive / gray-green
+        r0 = int(rng.integers(45, 105)); g0 = int(rng.integers(50, 110)); b0 = int(rng.integers(40, 95))
+
+    # Alpha mask: 2–5 overlapping ellipses → irregular blob silhouette.
+    yy, xx = np.mgrid[0:h, 0:w]
+    blob = np.zeros((h, w), dtype=np.float32)
+    for _ in range(int(rng.integers(2, 6))):
+        cx = rng.uniform(w * 0.15, w * 0.85)
+        cy = rng.uniform(h * 0.15, h * 0.85)
+        rx = max(1.0, rng.uniform(w * 0.12, w * 0.48))
+        ry = max(1.0, rng.uniform(h * 0.12, h * 0.48))
+        blob = np.maximum(blob, np.clip(1.0 - np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2), 0, 1))
+    alpha = ((blob > 0.38).astype(np.uint8) * 255)
+    alpha_img = Image.fromarray(alpha).filter(ImageFilter.GaussianBlur(radius=1.0))
+
+    # Textured RGB: base colour + Gaussian noise + low-frequency shading.
+    rgb = np.full((h, w, 3), [r0, g0, b0], dtype=np.float32)
+    rgb += rng.normal(0, 14, rgb.shape)
+    lf = rng.uniform(-18, 18, (4, 4, 3)).astype(np.float32)
+    lf_up = np.asarray(
+        Image.fromarray(np.clip(lf + 128, 0, 255).astype(np.uint8)).resize((w, h), Image.Resampling.BICUBIC),
+        dtype=np.float32,
+    )
+    rgb = np.clip(rgb + lf_up - 128, 0, 255).astype(np.uint8)
+
+    result = Image.fromarray(rgb)
+    # Resize to the originally requested dimensions so placement arithmetic stays simple.
+    result = Image.merge("RGBA", (*result.split(), alpha_img)).resize(
+        (target_w, target_h), Image.Resampling.LANCZOS
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dataset generation
+# ---------------------------------------------------------------------------
+
+def _clip_label(x: int, y: int, w: int, h: int, size: int) -> tuple[float, float, float, float] | None:
+    """Clip a survivor placement to the image boundary and return a YOLO label tuple.
+
+    Returns (cx_norm, cy_norm, w_norm, h_norm) using the visible (clipped) bbox,
+    or None if the visible area is too small to label (< 4 px on either axis).
+    """
+    x1 = max(0, x); y1 = max(0, y)
+    x2 = min(size, x + w); y2 = min(size, y + h)
+    cw = x2 - x1; ch = y2 - y1
+    if cw < 4 or ch < 4:
+        return None
+    return (x1 + x2) / 2.0 / size, (y1 + y2) / 2.0 / size, cw / size, ch / size
+
+
+def _generate_split(
+    out_dir: Path,
+    n: int,
+    assets: list[Image.Image],
+    size: int,
+    rng: np.random.Generator,
+    cfg: WildfireEffectConfig,
+    fire_frac: float = 0.65,
+    surv_px: tuple[int, int] = (45, 230),
+    naip_tiles: list[Image.Image] | None = None,
+    neg_frac: float = 0.12,
+    decoy_frac: float = 0.20,
+    decoy_assets: list[Image.Image] | None = None,
+    boundary_frac: float = 0.10,
+) -> None:
+    """Generate *n* composite images into *out_dir*.
+
+    neg_frac:      fraction of images that are pure background (no survivor label).
+                   Essential so the model learns that not every NAIP crop contains a
+                   person.
+
+    decoy_frac:    fraction of images that contain 1–3 hard-negative decoy objects
+                   composited with the SAME pipeline as survivors but carrying NO
+                   label.  Decoys are drawn from *decoy_assets* when provided
+                   (real VisDrone vehicles / SARD rejected crops), otherwise from
+                   procedural synthetic blobs.
+
+    boundary_frac: fraction of survivor placements that are allowed to overlap the
+                   image edge (partially outside the frame).  Labels use the visible
+                   (clipped) bbox.  Closes the train/deploy mismatch where deployment
+                   can render edge-truncated survivors but training never did.
+    """
     img_dir = out_dir / "images"; lbl_dir = out_dir / "labels"
     img_dir.mkdir(parents=True, exist_ok=True); lbl_dir.mkdir(parents=True, exist_ok=True)
     lo, hi = int(surv_px[0]), int(surv_px[1])
+    n_neg = 0
     for i in range(n):
         # Real NAIP crops when available (matches deployment imagery and kills
         # the false positives a procedural-only model fires on real terrain);
@@ -117,33 +333,95 @@ def _generate_split(out_dir: Path, n: int, assets, size, rng, cfg, fire_frac=0.6
             bg = _naip_background(naip_tiles, size, rng)
         else:
             bg = _procedural_background(size, rng)
-        # Decide survivor placements first so fire can be centered on them.
-        placements = []
-        for _ in range(int(rng.integers(1, 4))):  # 1-3 survivors
-            asset = assets[int(rng.integers(0, len(assets)))]
-            w = int(rng.integers(lo, hi)); h = int(w * asset.height / asset.width)
-            x = int(rng.integers(0, max(1, size - w))); y = int(rng.integers(0, max(1, size - h)))
-            placements.append((asset, w, h, x, y))
-        centers = [(x + w / 2, y + h / 2) for (_, w, h, x, y) in placements]
 
+        # Negative-only images: survivor-free backgrounds teach the model that
+        # NAIP terrain does not automatically imply a person is present.
+        is_negative = rng.random() < neg_frac
+
+        placements: list[tuple[Image.Image, int, int, int, int]] = []
+        if not is_negative:
+            for _ in range(int(rng.integers(1, 4))):   # 1-3 survivors
+                asset = assets[int(rng.integers(0, len(assets)))]
+                w = int(rng.integers(lo, hi))
+                h = int(w * asset.height / asset.width)
+                if rng.random() < boundary_frac:
+                    # Boundary placement: allow up to 50% of the survivor to hang
+                    # off any edge so the model learns to detect truncated humans.
+                    x = int(rng.integers(-w // 2, max(1, size - w // 2)))
+                    y = int(rng.integers(-h // 2, max(1, size - h // 2)))
+                else:
+                    x = int(rng.integers(0, max(1, size - w)))
+                    y = int(rng.integers(0, max(1, size - h)))
+                placements.append((asset, w, h, x, y))
+            n_neg -= 1   # track below
+
+        centers = [(x + w / 2, y + h / 2) for (_, w, h, x, y) in placements]
         has_fire = rng.random() < fire_frac
         mask = _wildfire_masks(size, rng, centers) if has_fire else None
-        if mask is not None:  # burn + flame UNDER survivors (production order)
+        if mask is not None:    # burn + flame UNDER survivors (production order)
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg, include_burn=True, include_flame=True, include_smoke=False)
 
-        labels = []
+        labels: list[str] = []
         for asset, w, h, x, y in placements:
             s = asset.resize((w, h), Image.Resampling.LANCZOS)
+            # Sample only the visible patch of the background for color harmonization.
+            px1 = max(0, x); py1 = max(0, y)
+            px2 = min(size, x + w); py2 = min(size, y + h)
+            bg_patch = bg.crop((px1, py1, px2, py2)) if px2 > px1 and py2 > py1 else bg.crop((0, 0, w, h))
+            s = _harmonize_color(s, bg_patch, rng)   # tone match to local BG
+            s = _erode_alpha_edge(s, rng)             # soften GrabCut hard edges
+            s = _resolution_blur(s, w, rng)           # match NAIP sharpness
             bg.paste(s, (x, y), s)
-            labels.append(f"0 {(x+w/2)/size:.6f} {(y+h/2)/size:.6f} {w/size:.6f} {h/size:.6f}")
+            # Use the visible (clipped) bbox for the YOLO label so that partially
+            # out-of-frame survivors get correct annotations.
+            clipped = _clip_label(x, y, w, h, size)
+            if clipped is not None:
+                cx_n, cy_n, w_n, h_n = clipped
+                labels.append(f"0 {cx_n:.6f} {cy_n:.6f} {w_n:.6f} {h_n:.6f}")
 
-        if mask is not None:  # smoke drifts OVER survivors
+        if mask is not None:    # smoke drifts OVER survivors
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg, include_burn=False, include_flame=False, include_smoke=True)
+
+        # Hard-negative decoys: non-human objects composited the same way as
+        # survivors but never labeled.  Applied regardless of whether the image is
+        # positive, negative, or mixed — the model must learn to ignore them.
+        # Prefer REAL assets (VisDrone vehicles, SARD rejected) when available;
+        # fall back to procedural synthetic blobs otherwise.
+        if rng.random() < decoy_frac:
+            n_decoys = int(rng.integers(1, 4))
+            for _ in range(n_decoys):
+                dw = int(rng.integers(lo, hi))
+                dx = int(rng.integers(0, max(1, size - dw)))
+                if decoy_assets:
+                    # Real asset: resize to target width preserving aspect ratio.
+                    raw = decoy_assets[int(rng.integers(0, len(decoy_assets)))]
+                    dh = max(8, int(dw * raw.height / raw.width))
+                    dy = int(rng.integers(0, max(1, size - dh)))
+                    decoy = raw.resize((dw, dh), Image.Resampling.LANCZOS)
+                else:
+                    # Fallback: procedural blob (non-human aspect ratios).
+                    dh = int(dw * rng.uniform(0.5, 1.8))
+                    dy = int(rng.integers(0, max(1, size - dh)))
+                    decoy = _synthetic_decoy_rgba(dw, dh, rng)
+                bg_patch = bg.crop((dx, dy, dx + dw, dy + dh))
+                decoy = _harmonize_color(decoy, bg_patch, rng)
+                decoy = _erode_alpha_edge(decoy, rng)
+                decoy = _resolution_blur(decoy, dw, rng)
+                bg.paste(decoy, (dx, dy), decoy)
+                # Intentionally no label — this is the hard-negative signal.
+
         bg.save(img_dir / f"{i:05d}.jpg", quality=92)
-        (lbl_dir / f"{i:05d}.txt").write_text("\n".join(labels) + "\n", encoding="utf-8")
+        # Empty label file is the YOLO convention for a negative image.
+        label_text = "\n".join(labels) + ("\n" if labels else "")
+        (lbl_dir / f"{i:05d}.txt").write_text(label_text, encoding="utf-8")
+        if is_negative:
+            n_neg += 1
+
+    neg_pct = 100 * n_neg / n if n else 0
+    print(f"  {out_dir.name}: {n} images ({n_neg} negatives, {neg_pct:.0f}%)")
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="yolov8n.pt")
     ap.add_argument("--epochs", type=int, default=20)
@@ -154,14 +432,45 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fire-frac", type=float, default=0.65,
                     help="Fraction of training images with fire/smoke centered on survivors.")
+    ap.add_argument("--neg-frac", type=float, default=0.12,
+                    help="Fraction of training images that are negative-only (no survivor label). "
+                         "These teach the model that not every NAIP crop contains a person.")
+    ap.add_argument("--boundary-frac", type=float, default=0.10,
+                    help="Fraction of survivor placements allowed to overlap the image edge. "
+                         "Labels use the visible (clipped) bbox. Closes the train/deploy gap "
+                         "where deployment renders partially cropped survivors at the frame edge.")
+    ap.add_argument("--decoy-frac", type=float, default=0.20,
+                    help="Fraction of training images that contain 1-3 synthetic non-human objects "
+                         "(rocks, stumps, debris) composited identically to survivors but with no label. "
+                         "Hard negatives: forces the model to learn genuine human silhouette rather "
+                         "than 'any composited blob on NAIP'.")
     ap.add_argument("--min-surv-px", type=int, default=45,
                     help="Min survivor width in the generated image. Use larger (e.g. 120) for a ground-robot close-range model.")
     ap.add_argument("--max-surv-px", type=int, default=230,
                     help="Max survivor width in the generated image.")
     ap.add_argument("--naip-dir", default=None,
                     help="Cached NAIP tile dir to sample REAL aerial backgrounds from "
-                         "(e.g. data/source_cache/naip/naip_tiles_*). Strongly recommended for real deployment.")
+                         "(e.g. data/source_cache/naip/naip_tiles_*). Strongly recommended for real deployment. "
+                         "Tiles are sorted alphabetically and split 80/20 into train/val pools so the "
+                         "two splits never share the same geographic crop.")
+    ap.add_argument("--naip-val-dir", default=None,
+                    help="Optional separate NAIP tile directory used ONLY for validation composites. "
+                         "Use a different geographic area than --naip-dir for the strongest domain-shift test.")
     ap.add_argument("--assets-dir", default=str(ROOT / "data/cv_assets/sard_grabcut"))
+    ap.add_argument(
+        "--review-json",
+        default=str(ROOT / "configs/cv/sard_grabcut_asset_review.json"),
+        help="SARD asset review JSON.  When present, only 'accepted_assets' are used "
+             "for training so rejected/ambiguous cutouts stay out of the positive class.",
+    )
+    ap.add_argument(
+        "--decoy-assets-dir",
+        default=None,
+        help="Directory of real non-human RGBA PNGs to use as hard-negative decoys "
+             "(e.g. data/cv_assets/visdrone_decoys or data/cv_assets/sard_decoys). "
+             "Generate these first with extract_visdrone_decoys.py or "
+             "extract_sard_rejected_decoys.py.  Falls back to procedural blobs if omitted.",
+    )
     ap.add_argument("--data-dir", default=str(ROOT / "data/cv_train/survivor"))
     ap.add_argument("--out", default=str(ROOT / "models/survivor_yolov8n.pt"))
     args = ap.parse_args()
@@ -169,25 +478,81 @@ def main():
     rng = np.random.default_rng(args.seed)
     random.seed(args.seed)
     cfg = WildfireEffectConfig()
-    asset_paths = sorted(glob.glob(str(Path(args.assets_dir) / "*.png")))
-    if not asset_paths:
+
+    # Load SARD survivor assets, filtering to accepted-only when a review JSON exists.
+    all_asset_paths = sorted(glob.glob(str(Path(args.assets_dir) / "*.png")))
+    if not all_asset_paths:
         raise SystemExit(f"No survivor assets in {args.assets_dir}")
-    assets = [Image.open(p).convert("RGBA") for p in asset_paths]
-    # Hold out some assets for val so we test pose generalization, not memorization.
+
+    review_path = Path(args.review_json)
+    if review_path.exists():
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        accepted = set(review.get("accepted_assets", []))
+        if accepted:
+            filtered = [p for p in all_asset_paths if Path(p).name in accepted]
+            if filtered:
+                print(f"Filtering survivor assets to {len(filtered)} accepted "
+                      f"(of {len(all_asset_paths)} total) using {review_path.name}")
+                all_asset_paths = filtered
+            else:
+                print(f"WARNING: review JSON found but no paths matched; using all {len(all_asset_paths)} assets")
+    else:
+        print(f"No review JSON at {review_path}; using all {len(all_asset_paths)} survivor assets")
+
+    assets = [Image.open(p).convert("RGBA") for p in all_asset_paths]
+    # Hold out last ~20% of SARD assets for val so we test pose generalisation.
     n_hold = max(1, len(assets) // 5)
     train_assets, val_assets = assets[:-n_hold], assets[-n_hold:]
 
+    # Load real non-human decoy assets if a directory was provided.
+    decoy_assets: list[Image.Image] | None = None
+    if args.decoy_assets_dir:
+        decoy_assets = _load_decoy_assets(args.decoy_assets_dir)
+        if decoy_assets:
+            print(f"Loaded {len(decoy_assets)} real decoy assets from {args.decoy_assets_dir}")
+        else:
+            print(f"WARNING: no decoy assets found in {args.decoy_assets_dir}; falling back to procedural blobs")
+
+    # NAIP tile pools — split geographically so train and val backgrounds are
+    # from different areas, mirroring the out-of-distribution concern.
+    naip_train_tiles: list[Image.Image] | None = None
+    naip_val_tiles: list[Image.Image] | None = None
+    if args.naip_dir:
+        all_tiles = _load_naip_tiles(args.naip_dir)
+        if all_tiles:
+            if args.naip_val_dir:
+                # Separate directory: use all tiles from naip_dir for train only.
+                naip_train_tiles = all_tiles
+                naip_val_tiles = _load_naip_tiles(args.naip_val_dir) or all_tiles
+                print(f"NAIP train tiles: {len(naip_train_tiles)} (from {args.naip_dir})")
+                print(f"NAIP  val tiles: {len(naip_val_tiles)} (from {args.naip_val_dir})")
+            else:
+                # Single directory: 80/20 geographic split by tile index.
+                naip_train_tiles, naip_val_tiles = _split_tiles(all_tiles, val_frac=0.20)
+                if not naip_val_tiles:
+                    naip_val_tiles = naip_train_tiles   # fallback if only 1 tile
+                print(f"NAIP tiles split: {len(naip_train_tiles)} train / {len(naip_val_tiles)} val "
+                      f"(geographic holdout from sorted tile list)")
+        else:
+            print(f"WARNING: no NAIP tiles found in {args.naip_dir}; using procedural backgrounds.")
+
     data_dir = Path(args.data_dir)
-    print(f"Generating {args.n_train} train / {args.n_val} val composites at {args.size}px "
-          f"({int(args.fire_frac*100)}% with fire/smoke on survivors) ...")
     surv_px = (args.min_surv_px, args.max_surv_px)
-    naip_tiles = _load_naip_tiles(args.naip_dir) if args.naip_dir else None
-    if naip_tiles:
-        print(f"Using {len(naip_tiles)} real NAIP tiles for backgrounds.")
-    elif args.naip_dir:
-        print(f"WARNING: no NAIP tiles found in {args.naip_dir}; using procedural backgrounds.")
-    _generate_split(data_dir / "train", args.n_train, train_assets, args.size, rng, cfg, fire_frac=args.fire_frac, surv_px=surv_px, naip_tiles=naip_tiles)
-    _generate_split(data_dir / "val", args.n_val, val_assets, args.size, rng, cfg, fire_frac=args.fire_frac, surv_px=surv_px, naip_tiles=naip_tiles)
+    print(f"Generating {args.n_train} train / {args.n_val} val composites at {args.size}px "
+          f"({int(args.fire_frac*100)}% with fire/smoke, {int(args.neg_frac*100)}% negatives, "
+          f"{int(args.decoy_frac*100)}% with hard-negative decoys) ...")
+    _generate_split(
+        data_dir / "train", args.n_train, train_assets, args.size, rng, cfg,
+        fire_frac=args.fire_frac, surv_px=surv_px,
+        naip_tiles=naip_train_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
+        decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
+    )
+    _generate_split(
+        data_dir / "val", args.n_val, val_assets, args.size, rng, cfg,
+        fire_frac=args.fire_frac, surv_px=surv_px,
+        naip_tiles=naip_val_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
+        decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
+    )
 
     yaml = data_dir / "survivor.yaml"
     yaml.write_text(
