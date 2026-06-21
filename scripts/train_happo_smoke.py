@@ -731,7 +731,7 @@ def main():
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
     p.add_argument("--uav-frontier-alignment-reward", type=float, default=0.0,
-                   help="Reward scale for moving in the same direction as the local uncovered frontier. "
+                   help="Reward scale for clamped progress toward the local uncovered frontier. "
                         "Use with --uav-frontier-obs for the cleanest learning signal.")
     p.add_argument("--uav-overlap-penalty", type=float, default=None,
                    help="Maximum per-UAV per-step penalty at maximum excess footprint overlap. "

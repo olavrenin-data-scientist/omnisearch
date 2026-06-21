@@ -828,6 +828,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_frontier_progress_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_frontier_progress_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_frontier_uncovered_ratio = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_uncovered_ratio_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_reward_uav_overlap = torch.zeros(batch_dim, device=device)
@@ -895,6 +897,8 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_uav_frontier_alignment,
             self.metric_uav_frontier_alignment,
             self.metric_uav_frontier_alignment_by_drone,
+            self.metric_uav_frontier_progress_fraction,
+            self.metric_uav_frontier_progress_fraction_by_drone,
             self.metric_uav_frontier_uncovered_ratio,
             self.metric_uav_frontier_uncovered_ratio_by_drone,
             self.metric_reward_uav_overlap,
@@ -2482,6 +2486,7 @@ class WildfireSearchScenario(BaseScenario):
         (
             uav_frontier_alignment_reward,
             uav_frontier_alignment,
+            uav_frontier_progress_fraction,
             uav_frontier_uncovered_ratio,
         ) = self._uav_frontier_alignment_reward(drone_pos)
         (
@@ -2520,9 +2525,15 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
         self.metric_reward_uav_frontier_alignment = uav_frontier_alignment_reward.sum(dim=1)
         self.metric_uav_frontier_alignment_by_drone = uav_frontier_alignment
+        self.metric_uav_frontier_progress_fraction_by_drone = uav_frontier_progress_fraction
         self.metric_uav_frontier_uncovered_ratio_by_drone = uav_frontier_uncovered_ratio
         self.metric_uav_frontier_alignment = (
             uav_frontier_alignment.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_uav_frontier_progress_fraction = (
+            uav_frontier_progress_fraction.mean(dim=1)
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=device)
         )
@@ -3188,14 +3199,14 @@ class WildfireSearchScenario(BaseScenario):
                 out[env_idx, item_idx, 3] = (count / ideal_cells).clamp(0.0, 1.0)
         return out
 
-    def _uav_frontier_alignment_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Reward actual movement aligned with nearby uncovered coverage mass."""
+    def _uav_frontier_alignment_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Reward clamped progress toward nearby uncovered coverage mass."""
         if self.n_drones == 0:
             empty = torch.zeros(self.world.batch_dim, 0, device=drone_pos.device)
-            return empty, empty, empty
+            return empty, empty, empty, empty
         if not self.uav_frontier_obs and self.r_uav_frontier_alignment <= 0.0:
             empty = torch.zeros(self.world.batch_dim, self.n_drones, device=drone_pos.device)
-            return empty, empty, empty
+            return empty, empty, empty, empty
 
         features = self._uav_frontier_features_for_positions(self._pre_step_drone_pos)
         frontier_vec = features[..., :2]
@@ -3210,12 +3221,24 @@ class WildfireSearchScenario(BaseScenario):
             alignment.clamp(-1.0, 1.0),
             torch.zeros_like(alignment),
         )
+        unit_frontier = frontier_vec / frontier_norm.clamp_min(1e-9).unsqueeze(-1)
+        progress_sim = (displacement * unit_frontier).sum(dim=-1)
+        max_step_sim = (
+            float(self.drone_speed_mps)
+            * float(self.sim_step_seconds)
+            * self.terrain_sim_units_per_meter.to(device=drone_pos.device, dtype=drone_pos.dtype).clamp_min(1e-9)
+        ).view(-1, 1)
+        progress_fraction = torch.where(
+            frontier_norm > 1e-6,
+            (progress_sim / max_step_sim).clamp(0.0, 1.0),
+            torch.zeros_like(progress_sim),
+        )
         reward = (
             self.r_uav_frontier_alignment
-            * alignment.clamp(min=0.0)
+            * progress_fraction
             * uncovered_ratio.clamp(0.0, 1.0)
         )
-        return reward, alignment, uncovered_ratio
+        return reward, alignment, progress_fraction, uncovered_ratio
 
     def _uav_expected_overlap_fraction(self, displacement_m: Tensor) -> Tensor:
         """Expected overlap of consecutive circular footprints from actual motion."""
@@ -4194,6 +4217,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/uav_overlap_fraction": self.metric_uav_overlap_fraction,
             "diagnostic/uav_inter_uav_overlap_fraction": self.metric_uav_inter_uav_overlap_fraction,
             "diagnostic/uav_frontier_alignment": self.metric_uav_frontier_alignment,
+            "diagnostic/uav_frontier_progress_fraction": self.metric_uav_frontier_progress_fraction,
             "diagnostic/uav_frontier_uncovered_ratio": self.metric_uav_frontier_uncovered_ratio,
             "diagnostic/uav_outside_footprint_fraction": self.metric_uav_outside_footprint_fraction,
             "diagnostic/ugv_speed_limited": self.step_ugv_speed_limited.float().sum(dim=1),

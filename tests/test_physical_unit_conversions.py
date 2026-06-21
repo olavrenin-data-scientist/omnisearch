@@ -313,7 +313,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertGreater(float(features[0, 0, 2]), 0.0)
         self.assertGreater(float(features[0, 0, 3]), 0.0)
 
-    def test_uav_frontier_alignment_rewards_movement_toward_uncovered_mass(self):
+    def test_uav_frontier_alignment_rewards_clamped_progress_toward_uncovered_mass(self):
         scenario = self._coverage_scenario(grid_size=8)
         scenario.uav_frontier_obs = True
         scenario.r_uav_frontier_alignment = 0.2
@@ -322,15 +322,27 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario._pre_step_drone_pos = torch.zeros(1, 1, 2)
 
         toward = torch.tensor([[[0.1, 0.0]]])
+        full_step = torch.tensor([[[2.0, 0.0]]])
+        overshoot = torch.tensor([[[4.0, 0.0]]])
         away = torch.tensor([[[-0.1, 0.0]]])
 
-        toward_reward, toward_alignment, ratio = scenario._uav_frontier_alignment_reward(toward)
-        away_reward, away_alignment, _ = scenario._uav_frontier_alignment_reward(away)
+        toward_reward, toward_alignment, toward_progress, ratio = scenario._uav_frontier_alignment_reward(toward)
+        full_reward, _, full_progress, full_ratio = scenario._uav_frontier_alignment_reward(full_step)
+        overshoot_reward, _, overshoot_progress, _ = scenario._uav_frontier_alignment_reward(overshoot)
+        away_reward, away_alignment, away_progress, _ = scenario._uav_frontier_alignment_reward(away)
 
         self.assertGreater(float(ratio[0, 0]), 0.0)
         self.assertGreater(float(toward_alignment[0, 0]), 0.9)
         self.assertLess(float(away_alignment[0, 0]), -0.9)
+        self.assertGreater(float(toward_progress[0, 0]), 0.0)
+        self.assertLess(float(toward_progress[0, 0]), 1.0)
+        self.assertEqual(float(full_progress[0, 0]), 1.0)
+        self.assertEqual(float(overshoot_progress[0, 0]), 1.0)
+        self.assertEqual(float(away_progress[0, 0]), 0.0)
         self.assertGreater(float(toward_reward[0, 0]), 0.0)
+        self.assertLess(float(toward_reward[0, 0]), float(full_reward[0, 0]))
+        self.assertAlmostEqual(float(full_reward[0, 0]), 0.2 * float(full_ratio[0, 0]), places=6)
+        self.assertAlmostEqual(float(overshoot_reward[0, 0]), float(full_reward[0, 0]), places=6)
         self.assertEqual(float(away_reward[0, 0]), 0.0)
 
     def test_uav_outside_footprint_penalty_scales_with_footprint_outside_map(self):
