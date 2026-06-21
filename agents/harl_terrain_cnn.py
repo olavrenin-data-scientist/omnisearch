@@ -13,6 +13,7 @@ TERRAIN_CNN_OBS_OFFSET = 4 + 12 + 1
 TERRAIN_CNN_CHANNELS = 2
 UGV_PLANNER_HINT_DIM = 5
 BOUNDARY_OBS_DIM = 4
+UAV_FRONTIER_OBS_DIM = 4
 
 
 def wildfire_single_observation_dim(
@@ -23,6 +24,7 @@ def wildfire_single_observation_dim(
     ugv_planner_hint: str = "none",
     coverage_obs_grid: int = 0,
     local_coverage_obs_grid: int = 0,
+    uav_frontier_obs: bool = False,
 ) -> int:
     """Return the per-agent wildfire observation width for the current layout."""
     patch_size = int(local_map_patch_size)
@@ -31,6 +33,7 @@ def wildfire_single_observation_dim(
     coverage_obs_dim = coverage_grid * coverage_grid + 1 if coverage_grid > 0 else 0
     local_coverage_grid = max(int(local_coverage_obs_grid), 0)
     local_coverage_obs_dim = local_coverage_grid * local_coverage_grid
+    uav_frontier_obs_dim = UAV_FRONTIER_OBS_DIM if bool(uav_frontier_obs) else 0
     return (
         4  # own pos + velocity
         + 12  # lidar or drone dummy lidar
@@ -44,6 +47,7 @@ def wildfire_single_observation_dim(
         + max(int(n_survivors), 0) * 7  # survivor messages
         + coverage_obs_dim  # optional downsampled team coverage map + global fraction
         + local_coverage_obs_dim  # optional pooled local coverage map around this agent
+        + uav_frontier_obs_dim  # optional direction/distance/strength toward uncovered coverage frontier
     )
 
 

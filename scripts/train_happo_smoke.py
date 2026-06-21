@@ -48,6 +48,7 @@ DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID = 6
 DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID = 9
 DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M = 150.0
+DEFAULT_UAV_FRONTIER_OBS_RADIUS_M = 150.0
 DEFAULT_UAV_DIAG_COVERAGE_REWARD = 20.0
 DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD = 0.001
 DEFAULT_UAV_DIAG_OVERLAP_PENALTY = 0.10
@@ -160,6 +161,8 @@ def build_args(
     r_drone_confirm: float = 0.0,
     local_coverage_obs_grid: int = 0,
     local_coverage_obs_radius_m: float = 150.0,
+    uav_frontier_obs: bool = False,
+    uav_frontier_obs_radius_m: float = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     uav_diagnostic_drones: int = 1,
@@ -172,6 +175,7 @@ def build_args(
     uav_coverage_reward: float | None = None,
     uav_move_coverage_reward: float | None = None,
     uav_move_coverage_cap: float = 0.1,
+    uav_frontier_alignment_reward: float = 0.0,
     uav_overlap_penalty: float | None = None,
     uav_overlap_allowed: float | None = None,
     uav_inter_uav_overlap_penalty: float = 0.0,
@@ -421,6 +425,16 @@ def build_args(
     if local_coverage_obs_grid > 0:
         scenario_kwargs["local_coverage_obs_grid"] = local_coverage_obs_grid
         scenario_kwargs["local_coverage_obs_radius_m"] = local_coverage_obs_radius_m
+    uav_frontier_obs_radius_m = float(uav_frontier_obs_radius_m)
+    if uav_frontier_obs_radius_m <= 0.0:
+        raise ValueError("uav_frontier_obs_radius_m must be positive")
+    uav_frontier_alignment_reward = float(uav_frontier_alignment_reward)
+    if uav_frontier_alignment_reward < 0.0:
+        raise ValueError("uav_frontier_alignment_reward must be nonnegative")
+    if uav_frontier_obs or uav_frontier_alignment_reward > 0.0:
+        scenario_kwargs["uav_frontier_obs"] = bool(uav_frontier_obs)
+        scenario_kwargs["uav_frontier_obs_radius_m"] = uav_frontier_obs_radius_m
+        scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
     if uav_start_min_separation_m is not None:
         scenario_kwargs["uav_start_min_separation_m"] = uav_start_min_separation_m
     if uav_start_edge_margin_m is not None:
@@ -567,6 +581,7 @@ def build_args(
         ugv_planner_hint=ugv_planner_hint,
         coverage_obs_grid=int(coverage_obs_grid),
         local_coverage_obs_grid=int(local_coverage_obs_grid),
+        uav_frontier_obs=bool(uav_frontier_obs),
     )
     env_args = {
         "max_cycles":      episode_length,
@@ -679,6 +694,11 @@ def main():
     p.add_argument("--local-coverage-obs-radius-m", type=float, default=150.0,
                    help="Physical half-width/radius in meters for --local-coverage-obs-grid. "
                         "Example: 150 with K=9 gives bins about 33m wide on a 500m map.")
+    p.add_argument("--uav-frontier-obs", action="store_true",
+                   help="Add UAV frontier features: direction, distance, and local uncovered ratio "
+                        "toward nearby unsearched team-coverage cells.")
+    p.add_argument("--uav-frontier-obs-radius-m", type=float, default=DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
+                   help="Physical radius in meters used for --uav-frontier-obs and frontier-alignment reward.")
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
@@ -710,6 +730,9 @@ def main():
                         "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
+    p.add_argument("--uav-frontier-alignment-reward", type=float, default=0.0,
+                   help="Reward scale for moving in the same direction as the local uncovered frontier. "
+                        "Use with --uav-frontier-obs for the cleanest learning signal.")
     p.add_argument("--uav-overlap-penalty", type=float, default=None,
                    help="Maximum per-UAV per-step penalty at maximum excess footprint overlap. "
                         "The expected overlap from actual movement is not penalized. "
@@ -797,6 +820,8 @@ def main():
         p.error("--local-coverage-obs-grid must be 0 or a positive odd integer")
     if args.local_coverage_obs_radius_m <= 0.0:
         p.error("--local-coverage-obs-radius-m must be positive")
+    if args.uav_frontier_obs_radius_m <= 0.0:
+        p.error("--uav-frontier-obs-radius-m must be positive")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
@@ -807,6 +832,8 @@ def main():
         p.error("--uav-move-coverage-reward must be nonnegative")
     if args.uav_move_coverage_cap < 0.0:
         p.error("--uav-move-coverage-cap must be nonnegative")
+    if args.uav_frontier_alignment_reward < 0.0:
+        p.error("--uav-frontier-alignment-reward must be nonnegative")
     if args.uav_overlap_penalty is not None and args.uav_overlap_penalty < 0.0:
         p.error("--uav-overlap-penalty must be nonnegative")
     if args.uav_overlap_allowed is not None and not 0.0 <= args.uav_overlap_allowed < 1.0:
@@ -969,6 +996,8 @@ def main():
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
     print(f" local_coverage_obs_radius_m: {args.local_coverage_obs_radius_m}")
+    print(f" uav_frontier_obs: {args.uav_frontier_obs}")
+    print(f" uav_frontier_obs_radius_m: {args.uav_frontier_obs_radius_m}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
@@ -977,6 +1006,7 @@ def main():
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_move_coverage_reward: {args.uav_move_coverage_reward}")
     print(f" uav_move_coverage_cap: {args.uav_move_coverage_cap}")
+    print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
     print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
     print(f" uav_inter_uav_overlap_penalty: {args.uav_inter_uav_overlap_penalty}")
@@ -1024,6 +1054,8 @@ def main():
         r_drone_confirm = args.r_drone_confirm,
         local_coverage_obs_grid = args.local_coverage_obs_grid,
         local_coverage_obs_radius_m = args.local_coverage_obs_radius_m,
+        uav_frontier_obs = args.uav_frontier_obs,
+        uav_frontier_obs_radius_m = args.uav_frontier_obs_radius_m,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
@@ -1036,6 +1068,7 @@ def main():
         uav_coverage_reward = args.uav_coverage_reward,
         uav_move_coverage_reward = args.uav_move_coverage_reward,
         uav_move_coverage_cap = args.uav_move_coverage_cap,
+        uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_overlap_penalty = args.uav_overlap_penalty,
         uav_overlap_allowed = args.uav_overlap_allowed,
         uav_inter_uav_overlap_penalty = args.uav_inter_uav_overlap_penalty,
