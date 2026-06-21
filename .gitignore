@@ -246,3 +246,6 @@ models/
 
 # Local Claude Code config and agent context (machine-specific)
 .claude/
+
+# Cursor local settings
+.cursor/
