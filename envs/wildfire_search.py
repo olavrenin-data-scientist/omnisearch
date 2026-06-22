@@ -530,6 +530,18 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("uav_frontier_obs_radius_m", self.local_coverage_obs_radius_m)),
             1e-6,
         )
+        self.uav_frontier_mode = str(kwargs.pop("uav_frontier_mode", "centroid")).replace("-", "_")
+        if self.uav_frontier_mode not in {"centroid", "sector_topk"}:
+            raise ValueError("uav_frontier_mode must be one of: centroid, sector_topk")
+        self.uav_frontier_sectors = int(kwargs.pop("uav_frontier_sectors", 8))
+        if self.uav_frontier_sectors < 2:
+            raise ValueError("uav_frontier_sectors must be at least 2")
+        self.uav_frontier_top_k = int(kwargs.pop("uav_frontier_top_k", 2))
+        if self.uav_frontier_top_k < 1:
+            raise ValueError("uav_frontier_top_k must be positive")
+        if self.uav_frontier_top_k > self.uav_frontier_sectors:
+            raise ValueError("uav_frontier_top_k must be <= uav_frontier_sectors")
+        self.uav_frontier_ownership = bool(kwargs.pop("uav_frontier_ownership", False))
         # One-time directed-approach milestones for ground robots. The scalar
         # is the final/inner milestone reward; default fractions make 0.05 map
         # to rewards [0.02, 0.025, 0.03, 0.04, 0.05] for 75/50/40/30/20m.
@@ -3139,7 +3151,18 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp(max=self.r_uav_move_coverage_cap)
         return reward, displacement_m, coverage_new_cells
 
+    def _uav_frontier_obs_dim(self) -> int:
+        if self.uav_frontier_mode == "sector_topk":
+            return 4 * int(self.uav_frontier_top_k)
+        return 4
+
     def _uav_frontier_features_for_positions(self, positions: Tensor) -> Tensor:
+        """UAV frontier features for the configured frontier mode."""
+        if self.uav_frontier_mode == "sector_topk":
+            return self._uav_frontier_sector_topk_features_for_positions(positions)
+        return self._uav_frontier_centroid_features_for_positions(positions)
+
+    def _uav_frontier_centroid_features_for_positions(self, positions: Tensor) -> Tensor:
         """Direction, distance, and strength of nearby uncovered coverage mass."""
         if positions.ndim != 3:
             raise ValueError("positions must have shape [B, N, 2]")
@@ -3199,6 +3222,117 @@ class WildfireSearchScenario(BaseScenario):
                 out[env_idx, item_idx, 3] = (count / ideal_cells).clamp(0.0, 1.0)
         return out
 
+    def _uav_frontier_sector_topk_features_for_positions(self, positions: Tensor) -> Tensor:
+        """Top-k uncovered sector candidates with optional team ownership weighting.
+
+        Each candidate is encoded as [unit_dx, unit_dy, distance_norm, score].
+        The score is ownership-weighted uncovered cell mass divided by the ideal
+        sector area; distance is the weighted mean distance of those cells.
+        """
+        if positions.ndim != 3:
+            raise ValueError("positions must have shape [B, N, 2]")
+        B, N, _ = positions.shape
+        top_k = int(self.uav_frontier_top_k)
+        sectors = int(self.uav_frontier_sectors)
+        out = torch.zeros(B, N, top_k * 4, device=positions.device, dtype=positions.dtype)
+        if B == 0 or N == 0:
+            return out
+
+        G = int(self.fire_grid_size)
+        cell_width = 2.0 * self.x_semidim / G
+        cell_height = 2.0 * self.y_semidim / G
+        xs = torch.linspace(
+            -self.x_semidim + cell_width / 2.0,
+            self.x_semidim - cell_width / 2.0,
+            G,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        ys = torch.linspace(
+            -self.y_semidim + cell_height / 2.0,
+            self.y_semidim - cell_height / 2.0,
+            G,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        cell_area = max(float(cell_width * cell_height), 1e-12)
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).clamp_min(1e-9)
+        radius_sim = (float(self.uav_frontier_obs_radius_m) * sim_units_per_meter).clamp_min(1e-9)
+        coverage = self.coverage_grid.to(device=positions.device)
+
+        sector_width = 2.0 * math.pi / float(sectors)
+        sector_angles = (
+            -math.pi
+            + (torch.arange(sectors, device=positions.device, dtype=positions.dtype) + 0.5)
+            * sector_width
+        )
+        sector_unit = torch.stack((torch.cos(sector_angles), torch.sin(sector_angles)), dim=-1)
+        x_grid = xs.view(1, G)
+        y_grid = ys.view(G, 1)
+
+        for env_idx in range(B):
+            radius = radius_sim[env_idx]
+            radius_value = float(radius.detach().cpu().item())
+            ideal_sector_cells = max(
+                math.pi * radius_value * radius_value / cell_area / float(sectors),
+                1.0,
+            )
+            uncovered = ~coverage[env_idx]
+            env_positions = positions[env_idx]
+
+            for item_idx in range(N):
+                pos = env_positions[item_idx]
+                dx = x_grid - pos[X]
+                dy = y_grid - pos[Y]
+                dist_sq = dx.square() + dy.square()
+                dist = dist_sq.sqrt()
+                in_radius = dist_sq <= radius.square()
+                useful_any = in_radius & uncovered
+                if float(useful_any.float().sum().detach().cpu().item()) <= 0.0:
+                    continue
+
+                if self.uav_frontier_ownership and N > 1:
+                    other_mask = torch.ones(N, device=positions.device, dtype=torch.bool)
+                    other_mask[item_idx] = False
+                    other_positions = env_positions[other_mask]
+                    other_dx = x_grid.view(1, 1, G) - other_positions[:, X].view(-1, 1, 1)
+                    other_dy = y_grid.view(1, G, 1) - other_positions[:, Y].view(-1, 1, 1)
+                    other_dist = (other_dx.square() + other_dy.square()).sqrt().amin(dim=0)
+                    ownership = other_dist / (dist + other_dist + 1e-9)
+                else:
+                    ownership = torch.ones(G, G, device=positions.device, dtype=positions.dtype)
+
+                angles = torch.atan2(dy, dx)
+                sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
+                sector_scores = torch.zeros(sectors, device=positions.device, dtype=positions.dtype)
+                sector_distances = torch.zeros_like(sector_scores)
+
+                for sector_idx in range(sectors):
+                    sector_mask = useful_any & (sector_index == sector_idx)
+                    weighted_uncovered = sector_mask.to(dtype=positions.dtype) * ownership
+                    weighted_count = weighted_uncovered.sum()
+                    if float(weighted_count.detach().cpu().item()) <= 0.0:
+                        continue
+                    sector_scores[sector_idx] = (weighted_count / ideal_sector_cells).clamp(0.0, 1.0)
+                    sector_distances[sector_idx] = (
+                        (dist * weighted_uncovered).sum() / weighted_count / radius
+                    ).clamp(0.0, 1.0)
+
+                top_scores, top_indices = torch.topk(sector_scores, k=top_k, largest=True, sorted=True)
+                for rank_idx in range(top_k):
+                    score = top_scores[rank_idx]
+                    if float(score.detach().cpu().item()) <= 1e-9:
+                        continue
+                    sector_idx = int(top_indices[rank_idx].detach().cpu().item())
+                    base = rank_idx * 4
+                    out[env_idx, item_idx, base : base + 2] = sector_unit[sector_idx]
+                    out[env_idx, item_idx, base + 2] = sector_distances[sector_idx]
+                    out[env_idx, item_idx, base + 3] = score
+        return out
+
     def _uav_frontier_alignment_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Reward clamped progress toward nearby uncovered coverage mass."""
         if self.n_drones == 0:
@@ -3207,6 +3341,9 @@ class WildfireSearchScenario(BaseScenario):
         if not self.uav_frontier_obs and self.r_uav_frontier_alignment <= 0.0:
             empty = torch.zeros(self.world.batch_dim, self.n_drones, device=drone_pos.device)
             return empty, empty, empty, empty
+
+        if self.uav_frontier_mode == "sector_topk":
+            return self._uav_frontier_sector_topk_alignment_reward(drone_pos)
 
         features = self._uav_frontier_features_for_positions(self._pre_step_drone_pos)
         frontier_vec = features[..., :2]
@@ -3239,6 +3376,47 @@ class WildfireSearchScenario(BaseScenario):
             * uncovered_ratio.clamp(0.0, 1.0)
         )
         return reward, alignment, progress_fraction, uncovered_ratio
+
+    def _uav_frontier_sector_topk_alignment_reward(
+        self,
+        drone_pos: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Reward progress toward whichever top-k sector candidate was followed."""
+        features = self._uav_frontier_features_for_positions(self._pre_step_drone_pos)
+        B, D, _ = features.shape
+        top_k = int(self.uav_frontier_top_k)
+        candidates = features.view(B, D, top_k, 4)
+        candidate_vec = candidates[..., :2]
+        candidate_score = candidates[..., 3].clamp(0.0, 1.0)
+        displacement = (drone_pos - self._pre_step_drone_pos).unsqueeze(2)
+        displacement_norm = displacement.norm(dim=-1)
+        frontier_norm = candidate_vec.norm(dim=-1)
+        unit_frontier = candidate_vec / frontier_norm.clamp_min(1e-9).unsqueeze(-1)
+        alignment = (unit_frontier * displacement).sum(dim=-1) / displacement_norm.clamp_min(1e-9)
+        alignment = torch.where(
+            (frontier_norm > 1e-6) & (displacement_norm > 1e-9),
+            alignment.clamp(-1.0, 1.0),
+            torch.zeros_like(alignment),
+        )
+        progress_sim = (displacement * unit_frontier).sum(dim=-1)
+        max_step_sim = (
+            float(self.drone_speed_mps)
+            * float(self.sim_step_seconds)
+            * self.terrain_sim_units_per_meter.to(device=drone_pos.device, dtype=drone_pos.dtype).clamp_min(1e-9)
+        ).view(-1, 1, 1)
+        progress_fraction = torch.where(
+            frontier_norm > 1e-6,
+            (progress_sim / max_step_sim).clamp(0.0, 1.0),
+            torch.zeros_like(progress_sim),
+        )
+        candidate_value = progress_fraction * candidate_score
+        best_value, best_idx = candidate_value.max(dim=2)
+        gather_idx = best_idx.unsqueeze(-1)
+        best_alignment = torch.gather(alignment, 2, gather_idx).squeeze(-1)
+        best_progress = torch.gather(progress_fraction, 2, gather_idx).squeeze(-1)
+        best_score = torch.gather(candidate_score, 2, gather_idx).squeeze(-1)
+        reward = self.r_uav_frontier_alignment * best_value
+        return reward, best_alignment, best_progress, best_score
 
     def _uav_expected_overlap_fraction(self, displacement_m: Tensor) -> Tensor:
         """Expected overlap of consecutive circular footprints from actual motion."""
@@ -3435,7 +3613,7 @@ class WildfireSearchScenario(BaseScenario):
         if self.local_coverage_obs_grid > 0:
             parts.append(self._local_coverage_observation(agent))  # [B, K*K]
         if self.uav_frontier_obs:
-            parts.append(self._uav_frontier_observation(agent))  # [B, 4]
+            parts.append(self._uav_frontier_observation(agent))
         return torch.cat(parts, dim=-1)
 
     def _coverage_observation(self) -> Tensor:
@@ -3510,9 +3688,21 @@ class WildfireSearchScenario(BaseScenario):
         return out
 
     def _uav_frontier_observation(self, agent: Agent) -> Tensor:
-        """Direction/distance/strength of nearby uncovered team-coverage cells."""
+        """Configured frontier features for nearby uncovered team-coverage cells."""
+        dim = self._uav_frontier_obs_dim()
         if not agent.is_drone or self.n_drones <= 0:
-            return torch.zeros(self.world.batch_dim, 4, device=agent.state.pos.device, dtype=agent.state.pos.dtype)
+            return torch.zeros(self.world.batch_dim, dim, device=agent.state.pos.device, dtype=agent.state.pos.dtype)
+        if self.uav_frontier_mode == "sector_topk":
+            try:
+                drone_idx = int(agent.name.rsplit("_", 1)[1])
+            except (IndexError, ValueError):
+                drone_idx = 0
+            drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
+            drone_pos = torch.stack(
+                [drone.state.pos for drone in self.world.agents[: self.n_drones]],
+                dim=1,
+            )
+            return self._uav_frontier_features_for_positions(drone_pos)[:, drone_idx]
         return self._uav_frontier_features_for_positions(agent.state.pos.unsqueeze(1)).squeeze(1)
 
     def _boundary_observation(self, agent: Agent) -> Tensor:

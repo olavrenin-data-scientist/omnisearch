@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 import vmas
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,8 @@ if str(ROOT) not in sys.path:
 from agents.happo_checkpoint import load_training_manifest
 from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
+
+TIME_BIN_COUNT = 5
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -98,6 +101,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     action_displacement_alignments: list[float] = []
     action_displacement_alignments_new_cov: list[float] = []
     action_displacement_alignments_no_new_cov: list[float] = []
+    action_frontier_alignment_values: list[float] = []
+    action_frontier_alignment_new_cov_values: list[float] = []
+    action_frontier_alignment_no_new_cov_values: list[float] = []
+    action_frontier_intent_values: list[float] = []
+    action_frontier_movement_gap_values: list[float] = []
     new_coverage_cells_values: list[float] = []
     outside_footprint_values: list[float] = []
     overlap_values: list[float] = []
@@ -107,6 +115,36 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     frontier_alignment_values: list[float] = []
     frontier_progress_values: list[float] = []
     frontier_uncovered_ratio_values: list[float] = []
+    frontier_obs_distance_values: list[float] = []
+    frontier_obs_vector_norm_values: list[float] = []
+    frontier_local_coverage_cos_values: list[float] = []
+    frontier_global_coverage_cos_values: list[float] = []
+    local_global_coverage_cos_values: list[float] = []
+    frontier_sector_cos_values: list[float] = []
+    frontier_sector_dominance_values: list[float] = []
+    frontier_sector_entropy_values: list[float] = []
+    frontier_cancellation_values: list[float] = []
+    frontier_pairwise_cos_values: list[float] = []
+    frontier_pairwise_same_dir_values: list[float] = []
+    local_pairwise_same_dir_values: list[float] = []
+    global_pairwise_same_dir_values: list[float] = []
+    reward_uav_coverage_values: list[float] = []
+    reward_uav_move_coverage_values: list[float] = []
+    reward_uav_frontier_values: list[float] = []
+    penalty_uav_overlap_values: list[float] = []
+    penalty_uav_inter_overlap_values: list[float] = []
+    penalty_uav_outside_footprint_values: list[float] = []
+    reward_uav_scout_values: list[float] = []
+    reward_uav_aux_values: list[float] = []
+    frontier_abs_reward_share_values: list[float] = []
+    frontier_progress_edge_values: list[float] = []
+    frontier_progress_interior_values: list[float] = []
+    frontier_reward_edge_values: list[float] = []
+    frontier_reward_interior_values: list[float] = []
+    frontier_new_cells_edge_values: list[float] = []
+    frontier_new_cells_interior_values: list[float] = []
+    frontier_outside_edge_values: list[float] = []
+    frontier_outside_interior_values: list[float] = []
     boundary_distance_m_values: list[float] = []
     footprint_radius_m_values: list[float] = []
     path_positions_sim: list[np.ndarray] = []
@@ -114,7 +152,17 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     low_action_high_motion = 0
     high_action_low_motion = 0
     moving_no_new_coverage = 0
+    frontier_high_progress_steps = 0
+    frontier_high_progress_no_new_steps = 0
+    frontier_high_progress_edge_steps = 0
+    frontier_high_progress_corner_steps = 0
+    action_frontier_aligned_steps = 0
+    action_frontier_anti_aligned_steps = 0
+    action_frontier_aligned_no_new_steps = 0
+    action_frontier_aligned_edge_steps = 0
+    frontier_obs_empty_steps = 0
     diagnostic_steps = 0
+    time_bins = _new_time_bins(TIME_BIN_COUNT)
 
     for step in range(int(scenario_kwargs["max_steps"])):
         prev_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool).copy()
@@ -122,6 +170,25 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             agent.state.pos[0].detach().cpu().numpy().astype(float).copy()
             for agent in scenario.world.agents[:scenario.n_drones]
         ]
+        if scenario.n_drones > 0:
+            pre_drone_pos_tensor = torch.stack(
+                [agent.state.pos for agent in scenario.world.agents[:scenario.n_drones]],
+                dim=1,
+            )
+            frontier_obs = (
+                scenario._uav_frontier_features_for_positions(pre_drone_pos_tensor)[0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+            )
+            coverage_signal = _coverage_signal_snapshot(scenario, pre_drone_pos_tensor, frontier_obs)
+        else:
+            frontier_obs = np.zeros((0, 4), dtype=float)
+            coverage_signal = _empty_coverage_signal_snapshot(0)
+        frontier_pairwise = _pairwise_direction_metrics(frontier_obs[:, :2])
+        local_pairwise = _pairwise_direction_metrics(coverage_signal["local_vec"])
+        global_pairwise = _pairwise_direction_metrics(coverage_signal["global_vec"])
         path_positions_sim.extend(pre_drone_pos)
         actions = policy(env)
         action_vectors = [
@@ -212,6 +279,70 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             frontier_align = float(frontier_alignment[drone_idx])
             frontier_progress_frac = float(frontier_progress[drone_idx])
             frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
+            frontier_candidates = _frontier_candidates_for_drone(scenario, frontier_obs, drone_idx)
+            frontier_obs_vec = (
+                frontier_candidates[0, :2]
+                if len(frontier_candidates)
+                else np.zeros(2)
+            )
+            frontier_obs_distance = (
+                float(frontier_candidates[0, 2])
+                if len(frontier_candidates)
+                else 0.0
+            )
+            frontier_obs_ratio = (
+                float(frontier_candidates[0, 3])
+                if len(frontier_candidates)
+                else 0.0
+            )
+            frontier_obs_norm = float(np.linalg.norm(frontier_obs_vec))
+            local_coverage_vec = coverage_signal["local_vec"][drone_idx]
+            global_coverage_vec = coverage_signal["global_vec"][drone_idx]
+            dominant_sector_vec = coverage_signal["sector_vec"][drone_idx]
+            frontier_local_cos = _cosine_or_nan(frontier_obs_vec, local_coverage_vec)
+            frontier_global_cos = _cosine_or_nan(frontier_obs_vec, global_coverage_vec)
+            local_global_cos = _cosine_or_nan(local_coverage_vec, global_coverage_vec)
+            frontier_sector_cos = _cosine_or_nan(frontier_obs_vec, dominant_sector_vec)
+            sector_dominance = float(coverage_signal["sector_dominance"][drone_idx])
+            sector_entropy = float(coverage_signal["sector_entropy"][drone_idx])
+            frontier_cancellation = float(coverage_signal["frontier_cancellation"][drone_idx])
+            action_frontier_alignment = _best_frontier_candidate_cosine(
+                action_vec[:2],
+                frontier_candidates,
+            )
+            action_frontier_intent = _best_frontier_candidate_projection(
+                action_vec[:2],
+                frontier_candidates,
+            )
+            action_frontier_movement_gap = (
+                action_frontier_alignment - frontier_align
+                if math.isfinite(action_frontier_alignment) and math.isfinite(frontier_align)
+                else math.nan
+            )
+            scout_reward = float(np.count_nonzero(scout_credit[drone_idx])) * float(
+                getattr(scenario, "r_drone_scout", 0.0)
+            )
+            reward_terms = _uav_reward_terms(
+                scenario=scenario,
+                new_cells=new_cells,
+                displacement_m=displacement_m,
+                frontier_progress=frontier_progress_frac,
+                frontier_ratio=frontier_ratio,
+                overlap=overlap,
+                expected_overlap=expected_overlap,
+                inter_uav_overlap=inter_uav_overlap,
+                outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                scout_reward=scout_reward,
+            )
+            distances_to_edges = _distances_to_edges_m(
+                np.asarray([post_pos], dtype=float),
+                scenario,
+                meters_per_sim,
+            )[0]
+            edge_threshold = footprint_radius if math.isfinite(footprint_radius) and footprint_radius > 0.0 else 25.0
+            is_edge_step = bool(float(boundary_distance_m[drone_idx]) <= edge_threshold)
+            is_corner_step = bool(np.count_nonzero(distances_to_edges <= edge_threshold) >= 2)
+            coverage_fraction_now = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
             overlap_values.append(overlap)
             expected_overlap_values.append(expected_overlap)
             excess_overlap_values.append(excess_overlap)
@@ -219,6 +350,45 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             frontier_alignment_values.append(frontier_align)
             frontier_progress_values.append(frontier_progress_frac)
             frontier_uncovered_ratio_values.append(frontier_ratio)
+            frontier_obs_distance_values.append(frontier_obs_distance)
+            frontier_obs_vector_norm_values.append(frontier_obs_norm)
+            frontier_local_coverage_cos_values.append(frontier_local_cos)
+            frontier_global_coverage_cos_values.append(frontier_global_cos)
+            local_global_coverage_cos_values.append(local_global_cos)
+            frontier_sector_cos_values.append(frontier_sector_cos)
+            frontier_sector_dominance_values.append(sector_dominance)
+            frontier_sector_entropy_values.append(sector_entropy)
+            frontier_cancellation_values.append(frontier_cancellation)
+            frontier_pairwise_cos_values.append(frontier_pairwise["mean_cos"])
+            frontier_pairwise_same_dir_values.append(frontier_pairwise["same_dir_frac"])
+            local_pairwise_same_dir_values.append(local_pairwise["same_dir_frac"])
+            global_pairwise_same_dir_values.append(global_pairwise["same_dir_frac"])
+            action_frontier_alignment_values.append(action_frontier_alignment)
+            action_frontier_intent_values.append(action_frontier_intent)
+            action_frontier_movement_gap_values.append(action_frontier_movement_gap)
+            if new_cells >= 1.0:
+                action_frontier_alignment_new_cov_values.append(action_frontier_alignment)
+            else:
+                action_frontier_alignment_no_new_cov_values.append(action_frontier_alignment)
+            reward_uav_coverage_values.append(reward_terms["coverage"])
+            reward_uav_move_coverage_values.append(reward_terms["move_coverage"])
+            reward_uav_frontier_values.append(reward_terms["frontier"])
+            penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
+            penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
+            penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+            reward_uav_scout_values.append(reward_terms["scout"])
+            reward_uav_aux_values.append(reward_terms["aux"])
+            frontier_abs_reward_share_values.append(reward_terms["frontier_abs_share"])
+            if is_edge_step:
+                frontier_progress_edge_values.append(frontier_progress_frac)
+                frontier_reward_edge_values.append(reward_terms["frontier"])
+                frontier_new_cells_edge_values.append(new_cells)
+                frontier_outside_edge_values.append(float(outside_footprint_fraction[drone_idx]))
+            else:
+                frontier_progress_interior_values.append(frontier_progress_frac)
+                frontier_reward_interior_values.append(reward_terms["frontier"])
+                frontier_new_cells_interior_values.append(new_cells)
+                frontier_outside_interior_values.append(float(outside_footprint_fraction[drone_idx]))
             boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
             footprint_radius_m_values.append(footprint_radius)
             diagnostic_steps += 1
@@ -235,6 +405,23 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["frontier_alignment"].append(frontier_align)
             drone_stats["frontier_progress"].append(frontier_progress_frac)
             drone_stats["frontier_uncovered_ratio"].append(frontier_ratio)
+            drone_stats["frontier_obs_distance"].append(frontier_obs_distance)
+            drone_stats["frontier_obs_vector_norm"].append(frontier_obs_norm)
+            drone_stats["frontier_obs_uncovered_ratio"].append(frontier_obs_ratio)
+            drone_stats["frontier_local_coverage_cos"].append(frontier_local_cos)
+            drone_stats["frontier_global_coverage_cos"].append(frontier_global_cos)
+            drone_stats["local_global_coverage_cos"].append(local_global_cos)
+            drone_stats["frontier_sector_cos"].append(frontier_sector_cos)
+            drone_stats["frontier_sector_dominance"].append(sector_dominance)
+            drone_stats["frontier_sector_entropy"].append(sector_entropy)
+            drone_stats["frontier_cancellation"].append(frontier_cancellation)
+            drone_stats["action_frontier_alignment"].append(action_frontier_alignment)
+            drone_stats["action_frontier_intent"].append(action_frontier_intent)
+            drone_stats["action_frontier_movement_gap"].append(action_frontier_movement_gap)
+            for key, value in reward_terms.items():
+                drone_stats["reward_terms"][key].append(value)
+            drone_stats["is_edge_step"].append(float(is_edge_step))
+            drone_stats["is_corner_step"].append(float(is_corner_step))
             drone_stats["boundary_distance_m"].append(float(boundary_distance_m[drone_idx]))
             drone_stats["footprint_radius_m"].append(footprint_radius)
             drone_stats["diagnostic_steps"] += 1
@@ -252,19 +439,102 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             if displacement_m > 1.0 and new_cells < 1.0:
                 moving_no_new_coverage += 1
                 drone_stats["moving_no_new_coverage"] += 1
+            if frontier_obs_norm <= 1e-6:
+                frontier_obs_empty_steps += 1
+                drone_stats["frontier_obs_empty_steps"] += 1
+            if math.isfinite(action_frontier_alignment) and action_frontier_alignment >= 0.50:
+                action_frontier_aligned_steps += 1
+                drone_stats["action_frontier_aligned_steps"] += 1
+                if new_cells < 1.0:
+                    action_frontier_aligned_no_new_steps += 1
+                    drone_stats["action_frontier_aligned_no_new_steps"] += 1
+                if is_edge_step:
+                    action_frontier_aligned_edge_steps += 1
+                    drone_stats["action_frontier_aligned_edge_steps"] += 1
+            if math.isfinite(action_frontier_alignment) and action_frontier_alignment <= -0.50:
+                action_frontier_anti_aligned_steps += 1
+                drone_stats["action_frontier_anti_aligned_steps"] += 1
+            if frontier_progress_frac >= 0.50:
+                frontier_high_progress_steps += 1
+                drone_stats["frontier_high_progress_steps"] += 1
+                if new_cells < 1.0:
+                    frontier_high_progress_no_new_steps += 1
+                    drone_stats["frontier_high_progress_no_new_steps"] += 1
+                if is_edge_step:
+                    frontier_high_progress_edge_steps += 1
+                    drone_stats["frontier_high_progress_edge_steps"] += 1
+                if is_corner_step:
+                    frontier_high_progress_corner_steps += 1
+                    drone_stats["frontier_high_progress_corner_steps"] += 1
 
+            action_displacement_alignment = math.nan
             displacement_norm_sim = float(np.linalg.norm(displacement_vec))
             if action_norm > 1e-6 and displacement_norm_sim > 1e-9:
-                alignment = float(np.dot(action_vec[:2], displacement_vec[:2]) / (action_norm * displacement_norm_sim))
-                alignment = max(min(alignment, 1.0), -1.0)
-                action_displacement_alignments.append(alignment)
-                drone_stats["alignments"].append(alignment)
+                action_displacement_alignment = float(
+                    np.dot(action_vec[:2], displacement_vec[:2]) / (action_norm * displacement_norm_sim)
+                )
+                action_displacement_alignment = max(min(action_displacement_alignment, 1.0), -1.0)
+                action_displacement_alignments.append(action_displacement_alignment)
+                drone_stats["alignments"].append(action_displacement_alignment)
                 if new_cells >= 1.0:
-                    action_displacement_alignments_new_cov.append(alignment)
-                    drone_stats["alignments_new_cov"].append(alignment)
+                    action_displacement_alignments_new_cov.append(action_displacement_alignment)
+                    drone_stats["alignments_new_cov"].append(action_displacement_alignment)
                 else:
-                    action_displacement_alignments_no_new_cov.append(alignment)
-                    drone_stats["alignments_no_new_cov"].append(alignment)
+                    action_displacement_alignments_no_new_cov.append(action_displacement_alignment)
+                    drone_stats["alignments_no_new_cov"].append(action_displacement_alignment)
+
+            _append_time_bin(
+                time_bins,
+                step=step,
+                max_steps=int(scenario_kwargs["max_steps"]),
+                values={
+                    "coverage_fraction": coverage_fraction_now,
+                    "action_norm": action_norm,
+                    "displacement_m": displacement_m,
+                    "new_coverage_cells": new_cells,
+                    "action_displacement_alignment": action_displacement_alignment,
+                    "frontier_obs_distance": frontier_obs_distance,
+                    "frontier_obs_vector_norm": frontier_obs_norm,
+                    "frontier_obs_uncovered_ratio": frontier_obs_ratio,
+                    "frontier_local_coverage_cos": frontier_local_cos,
+                    "frontier_global_coverage_cos": frontier_global_cos,
+                    "local_global_coverage_cos": local_global_cos,
+                    "frontier_sector_cos": frontier_sector_cos,
+                    "frontier_sector_dominance": sector_dominance,
+                    "frontier_sector_entropy": sector_entropy,
+                    "frontier_cancellation": frontier_cancellation,
+                    "frontier_pairwise_cos": frontier_pairwise["mean_cos"],
+                    "frontier_pairwise_same_dir": frontier_pairwise["same_dir_frac"],
+                    "local_pairwise_same_dir": local_pairwise["same_dir_frac"],
+                    "global_pairwise_same_dir": global_pairwise["same_dir_frac"],
+                    "action_frontier_alignment": action_frontier_alignment,
+                    "action_frontier_intent": action_frontier_intent,
+                    "movement_frontier_alignment": frontier_align,
+                    "frontier_progress": frontier_progress_frac,
+                    "frontier_uncovered_ratio": frontier_ratio,
+                    "frontier_reward": reward_terms["frontier"],
+                    "coverage_reward": reward_terms["coverage"],
+                    "move_coverage_reward": reward_terms["move_coverage"],
+                    "overlap_penalty": reward_terms["overlap_penalty"],
+                    "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                    "overlap": overlap,
+                    "excess_overlap": excess_overlap,
+                    "outside_footprint": float(outside_footprint_fraction[drone_idx]),
+                    "edge_step": float(is_edge_step),
+                    "corner_step": float(is_corner_step),
+                    "moving_no_new_coverage": float(displacement_m > 1.0 and new_cells < 1.0),
+                    "frontier_obs_empty": float(frontier_obs_norm <= 1e-6),
+                    "action_frontier_aligned": float(
+                        math.isfinite(action_frontier_alignment)
+                        and action_frontier_alignment >= 0.50
+                    ),
+                    "action_frontier_anti_aligned": float(
+                        math.isfinite(action_frontier_alignment)
+                        and action_frontier_alignment <= -0.50
+                    ),
+                    "frontier_high_progress": float(frontier_progress_frac >= 0.50),
+                },
+            )
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         for survivor_idx, is_scouted in enumerate(scouted):
@@ -316,6 +586,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_action_displacement_alignment": _finite_mean(action_displacement_alignments),
         "avg_action_displacement_alignment_new_cov": _finite_mean(action_displacement_alignments_new_cov),
         "avg_action_displacement_alignment_no_new_cov": _finite_mean(action_displacement_alignments_no_new_cov),
+        "avg_action_frontier_alignment": _finite_mean(action_frontier_alignment_values),
+        "avg_action_frontier_alignment_new_cov": _finite_mean(action_frontier_alignment_new_cov_values),
+        "avg_action_frontier_alignment_no_new_cov": _finite_mean(action_frontier_alignment_no_new_cov_values),
+        "avg_action_frontier_intent": _finite_mean(action_frontier_intent_values),
+        "avg_action_frontier_movement_gap": _finite_mean(action_frontier_movement_gap_values),
         "avg_new_coverage_cells": _finite_mean(new_coverage_cells_values),
         "avg_outside_footprint_fraction": _finite_mean(outside_footprint_values),
         "max_outside_footprint_fraction": max(outside_footprint_values) if outside_footprint_values else 0.0,
@@ -330,6 +605,82 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_frontier_alignment": _finite_mean(frontier_alignment_values),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress_values),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_uncovered_ratio_values),
+        "avg_frontier_obs_distance": _finite_mean(frontier_obs_distance_values),
+        "avg_frontier_obs_vector_norm": _finite_mean(frontier_obs_vector_norm_values),
+        "avg_frontier_local_coverage_cos": _finite_mean(frontier_local_coverage_cos_values),
+        "avg_frontier_global_coverage_cos": _finite_mean(frontier_global_coverage_cos_values),
+        "avg_local_global_coverage_cos": _finite_mean(local_global_coverage_cos_values),
+        "avg_frontier_sector_cos": _finite_mean(frontier_sector_cos_values),
+        "avg_frontier_sector_dominance": _finite_mean(frontier_sector_dominance_values),
+        "avg_frontier_sector_entropy": _finite_mean(frontier_sector_entropy_values),
+        "avg_frontier_cancellation": _finite_mean(frontier_cancellation_values),
+        "avg_frontier_pairwise_cos": _finite_mean(frontier_pairwise_cos_values),
+        "avg_frontier_pairwise_same_dir": _finite_mean(frontier_pairwise_same_dir_values),
+        "avg_local_pairwise_same_dir": _finite_mean(local_pairwise_same_dir_values),
+        "avg_global_pairwise_same_dir": _finite_mean(global_pairwise_same_dir_values),
+        "avg_reward_uav_coverage": _finite_mean(reward_uav_coverage_values),
+        "avg_reward_uav_move_coverage": _finite_mean(reward_uav_move_coverage_values),
+        "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
+        "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
+        "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
+        "avg_penalty_uav_outside_footprint": _finite_mean(penalty_uav_outside_footprint_values),
+        "avg_reward_uav_scout": _finite_mean(reward_uav_scout_values),
+        "avg_reward_uav_aux": _finite_mean(reward_uav_aux_values),
+        "avg_frontier_abs_reward_share": _finite_mean(frontier_abs_reward_share_values),
+        "frontier_high_progress_step_frac": (
+            frontier_high_progress_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "frontier_high_progress_no_new_frac": (
+            frontier_high_progress_no_new_steps / frontier_high_progress_steps
+            if frontier_high_progress_steps else 0.0
+        ),
+        "frontier_high_progress_edge_frac": (
+            frontier_high_progress_edge_steps / frontier_high_progress_steps
+            if frontier_high_progress_steps else 0.0
+        ),
+        "frontier_high_progress_corner_frac": (
+            frontier_high_progress_corner_steps / frontier_high_progress_steps
+            if frontier_high_progress_steps else 0.0
+        ),
+        "frontier_edge_progress_mean": _finite_mean(frontier_progress_edge_values),
+        "frontier_interior_progress_mean": _finite_mean(frontier_progress_interior_values),
+        "frontier_edge_reward_mean": _finite_mean(frontier_reward_edge_values),
+        "frontier_interior_reward_mean": _finite_mean(frontier_reward_interior_values),
+        "frontier_edge_new_cells_mean": _finite_mean(frontier_new_cells_edge_values),
+        "frontier_interior_new_cells_mean": _finite_mean(frontier_new_cells_interior_values),
+        "frontier_edge_outside_mean": _finite_mean(frontier_outside_edge_values),
+        "frontier_interior_outside_mean": _finite_mean(frontier_outside_interior_values),
+        "frontier_progress_new_cells_corr": _safe_corr(frontier_progress_values, new_coverage_cells_values),
+        "frontier_progress_boundary_distance_corr": _safe_corr(
+            frontier_progress_values,
+            boundary_distance_m_values,
+        ),
+        "frontier_obs_empty_step_frac": (
+            frontier_obs_empty_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "action_frontier_aligned_step_frac": (
+            action_frontier_aligned_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "action_frontier_anti_aligned_step_frac": (
+            action_frontier_anti_aligned_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "action_frontier_aligned_no_new_frac": (
+            action_frontier_aligned_no_new_steps / action_frontier_aligned_steps
+            if action_frontier_aligned_steps else 0.0
+        ),
+        "action_frontier_aligned_edge_frac": (
+            action_frontier_aligned_edge_steps / action_frontier_aligned_steps
+            if action_frontier_aligned_steps else 0.0
+        ),
+        "action_frontier_alignment_new_cells_corr": _safe_corr(
+            action_frontier_alignment_values,
+            new_coverage_cells_values,
+        ),
+        "action_frontier_alignment_boundary_distance_corr": _safe_corr(
+            action_frontier_alignment_values,
+            boundary_distance_m_values,
+        ),
+        "time_bins": _finalize_time_bins(time_bins),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess_overlap_values]))
             if excess_overlap_values else 0.0
@@ -382,6 +733,437 @@ def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) ->
     return np.resize(arr, n_drones)
 
 
+def _empty_coverage_signal_snapshot(n_drones: int) -> dict[str, np.ndarray]:
+    n = max(int(n_drones), 0)
+    return {
+        "local_vec": np.zeros((n, 2), dtype=float),
+        "global_vec": np.zeros((n, 2), dtype=float),
+        "sector_vec": np.zeros((n, 2), dtype=float),
+        "sector_dominance": np.full(n, math.nan, dtype=float),
+        "sector_entropy": np.full(n, math.nan, dtype=float),
+        "frontier_cancellation": np.full(n, math.nan, dtype=float),
+    }
+
+
+def _coverage_signal_snapshot(
+    scenario: WildfireSearchScenario,
+    positions_tensor: torch.Tensor,
+    frontier_obs: np.ndarray,
+) -> dict[str, np.ndarray]:
+    positions = positions_tensor[0].detach().cpu().numpy().astype(float)
+    n_drones = positions.shape[0]
+    out = _empty_coverage_signal_snapshot(n_drones)
+    if n_drones == 0:
+        return out
+
+    if int(getattr(scenario, "local_coverage_obs_grid", 0)) > 0:
+        K_local = int(scenario.local_coverage_obs_grid)
+        for drone_idx, agent in enumerate(scenario.world.agents[:n_drones]):
+            patch = (
+                scenario._local_coverage_observation(agent)[0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+                .reshape(K_local, K_local)
+            )
+            out["local_vec"][drone_idx] = _pooled_uncovered_patch_vector(patch)
+
+    if int(getattr(scenario, "coverage_obs_grid", 0)) > 0:
+        K_global = int(scenario.coverage_obs_grid)
+        global_obs = scenario._coverage_observation()[0].detach().cpu().numpy().astype(float)
+        pooled = global_obs[: K_global * K_global].reshape(K_global, K_global)
+        out["global_vec"] = _global_pooled_uncovered_vectors(pooled, positions, scenario)
+
+    sector = _frontier_sector_snapshot(scenario, positions, frontier_obs)
+    out.update(sector)
+    return out
+
+
+def _pooled_uncovered_patch_vector(covered_patch: np.ndarray) -> np.ndarray:
+    K = int(covered_patch.shape[0])
+    if K <= 0:
+        return np.zeros(2, dtype=float)
+    weights = (1.0 - np.asarray(covered_patch, dtype=float)).clip(0.0, 1.0)
+    total = float(weights.sum())
+    if total <= 1e-12:
+        return np.zeros(2, dtype=float)
+    centers = np.linspace(-1.0 + 1.0 / K, 1.0 - 1.0 / K, K)
+    xx, yy = np.meshgrid(centers, centers)
+    return np.asarray([
+        float((weights * xx).sum() / total),
+        float((weights * yy).sum() / total),
+    ])
+
+
+def _global_pooled_uncovered_vectors(
+    covered_map: np.ndarray,
+    positions: np.ndarray,
+    scenario: WildfireSearchScenario,
+) -> np.ndarray:
+    K = int(covered_map.shape[0])
+    weights = (1.0 - np.asarray(covered_map, dtype=float)).clip(0.0, 1.0)
+    total = float(weights.sum())
+    out = np.zeros((positions.shape[0], 2), dtype=float)
+    if K <= 0 or total <= 1e-12:
+        return out
+    x_centers = np.linspace(
+        -float(scenario.x_semidim) + float(scenario.x_semidim) / K,
+        float(scenario.x_semidim) - float(scenario.x_semidim) / K,
+        K,
+    )
+    y_centers = np.linspace(
+        -float(scenario.y_semidim) + float(scenario.y_semidim) / K,
+        float(scenario.y_semidim) - float(scenario.y_semidim) / K,
+        K,
+    )
+    xx, yy = np.meshgrid(x_centers, y_centers)
+    for idx, pos in enumerate(positions):
+        dx = xx - float(pos[0])
+        dy = yy - float(pos[1])
+        out[idx] = np.asarray([
+            float((weights * dx).sum() / total),
+            float((weights * dy).sum() / total),
+        ])
+    return out
+
+
+def _frontier_sector_snapshot(
+    scenario: WildfireSearchScenario,
+    positions: np.ndarray,
+    frontier_obs: np.ndarray,
+    n_sectors: int = 8,
+) -> dict[str, np.ndarray]:
+    n_drones = positions.shape[0]
+    sector_vec = np.zeros((n_drones, 2), dtype=float)
+    dominance = np.full(n_drones, math.nan, dtype=float)
+    entropy = np.full(n_drones, math.nan, dtype=float)
+    cancellation = np.full(n_drones, math.nan, dtype=float)
+    if n_drones == 0:
+        return {
+            "sector_vec": sector_vec,
+            "sector_dominance": dominance,
+            "sector_entropy": entropy,
+            "frontier_cancellation": cancellation,
+        }
+
+    coverage = scenario.coverage_grid[0].detach().cpu().numpy().astype(bool)
+    uncovered = ~coverage
+    G = int(scenario.fire_grid_size)
+    cell_width = 2.0 * float(scenario.x_semidim) / G
+    cell_height = 2.0 * float(scenario.y_semidim) / G
+    xs = np.linspace(
+        -float(scenario.x_semidim) + cell_width / 2.0,
+        float(scenario.x_semidim) - cell_width / 2.0,
+        G,
+    )
+    ys = np.linspace(
+        -float(scenario.y_semidim) + cell_height / 2.0,
+        float(scenario.y_semidim) - cell_height / 2.0,
+        G,
+    )
+    xx, yy = np.meshgrid(xs, ys)
+    sim_units_per_meter = max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
+    radius = max(float(getattr(scenario, "uav_frontier_obs_radius_m", 150.0)) * sim_units_per_meter, 1e-9)
+    sector_width = 2.0 * math.pi / max(n_sectors, 1)
+    for idx, pos in enumerate(positions):
+        dx = xx - float(pos[0])
+        dy = yy - float(pos[1])
+        dist = np.sqrt(dx * dx + dy * dy)
+        useful = (dist <= radius) & uncovered
+        count = int(useful.sum())
+        if count <= 0:
+            continue
+        angles = (np.arctan2(dy[useful], dx[useful]) + 2.0 * math.pi) % (2.0 * math.pi)
+        sector_idx = np.floor(angles / sector_width).astype(int).clip(0, n_sectors - 1)
+        counts = np.bincount(sector_idx, minlength=n_sectors).astype(float)
+        probs = counts / max(float(counts.sum()), 1e-12)
+        best = int(np.argmax(counts))
+        angle = (best + 0.5) * sector_width
+        sector_vec[idx] = np.asarray([math.cos(angle), math.sin(angle)])
+        dominance[idx] = float(probs[best])
+        nonzero = probs[probs > 0.0]
+        entropy[idx] = float(-(nonzero * np.log(nonzero)).sum() / math.log(n_sectors))
+        mean_dist_norm = float(dist[useful].mean() / radius)
+        frontier_norm = float(np.linalg.norm(frontier_obs[idx, :2])) if idx < len(frontier_obs) else 0.0
+        cancellation[idx] = (
+            float(frontier_norm / mean_dist_norm)
+            if mean_dist_norm > 1e-12
+            else math.nan
+        )
+    return {
+        "sector_vec": sector_vec,
+        "sector_dominance": dominance,
+        "sector_entropy": entropy,
+        "frontier_cancellation": cancellation,
+    }
+
+
+def _pairwise_direction_metrics(vectors: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(vectors, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] < 2:
+        return {"mean_cos": math.nan, "same_dir_frac": math.nan}
+    cosines = []
+    for i in range(arr.shape[0]):
+        for j in range(i + 1, arr.shape[0]):
+            cosine = _cosine_or_nan(arr[i], arr[j])
+            if math.isfinite(cosine):
+                cosines.append(cosine)
+    if not cosines:
+        return {"mean_cos": math.nan, "same_dir_frac": math.nan}
+    return {
+        "mean_cos": float(np.mean(cosines)),
+        "same_dir_frac": float(np.mean([value >= 0.75 for value in cosines])),
+    }
+
+
+def _uav_reward_terms(
+    *,
+    scenario: WildfireSearchScenario,
+    new_cells: float,
+    displacement_m: float,
+    frontier_progress: float,
+    frontier_ratio: float,
+    overlap: float,
+    expected_overlap: float,
+    inter_uav_overlap: float,
+    outside_footprint: float,
+    scout_reward: float,
+) -> dict[str, float]:
+    grid_cells = float(max(int(getattr(scenario, "fire_grid_size", 1)) ** 2, 1))
+    coverage = (new_cells / grid_cells) * float(getattr(scenario, "r_coverage", 0.0))
+
+    move_scale = float(getattr(scenario, "r_uav_move_coverage", 0.0))
+    move_cap = max(float(getattr(scenario, "r_uav_move_coverage_cap", 0.0)), 0.0)
+    move_coverage = max(displacement_m, 0.0) * max(new_cells, 0.0) * move_scale
+    if move_cap > 0.0:
+        move_coverage = min(move_coverage, move_cap)
+
+    frontier = (
+        float(getattr(scenario, "r_uav_frontier_alignment", 0.0))
+        * min(max(frontier_progress, 0.0), 1.0)
+        * min(max(frontier_ratio, 0.0), 1.0)
+    )
+
+    overlap_penalty = _overlap_penalty_value(
+        overlap=overlap,
+        expected_overlap=expected_overlap,
+        scale=float(getattr(scenario, "r_uav_overlap", 0.0)),
+        allowed=float(getattr(scenario, "uav_overlap_allowed", 0.10)),
+    )
+    inter_penalty = _fraction_penalty_value(
+        value=inter_uav_overlap,
+        scale=float(getattr(scenario, "r_uav_inter_uav_overlap", 0.0)),
+        allowed=float(getattr(scenario, "uav_inter_uav_overlap_allowed", 0.20)),
+    )
+    outside_penalty = -float(getattr(scenario, "r_uav_outside_footprint", 0.0)) * min(
+        max(outside_footprint, 0.0),
+        1.0,
+    )
+
+    aux = coverage + move_coverage + frontier + overlap_penalty + inter_penalty + outside_penalty
+    abs_denom = (
+        abs(coverage)
+        + abs(move_coverage)
+        + abs(frontier)
+        + abs(overlap_penalty)
+        + abs(inter_penalty)
+        + abs(outside_penalty)
+        + abs(scout_reward)
+    )
+    return {
+        "coverage": float(coverage),
+        "move_coverage": float(move_coverage),
+        "frontier": float(frontier),
+        "overlap_penalty": float(overlap_penalty),
+        "inter_uav_overlap_penalty": float(inter_penalty),
+        "outside_footprint_penalty": float(outside_penalty),
+        "scout": float(scout_reward),
+        "aux": float(aux),
+        "frontier_abs_share": float(abs(frontier) / abs_denom) if abs_denom > 1e-12 else 0.0,
+    }
+
+
+def _overlap_penalty_value(
+    *,
+    overlap: float,
+    expected_overlap: float,
+    scale: float,
+    allowed: float,
+) -> float:
+    if scale <= 0.0:
+        return 0.0
+    slack = min(max(allowed, 0.0), 0.999)
+    threshold = min(max(expected_overlap, 0.0) + slack, 0.999)
+    excess = max(overlap - threshold, 0.0)
+    normalized = min(excess / max(1.0 - threshold, 1e-6), 1.0)
+    return float(-scale * normalized)
+
+
+def _fraction_penalty_value(*, value: float, scale: float, allowed: float) -> float:
+    if scale <= 0.0:
+        return 0.0
+    slack = min(max(allowed, 0.0), 0.999)
+    excess = max(value - slack, 0.0)
+    normalized = min(excess / max(1.0 - slack, 1e-6), 1.0)
+    return float(-scale * normalized)
+
+
+def _safe_corr(xs: list[float], ys: list[float]) -> float:
+    pairs = [
+        (float(x), float(y))
+        for x, y in zip(xs, ys)
+        if math.isfinite(float(x)) and math.isfinite(float(y))
+    ]
+    if len(pairs) < 2:
+        return math.nan
+    x_arr = np.asarray([pair[0] for pair in pairs], dtype=float)
+    y_arr = np.asarray([pair[1] for pair in pairs], dtype=float)
+    if float(np.std(x_arr)) <= 1e-12 or float(np.std(y_arr)) <= 1e-12:
+        return math.nan
+    return float(np.corrcoef(x_arr, y_arr)[0, 1])
+
+
+def _cosine_or_nan(a: np.ndarray, b: np.ndarray) -> float:
+    a_arr = np.asarray(a, dtype=float).reshape(-1)
+    b_arr = np.asarray(b, dtype=float).reshape(-1)
+    norm = float(np.linalg.norm(a_arr) * np.linalg.norm(b_arr))
+    if norm <= 1e-12:
+        return math.nan
+    return float(np.clip(np.dot(a_arr, b_arr) / norm, -1.0, 1.0))
+
+
+def _project_onto_unit(a: np.ndarray, b: np.ndarray) -> float:
+    a_arr = np.asarray(a, dtype=float).reshape(-1)
+    b_arr = np.asarray(b, dtype=float).reshape(-1)
+    norm = float(np.linalg.norm(b_arr))
+    if norm <= 1e-12:
+        return math.nan
+    return float(np.dot(a_arr, b_arr / norm))
+
+
+def _frontier_candidates_for_drone(
+    scenario: WildfireSearchScenario,
+    frontier_obs: np.ndarray,
+    drone_idx: int,
+) -> np.ndarray:
+    if drone_idx >= len(frontier_obs):
+        return np.zeros((0, 4), dtype=float)
+    row = np.asarray(frontier_obs[drone_idx], dtype=float).reshape(-1)
+    mode = str(getattr(scenario, "uav_frontier_mode", "centroid")).replace("-", "_")
+    if mode != "sector_topk":
+        return row[:4].reshape(1, 4)
+    top_k = max(int(getattr(scenario, "uav_frontier_top_k", max(len(row) // 4, 1))), 1)
+    usable = min(top_k * 4, len(row))
+    if usable < 4:
+        return np.zeros((0, 4), dtype=float)
+    return row[:usable].reshape(-1, 4)
+
+
+def _valid_frontier_candidates(candidates: np.ndarray) -> list[np.ndarray]:
+    rows = np.asarray(candidates, dtype=float).reshape(-1, 4)
+    return [
+        row
+        for row in rows
+        if float(np.linalg.norm(row[:2])) > 1e-12 and float(row[3]) > 1e-12
+    ]
+
+
+def _best_frontier_candidate_cosine(vector: np.ndarray, candidates: np.ndarray) -> float:
+    values = [
+        _cosine_or_nan(vector, row[:2])
+        for row in _valid_frontier_candidates(candidates)
+    ]
+    values = [value for value in values if math.isfinite(value)]
+    return float(max(values)) if values else math.nan
+
+
+def _best_frontier_candidate_projection(vector: np.ndarray, candidates: np.ndarray) -> float:
+    values = [
+        _project_onto_unit(vector, row[:2])
+        for row in _valid_frontier_candidates(candidates)
+    ]
+    values = [value for value in values if math.isfinite(value)]
+    return float(max(values)) if values else math.nan
+
+
+def _new_time_bins(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "bin": int(idx),
+            "start_fraction": idx / max(count, 1),
+            "end_fraction": (idx + 1) / max(count, 1),
+            "values": {},
+        }
+        for idx in range(max(int(count), 1))
+    ]
+
+
+def _append_time_bin(
+    bins: list[dict[str, Any]],
+    *,
+    step: int,
+    max_steps: int,
+    values: dict[str, float],
+) -> None:
+    if not bins:
+        return
+    bin_idx = min(int(step * len(bins) / max(max_steps, 1)), len(bins) - 1)
+    bucket = bins[bin_idx]["values"]
+    for key, value in values.items():
+        bucket.setdefault(key, []).append(float(value))
+
+
+def _finalize_time_bins(bins: list[dict[str, Any]]) -> list[dict[str, float]]:
+    finalized = []
+    for item in bins:
+        values = item["values"]
+        row: dict[str, float] = {
+            "bin": float(item["bin"]),
+            "start_fraction": float(item["start_fraction"]),
+            "end_fraction": float(item["end_fraction"]),
+            "count": float(max((len(v) for v in values.values()), default=0)),
+        }
+        for key, series in values.items():
+            row[key] = _finite_mean(series)
+        finalized.append(row)
+    return finalized
+
+
+def _summarize_time_bins(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+    max_bins = max((len(row.get("time_bins", [])) for row in rows), default=0)
+    summary = []
+    for bin_idx in range(max_bins):
+        entries = [
+            row["time_bins"][bin_idx]
+            for row in rows
+            if len(row.get("time_bins", [])) > bin_idx
+        ]
+        if not entries:
+            continue
+        keys = sorted({
+            key
+            for entry in entries
+            for key in entry.keys()
+            if key not in {"bin", "start_fraction", "end_fraction"}
+        })
+        row_summary: dict[str, float] = {
+            "bin": float(bin_idx),
+            "start_fraction": _finite_mean([
+                float(entry.get("start_fraction", math.nan)) for entry in entries
+            ]),
+            "end_fraction": _finite_mean([
+                float(entry.get("end_fraction", math.nan)) for entry in entries
+            ]),
+        }
+        for key in keys:
+            row_summary[key] = _finite_mean([
+                float(entry.get(key, math.nan)) for entry in entries
+            ])
+        summary.append(row_summary)
+    return summary
+
+
 def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
     return {
         "drone": int(drone_idx),
@@ -400,6 +1182,32 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "frontier_alignment": [],
         "frontier_progress": [],
         "frontier_uncovered_ratio": [],
+        "frontier_obs_distance": [],
+        "frontier_obs_vector_norm": [],
+        "frontier_obs_uncovered_ratio": [],
+        "frontier_local_coverage_cos": [],
+        "frontier_global_coverage_cos": [],
+        "local_global_coverage_cos": [],
+        "frontier_sector_cos": [],
+        "frontier_sector_dominance": [],
+        "frontier_sector_entropy": [],
+        "frontier_cancellation": [],
+        "action_frontier_alignment": [],
+        "action_frontier_intent": [],
+        "action_frontier_movement_gap": [],
+        "reward_terms": {
+            "coverage": [],
+            "move_coverage": [],
+            "frontier": [],
+            "overlap_penalty": [],
+            "inter_uav_overlap_penalty": [],
+            "outside_footprint_penalty": [],
+            "scout": [],
+            "aux": [],
+            "frontier_abs_share": [],
+        },
+        "is_edge_step": [],
+        "is_corner_step": [],
         "boundary_distance_m": [],
         "footprint_radius_m": [],
         "scout_credit_count": 0,
@@ -409,6 +1217,15 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "low_action_high_motion": 0,
         "high_action_low_motion": 0,
         "moving_no_new_coverage": 0,
+        "frontier_high_progress_steps": 0,
+        "frontier_high_progress_no_new_steps": 0,
+        "frontier_high_progress_edge_steps": 0,
+        "frontier_high_progress_corner_steps": 0,
+        "frontier_obs_empty_steps": 0,
+        "action_frontier_aligned_steps": 0,
+        "action_frontier_anti_aligned_steps": 0,
+        "action_frontier_aligned_no_new_steps": 0,
+        "action_frontier_aligned_edge_steps": 0,
     }
 
 
@@ -429,7 +1246,23 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     frontier_alignment = stats["frontier_alignment"]
     frontier_progress = stats["frontier_progress"]
     frontier_ratio = stats["frontier_uncovered_ratio"]
+    frontier_obs_distance = stats["frontier_obs_distance"]
+    frontier_obs_norm = stats["frontier_obs_vector_norm"]
+    frontier_local_cos = stats["frontier_local_coverage_cos"]
+    frontier_global_cos = stats["frontier_global_coverage_cos"]
+    local_global_cos = stats["local_global_coverage_cos"]
+    frontier_sector_cos = stats["frontier_sector_cos"]
+    frontier_sector_dominance = stats["frontier_sector_dominance"]
+    frontier_sector_entropy = stats["frontier_sector_entropy"]
+    frontier_cancellation = stats["frontier_cancellation"]
+    action_frontier_alignment = stats["action_frontier_alignment"]
+    action_frontier_intent = stats["action_frontier_intent"]
+    action_frontier_gap = stats["action_frontier_movement_gap"]
     outside = stats["outside_footprint"]
+    edge_mask = [bool(value) for value in stats["is_edge_step"]]
+    high_frontier = int(stats["frontier_high_progress_steps"])
+    action_frontier_aligned = int(stats["action_frontier_aligned_steps"])
+    reward_terms = stats["reward_terms"]
     return {
         "drone": int(stats["drone"]),
         "scout_credit_count": int(stats["scout_credit_count"]),
@@ -442,6 +1275,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_action_displacement_alignment": _finite_mean(stats["alignments"]),
         "avg_action_displacement_alignment_new_cov": _finite_mean(stats["alignments_new_cov"]),
         "avg_action_displacement_alignment_no_new_cov": _finite_mean(stats["alignments_no_new_cov"]),
+        "avg_action_frontier_alignment": _finite_mean(action_frontier_alignment),
+        "avg_action_frontier_intent": _finite_mean(action_frontier_intent),
+        "avg_action_frontier_movement_gap": _finite_mean(action_frontier_gap),
         "avg_new_coverage_cells": _finite_mean(new_cells),
         "total_new_coverage_cells": float(np.sum(new_cells)) if new_cells else 0.0,
         "new_coverage_step_frac": (
@@ -457,6 +1293,85 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_frontier_alignment": _finite_mean(frontier_alignment),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_ratio),
+        "avg_frontier_obs_distance": _finite_mean(frontier_obs_distance),
+        "avg_frontier_obs_vector_norm": _finite_mean(frontier_obs_norm),
+        "avg_frontier_local_coverage_cos": _finite_mean(frontier_local_cos),
+        "avg_frontier_global_coverage_cos": _finite_mean(frontier_global_cos),
+        "avg_local_global_coverage_cos": _finite_mean(local_global_cos),
+        "avg_frontier_sector_cos": _finite_mean(frontier_sector_cos),
+        "avg_frontier_sector_dominance": _finite_mean(frontier_sector_dominance),
+        "avg_frontier_sector_entropy": _finite_mean(frontier_sector_entropy),
+        "avg_frontier_cancellation": _finite_mean(frontier_cancellation),
+        "avg_reward_uav_coverage": _finite_mean(reward_terms["coverage"]),
+        "avg_reward_uav_move_coverage": _finite_mean(reward_terms["move_coverage"]),
+        "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
+        "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
+        "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
+        "avg_penalty_uav_outside_footprint": _finite_mean(reward_terms["outside_footprint_penalty"]),
+        "avg_reward_uav_scout": _finite_mean(reward_terms["scout"]),
+        "avg_reward_uav_aux": _finite_mean(reward_terms["aux"]),
+        "avg_frontier_abs_reward_share": _finite_mean(reward_terms["frontier_abs_share"]),
+        "frontier_high_progress_step_frac": high_frontier / steps if steps else 0.0,
+        "frontier_high_progress_no_new_frac": (
+            stats["frontier_high_progress_no_new_steps"] / high_frontier
+            if high_frontier else 0.0
+        ),
+        "frontier_high_progress_edge_frac": (
+            stats["frontier_high_progress_edge_steps"] / high_frontier
+            if high_frontier else 0.0
+        ),
+        "frontier_high_progress_corner_frac": (
+            stats["frontier_high_progress_corner_steps"] / high_frontier
+            if high_frontier else 0.0
+        ),
+        "frontier_edge_progress_mean": _finite_mean([
+            value for value, is_edge in zip(frontier_progress, edge_mask) if is_edge
+        ]),
+        "frontier_interior_progress_mean": _finite_mean([
+            value for value, is_edge in zip(frontier_progress, edge_mask) if not is_edge
+        ]),
+        "frontier_edge_reward_mean": _finite_mean([
+            value for value, is_edge in zip(reward_terms["frontier"], edge_mask) if is_edge
+        ]),
+        "frontier_interior_reward_mean": _finite_mean([
+            value for value, is_edge in zip(reward_terms["frontier"], edge_mask) if not is_edge
+        ]),
+        "frontier_edge_new_cells_mean": _finite_mean([
+            value for value, is_edge in zip(new_cells, edge_mask) if is_edge
+        ]),
+        "frontier_interior_new_cells_mean": _finite_mean([
+            value for value, is_edge in zip(new_cells, edge_mask) if not is_edge
+        ]),
+        "frontier_edge_outside_mean": _finite_mean([
+            value for value, is_edge in zip(outside, edge_mask) if is_edge
+        ]),
+        "frontier_interior_outside_mean": _finite_mean([
+            value for value, is_edge in zip(outside, edge_mask) if not is_edge
+        ]),
+        "frontier_progress_new_cells_corr": _safe_corr(frontier_progress, new_cells),
+        "frontier_progress_boundary_distance_corr": _safe_corr(frontier_progress, boundary),
+        "frontier_obs_empty_step_frac": (
+            stats["frontier_obs_empty_steps"] / steps if steps else 0.0
+        ),
+        "action_frontier_aligned_step_frac": (
+            action_frontier_aligned / steps if steps else 0.0
+        ),
+        "action_frontier_anti_aligned_step_frac": (
+            stats["action_frontier_anti_aligned_steps"] / steps if steps else 0.0
+        ),
+        "action_frontier_aligned_no_new_frac": (
+            stats["action_frontier_aligned_no_new_steps"] / action_frontier_aligned
+            if action_frontier_aligned else 0.0
+        ),
+        "action_frontier_aligned_edge_frac": (
+            stats["action_frontier_aligned_edge_steps"] / action_frontier_aligned
+            if action_frontier_aligned else 0.0
+        ),
+        "action_frontier_alignment_new_cells_corr": _safe_corr(action_frontier_alignment, new_cells),
+        "action_frontier_alignment_boundary_distance_corr": _safe_corr(
+            action_frontier_alignment,
+            boundary,
+        ),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess]))
             if excess else 0.0
@@ -748,6 +1663,21 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_action_displacement_alignment_no_new_cov": _finite_mean([
             row["avg_action_displacement_alignment_no_new_cov"] for row in rows
         ]),
+        "mean_action_frontier_alignment": _finite_mean([
+            row["avg_action_frontier_alignment"] for row in rows
+        ]),
+        "mean_action_frontier_alignment_new_cov": _finite_mean([
+            row["avg_action_frontier_alignment_new_cov"] for row in rows
+        ]),
+        "mean_action_frontier_alignment_no_new_cov": _finite_mean([
+            row["avg_action_frontier_alignment_no_new_cov"] for row in rows
+        ]),
+        "mean_action_frontier_intent": _finite_mean([
+            row["avg_action_frontier_intent"] for row in rows
+        ]),
+        "mean_action_frontier_movement_gap": _finite_mean([
+            row["avg_action_frontier_movement_gap"] for row in rows
+        ]),
         "mean_new_coverage_cells": _finite_mean([row["avg_new_coverage_cells"] for row in rows]),
         "mean_outside_footprint_fraction": _finite_mean([
             row["avg_outside_footprint_fraction"] for row in rows
@@ -773,6 +1703,135 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_frontier_uncovered_ratio": _finite_mean([
             row["avg_frontier_uncovered_ratio"] for row in rows
+        ]),
+        "mean_frontier_obs_distance": _finite_mean([
+            row["avg_frontier_obs_distance"] for row in rows
+        ]),
+        "mean_frontier_obs_vector_norm": _finite_mean([
+            row["avg_frontier_obs_vector_norm"] for row in rows
+        ]),
+        "mean_frontier_local_coverage_cos": _finite_mean([
+            row["avg_frontier_local_coverage_cos"] for row in rows
+        ]),
+        "mean_frontier_global_coverage_cos": _finite_mean([
+            row["avg_frontier_global_coverage_cos"] for row in rows
+        ]),
+        "mean_local_global_coverage_cos": _finite_mean([
+            row["avg_local_global_coverage_cos"] for row in rows
+        ]),
+        "mean_frontier_sector_cos": _finite_mean([
+            row["avg_frontier_sector_cos"] for row in rows
+        ]),
+        "mean_frontier_sector_dominance": _finite_mean([
+            row["avg_frontier_sector_dominance"] for row in rows
+        ]),
+        "mean_frontier_sector_entropy": _finite_mean([
+            row["avg_frontier_sector_entropy"] for row in rows
+        ]),
+        "mean_frontier_cancellation": _finite_mean([
+            row["avg_frontier_cancellation"] for row in rows
+        ]),
+        "mean_frontier_pairwise_cos": _finite_mean([
+            row["avg_frontier_pairwise_cos"] for row in rows
+        ]),
+        "mean_frontier_pairwise_same_dir": _finite_mean([
+            row["avg_frontier_pairwise_same_dir"] for row in rows
+        ]),
+        "mean_local_pairwise_same_dir": _finite_mean([
+            row["avg_local_pairwise_same_dir"] for row in rows
+        ]),
+        "mean_global_pairwise_same_dir": _finite_mean([
+            row["avg_global_pairwise_same_dir"] for row in rows
+        ]),
+        "mean_reward_uav_coverage": _finite_mean([
+            row["avg_reward_uav_coverage"] for row in rows
+        ]),
+        "mean_reward_uav_move_coverage": _finite_mean([
+            row["avg_reward_uav_move_coverage"] for row in rows
+        ]),
+        "mean_reward_uav_frontier": _finite_mean([
+            row["avg_reward_uav_frontier"] for row in rows
+        ]),
+        "mean_penalty_uav_overlap": _finite_mean([
+            row["avg_penalty_uav_overlap"] for row in rows
+        ]),
+        "mean_penalty_uav_inter_overlap": _finite_mean([
+            row["avg_penalty_uav_inter_overlap"] for row in rows
+        ]),
+        "mean_penalty_uav_outside_footprint": _finite_mean([
+            row["avg_penalty_uav_outside_footprint"] for row in rows
+        ]),
+        "mean_reward_uav_scout": _finite_mean([
+            row["avg_reward_uav_scout"] for row in rows
+        ]),
+        "mean_reward_uav_aux": _finite_mean([
+            row["avg_reward_uav_aux"] for row in rows
+        ]),
+        "mean_frontier_abs_reward_share": _finite_mean([
+            row["avg_frontier_abs_reward_share"] for row in rows
+        ]),
+        "mean_frontier_high_progress_step_frac": _finite_mean([
+            row["frontier_high_progress_step_frac"] for row in rows
+        ]),
+        "mean_frontier_high_progress_no_new_frac": _finite_mean([
+            row["frontier_high_progress_no_new_frac"] for row in rows
+        ]),
+        "mean_frontier_high_progress_edge_frac": _finite_mean([
+            row["frontier_high_progress_edge_frac"] for row in rows
+        ]),
+        "mean_frontier_high_progress_corner_frac": _finite_mean([
+            row["frontier_high_progress_corner_frac"] for row in rows
+        ]),
+        "mean_frontier_edge_progress": _finite_mean([
+            row["frontier_edge_progress_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_progress": _finite_mean([
+            row["frontier_interior_progress_mean"] for row in rows
+        ]),
+        "mean_frontier_edge_reward": _finite_mean([
+            row["frontier_edge_reward_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_reward": _finite_mean([
+            row["frontier_interior_reward_mean"] for row in rows
+        ]),
+        "mean_frontier_edge_new_cells": _finite_mean([
+            row["frontier_edge_new_cells_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_new_cells": _finite_mean([
+            row["frontier_interior_new_cells_mean"] for row in rows
+        ]),
+        "mean_frontier_edge_outside": _finite_mean([
+            row["frontier_edge_outside_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_outside": _finite_mean([
+            row["frontier_interior_outside_mean"] for row in rows
+        ]),
+        "mean_frontier_progress_new_cells_corr": _finite_mean([
+            row["frontier_progress_new_cells_corr"] for row in rows
+        ]),
+        "mean_frontier_progress_boundary_distance_corr": _finite_mean([
+            row["frontier_progress_boundary_distance_corr"] for row in rows
+        ]),
+        "mean_frontier_obs_empty_step_frac": _finite_mean([
+            row["frontier_obs_empty_step_frac"] for row in rows
+        ]),
+        "mean_action_frontier_aligned_step_frac": _finite_mean([
+            row["action_frontier_aligned_step_frac"] for row in rows
+        ]),
+        "mean_action_frontier_anti_aligned_step_frac": _finite_mean([
+            row["action_frontier_anti_aligned_step_frac"] for row in rows
+        ]),
+        "mean_action_frontier_aligned_no_new_frac": _finite_mean([
+            row["action_frontier_aligned_no_new_frac"] for row in rows
+        ]),
+        "mean_action_frontier_aligned_edge_frac": _finite_mean([
+            row["action_frontier_aligned_edge_frac"] for row in rows
+        ]),
+        "mean_action_frontier_alignment_new_cells_corr": _finite_mean([
+            row["action_frontier_alignment_new_cells_corr"] for row in rows
+        ]),
+        "mean_action_frontier_alignment_boundary_distance_corr": _finite_mean([
+            row["action_frontier_alignment_boundary_distance_corr"] for row in rows
         ]),
         "mean_excess_overlap_step_frac_10": _finite_mean([
             row["excess_overlap_step_frac_10"] for row in rows
@@ -823,6 +1882,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
     summary.update(_distribution_summary(rows))
     summary["per_drone"] = _summarize_per_drone(rows)
+    summary["time_bins"] = _summarize_time_bins(rows)
     return summary
 
 
@@ -838,6 +1898,9 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_displacement_m",
         "path_length_m",
         "avg_action_displacement_alignment",
+        "avg_action_frontier_alignment",
+        "avg_action_frontier_intent",
+        "avg_action_frontier_movement_gap",
         "avg_new_coverage_cells",
         "total_new_coverage_cells",
         "new_coverage_step_frac",
@@ -849,6 +1912,45 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
         "avg_frontier_uncovered_ratio",
+        "avg_frontier_obs_distance",
+        "avg_frontier_obs_vector_norm",
+        "avg_frontier_local_coverage_cos",
+        "avg_frontier_global_coverage_cos",
+        "avg_local_global_coverage_cos",
+        "avg_frontier_sector_cos",
+        "avg_frontier_sector_dominance",
+        "avg_frontier_sector_entropy",
+        "avg_frontier_cancellation",
+        "avg_reward_uav_coverage",
+        "avg_reward_uav_move_coverage",
+        "avg_reward_uav_frontier",
+        "avg_penalty_uav_overlap",
+        "avg_penalty_uav_inter_overlap",
+        "avg_penalty_uav_outside_footprint",
+        "avg_reward_uav_scout",
+        "avg_reward_uav_aux",
+        "avg_frontier_abs_reward_share",
+        "frontier_high_progress_step_frac",
+        "frontier_high_progress_no_new_frac",
+        "frontier_high_progress_edge_frac",
+        "frontier_high_progress_corner_frac",
+        "frontier_edge_progress_mean",
+        "frontier_interior_progress_mean",
+        "frontier_edge_reward_mean",
+        "frontier_interior_reward_mean",
+        "frontier_edge_new_cells_mean",
+        "frontier_interior_new_cells_mean",
+        "frontier_edge_outside_mean",
+        "frontier_interior_outside_mean",
+        "frontier_progress_new_cells_corr",
+        "frontier_progress_boundary_distance_corr",
+        "frontier_obs_empty_step_frac",
+        "action_frontier_aligned_step_frac",
+        "action_frontier_anti_aligned_step_frac",
+        "action_frontier_aligned_no_new_frac",
+        "action_frontier_aligned_edge_frac",
+        "action_frontier_alignment_new_cells_corr",
+        "action_frontier_alignment_boundary_distance_corr",
         "excess_overlap_step_frac_10",
         "inter_uav_overlap_step_frac_20",
         "edge_step_frac",
@@ -894,6 +1996,27 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
         "frontier_ratio": "avg_frontier_uncovered_ratio",
+        "frontier_obs_dist": "avg_frontier_obs_distance",
+        "frontier_local": "avg_frontier_local_coverage_cos",
+        "frontier_global": "avg_frontier_global_coverage_cos",
+        "frontier_sector": "avg_frontier_sector_cos",
+        "sector_dom": "avg_frontier_sector_dominance",
+        "sector_entropy": "avg_frontier_sector_entropy",
+        "frontier_cancel": "avg_frontier_cancellation",
+        "frontier_pair": "avg_frontier_pairwise_cos",
+        "frontier_pair_same": "avg_frontier_pairwise_same_dir",
+        "action_frontier": "avg_action_frontier_alignment",
+        "action_frontier_intent": "avg_action_frontier_intent",
+        "action_frontier_gap": "avg_action_frontier_movement_gap",
+        "action_frontier_aligned": "action_frontier_aligned_step_frac",
+        "action_frontier_anti": "action_frontier_anti_aligned_step_frac",
+        "action_frontier_no_new": "action_frontier_aligned_no_new_frac",
+        "frontier_reward": "avg_reward_uav_frontier",
+        "frontier_share": "avg_frontier_abs_reward_share",
+        "frontier_high": "frontier_high_progress_step_frac",
+        "frontier_high_no_new": "frontier_high_progress_no_new_frac",
+        "frontier_high_edge": "frontier_high_progress_edge_frac",
+        "frontier_new_corr": "frontier_progress_new_cells_corr",
         "edge_frac": "edge_step_frac",
         "corner_frac": "corner_step_frac",
         "center_cov": "coverage_center_fraction",
@@ -951,6 +2074,11 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"front={drone['avg_frontier_alignment']:.2f}/"
             f"{drone['avg_frontier_progress_fraction']:.2f}/"
             f"{drone['avg_frontier_uncovered_ratio']:.2f} "
+            f"act_front={drone['avg_action_frontier_alignment']:.2f}/"
+            f"{drone['action_frontier_aligned_step_frac']:.2f} "
+            f"fhi={drone['frontier_high_progress_step_frac']:.2f}/"
+            f"{drone['frontier_high_progress_no_new_frac']:.2f}/"
+            f"{drone['frontier_high_progress_edge_frac']:.2f} "
             f"stall={drone['stalled_step_frac']:.2f}"
         )
     return "; ".join(parts)
@@ -973,7 +2101,39 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"front={drone['mean_avg_frontier_alignment']:.3f}/"
             f"{drone['mean_avg_frontier_progress_fraction']:.3f}/"
             f"{drone['mean_avg_frontier_uncovered_ratio']:.3f} "
+            f"act_front={drone['mean_avg_action_frontier_alignment']:.3f}/"
+            f"{drone['mean_action_frontier_aligned_step_frac']:.3f} "
+            f"front_rew={drone['mean_avg_reward_uav_frontier']:.4f} "
+            f"front_hi={drone['mean_frontier_high_progress_step_frac']:.3f}/"
+            f"{drone['mean_frontier_high_progress_no_new_frac']:.3f}/"
+            f"{drone['mean_frontier_high_progress_edge_frac']:.3f} "
             f"stall={drone['mean_stalled_step_frac']:.3f}"
+        )
+    return lines
+
+
+def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
+    lines = []
+    for item in time_bins:
+        start = 100.0 * float(item.get("start_fraction", 0.0))
+        end = 100.0 * float(item.get("end_fraction", 0.0))
+        lines.append(
+            f"  {start:>3.0f}-{end:<3.0f}%: "
+            f"cov={item.get('coverage_fraction', math.nan):.3f} "
+            f"move={item.get('displacement_m', math.nan):.2f}m "
+            f"new={item.get('new_coverage_cells', math.nan):.1f} "
+            f"edge={item.get('edge_step', math.nan):.3f} "
+            f"outside={item.get('outside_footprint', math.nan):.3f} "
+            f"obs_dist={item.get('frontier_obs_distance', math.nan):.3f} "
+            f"f_loc={item.get('frontier_local_coverage_cos', math.nan):.3f} "
+            f"f_glob={item.get('frontier_global_coverage_cos', math.nan):.3f} "
+            f"sect_dom={item.get('frontier_sector_dominance', math.nan):.3f} "
+            f"centroid={item.get('frontier_cancellation', math.nan):.3f} "
+            f"pair_same={item.get('frontier_pairwise_same_dir', math.nan):.3f} "
+            f"act_front={item.get('action_frontier_alignment', math.nan):.3f} "
+            f"move_front={item.get('movement_frontier_alignment', math.nan):.3f} "
+            f"front_prog={item.get('frontier_progress', math.nan):.3f} "
+            f"front_rew={item.get('frontier_reward', math.nan):.4f}"
         )
     return lines
 
@@ -998,6 +2158,60 @@ def _plot_per_drone_bars(
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=10)
     ax.grid(axis="y", alpha=0.25)
+
+
+def _plot_time_bins(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Frontier", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("action", "action_frontier_alignment", "#4f7cff"),
+        ("movement", "movement_frontier_alignment", "#36a269"),
+        ("progress", "frontier_progress", "#d44a3a"),
+        ("edge", "edge_step", "#20242c"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(centers, values, marker="o", linewidth=1.5, label=label, color=color)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(-1.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_title("Time-Bin Frontier", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, frameon=False)
+
+
+def _plot_time_bins_coverage_signals(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Coverage Signals", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("front/local", "frontier_local_coverage_cos", "#4f7cff"),
+        ("front/global", "frontier_global_coverage_cos", "#36a269"),
+        ("sector dom", "frontier_sector_dominance", "#d44a3a"),
+        ("same dir", "frontier_pairwise_same_dir", "#20242c"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(centers, values, marker="o", linewidth=1.5, label=label, color=color)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(-1.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_title("Time-Bin Coverage Signals", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, frameon=False)
 
 
 def write_distribution_plots(
@@ -1028,9 +2242,17 @@ def write_distribution_plots(
         ("Moving No New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0)),
         ("Start Pair Min (m)", "min_start_pair_distance_m", None),
         ("Start Edge Min (m)", "min_start_edge_distance_m", None),
+        ("Action Frontier Align", "avg_action_frontier_alignment", (-1.0, 1.0)),
+        ("Action Frontier Aligned", "action_frontier_aligned_step_frac", (0.0, 1.0)),
+        ("Action Frontier No New", "action_frontier_aligned_no_new_frac", (0.0, 1.0)),
+        ("Frontier Reward", "avg_reward_uav_frontier", None),
+        ("Frontier Reward Share", "avg_frontier_abs_reward_share", (0.0, 1.0)),
+        ("High Frontier No New", "frontier_high_progress_no_new_frac", (0.0, 1.0)),
+        ("High Frontier Edge", "frontier_high_progress_edge_frac", (0.0, 1.0)),
+        ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(6, 3, figsize=(14, 18), constrained_layout=True)
+    fig, axes = plt.subplots(10, 3, figsize=(14, 30), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -1055,28 +2277,37 @@ def write_distribution_plots(
         ax.grid(axis="y", alpha=0.25)
 
     _plot_per_drone_bars(
-        axes_flat[13],
+        axes_flat[21],
         summary,
         "mean_path_length_m",
         "Per-Drone Path Length",
         "m",
     )
     _plot_per_drone_bars(
-        axes_flat[14],
+        axes_flat[22],
         summary,
         "mean_edge_step_frac",
         "Per-Drone Edge Fraction",
         "fraction",
     )
     _plot_per_drone_bars(
-        axes_flat[15],
+        axes_flat[23],
+        summary,
+        "mean_avg_reward_uav_frontier",
+        "Per-Drone Frontier Reward",
+        "reward",
+    )
+    _plot_time_bins(axes_flat[24], summary)
+
+    _plot_per_drone_bars(
+        axes_flat[25],
         summary,
         "mean_avg_excess_overlap_fraction",
         "Per-Drone Excess Overlap",
         "fraction",
     )
 
-    heat_ax = axes_flat[-2]
+    heat_ax = axes_flat[26]
     heat_ax.clear()
     starts = [
         position
@@ -1111,7 +2342,7 @@ def write_distribution_plots(
         heat_ax.text(0.5, 0.5, "no starts", ha="center", va="center", transform=heat_ax.transAxes)
         heat_ax.set_title("UAV Start Heatmap", fontsize=10)
 
-    label_ax = axes_flat[-1]
+    label_ax = axes_flat[27]
     label_ax.clear()
     if label_counts:
         labels = list(label_counts.keys())
@@ -1127,6 +2358,11 @@ def write_distribution_plots(
     else:
         label_ax.text(0.5, 0.5, "no labels", ha="center", va="center", transform=label_ax.transAxes)
     label_ax.grid(axis="x", alpha=0.25)
+
+    _plot_time_bins_coverage_signals(axes_flat[28], summary)
+
+    for ax in axes_flat[29:]:
+        ax.axis("off")
 
     fig.suptitle(
         "UAV HAPPO Diagnostics Distributions "
@@ -1226,6 +2462,12 @@ def main() -> None:
             f"front={row['avg_frontier_alignment']:.2f}/"
             f"{row['avg_frontier_progress_fraction']:.2f}/"
             f"{row['avg_frontier_uncovered_ratio']:.2f} "
+            f"act_front={row['avg_action_frontier_alignment']:.2f}/"
+            f"{row['action_frontier_aligned_step_frac']:.2f} "
+            f"front_rew={row['avg_reward_uav_frontier']:.4f} "
+            f"front_hi={row['frontier_high_progress_step_frac']:.2f}/"
+            f"{row['frontier_high_progress_no_new_frac']:.2f}/"
+            f"{row['frontier_high_progress_edge_frac']:.2f} "
             f"center_cov={row['coverage_center_fraction']:.2f} "
             f"start_pair={_fmt_optional(row['min_start_pair_distance_m'])}m "
             f"start_edge={_fmt_optional(row['min_start_edge_distance_m'])}m "
@@ -1261,6 +2503,37 @@ def main() -> None:
         f"new_step_frac={summary['mean_new_coverage_step_frac']:.3f}"
     )
     print(
+        "frontier observation/action means: "
+        f"obs_empty={summary['mean_frontier_obs_empty_step_frac']:.3f} "
+        f"obs_dist={summary['mean_frontier_obs_distance']:.3f} "
+        f"obs_norm={summary['mean_frontier_obs_vector_norm']:.3f} "
+        f"act_front={summary['mean_action_frontier_alignment']:.3f} "
+        f"act_front_new={summary['mean_action_frontier_alignment_new_cov']:.3f} "
+        f"act_front_nonew={summary['mean_action_frontier_alignment_no_new_cov']:.3f} "
+        f"act_intent={summary['mean_action_frontier_intent']:.3f} "
+        f"act_move_gap={summary['mean_action_frontier_movement_gap']:.3f} "
+        f"act_aligned={summary['mean_action_frontier_aligned_step_frac']:.3f} "
+        f"act_anti={summary['mean_action_frontier_anti_aligned_step_frac']:.3f} "
+        f"act_aligned_no_new={summary['mean_action_frontier_aligned_no_new_frac']:.3f} "
+        f"act_aligned_edge={summary['mean_action_frontier_aligned_edge_frac']:.3f} "
+        f"corr_act_new={summary['mean_action_frontier_alignment_new_cells_corr']:.3f} "
+        f"corr_act_boundary={summary['mean_action_frontier_alignment_boundary_distance_corr']:.3f}"
+    )
+    print(
+        "coverage-observation comparison means: "
+        f"front_local={summary['mean_frontier_local_coverage_cos']:.3f} "
+        f"front_global={summary['mean_frontier_global_coverage_cos']:.3f} "
+        f"local_global={summary['mean_local_global_coverage_cos']:.3f} "
+        f"front_sector={summary['mean_frontier_sector_cos']:.3f} "
+        f"sector_dom={summary['mean_frontier_sector_dominance']:.3f} "
+        f"sector_entropy={summary['mean_frontier_sector_entropy']:.3f} "
+        f"centroid_strength={summary['mean_frontier_cancellation']:.3f} "
+        f"front_pair_cos={summary['mean_frontier_pairwise_cos']:.3f} "
+        f"front_pair_same={summary['mean_frontier_pairwise_same_dir']:.3f} "
+        f"local_pair_same={summary['mean_local_pairwise_same_dir']:.3f} "
+        f"global_pair_same={summary['mean_global_pairwise_same_dir']:.3f}"
+    )
+    print(
         "footprint/revisit means: "
         f"outside={summary['mean_outside_footprint_fraction']:.3f} "
         f"outside10={summary['mean_outside_footprint_step_frac_10']:.3f} "
@@ -1275,6 +2548,33 @@ def main() -> None:
         f"inter20={summary['mean_inter_uav_overlap_step_frac_20']:.3f} "
         f"excess20={summary['mean_excess_overlap_step_frac_20']:.3f} "
         f"overlap60={summary['mean_overlap_step_frac_60']:.3f}"
+    )
+    print(
+        "uav reward-scale means: "
+        f"coverage={summary['mean_reward_uav_coverage']:.4f} "
+        f"move_cov={summary['mean_reward_uav_move_coverage']:.4f} "
+        f"frontier={summary['mean_reward_uav_frontier']:.4f} "
+        f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
+        f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
+        f"outside_pen={summary['mean_penalty_uav_outside_footprint']:.4f} "
+        f"scout={summary['mean_reward_uav_scout']:.4f} "
+        f"aux_net={summary['mean_reward_uav_aux']:.4f} "
+        f"frontier_abs_share={summary['mean_frontier_abs_reward_share']:.3f}"
+    )
+    print(
+        "frontier diagnostic means: "
+        f"high_progress={summary['mean_frontier_high_progress_step_frac']:.3f} "
+        f"high_no_new={summary['mean_frontier_high_progress_no_new_frac']:.3f} "
+        f"high_edge={summary['mean_frontier_high_progress_edge_frac']:.3f} "
+        f"high_corner={summary['mean_frontier_high_progress_corner_frac']:.3f} "
+        f"edge_prog={summary['mean_frontier_edge_progress']:.3f} "
+        f"interior_prog={summary['mean_frontier_interior_progress']:.3f} "
+        f"edge_new={summary['mean_frontier_edge_new_cells']:.1f} "
+        f"interior_new={summary['mean_frontier_interior_new_cells']:.1f} "
+        f"edge_outside={summary['mean_frontier_edge_outside']:.3f} "
+        f"interior_outside={summary['mean_frontier_interior_outside']:.3f} "
+        f"corr_prog_new={summary['mean_frontier_progress_new_cells_corr']:.3f} "
+        f"corr_prog_boundary={summary['mean_frontier_progress_boundary_distance_corr']:.3f}"
     )
     print(
         "path/edge means: "
@@ -1308,6 +2608,10 @@ def main() -> None:
     if summary.get("per_drone"):
         print("per-drone means:")
         for line in _format_per_drone_summary(summary["per_drone"]):
+            print(line)
+    if summary.get("time_bins"):
+        print("time-bin means:")
+        for line in _format_time_bin_summary(summary["time_bins"]):
             print(line)
     print(
         "failure labels: "

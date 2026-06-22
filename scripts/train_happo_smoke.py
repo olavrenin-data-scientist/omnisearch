@@ -61,6 +61,10 @@ DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
 DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M = 150.0
 DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
+DEFAULT_UAV_FRONTIER_MODE = "sector_topk"
+DEFAULT_UAV_FRONTIER_SECTORS = 8
+DEFAULT_UAV_FRONTIER_TOP_K = 2
+DEFAULT_UAV_FRONTIER_OWNERSHIP = True
 
 
 def _resolve_uav_reward_defaults(
@@ -163,6 +167,10 @@ def build_args(
     local_coverage_obs_radius_m: float = 150.0,
     uav_frontier_obs: bool = False,
     uav_frontier_obs_radius_m: float = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
+    uav_frontier_mode: str = DEFAULT_UAV_FRONTIER_MODE,
+    uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
+    uav_frontier_top_k: int = DEFAULT_UAV_FRONTIER_TOP_K,
+    uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     uav_diagnostic_drones: int = 1,
@@ -428,12 +436,25 @@ def build_args(
     uav_frontier_obs_radius_m = float(uav_frontier_obs_radius_m)
     if uav_frontier_obs_radius_m <= 0.0:
         raise ValueError("uav_frontier_obs_radius_m must be positive")
+    uav_frontier_mode = str(uav_frontier_mode).replace("-", "_")
+    if uav_frontier_mode not in {"centroid", "sector_topk"}:
+        raise ValueError("uav_frontier_mode must be one of: centroid, sector_topk")
+    uav_frontier_sectors = int(uav_frontier_sectors)
+    if uav_frontier_sectors < 2:
+        raise ValueError("uav_frontier_sectors must be at least 2")
+    uav_frontier_top_k = int(uav_frontier_top_k)
+    if uav_frontier_top_k < 1 or uav_frontier_top_k > uav_frontier_sectors:
+        raise ValueError("uav_frontier_top_k must be in [1, uav_frontier_sectors]")
     uav_frontier_alignment_reward = float(uav_frontier_alignment_reward)
     if uav_frontier_alignment_reward < 0.0:
         raise ValueError("uav_frontier_alignment_reward must be nonnegative")
     if uav_frontier_obs or uav_frontier_alignment_reward > 0.0:
         scenario_kwargs["uav_frontier_obs"] = bool(uav_frontier_obs)
         scenario_kwargs["uav_frontier_obs_radius_m"] = uav_frontier_obs_radius_m
+        scenario_kwargs["uav_frontier_mode"] = uav_frontier_mode
+        scenario_kwargs["uav_frontier_sectors"] = uav_frontier_sectors
+        scenario_kwargs["uav_frontier_top_k"] = uav_frontier_top_k
+        scenario_kwargs["uav_frontier_ownership"] = bool(uav_frontier_ownership)
         scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
     if uav_start_min_separation_m is not None:
         scenario_kwargs["uav_start_min_separation_m"] = uav_start_min_separation_m
@@ -582,6 +603,8 @@ def build_args(
         coverage_obs_grid=int(coverage_obs_grid),
         local_coverage_obs_grid=int(local_coverage_obs_grid),
         uav_frontier_obs=bool(uav_frontier_obs),
+        uav_frontier_mode=uav_frontier_mode,
+        uav_frontier_top_k=uav_frontier_top_k,
     )
     env_args = {
         "max_cycles":      episode_length,
@@ -699,6 +722,19 @@ def main():
                         "toward nearby unsearched team-coverage cells.")
     p.add_argument("--uav-frontier-obs-radius-m", type=float, default=DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
                    help="Physical radius in meters used for --uav-frontier-obs and frontier-alignment reward.")
+    p.add_argument("--uav-frontier-mode", choices=("centroid", "sector_topk", "sector-topk"),
+                   default=DEFAULT_UAV_FRONTIER_MODE,
+                   help="Frontier feature/reward mode. centroid is the legacy averaged direction; "
+                        "sector_topk uses top-k uncovered sector candidates.")
+    p.add_argument("--uav-frontier-sectors", type=int, default=DEFAULT_UAV_FRONTIER_SECTORS,
+                   help="Number of angular sectors for --uav-frontier-mode sector_topk.")
+    p.add_argument("--uav-frontier-top-k", type=int, default=DEFAULT_UAV_FRONTIER_TOP_K,
+                   help="How many sector candidates to expose in --uav-frontier-mode sector_topk.")
+    p.set_defaults(uav_frontier_ownership=DEFAULT_UAV_FRONTIER_OWNERSHIP)
+    p.add_argument("--uav-frontier-ownership", dest="uav_frontier_ownership", action="store_true",
+                   help="Ownership-weight sector scores by which UAV is closest to uncovered cells.")
+    p.add_argument("--uav-frontier-no-ownership", dest="uav_frontier_ownership", action="store_false",
+                   help="Disable ownership weighting for sector-top-k frontier scoring.")
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
@@ -822,6 +858,13 @@ def main():
         p.error("--local-coverage-obs-radius-m must be positive")
     if args.uav_frontier_obs_radius_m <= 0.0:
         p.error("--uav-frontier-obs-radius-m must be positive")
+    args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
+    if args.uav_frontier_mode not in {"centroid", "sector_topk"}:
+        p.error("--uav-frontier-mode must be one of: centroid, sector_topk")
+    if args.uav_frontier_sectors < 2:
+        p.error("--uav-frontier-sectors must be at least 2")
+    if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:
+        p.error("--uav-frontier-top-k must be in [1, --uav-frontier-sectors]")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
@@ -998,6 +1041,10 @@ def main():
     print(f" local_coverage_obs_radius_m: {args.local_coverage_obs_radius_m}")
     print(f" uav_frontier_obs: {args.uav_frontier_obs}")
     print(f" uav_frontier_obs_radius_m: {args.uav_frontier_obs_radius_m}")
+    print(f" uav_frontier_mode: {args.uav_frontier_mode}")
+    print(f" uav_frontier_sectors: {args.uav_frontier_sectors}")
+    print(f" uav_frontier_top_k: {args.uav_frontier_top_k}")
+    print(f" uav_frontier_ownership: {args.uav_frontier_ownership}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
@@ -1056,6 +1103,10 @@ def main():
         local_coverage_obs_radius_m = args.local_coverage_obs_radius_m,
         uav_frontier_obs = args.uav_frontier_obs,
         uav_frontier_obs_radius_m = args.uav_frontier_obs_radius_m,
+        uav_frontier_mode = args.uav_frontier_mode,
+        uav_frontier_sectors = args.uav_frontier_sectors,
+        uav_frontier_top_k = args.uav_frontier_top_k,
+        uav_frontier_ownership = args.uav_frontier_ownership,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,

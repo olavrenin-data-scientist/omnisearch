@@ -16,6 +16,20 @@ BOUNDARY_OBS_DIM = 4
 UAV_FRONTIER_OBS_DIM = 4
 
 
+def uav_frontier_observation_dim(
+    *,
+    uav_frontier_obs: bool = False,
+    uav_frontier_mode: str = "centroid",
+    uav_frontier_top_k: int = 2,
+) -> int:
+    if not bool(uav_frontier_obs):
+        return 0
+    mode = str(uav_frontier_mode).replace("-", "_")
+    if mode == "sector_topk":
+        return 4 * max(int(uav_frontier_top_k), 1)
+    return UAV_FRONTIER_OBS_DIM
+
+
 def wildfire_single_observation_dim(
     *,
     local_map_patch_size: int,
@@ -25,6 +39,8 @@ def wildfire_single_observation_dim(
     coverage_obs_grid: int = 0,
     local_coverage_obs_grid: int = 0,
     uav_frontier_obs: bool = False,
+    uav_frontier_mode: str = "centroid",
+    uav_frontier_top_k: int = 2,
 ) -> int:
     """Return the per-agent wildfire observation width for the current layout."""
     patch_size = int(local_map_patch_size)
@@ -33,7 +49,11 @@ def wildfire_single_observation_dim(
     coverage_obs_dim = coverage_grid * coverage_grid + 1 if coverage_grid > 0 else 0
     local_coverage_grid = max(int(local_coverage_obs_grid), 0)
     local_coverage_obs_dim = local_coverage_grid * local_coverage_grid
-    uav_frontier_obs_dim = UAV_FRONTIER_OBS_DIM if bool(uav_frontier_obs) else 0
+    uav_frontier_obs_dim = uav_frontier_observation_dim(
+        uav_frontier_obs=uav_frontier_obs,
+        uav_frontier_mode=uav_frontier_mode,
+        uav_frontier_top_k=uav_frontier_top_k,
+    )
     return (
         4  # own pos + velocity
         + 12  # lidar or drone dummy lidar
