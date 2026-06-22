@@ -178,7 +178,13 @@ def _split_tiles(
 
 
 def _naip_background(tiles: list[Image.Image], size: int, rng: np.random.Generator) -> Image.Image:
-    """Random crop from a real NAIP tile (with light scale/flip augmentation)."""
+    """Random crop from a real NAIP tile with aggressive augmentation.
+
+    Since only a few NAIP tiles are available, we maximize visual diversity via
+    random scale, flip, 90-degree rotation, and color jitter (hue/saturation/
+    brightness shifts).  This lets the model generalise beyond the specific
+    colour palette of the 4 available tiles.
+    """
     tile = tiles[int(rng.integers(0, len(tiles)))]
     W, H = tile.size
     scale = rng.uniform(0.5, 1.0)
@@ -207,7 +213,9 @@ def _disc(size: int, cx: float, cy: float, r: float) -> np.ndarray:
     return np.clip(1.0 - np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max(r, 1.0), 0, 1).astype(np.float32)
 
 
-def _wildfire_masks(size: int, rng: np.random.Generator, centers: list) -> WildfireMasks:
+def _wildfire_masks(
+    size: int, rng: np.random.Generator, centers: list, heavy_occlude: bool = False
+) -> WildfireMasks:
     """Build burn/flame/smoke masks, biased to sit ON survivors.
 
     ``centers`` are pixel (cx, cy) of placed survivors; fire is centered on a
@@ -420,12 +428,14 @@ def _generate_split(
     rng: np.random.Generator,
     cfg: WildfireEffectConfig,
     fire_frac: float = 0.65,
-    surv_px: tuple[int, int] = (45, 230),
+    surv_px: tuple[int, int] = (25, 230),
     naip_tiles: list[Image.Image] | None = None,
     neg_frac: float = 0.12,
     decoy_frac: float = 0.20,
     decoy_assets: list[Image.Image] | None = None,
     boundary_frac: float = 0.10,
+    small_frac: float = 0.30,
+    heavy_occlude_frac: float = 0.20,
 ) -> None:
     """Generate *n* composite images into *out_dir*.
 
@@ -443,6 +453,12 @@ def _generate_split(
                    image edge (partially outside the frame).  Labels use the visible
                    (clipped) bbox.  Closes the train/deploy mismatch where deployment
                    can render edge-truncated survivors but training never did.
+
+    small_frac:    fraction of survivor placements forced to 25–50 px width (the
+                   hardest detection scale at realistic drone altitudes).
+
+    heavy_occlude_frac: fraction of fire images that use heavy smoke directly on
+                   survivors to train partial-occlusion robustness.
     """
     img_dir = out_dir / "images"; lbl_dir = out_dir / "labels"
     img_dir.mkdir(parents=True, exist_ok=True); lbl_dir.mkdir(parents=True, exist_ok=True)
@@ -465,11 +481,14 @@ def _generate_split(
         if not is_negative:
             for _ in range(int(rng.integers(1, 4))):   # 1-3 survivors
                 asset = assets[int(rng.integers(0, len(assets)))]
-                w = int(rng.integers(lo, hi))
+                # Force small survivors for a fraction of placements to improve
+                # recall at the hardest detection scale (20-50px at altitude).
+                if rng.random() < small_frac:
+                    w = int(rng.integers(max(lo, 20), min(50, hi)))
+                else:
+                    w = int(rng.integers(lo, hi))
                 h = int(w * asset.height / asset.width)
                 if rng.random() < boundary_frac:
-                    # Boundary placement: allow up to 50% of the survivor to hang
-                    # off any edge so the model learns to detect truncated humans.
                     x = int(rng.integers(-w // 2, max(1, size - w // 2)))
                     y = int(rng.integers(-h // 2, max(1, size - h // 2)))
                 else:
@@ -480,7 +499,8 @@ def _generate_split(
 
         centers = [(x + w / 2, y + h / 2) for (_, w, h, x, y) in placements]
         has_fire = rng.random() < fire_frac
-        mask = _wildfire_masks(size, rng, centers) if has_fire else None
+        heavy_occlude = has_fire and rng.random() < heavy_occlude_frac
+        mask = _wildfire_masks(size, rng, centers, heavy_occlude=heavy_occlude) if has_fire else None
         if mask is not None:    # burn + flame UNDER survivors (production order)
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg, include_burn=True, include_flame=True, include_smoke=False)
 
@@ -567,8 +587,9 @@ def main() -> None:
                          "(rocks, stumps, debris) composited identically to survivors but with no label. "
                          "Hard negatives: forces the model to learn genuine human silhouette rather "
                          "than 'any composited blob on NAIP'.")
-    ap.add_argument("--min-surv-px", type=int, default=45,
-                    help="Min survivor width in the generated image. Use larger (e.g. 120) for a ground-robot close-range model.")
+    ap.add_argument("--min-surv-px", type=int, default=25,
+                    help="Min survivor width in the generated image. Default 25px covers "
+                         "realistic drone altitudes. Use larger (e.g. 120) for ground-robot model.")
     ap.add_argument("--max-surv-px", type=int, default=230,
                     help="Max survivor width in the generated image.")
     ap.add_argument("--small-frac", type=float, default=0.30,
@@ -675,12 +696,14 @@ def main() -> None:
         fire_frac=args.fire_frac, surv_px=surv_px,
         naip_tiles=naip_train_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
         decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
+        small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
     )
     _generate_split(
         data_dir / "val", args.n_val, val_assets, args.size, rng, cfg,
         fire_frac=args.fire_frac, surv_px=surv_px,
         naip_tiles=naip_val_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
         decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
+        small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
     )
 
     yaml = data_dir / "survivor.yaml"

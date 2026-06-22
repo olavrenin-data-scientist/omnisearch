@@ -129,15 +129,15 @@ class WildfireSearchScenario(BaseScenario):
 
         # Detection / sensing
         # detection_backend selects how drone scouting is computed:
-        #   "abstract" (default) uses the existing probabilistic perception model.
-        #   "cv" runs YOLOv8 on rendered NAIP+survivor imagery.
+        #   "abstract" (default) — stochastic Bernoulli against GT positions
+        #   "cv" — real YOLOv8 inference on rendered NAIP+survivor imagery
         self.detection_backend = str(kwargs.pop("detection_backend", "abstract")).lower()
         if self.detection_backend not in ("abstract", "cv"):
             raise ValueError(f"detection_backend must be 'abstract' or 'cv', got {self.detection_backend!r}")
         self.cv_image_size = int(kwargs.pop("cv_image_size", 512))
         self.cv_person_model = kwargs.pop("cv_person_model", None)
         self.cv_conf_threshold = float(kwargs.pop("cv_conf_threshold", 0.35))
-        self._cv_adapter = None  # lazily initialized on first CV detection step.
+        self._cv_adapter = None  # lazily initialized on first CV detection step
 
         # Drone search uses a downward camera footprint, not a fixed magic
         # radius: altitude * tan(FOV / 2) gives the visible ground radius.
@@ -4892,7 +4892,7 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos: Tensor,
         surv_pos: Tensor,
     ) -> Tensor:
-        """Drone scouting, using either abstract or opt-in CV perception."""
+        """Drone scouting — dispatches to abstract or CV backend."""
         if self.detection_backend == "cv":
             return self._drone_survivor_detections_cv(drone_pos, surv_pos)
         components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
@@ -4902,7 +4902,6 @@ class WildfireSearchScenario(BaseScenario):
     def _init_cv_adapter(self) -> None:
         """Lazily build the SimulationCvAdapter for real CV-based detection."""
         from detection.simulation_adapter import SimulationCvAdapter
-
         kwargs = {
             "terrain_cache_path": self.terrain_cache_path or "data/terrain_cache/malibu_128.npz",
             "image_size": self.cv_image_size,
@@ -4918,42 +4917,46 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos: Tensor,
         surv_pos: Tensor,
     ) -> Tensor:
-        """Run YOLOv8 detection per drone and return a [B, D, S] boolean tensor."""
+        """Run real YOLOv8 detection per drone and return [B, D, S] boolean tensor.
+
+        For each drone in each batch environment, renders the camera view via
+        SimulationCvAdapter and runs YOLO inference.  Detections are matched to
+        ground-truth survivors by IoU; unmatched detections (false positives) are
+        counted but do not create phantom observations.
+        """
         if self._cv_adapter is None:
             self._init_cv_adapter()
 
         from detection.simulation_adapter import SimDrone, SimEntity, SimWildfireState
 
         device = drone_pos.device
-        batch_dim = self.world.batch_dim
-        n_drones = self.n_drones
-        n_survivors = self.n_survivors
-        result = torch.zeros(batch_dim, n_drones, n_survivors, dtype=torch.bool, device=device)
+        B = self.world.batch_dim
+        D = self.n_drones
+        S = self.n_survivors
+        result = torch.zeros(B, D, S, dtype=torch.bool, device=device)
         self.step_cv_false_positives = 0
 
-        for env_i in range(batch_dim):
+        for b in range(B):
             survivors = [
-                SimEntity(
-                    index=s,
-                    world_xy=(float(surv_pos[env_i, s, X]), float(surv_pos[env_i, s, Y])),
-                )
-                for s in range(n_survivors)
+                SimEntity(index=s, world_xy=(float(surv_pos[b, s, 0]), float(surv_pos[b, s, 1])))
+                for s in range(S)
             ]
             wildfire_state = None
             if hasattr(self, "fire_grid") and self.fire_grid is not None:
                 wildfire_state = SimWildfireState(
-                    fire_grid=self.fire_grid[env_i].cpu().numpy(),
-                    fire_intensity_grid=self.fire_intensity_grid[env_i].cpu().numpy(),
-                    burned_grid=self.burned_grid[env_i].cpu().numpy(),
-                    smoke_grid=self.smoke_grid[env_i].cpu().numpy() if self.smoke_grid is not None else None,
+                    fire_grid=self.fire_grid[b].cpu().numpy(),
+                    fire_intensity_grid=self.fire_intensity_grid[b].cpu().numpy(),
+                    burned_grid=self.burned_grid[b].cpu().numpy(),
+                    smoke_grid=self.smoke_grid[b].cpu().numpy() if self.smoke_grid is not None else None,
                 )
-            for drone_i in range(n_drones):
-                drone_agent = self.world.agents[drone_i]
+            for d in range(D):
+                drone_agent = self.world.agents[d]
+                altitude_agl = float(self.drone_altitude[b, d])
                 drone = SimDrone(
-                    index=drone_i,
+                    index=d,
                     name=drone_agent.name,
-                    world_xy=(float(drone_pos[env_i, drone_i, X]), float(drone_pos[env_i, drone_i, Y])),
-                    altitude_agl=float(self.drone_altitude[env_i, drone_i]),
+                    world_xy=(float(drone_pos[b, d, 0]), float(drone_pos[b, d, 1])),
+                    altitude_agl=altitude_agl,
                 )
                 det_result = self._cv_adapter.render_and_detect(
                     drone=drone,
@@ -4962,8 +4965,8 @@ class WildfireSearchScenario(BaseScenario):
                 )
                 for det in det_result.get("detections", []):
                     matched_idx = det.get("matched_survivor_index")
-                    if matched_idx is not None and 0 <= matched_idx < n_survivors:
-                        result[env_i, drone_i, matched_idx] = True
+                    if matched_idx is not None and 0 <= matched_idx < S:
+                        result[b, d, matched_idx] = True
                     else:
                         self.step_cv_false_positives += 1
 
