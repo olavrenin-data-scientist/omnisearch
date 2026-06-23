@@ -139,6 +139,21 @@ class WildfireSearchScenario(BaseScenario):
         self.cv_conf_threshold = float(kwargs.pop("cv_conf_threshold", 0.35))
         self._cv_adapter = None  # lazily initialized on first CV detection step
 
+        # False-positive perception model (decoy landmarks).
+        # Decoys are non-survivor objects (rocks, debris, animals) that a drone's
+        # perception can MISCLASSIFY as a survivor.  A drone within camera range of
+        # a decoy falsely "scouts" it with probability drone_false_positive_rate.
+        # A ground robot that travels to investigate a scouted decoy wastes the
+        # trip — the decoy can never be confirmed — and the team optionally pays
+        # r_decoy_pursuit_penalty.  This tests how robust the learned coordination
+        # strategy is to noisy perception.  Default n_decoys=0 keeps the
+        # observation space and all existing behaviour unchanged (backward compatible).
+        self.n_decoys = max(int(kwargs.pop("n_decoys", 0)), 0)
+        self.drone_false_positive_rate = min(
+            max(float(kwargs.pop("drone_false_positive_rate", 0.0)), 0.0), 1.0,
+        )
+        self.r_decoy_pursuit_penalty = float(kwargs.pop("r_decoy_pursuit_penalty", 0.0))
+
         # Drone search uses a downward camera footprint, not a fixed magic
         # radius: altitude * tan(FOV / 2) gives the visible ground radius.
         kwargs.pop("drone_lidar_range", None)  # legacy name; replaced by camera FOV.
@@ -943,6 +958,23 @@ class WildfireSearchScenario(BaseScenario):
             world.add_landmark(survivor)
             self._survivors.append(survivor)
 
+        # Decoy landmarks: non-survivor objects a drone may misclassify as a
+        # survivor (the false-positive perception model).  They collide like
+        # survivors so ground robots physically interact with them, but they can
+        # never be confirmed.  Distinct colour so they are visible in the viewer.
+        self._decoys: List[Landmark] = []
+        for i in range(self.n_decoys):
+            decoy = Landmark(
+                name=f"decoy_{i}",
+                collide=True,
+                collision_filter=survivor_collision_filter,
+                movable=False,
+                shape=Sphere(radius=self.survivor_radius),
+                color=Color.ORANGE,
+            )
+            world.add_landmark(decoy)
+            self._decoys.append(decoy)
+
         # ---- Per-batch scenario state ----
         self.found_survivors = torch.zeros(
             batch_dim, self.n_survivors, dtype=torch.bool, device=device,
@@ -961,10 +993,20 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.n_agents, self.n_survivors, dtype=torch.bool, device=device,
         )
         self.confirmed_survivors_by_agent = torch.zeros_like(self.known_survivors_by_agent)
-        self.survivor_reveal_steps = torch.full(
-            (batch_dim, self.n_survivors), -1, dtype=torch.long, device=device,
+        # Decoy (false-positive) bookkeeping.  scouted_decoys: a drone has falsely
+        # reported it.  dismissed_decoys: a ground robot has investigated and ruled
+        # it out.  known_decoys_by_agent: per-agent local knowledge of the false
+        # report (drives the decoy observation block when n_decoys > 0).
+        self.scouted_decoys = torch.zeros(
+            batch_dim, self.n_decoys, dtype=torch.bool, device=device,
         )
-        self.survivor_oracle_revealed = torch.zeros_like(self.found_survivors)
+        self.dismissed_decoys = torch.zeros_like(self.scouted_decoys)
+        self.known_decoys_by_agent = torch.zeros(
+            batch_dim, self.n_agents, self.n_decoys, dtype=torch.bool, device=device,
+        )
+        self.step_decoy_false_detections = torch.zeros(
+            batch_dim, self.n_drones, self.n_decoys, dtype=torch.bool, device=device,
+        )
         self.coverage_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
         )
@@ -1317,6 +1359,9 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_new_scouts = torch.zeros(batch_dim, device=device)
         self.metric_new_confirmations = torch.zeros(batch_dim, device=device)
         self.metric_full_success = torch.zeros(batch_dim, device=device)
+        # False-positive perception diagnostics (decoy model).
+        self.metric_false_positive_detections = torch.zeros(batch_dim, device=device)
+        self.metric_false_positive_trips = torch.zeros(batch_dim, device=device)
         self.metric_reward_team = torch.zeros(batch_dim, device=device)
         self.metric_reward_all_survivors_found = torch.zeros(batch_dim, device=device)
         self.metric_reward_team_scout = torch.zeros(batch_dim, device=device)
@@ -1849,7 +1894,7 @@ class WildfireSearchScenario(BaseScenario):
     # ------------------------------------------------------------------
     def reset_world_at(self, env_index: int = None):
         ScenarioUtils.spawn_entities_randomly(
-            entities=self._survivors + self.world.agents,
+            entities=self._survivors + self._decoys + self.world.agents,
             world=self.world,
             env_index=env_index,
             min_dist_between_entities=(
@@ -1867,8 +1912,10 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ground_confirmations.zero_()
             self.known_survivors_by_agent.zero_()
             self.confirmed_survivors_by_agent.zero_()
-            self.survivor_reveal_steps.fill_(-1)
-            self.survivor_oracle_revealed.zero_()
+            self.scouted_decoys.zero_()
+            self.dismissed_decoys.zero_()
+            self.known_decoys_by_agent.zero_()
+            self.step_decoy_false_detections.zero_()
             self.coverage_grid.zero_()
             self.uav_confidence_grid.zero_()
             self.ground_coverage_grid.zero_()
@@ -1901,8 +1948,10 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ground_confirmations[env_index] = False
             self.known_survivors_by_agent[env_index] = False
             self.confirmed_survivors_by_agent[env_index] = False
-            self.survivor_reveal_steps[env_index] = -1
-            self.survivor_oracle_revealed[env_index] = False
+            self.scouted_decoys[env_index] = False
+            self.dismissed_decoys[env_index] = False
+            self.known_decoys_by_agent[env_index] = False
+            self.step_decoy_false_detections[env_index] = False
             self.coverage_grid[env_index] = False
             self.uav_confidence_grid[env_index] = 0.0
             self.ground_coverage_grid[env_index] = False
@@ -4184,6 +4233,13 @@ class WildfireSearchScenario(BaseScenario):
         )
         self._record_local_survivor_knowledge(drone_seen, eligible_ground_confirmations)
 
+        # False-positive perception: drones may misclassify decoys as survivors;
+        # ground robots waste trips investigating them.  decoy_pursuit_penalty is
+        # [B, n_ground] (zeros when n_decoys == 0).
+        decoy_pursuit_penalty = self._process_decoy_false_positives(
+            agent_pos, confirm_range, device,
+        )
+
         # Dense potential-based shaping (Ng et al. 1999): α · (prev_dist − curr_dist)
         # Drones: target = unscouted survivors
         INF = float("inf")
@@ -4882,8 +4938,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + movement_alignment_reward[:, g]
                 r = r + planner_progress_reward[:, g]
                 r = r + ugv_stall_penalty[:, g]
-                r = r + ugv_route_progress_floor_penalty[:, g]
-                r = r + ugv_route_progress_shortfall_penalty[:, g]
+                r = r + decoy_pursuit_penalty[:, g]
             agent.scenario_reward = r
 
     def _drone_survivor_detections(
@@ -4898,6 +4953,72 @@ class WildfireSearchScenario(BaseScenario):
         components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
         probability = components["probability"]
         return torch.rand_like(probability) < probability
+
+    def _process_decoy_false_positives(
+        self,
+        agent_pos: Tensor,
+        confirm_range: Tensor,
+        device: torch.device,
+    ) -> Tensor:
+        """Drive the false-positive perception model over decoy landmarks.
+
+        Returns a [B, n_ground] penalty tensor (zeros when disabled).  Updates
+        scouted_decoys / dismissed_decoys / known_decoys_by_agent in place and
+        records per-step false-positive metrics.
+        """
+        n_ground = self.n_ground
+        if self.n_decoys == 0:
+            self.metric_false_positive_detections = torch.zeros(self.world.batch_dim, device=device)
+            self.metric_false_positive_trips = torch.zeros(self.world.batch_dim, device=device)
+            return torch.zeros(self.world.batch_dim, max(n_ground, 0), device=device)
+
+        decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)  # [B, K, 2]
+        agent_decoy_dists = torch.cdist(agent_pos, decoy_pos)               # [B, A, K]
+
+        # --- Drone false detections: a decoy inside the camera footprint is
+        # misclassified as a survivor with probability drone_false_positive_rate.
+        if self.n_drones > 0 and self.drone_false_positive_rate > 0.0:
+            drone_decoy_dists = agent_decoy_dists[:, :self.n_drones, :]
+            footprint = self._drone_camera_ranges().unsqueeze(-1)            # [B, D, 1]
+            in_view = drone_decoy_dists <= footprint
+            draw = torch.rand_like(drone_decoy_dists)
+            false_det = in_view & (draw < self.drone_false_positive_rate)
+            # Cannot re-trigger a decoy already dismissed by the ground team.
+            false_det = false_det & ~self.dismissed_decoys.unsqueeze(1)
+            self.step_decoy_false_detections = false_det
+            newly_scouted_decoys = false_det.any(dim=1) & ~self.dismissed_decoys
+            self.scouted_decoys = self.scouted_decoys | newly_scouted_decoys
+            if self.n_drones:
+                self.known_decoys_by_agent[:, :self.n_drones] |= false_det
+        else:
+            self.step_decoy_false_detections = torch.zeros(
+                self.world.batch_dim, self.n_drones, self.n_decoys, dtype=torch.bool, device=device,
+            )
+
+        # --- Ground investigation: a ground robot within confirm range of a
+        # scouted, not-yet-dismissed decoy wastes a trip and rules it out.
+        decoy_penalty = torch.zeros(self.world.batch_dim, max(n_ground, 0), device=device)
+        newly_dismissed = torch.zeros_like(self.dismissed_decoys)
+        if n_ground > 0:
+            ground_decoy_dists = agent_decoy_dists[:, self.n_drones:, :]     # [B, G, K]
+            within = ground_decoy_dists < confirm_range
+            investigatable = within & self.scouted_decoys.unsqueeze(1) & ~self.dismissed_decoys.unsqueeze(1)
+            # Ground robot now knows the (false) report it is investigating.
+            self.known_decoys_by_agent[:, self.n_drones:] |= investigatable
+            newly_dismissed = investigatable.any(dim=1) & ~self.dismissed_decoys
+            self.dismissed_decoys = self.dismissed_decoys | newly_dismissed
+            # A dismissed decoy is ruled out: drop it from everyone's view so the
+            # team stops tracking the false report.
+            if newly_dismissed.any():
+                clear = newly_dismissed.unsqueeze(1).expand_as(self.known_decoys_by_agent)
+                self.known_decoys_by_agent = self.known_decoys_by_agent & ~clear
+            # Per-ground penalty for each decoy this robot investigated this step.
+            trips_per_ground = (investigatable.float().sum(dim=2))          # [B, G]
+            decoy_penalty = trips_per_ground * self.r_decoy_pursuit_penalty
+
+        self.metric_false_positive_detections = self.scouted_decoys.float().sum(dim=1)
+        self.metric_false_positive_trips = newly_dismissed.float().sum(dim=1)
+        return decoy_penalty
 
     def _init_cv_adapter(self) -> None:
         """Lazily build the SimulationCvAdapter for real CV-based detection."""
@@ -7805,6 +7926,10 @@ class WildfireSearchScenario(BaseScenario):
             neighbor,
             survivor_messages,
         ]
+        # Decoy (false-positive) candidate reports — only when the FP model is on,
+        # so the observation size is unchanged for existing configs/policies.
+        if self.n_decoys > 0:
+            parts.append(self._decoy_message_observations(agent, comms_keep))
         if self.coverage_obs_grid > 0:
             if self.ugv_zero_uav_search_observations and not agent.is_drone:
                 parts.append(torch.zeros(
@@ -8326,6 +8451,43 @@ class WildfireSearchScenario(BaseScenario):
                 dtype=features.dtype,
             )
             features = torch.cat((features, pad), dim=1)
+        return features.flatten(start_dim=1)
+
+    def _decoy_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
+        """Encode known decoy (false-positive) reports, mirroring the survivor block.
+
+        Same [known, dx, dy, ux, uy, distance_norm, confirmed] layout so the policy
+        sees decoy candidates the same way it sees survivor candidates — and must
+        learn to be skeptical.  ``confirmed`` is always 0 (decoys never confirm).
+        Once a decoy is dismissed it is dropped from every agent's view.
+        """
+        agent_idx = self.world.agents.index(agent)
+        local_known = self.known_decoys_by_agent[:, agent_idx]
+
+        team_known = self.known_decoys_by_agent.any(dim=1)
+        connected = comms_keep.expand_as(local_known)
+        local_known = torch.where(connected, team_known, local_known)
+        # A dismissed decoy is ruled out — never surface it again.
+        local_known = local_known & ~self.dismissed_decoys
+        self.known_decoys_by_agent[:, agent_idx] = local_known
+
+        decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
+        relative_pos = decoy_pos - agent.state.pos.unsqueeze(1)
+        relative_pos = relative_pos * local_known.unsqueeze(-1).float()
+        dist_sim = torch.linalg.norm(relative_pos, dim=-1, keepdim=True)
+        unit_direction = relative_pos / dist_sim.clamp_min(1e-9)
+        distance_m = dist_sim / self.terrain_sim_units_per_meter.view(-1, 1, 1).clamp_min(1e-9)
+        distance_norm = distance_m / self.survivor_message_distance_scale_m
+        features = torch.cat(
+            [
+                local_known.unsqueeze(-1).float(),
+                relative_pos,
+                unit_direction,
+                distance_norm,
+                torch.zeros_like(local_known.unsqueeze(-1).float()),
+            ],
+            dim=-1,
+        )
         return features.flatten(start_dim=1)
 
     def _local_fire_density(self, agent: Agent) -> Tensor:
@@ -10643,6 +10805,8 @@ class WildfireSearchScenario(BaseScenario):
             "mission/n_scouted": self.scouted_survivors.sum(dim=1).float(),
             "mission/n_confirmed": self.found_survivors.sum(dim=1).float(),
             "mission/full_success": self.metric_full_success,
+            "mission/false_positive_detections": self.metric_false_positive_detections,
+            "mission/false_positive_trips": self.metric_false_positive_trips,
             "reward/team": self.metric_reward_team,
             "reward/all_survivors_found": self.metric_reward_all_survivors_found,
             "reward/team_scout": self.metric_reward_team_scout,
