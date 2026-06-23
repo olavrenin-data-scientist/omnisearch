@@ -322,6 +322,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_ground_confirm"], 0.0)
         self.assertEqual(scenario["r_ground_shaping"], 0.0)
         self.assertEqual(scenario["r_coverage"], 7.5)
+        self.assertEqual(scenario["uav_coverage_normalization"], "map")
         self.assertEqual(scenario["coverage_obs_grid"], 6)
         self.assertEqual(scenario["local_coverage_obs_grid"], 9)
         self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
@@ -361,6 +362,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_found_survivor"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 20.0)
+        self.assertEqual(scenario["uav_coverage_normalization"], "map")
         self.assertEqual(scenario["coverage_obs_grid"], 6)
         self.assertEqual(scenario["local_coverage_obs_grid"], 9)
         self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
@@ -375,6 +377,44 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
+
+    def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_opp_cov",
+            uav_survivor_diagnostic=True,
+            uav_coverage_reward=0.5,
+            uav_coverage_normalization="opportunity",
+            uav_coverage_opportunity_cap=1.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_coverage"], 0.5)
+        self.assertEqual(scenario["uav_coverage_normalization"], "opportunity")
+        self.assertEqual(scenario["uav_coverage_opportunity_cap"], 1.0)
+        self.assertNotIn("r_uav_coverage_opportunity", scenario)
+
+    def test_legacy_uav_opportunity_reward_alias_sets_coverage_normalization(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_legacy_opp_cov",
+            uav_survivor_diagnostic=True,
+            uav_coverage_reward=0.0,
+            uav_coverage_opportunity_reward=0.5,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_coverage"], 0.5)
+        self.assertEqual(scenario["uav_coverage_normalization"], "opportunity")
+        self.assertNotIn("r_uav_coverage_opportunity", scenario)
 
     def test_uav_survivor_diagnostic_preserves_explicit_zero_reward_overrides(self):
         _, _, env_args = build_args(
@@ -592,6 +632,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 20.0)
+        self.assertEqual(scenario["uav_coverage_normalization"], "map")
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)

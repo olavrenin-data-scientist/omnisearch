@@ -175,9 +175,9 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario._world = types.SimpleNamespace(batch_dim=1)
         scenario.n_drones = n_drones
         scenario.r_coverage = 1.0
+        scenario.uav_coverage_normalization = "map"
         scenario.r_uav_move_coverage = 0.001
         scenario.r_uav_move_coverage_cap = 0.1
-        scenario.r_uav_coverage_opportunity = 0.0
         scenario.uav_coverage_opportunity_cap = 1.0
         scenario.r_uav_frontier_alignment = 0.0
         scenario.uav_frontier_obs = False
@@ -416,9 +416,10 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(float(coverage_cells[0, 0]), 0.0)
         self.assertEqual(float(reward[0, 0]), 0.0)
 
-    def test_uav_coverage_opportunity_reward_uses_reachable_uncovered_cells(self):
+    def test_uav_coverage_reward_can_use_reachable_uncovered_cells(self):
         scenario = self._coverage_scenario(grid_size=16)
-        scenario.r_uav_coverage_opportunity = 0.5
+        scenario.r_coverage = 0.5
+        scenario.uav_coverage_normalization = "opportunity"
         scenario.uav_coverage_opportunity_cap = 1.0
         scenario.drone_altitude = torch.tensor([[0.10]])
 
@@ -426,7 +427,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
             torch.zeros(1, 1, 2)
         )
         new_cells = credit * float(scenario.fire_grid_size * scenario.fire_grid_size)
-        reward = scenario._uav_coverage_opportunity_reward(opportunity_fraction)
+        reward = scenario._uav_coverage_reward(credit, opportunity_fraction)
 
         self.assertGreater(float(new_cells[0, 0]), 0.0)
         self.assertGreaterEqual(float(opportunity_cells[0, 0]), float(new_cells[0, 0]))
@@ -442,12 +443,16 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         )
 
         scenario.uav_coverage_opportunity_cap = 0.25
-        capped_reward = scenario._uav_coverage_opportunity_reward(opportunity_fraction)
+        capped_reward = scenario._uav_coverage_reward(credit, opportunity_fraction)
         self.assertLessEqual(float(capped_reward[0, 0]), 0.5 * 0.25 + 1e-7)
 
         scenario.uav_coverage_opportunity_cap = 0.0
-        zero_capped_reward = scenario._uav_coverage_opportunity_reward(opportunity_fraction)
+        zero_capped_reward = scenario._uav_coverage_reward(credit, opportunity_fraction)
         self.assertEqual(float(zero_capped_reward[0, 0]), 0.0)
+
+        scenario.uav_coverage_normalization = "map"
+        map_reward = scenario._uav_coverage_reward(credit, opportunity_fraction)
+        self.assertAlmostEqual(float(map_reward[0, 0]), 0.5 * float(credit[0, 0]), places=6)
 
     def test_uav_boundary_risk_metrics_scale_with_meter_distance(self):
         scenario = self._coverage_scenario()

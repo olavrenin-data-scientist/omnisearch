@@ -480,16 +480,23 @@ class WildfireSearchScenario(BaseScenario):
         # Coverage reward: maximum team bonus for covering the full map once.
         # Credit uses the physical camera footprint and is split when drones
         # simultaneously claim the same new cell. Default 0.0 keeps it off.
-        self.r_coverage = kwargs.pop("r_coverage", 5.0)
+        self.r_coverage = float(kwargs.pop("r_coverage", 5.0))
         # UAV movement-coverage reward: actual drone displacement in meters
         # times newly covered grid cells, capped per drone per step. This
         # nudges sweeping motion without paying for movement over old coverage.
         self.r_uav_move_coverage = max(float(kwargs.pop("r_uav_move_coverage", 0.0)), 0.0)
         self.r_uav_move_coverage_cap = max(float(kwargs.pop("r_uav_move_coverage_cap", 0.1)), 0.0)
-        # UAV opportunity-normalized coverage reward: newly covered cells as a
-        # fraction of uncovered cells reachable within one max UAV step plus
-        # the current camera footprint. Default 0.0 keeps it off.
-        self.r_uav_coverage_opportunity = max(float(kwargs.pop("r_uav_coverage_opportunity", 0.0)), 0.0)
+        legacy_uav_coverage_opportunity = kwargs.pop("r_uav_coverage_opportunity", None)
+        uav_coverage_normalization = kwargs.pop("uav_coverage_normalization", None)
+        if uav_coverage_normalization is None:
+            if legacy_uav_coverage_opportunity is not None and float(legacy_uav_coverage_opportunity) > 0.0:
+                self.r_coverage = max(float(legacy_uav_coverage_opportunity), 0.0)
+                uav_coverage_normalization = "opportunity"
+            else:
+                uav_coverage_normalization = "map"
+        self.uav_coverage_normalization = str(uav_coverage_normalization).replace("-", "_").lower()
+        if self.uav_coverage_normalization not in {"map", "opportunity"}:
+            raise ValueError("uav_coverage_normalization must be one of: map, opportunity")
         self.uav_coverage_opportunity_cap = max(float(kwargs.pop("uav_coverage_opportunity_cap", 1.0)), 0.0)
         self.r_uav_frontier_alignment = max(float(kwargs.pop("r_uav_frontier_alignment", 0.0)), 0.0)
         self.r_uav_overlap = max(float(kwargs.pop("r_uav_overlap", 0.0)), 0.0)
@@ -842,8 +849,6 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_move_coverage = torch.zeros(batch_dim, device=device)
-        self.metric_reward_uav_coverage_opportunity = torch.zeros(batch_dim, device=device)
-        self.metric_reward_uav_coverage_opportunity_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_reward_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
@@ -917,8 +922,6 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_drone_scout,
             self.metric_reward_drone_progress,
             self.metric_reward_uav_move_coverage,
-            self.metric_reward_uav_coverage_opportunity,
-            self.metric_reward_uav_coverage_opportunity_by_drone,
             self.metric_reward_uav_frontier_alignment,
             self.metric_uav_frontier_alignment,
             self.metric_uav_frontier_alignment_by_drone,
@@ -2531,7 +2534,8 @@ class WildfireSearchScenario(BaseScenario):
             drone_displacement_m,
             coverage_new_cells,
         ) = self._uav_move_coverage_reward(drone_pos, coverage_new)
-        uav_coverage_opportunity_reward = self._uav_coverage_opportunity_reward(
+        uav_coverage_reward = self._uav_coverage_reward(
+            coverage_new,
             uav_coverage_opportunity_fraction,
         )
         uav_expected_overlap_fraction = self._uav_expected_overlap_fraction(drone_displacement_m)
@@ -2557,8 +2561,6 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_drone_scout = (scout_per_drone * self.r_drone_scout).sum(dim=1)
         self.metric_reward_drone_progress = drone_shaping.sum(dim=1)
         self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
-        self.metric_reward_uav_coverage_opportunity_by_drone = uav_coverage_opportunity_reward
-        self.metric_reward_uav_coverage_opportunity = uav_coverage_opportunity_reward.sum(dim=1)
         self.metric_reward_uav_frontier_alignment = uav_frontier_alignment_reward.sum(dim=1)
         self.metric_uav_frontier_alignment_by_drone = uav_frontier_alignment
         self.metric_uav_frontier_progress_fraction_by_drone = uav_frontier_progress_fraction
@@ -2628,7 +2630,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_ground_confirm = (
             confirm_per_ground * self.r_ground_confirm
         ).sum(dim=1)
-        self.metric_reward_coverage = (coverage_new * self.r_coverage).sum(dim=1)
+        self.metric_reward_coverage = uav_coverage_reward.sum(dim=1)
         self.metric_cost_ugv_fire_exposure = ground_in_fire.float().sum(dim=1)
         self.metric_cost_ugv_travel = self.step_ugv_travel_cost.sum(dim=1)
         self.metric_cost_drone_energy = self.drone_energy_cost.sum(dim=1)
@@ -2694,9 +2696,8 @@ class WildfireSearchScenario(BaseScenario):
                 r = r - self.drone_energy_cost[:, i]
                 r = r + self.step_drone_climb[:, i] * self.r_drone_climb_cost
                 r = r + drone_shaping[:, i]
-                r = r + coverage_new[:, i] * self.r_coverage
+                r = r + uav_coverage_reward[:, i]
                 r = r + uav_move_coverage_reward[:, i]
-                r = r + uav_coverage_opportunity_reward[:, i]
                 r = r + uav_frontier_alignment_reward[:, i]
                 r = r + uav_overlap_penalty[:, i]
                 r = r + uav_inter_uav_overlap_penalty[:, i]
@@ -3106,13 +3107,13 @@ class WildfireSearchScenario(BaseScenario):
         # off, because it can also feed the team-coverage observation.
         if (
             self.r_coverage <= 0.0
+            and self.r_uav_move_coverage <= 0.0
             and self.coverage_obs_grid <= 0
             and not self.uav_frontier_obs
             and self.r_uav_frontier_alignment <= 0.0
             and self.r_uav_overlap <= 0.0
             and self.r_uav_inter_uav_overlap <= 0.0
             and self.r_uav_outside_footprint <= 0.0
-            and self.r_uav_coverage_opportunity <= 0.0
         ):
             return (
                 new_per_drone,
@@ -3216,15 +3217,18 @@ class WildfireSearchScenario(BaseScenario):
             opportunity_cells,
         )
 
-    def _uav_coverage_opportunity_reward(self, opportunity_fraction: Tensor) -> Tensor:
-        """Reward coverage capture relative to locally reachable opportunity."""
-        if self.n_drones == 0 or self.r_uav_coverage_opportunity <= 0.0:
-            return torch.zeros_like(opportunity_fraction)
-        ratio = opportunity_fraction.clamp(
-            min=0.0,
-            max=self.uav_coverage_opportunity_cap,
-        )
-        return ratio * self.r_uav_coverage_opportunity
+    def _uav_coverage_reward(self, map_fraction: Tensor, opportunity_fraction: Tensor) -> Tensor:
+        """Per-UAV coverage reward using the selected normalization mode."""
+        if self.n_drones == 0 or self.r_coverage <= 0.0:
+            return torch.zeros_like(map_fraction)
+        if self.uav_coverage_normalization == "opportunity":
+            ratio = opportunity_fraction.clamp(
+                min=0.0,
+                max=self.uav_coverage_opportunity_cap,
+            )
+        else:
+            ratio = map_fraction
+        return ratio * self.r_coverage
 
     def _uav_move_coverage_reward(self, drone_pos: Tensor, coverage_new: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Reward actual UAV displacement only when it produces new coverage."""
@@ -4480,7 +4484,6 @@ class WildfireSearchScenario(BaseScenario):
             "reward/drone_scout": self.metric_reward_drone_scout,
             "reward/drone_progress": self.metric_reward_drone_progress,
             "reward/uav_move_coverage": self.metric_reward_uav_move_coverage,
-            "reward/uav_coverage_opportunity": self.metric_reward_uav_coverage_opportunity,
             "reward/uav_frontier_alignment": self.metric_reward_uav_frontier_alignment,
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,

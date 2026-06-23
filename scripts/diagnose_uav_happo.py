@@ -132,7 +132,6 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     coverage_opportunity_fraction_values: list[float] = []
     reward_uav_coverage_values: list[float] = []
     reward_uav_move_coverage_values: list[float] = []
-    reward_uav_coverage_opportunity_values: list[float] = []
     reward_uav_frontier_values: list[float] = []
     penalty_uav_overlap_values: list[float] = []
     penalty_uav_inter_overlap_values: list[float] = []
@@ -390,7 +389,6 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 action_frontier_alignment_no_new_cov_values.append(action_frontier_alignment)
             reward_uav_coverage_values.append(reward_terms["coverage"])
             reward_uav_move_coverage_values.append(reward_terms["move_coverage"])
-            reward_uav_coverage_opportunity_values.append(reward_terms["coverage_opportunity"])
             reward_uav_frontier_values.append(reward_terms["frontier"])
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
             penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
@@ -536,7 +534,6 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "frontier_reward": reward_terms["frontier"],
                     "coverage_reward": reward_terms["coverage"],
                     "move_coverage_reward": reward_terms["move_coverage"],
-                    "coverage_opportunity_reward": reward_terms["coverage_opportunity"],
                     "overlap_penalty": reward_terms["overlap_penalty"],
                     "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
                     "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
@@ -650,7 +647,6 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_global_pairwise_same_dir": _finite_mean(global_pairwise_same_dir_values),
         "avg_reward_uav_coverage": _finite_mean(reward_uav_coverage_values),
         "avg_reward_uav_move_coverage": _finite_mean(reward_uav_move_coverage_values),
-        "avg_reward_uav_coverage_opportunity": _finite_mean(reward_uav_coverage_opportunity_values),
         "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
         "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
@@ -968,18 +964,22 @@ def _uav_reward_terms(
     scout_reward: float,
 ) -> dict[str, float]:
     grid_cells = float(max(int(getattr(scenario, "fire_grid_size", 1)) ** 2, 1))
-    coverage = (new_cells / grid_cells) * float(getattr(scenario, "r_coverage", 0.0))
+    coverage_scale = float(getattr(scenario, "r_coverage", 0.0))
+    coverage_normalization = str(
+        getattr(scenario, "uav_coverage_normalization", "map")
+    ).replace("-", "_").lower()
+    opportunity_cap = max(float(getattr(scenario, "uav_coverage_opportunity_cap", 1.0)), 0.0)
+    if coverage_normalization == "opportunity":
+        coverage_ratio = min(max(coverage_opportunity_fraction, 0.0), opportunity_cap)
+    else:
+        coverage_ratio = new_cells / grid_cells
+    coverage = coverage_scale * coverage_ratio
 
     move_scale = float(getattr(scenario, "r_uav_move_coverage", 0.0))
     move_cap = max(float(getattr(scenario, "r_uav_move_coverage_cap", 0.0)), 0.0)
     move_coverage = max(displacement_m, 0.0) * max(new_cells, 0.0) * move_scale
     if move_cap > 0.0:
         move_coverage = min(move_coverage, move_cap)
-
-    opportunity_scale = float(getattr(scenario, "r_uav_coverage_opportunity", 0.0))
-    opportunity_cap = max(float(getattr(scenario, "uav_coverage_opportunity_cap", 1.0)), 0.0)
-    opportunity_ratio = min(max(coverage_opportunity_fraction, 0.0), opportunity_cap)
-    coverage_opportunity = opportunity_scale * opportunity_ratio
 
     frontier = (
         float(getattr(scenario, "r_uav_frontier_alignment", 0.0))
@@ -1006,7 +1006,6 @@ def _uav_reward_terms(
     aux = (
         coverage
         + move_coverage
-        + coverage_opportunity
         + frontier
         + overlap_penalty
         + inter_penalty
@@ -1015,7 +1014,6 @@ def _uav_reward_terms(
     abs_denom = (
         abs(coverage)
         + abs(move_coverage)
-        + abs(coverage_opportunity)
         + abs(frontier)
         + abs(overlap_penalty)
         + abs(inter_penalty)
@@ -1025,7 +1023,6 @@ def _uav_reward_terms(
     return {
         "coverage": float(coverage),
         "move_coverage": float(move_coverage),
-        "coverage_opportunity": float(coverage_opportunity),
         "frontier": float(frontier),
         "overlap_penalty": float(overlap_penalty),
         "inter_uav_overlap_penalty": float(inter_penalty),
@@ -1306,7 +1303,6 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "reward_terms": {
             "coverage": [],
             "move_coverage": [],
-            "coverage_opportunity": [],
             "frontier": [],
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
@@ -1417,7 +1413,6 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_frontier_cancellation": _finite_mean(frontier_cancellation),
         "avg_reward_uav_coverage": _finite_mean(reward_terms["coverage"]),
         "avg_reward_uav_move_coverage": _finite_mean(reward_terms["move_coverage"]),
-        "avg_reward_uav_coverage_opportunity": _finite_mean(reward_terms["coverage_opportunity"]),
         "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
         "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
         "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
@@ -1869,9 +1864,6 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_reward_uav_move_coverage": _finite_mean([
             row["avg_reward_uav_move_coverage"] for row in rows
         ]),
-        "mean_reward_uav_coverage_opportunity": _finite_mean([
-            row["avg_reward_uav_coverage_opportunity"] for row in rows
-        ]),
         "mean_reward_uav_frontier": _finite_mean([
             row["avg_reward_uav_frontier"] for row in rows
         ]),
@@ -2049,7 +2041,6 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_frontier_cancellation",
         "avg_reward_uav_coverage",
         "avg_reward_uav_move_coverage",
-        "avg_reward_uav_coverage_opportunity",
         "avg_reward_uav_frontier",
         "avg_penalty_uav_overlap",
         "avg_penalty_uav_inter_overlap",
@@ -2140,7 +2131,6 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "action_frontier_aligned": "action_frontier_aligned_step_frac",
         "action_frontier_anti": "action_frontier_anti_aligned_step_frac",
         "action_frontier_no_new": "action_frontier_aligned_no_new_frac",
-        "coverage_opportunity_reward": "avg_reward_uav_coverage_opportunity",
         "frontier_reward": "avg_reward_uav_frontier",
         "frontier_share": "avg_frontier_abs_reward_share",
         "frontier_high": "frontier_high_progress_step_frac",
@@ -2270,8 +2260,7 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"move_front={item.get('movement_frontier_alignment', math.nan):.3f} "
             f"front_prog={item.get('frontier_progress', math.nan):.3f} "
             f"front_score={item.get('frontier_uncovered_ratio', math.nan):.3f} "
-            f"front_rew={item.get('frontier_reward', math.nan):.4f} "
-            f"opp_rew={item.get('coverage_opportunity_reward', math.nan):.4f}"
+            f"front_rew={item.get('frontier_reward', math.nan):.4f}"
         )
     return lines
 
@@ -2433,7 +2422,6 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
     series = [
         ("coverage", "coverage_reward", "#4f7cff", False),
         ("move cov", "move_coverage_reward", "#36a269", False),
-        ("opp cov", "coverage_opportunity_reward", "#2aa6a1", False),
         ("frontier", "frontier_reward", "#8a5cf6", False),
         ("scout", "scout_reward", "#d4a72c", False),
         ("overlap pen", "overlap_penalty", "#d44a3a", True),
@@ -2996,7 +2984,6 @@ def main() -> None:
         "uav reward-scale means: "
         f"coverage={summary['mean_reward_uav_coverage']:.4f} "
         f"move_cov={summary['mean_reward_uav_move_coverage']:.4f} "
-        f"opp_cov={summary['mean_reward_uav_coverage_opportunity']:.4f} "
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
         f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
         f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
