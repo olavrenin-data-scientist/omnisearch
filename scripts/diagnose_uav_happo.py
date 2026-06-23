@@ -977,7 +977,20 @@ def _uav_reward_terms(
 
     move_scale = float(getattr(scenario, "r_uav_move_coverage", 0.0))
     move_cap = max(float(getattr(scenario, "r_uav_move_coverage_cap", 0.0)), 0.0)
-    move_coverage = max(displacement_m, 0.0) * max(new_cells, 0.0) * move_scale
+    move_normalization = str(
+        getattr(scenario, "uav_move_coverage_normalization", "raw")
+    ).replace("-", "_").lower()
+    if move_normalization == "opportunity":
+        max_step_m = max(
+            float(getattr(scenario, "drone_speed_mps", 0.0))
+            * float(getattr(scenario, "sim_step_seconds", 1.0)),
+            1e-6,
+        )
+        distance_fraction = min(max(displacement_m / max_step_m, 0.0), 1.0)
+        move_base = distance_fraction * min(max(coverage_opportunity_fraction, 0.0), 1.0)
+    else:
+        move_base = max(displacement_m, 0.0) * max(new_cells, 0.0)
+    move_coverage = move_base * move_scale
     if move_cap > 0.0:
         move_coverage = min(move_coverage, move_cap)
 

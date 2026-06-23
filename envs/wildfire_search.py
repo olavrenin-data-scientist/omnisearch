@@ -486,6 +486,11 @@ class WildfireSearchScenario(BaseScenario):
         # nudges sweeping motion without paying for movement over old coverage.
         self.r_uav_move_coverage = max(float(kwargs.pop("r_uav_move_coverage", 0.0)), 0.0)
         self.r_uav_move_coverage_cap = max(float(kwargs.pop("r_uav_move_coverage_cap", 0.1)), 0.0)
+        self.uav_move_coverage_normalization = str(
+            kwargs.pop("uav_move_coverage_normalization", "raw")
+        ).replace("-", "_").lower()
+        if self.uav_move_coverage_normalization not in {"raw", "opportunity"}:
+            raise ValueError("uav_move_coverage_normalization must be one of: raw, opportunity")
         legacy_uav_coverage_opportunity = kwargs.pop("r_uav_coverage_opportunity", None)
         uav_coverage_normalization = kwargs.pop("uav_coverage_normalization", None)
         if uav_coverage_normalization is None:
@@ -2533,7 +2538,11 @@ class WildfireSearchScenario(BaseScenario):
             uav_move_coverage_reward,
             drone_displacement_m,
             coverage_new_cells,
-        ) = self._uav_move_coverage_reward(drone_pos, coverage_new)
+        ) = self._uav_move_coverage_reward(
+            drone_pos,
+            coverage_new,
+            uav_coverage_opportunity_fraction,
+        )
         uav_coverage_reward = self._uav_coverage_reward(
             coverage_new,
             uav_coverage_opportunity_fraction,
@@ -3230,7 +3239,12 @@ class WildfireSearchScenario(BaseScenario):
             ratio = map_fraction
         return ratio * self.r_coverage
 
-    def _uav_move_coverage_reward(self, drone_pos: Tensor, coverage_new: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def _uav_move_coverage_reward(
+        self,
+        drone_pos: Tensor,
+        coverage_new: Tensor,
+        opportunity_fraction: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """Reward actual UAV displacement only when it produces new coverage."""
         if self.n_drones == 0:
             empty = torch.zeros(self.world.batch_dim, 0, device=drone_pos.device)
@@ -3240,11 +3254,15 @@ class WildfireSearchScenario(BaseScenario):
         displacement_sim = (drone_pos - self._pre_step_drone_pos).norm(dim=-1)
         displacement_m = displacement_sim * meters_per_sim.view(-1, 1)
         coverage_new_cells = coverage_new * float(self.fire_grid_size * self.fire_grid_size)
-        reward = (
-            displacement_m
-            * coverage_new_cells
-            * self.r_uav_move_coverage
-        ).clamp(max=self.r_uav_move_coverage_cap)
+        if self.uav_move_coverage_normalization == "opportunity":
+            if opportunity_fraction is None:
+                opportunity_fraction = torch.zeros_like(coverage_new)
+            max_step_m = max(float(self.drone_speed_mps) * float(self.sim_step_seconds), 1e-6)
+            distance_fraction = (displacement_m / max_step_m).clamp(min=0.0, max=1.0)
+            reward_base = distance_fraction * opportunity_fraction.clamp(min=0.0, max=1.0)
+        else:
+            reward_base = displacement_m * coverage_new_cells
+        reward = (reward_base * self.r_uav_move_coverage).clamp(max=self.r_uav_move_coverage_cap)
         return reward, displacement_m, coverage_new_cells
 
     def _uav_frontier_obs_dim(self) -> int:

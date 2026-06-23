@@ -177,6 +177,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.r_coverage = 1.0
         scenario.uav_coverage_normalization = "map"
         scenario.r_uav_move_coverage = 0.001
+        scenario.uav_move_coverage_normalization = "raw"
         scenario.r_uav_move_coverage_cap = 0.1
         scenario.uav_coverage_opportunity_cap = 1.0
         scenario.r_uav_frontier_alignment = 0.0
@@ -415,6 +416,33 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertEqual(float(coverage_cells[0, 0]), 0.0)
         self.assertEqual(float(reward[0, 0]), 0.0)
+
+    def test_uav_move_coverage_reward_can_use_opportunity_normalization(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.r_uav_move_coverage = 0.2
+        scenario.uav_move_coverage_normalization = "opportunity"
+        scenario.r_uav_move_coverage_cap = 0.1
+        drone_pos = torch.tensor([[[1.0, 0.0]]])  # 10 meters at 0.1 sim-units/m.
+        coverage_new = torch.tensor([[10.0 / (16 * 16)]])
+        opportunity_fraction = torch.tensor([[0.25]])
+
+        reward, displacement_m, coverage_cells = scenario._uav_move_coverage_reward(
+            drone_pos,
+            coverage_new,
+            opportunity_fraction,
+        )
+
+        self.assertAlmostEqual(float(displacement_m[0, 0]), 10.0, places=6)
+        self.assertAlmostEqual(float(coverage_cells[0, 0]), 10.0, places=6)
+        self.assertAlmostEqual(float(reward[0, 0]), 0.2 * (10.0 / 20.0) * 0.25, places=6)
+
+        scenario.r_uav_move_coverage_cap = 0.01
+        capped_reward, _, _ = scenario._uav_move_coverage_reward(
+            drone_pos,
+            coverage_new,
+            opportunity_fraction,
+        )
+        self.assertAlmostEqual(float(capped_reward[0, 0]), 0.01, places=6)
 
     def test_uav_coverage_reward_can_use_reachable_uncovered_cells(self):
         scenario = self._coverage_scenario(grid_size=16)

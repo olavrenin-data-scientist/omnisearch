@@ -183,6 +183,7 @@ def build_args(
     uav_coverage_reward: float | None = None,
     uav_coverage_normalization: str = "map",
     uav_move_coverage_reward: float | None = None,
+    uav_move_coverage_normalization: str = "raw",
     uav_move_coverage_cap: float = 0.1,
     uav_coverage_opportunity_reward: float | None = None,
     uav_coverage_opportunity_cap: float = 1.0,
@@ -238,6 +239,9 @@ def build_args(
     uav_coverage_normalization = str(uav_coverage_normalization).replace("-", "_").lower()
     if uav_coverage_normalization not in {"map", "opportunity"}:
         raise ValueError("uav_coverage_normalization must be one of: map, opportunity")
+    uav_move_coverage_normalization = str(uav_move_coverage_normalization).replace("-", "_").lower()
+    if uav_move_coverage_normalization not in {"raw", "opportunity"}:
+        raise ValueError("uav_move_coverage_normalization must be one of: raw, opportunity")
     if uav_coverage_opportunity_reward is not None:
         legacy_opportunity_reward = float(uav_coverage_opportunity_reward)
         if legacy_opportunity_reward < 0.0:
@@ -610,6 +614,7 @@ def build_args(
             "r_coverage": uav_coverage_reward,
             "uav_coverage_normalization": uav_coverage_normalization,
             "r_uav_move_coverage": uav_move_coverage_reward,
+            "uav_move_coverage_normalization": uav_move_coverage_normalization,
             "r_uav_move_coverage_cap": uav_move_coverage_cap,
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_overlap": uav_overlap_penalty,
@@ -793,6 +798,11 @@ def main():
     p.add_argument("--uav-move-coverage-reward", type=float, default=None,
                    help="Reward scale for UAV actual displacement in meters multiplied by newly covered cells. "
                         "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-move-coverage-normalization", choices=("raw", "opportunity"),
+                   default="raw",
+                   help="Normalization for --uav-move-coverage-reward. raw uses distance_m * new_cells; "
+                        "opportunity uses (distance_m / max_step_m) * "
+                        "(new_cells / one-step reachable uncovered cells).")
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
     p.add_argument("--uav-coverage-opportunity-reward", type=float, default=None,
@@ -1105,6 +1115,7 @@ def main():
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_coverage_normalization: {args.uav_coverage_normalization}")
     print(f" uav_move_coverage_reward: {args.uav_move_coverage_reward}")
+    print(f" uav_move_coverage_normalization: {args.uav_move_coverage_normalization}")
     print(f" uav_move_coverage_cap: {args.uav_move_coverage_cap}")
     print(f" uav_coverage_opportunity_cap: {args.uav_coverage_opportunity_cap}")
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
@@ -1173,6 +1184,7 @@ def main():
         uav_coverage_reward = args.uav_coverage_reward,
         uav_coverage_normalization = args.uav_coverage_normalization,
         uav_move_coverage_reward = args.uav_move_coverage_reward,
+        uav_move_coverage_normalization = args.uav_move_coverage_normalization,
         uav_move_coverage_cap = args.uav_move_coverage_cap,
         uav_coverage_opportunity_reward = args.uav_coverage_opportunity_reward,
         uav_coverage_opportunity_cap = args.uav_coverage_opportunity_cap,
