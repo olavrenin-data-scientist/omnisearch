@@ -183,6 +183,8 @@ def build_args(
     uav_coverage_reward: float | None = None,
     uav_move_coverage_reward: float | None = None,
     uav_move_coverage_cap: float = 0.1,
+    uav_coverage_opportunity_reward: float = 0.0,
+    uav_coverage_opportunity_cap: float = 1.0,
     uav_frontier_alignment_reward: float = 0.0,
     uav_overlap_penalty: float | None = None,
     uav_overlap_allowed: float | None = None,
@@ -268,6 +270,10 @@ def build_args(
     if uav_move_coverage_reward < 0.0:
         raise ValueError("uav_move_coverage_reward must be nonnegative")
     uav_move_coverage_cap = max(float(uav_move_coverage_cap), 0.0)
+    uav_coverage_opportunity_reward = float(uav_coverage_opportunity_reward)
+    if uav_coverage_opportunity_reward < 0.0:
+        raise ValueError("uav_coverage_opportunity_reward must be nonnegative")
+    uav_coverage_opportunity_cap = max(float(uav_coverage_opportunity_cap), 0.0)
     uav_overlap_penalty = float(uav_overlap_penalty)
     if uav_overlap_penalty < 0.0:
         raise ValueError("uav_overlap_penalty must be nonnegative")
@@ -587,6 +593,8 @@ def build_args(
             "r_coverage": uav_coverage_reward,
             "r_uav_move_coverage": uav_move_coverage_reward,
             "r_uav_move_coverage_cap": uav_move_coverage_cap,
+            "r_uav_coverage_opportunity": uav_coverage_opportunity_reward,
+            "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_overlap": uav_overlap_penalty,
             "uav_overlap_allowed": uav_overlap_allowed,
             "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
@@ -766,6 +774,12 @@ def main():
                         "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
+    p.add_argument("--uav-coverage-opportunity-reward", type=float, default=0.0,
+                   help="Reward scale for UAV newly covered cells divided by one-step reachable "
+                        "uncovered coverage opportunity. Default 0 disables this optional term.")
+    p.add_argument("--uav-coverage-opportunity-cap", type=float, default=1.0,
+                   help="Cap applied to the opportunity capture fraction before multiplying by "
+                        "--uav-coverage-opportunity-reward.")
     p.add_argument("--uav-frontier-alignment-reward", type=float, default=0.0,
                    help="Reward scale for clamped progress toward the local uncovered frontier. "
                         "Use with --uav-frontier-obs for the cleanest learning signal.")
@@ -875,6 +889,10 @@ def main():
         p.error("--uav-move-coverage-reward must be nonnegative")
     if args.uav_move_coverage_cap < 0.0:
         p.error("--uav-move-coverage-cap must be nonnegative")
+    if args.uav_coverage_opportunity_reward < 0.0:
+        p.error("--uav-coverage-opportunity-reward must be nonnegative")
+    if args.uav_coverage_opportunity_cap < 0.0:
+        p.error("--uav-coverage-opportunity-cap must be nonnegative")
     if args.uav_frontier_alignment_reward < 0.0:
         p.error("--uav-frontier-alignment-reward must be nonnegative")
     if args.uav_overlap_penalty is not None and args.uav_overlap_penalty < 0.0:
@@ -1053,6 +1071,8 @@ def main():
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_move_coverage_reward: {args.uav_move_coverage_reward}")
     print(f" uav_move_coverage_cap: {args.uav_move_coverage_cap}")
+    print(f" uav_coverage_opportunity_reward: {args.uav_coverage_opportunity_reward}")
+    print(f" uav_coverage_opportunity_cap: {args.uav_coverage_opportunity_cap}")
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
     print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
@@ -1119,6 +1139,8 @@ def main():
         uav_coverage_reward = args.uav_coverage_reward,
         uav_move_coverage_reward = args.uav_move_coverage_reward,
         uav_move_coverage_cap = args.uav_move_coverage_cap,
+        uav_coverage_opportunity_reward = args.uav_coverage_opportunity_reward,
+        uav_coverage_opportunity_cap = args.uav_coverage_opportunity_cap,
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_overlap_penalty = args.uav_overlap_penalty,
         uav_overlap_allowed = args.uav_overlap_allowed,
