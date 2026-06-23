@@ -516,7 +516,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "coverage_reward": reward_terms["coverage"],
                     "move_coverage_reward": reward_terms["move_coverage"],
                     "overlap_penalty": reward_terms["overlap_penalty"],
+                    "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
                     "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                    "scout_reward": reward_terms["scout"],
+                    "aux_reward": reward_terms["aux"],
                     "overlap": overlap,
                     "excess_overlap": excess_overlap,
                     "outside_footprint": float(outside_footprint_fraction[drone_idx]),
@@ -566,6 +569,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     ]
     row = {
         "seed": int(seed),
+        "max_steps": int(scenario_kwargs["max_steps"]),
         "survivors": n_survivors,
         "scouted": scouted_count,
         "missed": missed_count,
@@ -719,6 +723,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
 def _finite_mean(values: list[float]) -> float:
     finite = [value for value in values if math.isfinite(value)]
     return float(np.mean(finite)) if finite else math.nan
+
+
+def _finite_median(values: list[float]) -> float:
+    finite = [value for value in values if math.isfinite(value)]
+    return float(np.median(finite)) if finite else math.nan
 
 
 def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) -> np.ndarray:
@@ -1161,6 +1170,60 @@ def _summarize_time_bins(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
                 float(entry.get(key, math.nan)) for entry in entries
             ])
         summary.append(row_summary)
+    return summary
+
+
+def _scout_time_bin_series(row: dict[str, Any], bin_count: int) -> tuple[np.ndarray, np.ndarray]:
+    n_survivors = max(int(row.get("survivors", 0)), 1)
+    max_steps = int(row.get("max_steps", 0))
+    steps = [
+        int(value)
+        for value in row.get("first_scout_steps", [])
+        if value is not None and int(value) > 0
+    ]
+    if max_steps <= 0:
+        max_steps = max(steps, default=1)
+
+    new_recall = np.zeros(max(int(bin_count), 1), dtype=float)
+    for step in steps:
+        bin_idx = min(
+            int((max(step, 1) - 1) * len(new_recall) / max(max_steps, 1)),
+            len(new_recall) - 1,
+        )
+        new_recall[bin_idx] += 1.0 / n_survivors
+    return new_recall, np.cumsum(new_recall)
+
+
+def _summarize_scout_time_bins(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+    bin_count = max((len(row.get("time_bins", [])) for row in rows), default=TIME_BIN_COUNT)
+    if bin_count <= 0:
+        return []
+
+    new_rows = []
+    cumulative_rows = []
+    for row in rows:
+        new_recall, cumulative_recall = _scout_time_bin_series(row, bin_count)
+        new_rows.append(new_recall)
+        cumulative_rows.append(cumulative_recall)
+
+    if not new_rows:
+        return []
+
+    new_matrix = np.vstack(new_rows)
+    cumulative_matrix = np.vstack(cumulative_rows)
+    summary = []
+    for bin_idx in range(bin_count):
+        new_values = new_matrix[:, bin_idx].astype(float).tolist()
+        cumulative_values = cumulative_matrix[:, bin_idx].astype(float).tolist()
+        summary.append({
+            "bin": float(bin_idx),
+            "start_fraction": float(bin_idx / bin_count),
+            "end_fraction": float((bin_idx + 1) / bin_count),
+            "mean_new_recall": _finite_mean(new_values),
+            "median_new_recall": _finite_median(new_values),
+            "mean_cumulative_recall": _finite_mean(cumulative_values),
+            "median_cumulative_recall": _finite_median(cumulative_values),
+        })
     return summary
 
 
@@ -1883,6 +1946,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     summary.update(_distribution_summary(rows))
     summary["per_drone"] = _summarize_per_drone(rows)
     summary["time_bins"] = _summarize_time_bins(rows)
+    summary["scout_time_bins"] = _summarize_scout_time_bins(rows)
     return summary
 
 
@@ -2123,7 +2187,10 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"move={item.get('displacement_m', math.nan):.2f}m "
             f"new={item.get('new_coverage_cells', math.nan):.1f} "
             f"edge={item.get('edge_step', math.nan):.3f} "
+            f"overlap={item.get('overlap', math.nan):.3f} "
+            f"excess={item.get('excess_overlap', math.nan):.3f} "
             f"outside={item.get('outside_footprint', math.nan):.3f} "
+            f"moving_nonew={item.get('moving_no_new_coverage', math.nan):.3f} "
             f"obs_dist={item.get('frontier_obs_distance', math.nan):.3f} "
             f"f_loc={item.get('frontier_local_coverage_cos', math.nan):.3f} "
             f"f_glob={item.get('frontier_global_coverage_cos', math.nan):.3f} "
@@ -2133,7 +2200,23 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"act_front={item.get('action_frontier_alignment', math.nan):.3f} "
             f"move_front={item.get('movement_frontier_alignment', math.nan):.3f} "
             f"front_prog={item.get('frontier_progress', math.nan):.3f} "
+            f"front_score={item.get('frontier_uncovered_ratio', math.nan):.3f} "
             f"front_rew={item.get('frontier_reward', math.nan):.4f}"
+        )
+    return lines
+
+
+def _format_scout_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
+    lines = []
+    for item in time_bins:
+        start = 100.0 * float(item.get("start_fraction", 0.0))
+        end = 100.0 * float(item.get("end_fraction", 0.0))
+        lines.append(
+            f"  {start:>3.0f}-{end:<3.0f}%: "
+            f"new_mean={item.get('mean_new_recall', math.nan):.3f} "
+            f"new_med={item.get('median_new_recall', math.nan):.3f} "
+            f"cum_mean={item.get('mean_cumulative_recall', math.nan):.3f} "
+            f"cum_med={item.get('median_cumulative_recall', math.nan):.3f}"
         )
     return lines
 
@@ -2164,7 +2247,7 @@ def _plot_time_bins(ax: Any, summary: dict[str, Any]) -> None:
     time_bins = summary.get("time_bins", [])
     if not time_bins:
         ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title("Time-Bin Frontier", fontsize=10)
+        ax.set_title("Time-Bin Frontier (mean)", fontsize=10)
         return
     centers = [
         0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
@@ -2182,7 +2265,7 @@ def _plot_time_bins(ax: Any, summary: dict[str, Any]) -> None:
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(-1.0, 1.0)
     ax.set_xlabel("episode fraction")
-    ax.set_title("Time-Bin Frontier", fontsize=10)
+    ax.set_title("Time-Bin Frontier (mean)", fontsize=10)
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8, frameon=False)
 
@@ -2191,7 +2274,7 @@ def _plot_time_bins_coverage_signals(ax: Any, summary: dict[str, Any]) -> None:
     time_bins = summary.get("time_bins", [])
     if not time_bins:
         ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title("Time-Bin Coverage Signals", fontsize=10)
+        ax.set_title("Time-Bin Coverage Signals (mean)", fontsize=10)
         return
     centers = [
         0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
@@ -2209,9 +2292,244 @@ def _plot_time_bins_coverage_signals(ax: Any, summary: dict[str, Any]) -> None:
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(-1.0, 1.0)
     ax.set_xlabel("episode fraction")
-    ax.set_title("Time-Bin Coverage Signals", fontsize=10)
+    ax.set_title("Time-Bin Coverage Signals (mean)", fontsize=10)
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8, frameon=False)
+
+
+def _plot_time_bins_search_efficiency(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Search Efficiency (mean)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    new_cells = [float(row.get("new_coverage_cells", math.nan)) for row in time_bins]
+    line_new = ax.plot(
+        centers,
+        new_cells,
+        marker="o",
+        linewidth=1.7,
+        label="new cells",
+        color="#4f7cff",
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("new cells / drone-step")
+    ax.grid(alpha=0.25)
+
+    ax_frac = ax.twinx()
+    frac_series = [
+        ("overlap", "overlap", "#36a269"),
+        ("excess", "excess_overlap", "#d44a3a"),
+        ("edge", "edge_step", "#20242c"),
+        ("moving no new", "moving_no_new_coverage", "#8a5cf6"),
+    ]
+    frac_lines = []
+    for label, key, color in frac_series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        frac_lines.extend(
+            ax_frac.plot(
+                centers,
+                values,
+                marker="o",
+                linewidth=1.2,
+                label=label,
+                color=color,
+                alpha=0.9,
+            )
+        )
+    ax_frac.set_ylim(0.0, 1.0)
+    ax_frac.set_ylabel("fraction")
+
+    lines = line_new + frac_lines
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=8, frameon=False)
+    ax.set_title("Time-Bin Search Efficiency (mean)", fontsize=10)
+
+
+def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Reward Scale (mean abs)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("coverage", "coverage_reward", "#4f7cff", False),
+        ("move cov", "move_coverage_reward", "#36a269", False),
+        ("frontier", "frontier_reward", "#8a5cf6", False),
+        ("scout", "scout_reward", "#d4a72c", False),
+        ("overlap pen", "overlap_penalty", "#d44a3a", True),
+        ("inter pen", "inter_uav_overlap_penalty", "#e07b39", True),
+        ("outside pen", "outside_footprint_penalty", "#20242c", True),
+    ]
+    max_value = 0.0
+    for label, key, color, is_penalty in series:
+        values = [
+            abs(float(row.get(key, math.nan)))
+            if is_penalty
+            else float(row.get(key, math.nan))
+            for row in time_bins
+        ]
+        finite_values = [value for value in values if math.isfinite(value)]
+        if finite_values:
+            max_value = max(max_value, max(finite_values))
+        linestyle = "--" if is_penalty else "-"
+        ax.plot(
+            centers,
+            values,
+            marker="o",
+            linewidth=1.3,
+            linestyle=linestyle,
+            label=label,
+            color=color,
+        )
+    ax.set_xlim(0.0, 1.0)
+    if max_value > 0.0:
+        ax.set_ylim(0.0, max_value * 1.15)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("abs reward/penalty / drone-step")
+    ax.set_title("Time-Bin Reward Scale (mean abs)", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
+def _plot_time_bins_scouts(ax: Any, summary: dict[str, Any]) -> None:
+    scout_bins = summary.get("scout_time_bins", [])
+    if not scout_bins:
+        ax.text(0.5, 0.5, "no scout bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Survivor Discovery Over Time", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in scout_bins
+    ]
+    widths = [
+        0.72 * (
+            float(row.get("end_fraction", 0.0))
+            - float(row.get("start_fraction", 0.0))
+        )
+        for row in scout_bins
+    ]
+    mean_new = [float(row.get("mean_new_recall", math.nan)) for row in scout_bins]
+    mean_cumulative = [
+        float(row.get("mean_cumulative_recall", math.nan))
+        for row in scout_bins
+    ]
+    median_cumulative = [
+        float(row.get("median_cumulative_recall", math.nan))
+        for row in scout_bins
+    ]
+
+    ax.bar(
+        centers,
+        mean_new,
+        width=widths,
+        color="#80bfff",
+        alpha=0.35,
+        label="new recall/bin mean",
+    )
+    ax.plot(
+        centers,
+        mean_cumulative,
+        marker="o",
+        linewidth=1.7,
+        color="#d44a3a",
+        label="cumulative mean",
+    )
+    ax.plot(
+        centers,
+        median_cumulative,
+        marker="o",
+        linewidth=1.3,
+        linestyle="--",
+        color="#20242c",
+        label="cumulative median",
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("recall fraction")
+    ax.set_title("Survivor Discovery Over Time", fontsize=10)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(fontsize=8, frameon=False)
+
+
+def _plot_time_bins_frontier_inputs(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Frontier Score/Progress (mean)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("score/uncovered", "frontier_uncovered_ratio", "#4f7cff"),
+        ("progress", "frontier_progress", "#d44a3a"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(centers, values, marker="o", linewidth=1.6, label=label, color=color)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction")
+    ax.set_title("Frontier Score/Progress (mean)", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, frameon=False)
+
+
+def _plot_time_bins_frontier_reward_yield(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Frontier Reward vs New Cells (mean)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    new_cells = [float(row.get("new_coverage_cells", math.nan)) for row in time_bins]
+    reward = [float(row.get("frontier_reward", math.nan)) for row in time_bins]
+    line_new = ax.plot(
+        centers,
+        new_cells,
+        marker="o",
+        linewidth=1.7,
+        label="new cells",
+        color="#36a269",
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("new cells / drone-step")
+    ax.grid(alpha=0.25)
+
+    ax_reward = ax.twinx()
+    line_reward = ax_reward.plot(
+        centers,
+        reward,
+        marker="o",
+        linewidth=1.4,
+        label="frontier reward",
+        color="#8a5cf6",
+    )
+    finite_reward = [value for value in reward if math.isfinite(value)]
+    if finite_reward:
+        reward_max = max(max(finite_reward), 1e-6)
+        ax_reward.set_ylim(0.0, reward_max * 1.2)
+    ax_reward.set_ylabel("reward / drone-step")
+
+    lines = line_new + line_reward
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=8, frameon=False)
+    ax.set_title("Frontier Reward vs New Cells (mean)", fontsize=10)
 
 
 def write_distribution_plots(
@@ -2252,7 +2570,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(10, 3, figsize=(14, 30), constrained_layout=True)
+    fig, axes = plt.subplots(12, 3, figsize=(14, 36), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -2360,8 +2678,13 @@ def write_distribution_plots(
     label_ax.grid(axis="x", alpha=0.25)
 
     _plot_time_bins_coverage_signals(axes_flat[28], summary)
+    _plot_time_bins_search_efficiency(axes_flat[29], summary)
+    _plot_time_bins_reward_scale(axes_flat[30], summary)
+    _plot_time_bins_scouts(axes_flat[31], summary)
+    _plot_time_bins_frontier_inputs(axes_flat[32], summary)
+    _plot_time_bins_frontier_reward_yield(axes_flat[33], summary)
 
-    for ax in axes_flat[29:]:
+    for ax in axes_flat[34:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -2612,6 +2935,10 @@ def main() -> None:
     if summary.get("time_bins"):
         print("time-bin means:")
         for line in _format_time_bin_summary(summary["time_bins"]):
+            print(line)
+    if summary.get("scout_time_bins"):
+        print("survivor discovery time-bins:")
+        for line in _format_scout_time_bin_summary(summary["scout_time_bins"]):
             print(line)
     print(
         "failure labels: "
