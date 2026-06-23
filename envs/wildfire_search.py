@@ -509,6 +509,11 @@ class WildfireSearchScenario(BaseScenario):
             max(float(kwargs.pop("uav_overlap_allowed", 0.10)), 0.0),
             0.999,
         )
+        self.uav_overlap_penalty_normalization = str(
+            kwargs.pop("uav_overlap_penalty_normalization", "raw")
+        ).replace("-", "_").lower()
+        if self.uav_overlap_penalty_normalization not in {"raw", "opportunity"}:
+            raise ValueError("uav_overlap_penalty_normalization must be one of: raw, opportunity")
         self.r_uav_inter_uav_overlap = max(float(kwargs.pop("r_uav_inter_uav_overlap", 0.0)), 0.0)
         self.uav_inter_uav_overlap_allowed = min(
             max(float(kwargs.pop("uav_inter_uav_overlap_allowed", 0.20)), 0.0),
@@ -883,6 +888,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_coverage_opportunity_cells_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_coverage_opportunity_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_coverage_opportunity_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_coverage_opportunity_available_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_coverage_opportunity_available_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_target_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_footprint_radius_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_footprint_radius_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
@@ -956,6 +963,8 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_uav_coverage_opportunity_cells_by_drone,
             self.metric_uav_coverage_opportunity_fraction,
             self.metric_uav_coverage_opportunity_fraction_by_drone,
+            self.metric_uav_coverage_opportunity_available_fraction,
+            self.metric_uav_coverage_opportunity_available_fraction_by_drone,
             self.metric_uav_target_distance_m,
             self.metric_uav_footprint_radius_m,
             self.metric_uav_footprint_radius_m_by_drone,
@@ -2533,6 +2542,7 @@ class WildfireSearchScenario(BaseScenario):
             uav_inter_uav_overlap_fraction,
             uav_coverage_opportunity_fraction,
             uav_coverage_opportunity_cells,
+            uav_coverage_opportunity_available_fraction,
         ) = self._coverage_reward(drone_pos)  # [B, D]
         (
             uav_move_coverage_reward,
@@ -2554,6 +2564,7 @@ class WildfireSearchScenario(BaseScenario):
         uav_overlap_penalty = self._uav_overlap_penalty(
             uav_overlap_fraction,
             uav_expected_overlap_fraction,
+            uav_coverage_opportunity_available_fraction,
         )
         uav_inter_uav_overlap_penalty = self._uav_inter_uav_overlap_penalty(
             uav_inter_uav_overlap_fraction,
@@ -2623,11 +2634,19 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_new_coverage_cells_by_drone = coverage_new_cells
         self.metric_uav_coverage_opportunity_cells_by_drone = uav_coverage_opportunity_cells
         self.metric_uav_coverage_opportunity_fraction_by_drone = uav_coverage_opportunity_fraction
+        self.metric_uav_coverage_opportunity_available_fraction_by_drone = (
+            uav_coverage_opportunity_available_fraction
+        )
         self.metric_uav_displacement_m = drone_displacement_m.sum(dim=1)
         self.metric_uav_new_coverage_cells = coverage_new_cells.sum(dim=1)
         self.metric_uav_coverage_opportunity_cells = uav_coverage_opportunity_cells.sum(dim=1)
         self.metric_uav_coverage_opportunity_fraction = (
             uav_coverage_opportunity_fraction.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_uav_coverage_opportunity_available_fraction = (
+            uav_coverage_opportunity_available_fraction.mean(dim=1)
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=device)
         )
@@ -3089,7 +3108,7 @@ class WildfireSearchScenario(BaseScenario):
         any_safe = traversable.any(dim=-1)
         return torch.where(any_safe.unsqueeze(-1), chosen, start_pos)
 
-    def _coverage_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def _coverage_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Per-drone fraction of the map newly covered by camera footprints.
 
         All drone claims are calculated before updating ``coverage_grid``.
@@ -3103,6 +3122,7 @@ class WildfireSearchScenario(BaseScenario):
         inter_uav_overlap_fraction = torch.zeros_like(new_per_drone)
         opportunity_fraction = torch.zeros_like(new_per_drone)
         opportunity_cells = torch.zeros_like(new_per_drone)
+        opportunity_available_fraction = torch.zeros_like(new_per_drone)
         if self.n_drones == 0:
             return (
                 new_per_drone,
@@ -3111,6 +3131,7 @@ class WildfireSearchScenario(BaseScenario):
                 inter_uav_overlap_fraction,
                 opportunity_fraction,
                 opportunity_cells,
+                opportunity_available_fraction,
             )
         # The coverage grid is updated below even when the coverage reward is
         # off, because it can also feed the team-coverage observation.
@@ -3131,6 +3152,7 @@ class WildfireSearchScenario(BaseScenario):
                 inter_uav_overlap_fraction,
                 opportunity_fraction,
                 opportunity_cells,
+                opportunity_available_fraction,
             )
 
         G = self.fire_grid_size
@@ -3207,6 +3229,7 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp_min(0.0)
         reachable_footprint = footprint + max_step_sim
         reachable_claims = reach_dx.square() + reach_dy.square() <= reachable_footprint.square()
+        reachable_total_cells = reachable_claims.float().sum(dim=(-1, -2))
         opportunity_cells = (
             reachable_claims & ~self.coverage_grid.unsqueeze(1)
         ).float().sum(dim=(-1, -2))
@@ -3214,6 +3237,11 @@ class WildfireSearchScenario(BaseScenario):
             opportunity_cells > 0.0,
             new_credit_cells / opportunity_cells.clamp_min(1e-6),
             torch.zeros_like(new_credit_cells),
+        ).clamp(0.0, 1.0)
+        opportunity_available_fraction = torch.where(
+            reachable_total_cells > 0.0,
+            opportunity_cells / reachable_total_cells.clamp_min(1e-6),
+            torch.zeros_like(opportunity_cells),
         ).clamp(0.0, 1.0)
 
         self.coverage_grid |= team_claims
@@ -3224,6 +3252,7 @@ class WildfireSearchScenario(BaseScenario):
             inter_uav_overlap_fraction,
             opportunity_fraction,
             opportunity_cells,
+            opportunity_available_fraction,
         )
 
     def _uav_coverage_reward(self, map_fraction: Tensor, opportunity_fraction: Tensor) -> Tensor:
@@ -3555,7 +3584,12 @@ class WildfireSearchScenario(BaseScenario):
             torch.zeros_like(fraction),
         )
 
-    def _uav_overlap_penalty(self, overlap_fraction: Tensor, expected_overlap_fraction: Tensor) -> Tensor:
+    def _uav_overlap_penalty(
+        self,
+        overlap_fraction: Tensor,
+        expected_overlap_fraction: Tensor,
+        opportunity_available_fraction: Tensor | None = None,
+    ) -> Tensor:
         """Penalize only overlap above physics-expected footprint overlap plus slack."""
         if self.n_drones == 0:
             return torch.zeros(self.world.batch_dim, 0, device=overlap_fraction.device)
@@ -3565,6 +3599,10 @@ class WildfireSearchScenario(BaseScenario):
         threshold = (expected_overlap_fraction + allowed).clamp(max=0.999)
         excess = (overlap_fraction - threshold).clamp(min=0.0)
         normalized = (excess / (1.0 - threshold).clamp_min(1e-6)).clamp(max=1.0)
+        if self.uav_overlap_penalty_normalization == "opportunity":
+            if opportunity_available_fraction is None:
+                opportunity_available_fraction = torch.ones_like(normalized)
+            normalized = normalized * opportunity_available_fraction.clamp(min=0.0, max=1.0)
         return -self.r_uav_overlap * normalized
 
     def _uav_inter_uav_overlap_penalty(self, inter_uav_overlap_fraction: Tensor) -> Tensor:
@@ -4567,6 +4605,9 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/uav_new_coverage_cells": self.metric_uav_new_coverage_cells,
             "diagnostic/uav_coverage_opportunity_cells": self.metric_uav_coverage_opportunity_cells,
             "diagnostic/uav_coverage_opportunity_fraction": self.metric_uav_coverage_opportunity_fraction,
+            "diagnostic/uav_coverage_opportunity_available_fraction": (
+                self.metric_uav_coverage_opportunity_available_fraction
+            ),
             "diagnostic/uav_boundary_projection_count": self.step_uav_boundary_projection_count.sum(dim=1),
             "diagnostic/uav_boundary_projection_norm": self.step_uav_boundary_projection_norm.sum(dim=1),
             "diagnostic/uav_boundary_hit_count": self.step_uav_boundary_hit.sum(dim=1),

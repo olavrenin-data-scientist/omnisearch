@@ -334,6 +334,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.04)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
+        self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
         self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.03)
         self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.25)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.1)
@@ -372,6 +373,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)
         self.assertEqual(scenario["r_uav_overlap"], 0.10)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.10)
+        self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
         self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.0)
         self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.20)
         self.assertNotIn("uav_frontier_obs", scenario)
@@ -436,6 +438,25 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage"], 0.2)
         self.assertEqual(scenario["uav_move_coverage_normalization"], "opportunity")
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.05)
+
+    def test_uav_survivor_diagnostic_can_use_opportunity_overlap_penalty_normalization(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_opp_overlap",
+            uav_survivor_diagnostic=True,
+            uav_overlap_penalty=0.05,
+            uav_overlap_allowed=0.60,
+            uav_overlap_penalty_normalization="opportunity",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_uav_overlap"], 0.05)
+        self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
+        self.assertEqual(scenario["uav_overlap_penalty_normalization"], "opportunity")
 
     def test_uav_survivor_diagnostic_preserves_explicit_zero_reward_overrides(self):
         _, _, env_args = build_args(
@@ -659,6 +680,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
+        self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.1)
 
     def test_uav_diagnostic_can_disable_team_found_and_time_reward(self):

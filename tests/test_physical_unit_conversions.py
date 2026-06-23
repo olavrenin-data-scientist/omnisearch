@@ -189,6 +189,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_frontier_ownership = False
         scenario.r_uav_overlap = 0.0
         scenario.uav_overlap_allowed = 0.10
+        scenario.uav_overlap_penalty_normalization = "raw"
         scenario.r_uav_inter_uav_overlap = 0.0
         scenario.uav_inter_uav_overlap_allowed = 0.20
         scenario.r_uav_outside_footprint = 0.0
@@ -292,6 +293,23 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(penalty[0, 1]), 0.0, places=6)
         self.assertAlmostEqual(float(penalty[0, 2]), -0.05 / 3.0, places=6)
         self.assertAlmostEqual(float(penalty[0, 3]), -0.05, places=6)
+
+    def test_uav_overlap_penalty_can_use_opportunity_normalization(self):
+        scenario = self._coverage_scenario()
+        scenario.r_uav_overlap = 0.05
+        scenario.uav_overlap_allowed = 0.10
+        scenario.uav_overlap_penalty_normalization = "opportunity"
+        overlap = torch.tensor([[1.00]])
+        expected = torch.tensor([[0.60]])
+        opportunity_available = torch.tensor([[0.25]])
+
+        penalty = scenario._uav_overlap_penalty(
+            overlap,
+            expected,
+            opportunity_available,
+        )
+
+        self.assertAlmostEqual(float(penalty[0, 0]), -0.05 * 0.25, places=6)
 
     def test_uav_inter_uav_overlap_penalty_uses_same_step_overlap_slack(self):
         scenario = self._coverage_scenario(n_drones=2)
@@ -451,14 +469,22 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_coverage_opportunity_cap = 1.0
         scenario.drone_altitude = torch.tensor([[0.10]])
 
-        credit, _, _, _, opportunity_fraction, opportunity_cells = scenario._coverage_reward(
-            torch.zeros(1, 1, 2)
-        )
+        (
+            credit,
+            _,
+            _,
+            _,
+            opportunity_fraction,
+            opportunity_cells,
+            opportunity_available_fraction,
+        ) = scenario._coverage_reward(torch.zeros(1, 1, 2))
         new_cells = credit * float(scenario.fire_grid_size * scenario.fire_grid_size)
         reward = scenario._uav_coverage_reward(credit, opportunity_fraction)
 
         self.assertGreater(float(new_cells[0, 0]), 0.0)
         self.assertGreaterEqual(float(opportunity_cells[0, 0]), float(new_cells[0, 0]))
+        self.assertGreater(float(opportunity_available_fraction[0, 0]), 0.0)
+        self.assertLessEqual(float(opportunity_available_fraction[0, 0]), 1.0)
         self.assertAlmostEqual(
             float(opportunity_fraction[0, 0]),
             float(new_cells[0, 0] / opportunity_cells[0, 0]),

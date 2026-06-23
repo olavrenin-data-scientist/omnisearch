@@ -190,6 +190,7 @@ def build_args(
     uav_frontier_alignment_reward: float = 0.0,
     uav_overlap_penalty: float | None = None,
     uav_overlap_allowed: float | None = None,
+    uav_overlap_penalty_normalization: str = "raw",
     uav_inter_uav_overlap_penalty: float = 0.0,
     uav_inter_uav_overlap_allowed: float = 0.20,
     uav_outside_footprint_penalty: float | None = None,
@@ -242,6 +243,9 @@ def build_args(
     uav_move_coverage_normalization = str(uav_move_coverage_normalization).replace("-", "_").lower()
     if uav_move_coverage_normalization not in {"raw", "opportunity"}:
         raise ValueError("uav_move_coverage_normalization must be one of: raw, opportunity")
+    uav_overlap_penalty_normalization = str(uav_overlap_penalty_normalization).replace("-", "_").lower()
+    if uav_overlap_penalty_normalization not in {"raw", "opportunity"}:
+        raise ValueError("uav_overlap_penalty_normalization must be one of: raw, opportunity")
     if uav_coverage_opportunity_reward is not None:
         legacy_opportunity_reward = float(uav_coverage_opportunity_reward)
         if legacy_opportunity_reward < 0.0:
@@ -619,6 +623,7 @@ def build_args(
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_overlap": uav_overlap_penalty,
             "uav_overlap_allowed": uav_overlap_allowed,
+            "uav_overlap_penalty_normalization": uav_overlap_penalty_normalization,
             "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
             "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
@@ -820,6 +825,10 @@ def main():
     p.add_argument("--uav-overlap-allowed", type=float, default=None,
                    help="Excess footprint-overlap slack above the physics-expected overlap "
                         "before the UAV overlap penalty starts.")
+    p.add_argument("--uav-overlap-penalty-normalization", choices=("raw", "opportunity"),
+                   default="raw",
+                   help="Normalization for --uav-overlap-penalty. raw preserves the current excess-overlap "
+                        "penalty; opportunity multiplies it by reachable_uncovered / reachable_total.")
     p.add_argument("--uav-inter-uav-overlap-penalty", type=float, default=0.0,
                    help="Maximum per-UAV per-step penalty for same-step footprint overlap with "
                         "other UAVs. Default 0 disables this optional coordination penalty.")
@@ -1121,6 +1130,7 @@ def main():
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
     print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
+    print(f" uav_overlap_penalty_normalization: {args.uav_overlap_penalty_normalization}")
     print(f" uav_inter_uav_overlap_penalty: {args.uav_inter_uav_overlap_penalty}")
     print(f" uav_inter_uav_overlap_allowed: {args.uav_inter_uav_overlap_allowed}")
     print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
@@ -1191,6 +1201,7 @@ def main():
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_overlap_penalty = args.uav_overlap_penalty,
         uav_overlap_allowed = args.uav_overlap_allowed,
+        uav_overlap_penalty_normalization = args.uav_overlap_penalty_normalization,
         uav_inter_uav_overlap_penalty = args.uav_inter_uav_overlap_penalty,
         uav_inter_uav_overlap_allowed = args.uav_inter_uav_overlap_allowed,
         uav_outside_footprint_penalty = args.uav_outside_footprint_penalty,

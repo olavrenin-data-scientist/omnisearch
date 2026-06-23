@@ -76,6 +76,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["uav_start_min_separation_m"] = max(float(args.uav_start_min_separation_m), 0.0)
     if getattr(args, "uav_start_edge_margin_m", None) is not None:
         scenario_kwargs["uav_start_edge_margin_m"] = max(float(args.uav_start_edge_margin_m), 0.0)
+    if getattr(args, "uav_overlap_penalty_normalization", None) is not None:
+        scenario_kwargs["uav_overlap_penalty_normalization"] = (
+            str(args.uav_overlap_penalty_normalization).replace("-", "_").lower()
+        )
     return scenario_kwargs
 
 
@@ -130,6 +134,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     global_pairwise_same_dir_values: list[float] = []
     coverage_opportunity_cells_values: list[float] = []
     coverage_opportunity_fraction_values: list[float] = []
+    coverage_opportunity_available_fraction_values: list[float] = []
     reward_uav_coverage_values: list[float] = []
     reward_uav_move_coverage_values: list[float] = []
     reward_uav_frontier_values: list[float] = []
@@ -239,6 +244,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             "metric_uav_coverage_opportunity_fraction_by_drone",
             scenario.n_drones,
         )
+        coverage_opportunity_available_fraction = _metric_array(
+            scenario,
+            "metric_uav_coverage_opportunity_available_fraction_by_drone",
+            scenario.n_drones,
+        )
         frontier_alignment = _metric_array(
             scenario,
             "metric_uav_frontier_alignment_by_drone",
@@ -290,6 +300,9 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             inter_uav_overlap = float(inter_uav_overlap_fraction[drone_idx])
             opportunity_cells = float(coverage_opportunity_cells[drone_idx])
             opportunity_fraction = float(coverage_opportunity_fraction[drone_idx])
+            opportunity_available_fraction = float(
+                coverage_opportunity_available_fraction[drone_idx]
+            )
             frontier_align = float(frontier_alignment[drone_idx])
             frontier_progress_frac = float(frontier_progress[drone_idx])
             frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
@@ -347,6 +360,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 inter_uav_overlap=inter_uav_overlap,
                 outside_footprint=float(outside_footprint_fraction[drone_idx]),
                 coverage_opportunity_fraction=opportunity_fraction,
+                coverage_opportunity_available_fraction=opportunity_available_fraction,
                 scout_reward=scout_reward,
             )
             distances_to_edges = _distances_to_edges_m(
@@ -364,6 +378,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             inter_uav_overlap_values.append(inter_uav_overlap)
             coverage_opportunity_cells_values.append(opportunity_cells)
             coverage_opportunity_fraction_values.append(opportunity_fraction)
+            coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
             frontier_alignment_values.append(frontier_align)
             frontier_progress_values.append(frontier_progress_frac)
             frontier_uncovered_ratio_values.append(frontier_ratio)
@@ -421,6 +436,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["inter_uav_overlap"].append(inter_uav_overlap)
             drone_stats["coverage_opportunity_cells"].append(opportunity_cells)
             drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
+            drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
             drone_stats["frontier_alignment"].append(frontier_align)
             drone_stats["frontier_progress"].append(frontier_progress_frac)
             drone_stats["frontier_uncovered_ratio"].append(frontier_ratio)
@@ -543,6 +559,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "excess_overlap": excess_overlap,
                     "coverage_opportunity_cells": opportunity_cells,
                     "coverage_opportunity_fraction": opportunity_fraction,
+                    "coverage_opportunity_available_fraction": opportunity_available_fraction,
                     "outside_footprint": float(outside_footprint_fraction[drone_idx]),
                     "edge_step": float(is_edge_step),
                     "corner_step": float(is_corner_step),
@@ -629,6 +646,9 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav_overlap_values),
         "avg_coverage_opportunity_cells": _finite_mean(coverage_opportunity_cells_values),
         "avg_coverage_opportunity_fraction": _finite_mean(coverage_opportunity_fraction_values),
+        "avg_coverage_opportunity_available_fraction": _finite_mean(
+            coverage_opportunity_available_fraction_values
+        ),
         "avg_frontier_alignment": _finite_mean(frontier_alignment_values),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress_values),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_uncovered_ratio_values),
@@ -961,6 +981,7 @@ def _uav_reward_terms(
     inter_uav_overlap: float,
     outside_footprint: float,
     coverage_opportunity_fraction: float,
+    coverage_opportunity_available_fraction: float,
     scout_reward: float,
 ) -> dict[str, float]:
     grid_cells = float(max(int(getattr(scenario, "fire_grid_size", 1)) ** 2, 1))
@@ -1005,6 +1026,8 @@ def _uav_reward_terms(
         expected_overlap=expected_overlap,
         scale=float(getattr(scenario, "r_uav_overlap", 0.0)),
         allowed=float(getattr(scenario, "uav_overlap_allowed", 0.10)),
+        opportunity_available_fraction=coverage_opportunity_available_fraction,
+        normalization=str(getattr(scenario, "uav_overlap_penalty_normalization", "raw")),
     )
     inter_penalty = _fraction_penalty_value(
         value=inter_uav_overlap,
@@ -1052,6 +1075,8 @@ def _overlap_penalty_value(
     expected_overlap: float,
     scale: float,
     allowed: float,
+    opportunity_available_fraction: float = 1.0,
+    normalization: str = "raw",
 ) -> float:
     if scale <= 0.0:
         return 0.0
@@ -1059,6 +1084,8 @@ def _overlap_penalty_value(
     threshold = min(max(expected_overlap, 0.0) + slack, 0.999)
     excess = max(overlap - threshold, 0.0)
     normalized = min(excess / max(1.0 - threshold, 1e-6), 1.0)
+    if str(normalization).replace("-", "_").lower() == "opportunity":
+        normalized *= min(max(opportunity_available_fraction, 0.0), 1.0)
     return float(-scale * normalized)
 
 
@@ -1297,6 +1324,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "inter_uav_overlap": [],
         "coverage_opportunity_cells": [],
         "coverage_opportunity_fraction": [],
+        "coverage_opportunity_available_fraction": [],
         "frontier_alignment": [],
         "frontier_progress": [],
         "frontier_uncovered_ratio": [],
@@ -1363,6 +1391,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     inter_uav = stats["inter_uav_overlap"]
     opportunity_cells = stats["coverage_opportunity_cells"]
     opportunity_fraction = stats["coverage_opportunity_fraction"]
+    opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
     frontier_alignment = stats["frontier_alignment"]
     frontier_progress = stats["frontier_progress"]
     frontier_ratio = stats["frontier_uncovered_ratio"]
@@ -1412,6 +1441,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav),
         "avg_coverage_opportunity_cells": _finite_mean(opportunity_cells),
         "avg_coverage_opportunity_fraction": _finite_mean(opportunity_fraction),
+        "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
         "avg_frontier_alignment": _finite_mean(frontier_alignment),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_ratio),
@@ -1823,6 +1853,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_coverage_opportunity_fraction": _finite_mean([
             row["avg_coverage_opportunity_fraction"] for row in rows
         ]),
+        "mean_coverage_opportunity_available_fraction": _finite_mean([
+            row["avg_coverage_opportunity_available_fraction"] for row in rows
+        ]),
         "mean_frontier_alignment": _finite_mean([
             row["avg_frontier_alignment"] for row in rows
         ]),
@@ -2040,6 +2073,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_inter_uav_overlap_fraction",
         "avg_coverage_opportunity_cells",
         "avg_coverage_opportunity_fraction",
+        "avg_coverage_opportunity_available_fraction",
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
         "avg_frontier_uncovered_ratio",
@@ -2126,6 +2160,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "inter_uav_overlap": "avg_inter_uav_overlap_fraction",
         "coverage_opportunity_cells": "avg_coverage_opportunity_cells",
         "coverage_opportunity": "avg_coverage_opportunity_fraction",
+        "coverage_opportunity_available": "avg_coverage_opportunity_available_fraction",
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
         "frontier_ratio": "avg_frontier_uncovered_ratio",
@@ -2201,6 +2236,7 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"move={drone['avg_displacement_m']:.1f}m "
             f"new={drone['avg_new_coverage_cells']:.1f} "
             f"opp={drone['avg_coverage_opportunity_fraction']:.2f} "
+            f"opp_avail={drone['avg_coverage_opportunity_available_fraction']:.2f} "
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
             f"excess={drone['avg_excess_overlap_fraction']:.2f} "
@@ -2228,6 +2264,7 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"move={drone['mean_avg_displacement_m']:.2f}m "
             f"new_cells={drone['mean_avg_new_coverage_cells']:.1f} "
             f"opp={drone['mean_avg_coverage_opportunity_fraction']:.3f} "
+            f"opp_avail={drone['mean_avg_coverage_opportunity_available_fraction']:.3f} "
             f"edge={drone['mean_edge_step_frac']:.3f} "
             f"corner={drone['mean_corner_step_frac']:.3f} "
             f"outside={drone['mean_avg_outside_footprint_fraction']:.3f} "
@@ -2258,6 +2295,7 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"move={item.get('displacement_m', math.nan):.2f}m "
             f"new={item.get('new_coverage_cells', math.nan):.1f} "
             f"opp={item.get('coverage_opportunity_fraction', math.nan):.3f} "
+            f"opp_avail={item.get('coverage_opportunity_available_fraction', math.nan):.3f} "
             f"edge={item.get('edge_step', math.nan):.3f} "
             f"overlap={item.get('overlap', math.nan):.3f} "
             f"excess={item.get('excess_overlap', math.nan):.3f} "
@@ -2509,10 +2547,22 @@ def _plot_time_bins_coverage_opportunity(ax: Any, summary: dict[str, Any]) -> No
         label="capture fraction",
         color="#d44a3a",
     )
+    available = [
+        float(row.get("coverage_opportunity_available_fraction", math.nan))
+        for row in time_bins
+    ]
+    line_available = ax_frac.plot(
+        centers,
+        available,
+        marker="o",
+        linewidth=1.3,
+        label="available fraction",
+        color="#36a269",
+    )
     ax_frac.set_ylim(0.0, 1.0)
-    ax_frac.set_ylabel("new / opportunity")
+    ax_frac.set_ylabel("fraction")
 
-    lines = line_cells + line_fraction
+    lines = line_cells + line_fraction + line_available
     ax.legend(lines, [line.get_label() for line in lines], fontsize=8, frameon=False)
     ax.set_title("Time-Bin Coverage Opportunity (mean)", fontsize=10)
 
@@ -2828,6 +2878,11 @@ def main() -> None:
                         help="Override checkpoint UAV start min separation in meters; pass 0 to disable.")
     parser.add_argument("--uav-start-edge-margin-m", type=float, default=None,
                         help="Override checkpoint UAV start edge margin in meters; pass 0 to disable.")
+    parser.add_argument("--uav-overlap-penalty-normalization",
+                        choices=("raw", "opportunity"),
+                        default=None,
+                        help="Override overlap penalty normalization for diagnostic reward terms. "
+                             "Default uses the checkpoint manifest, falling back to raw.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--json-output", default=None, help="Optional path to write per-seed rows and summary as JSON.")
     parser.add_argument("--plots-output", default=None, help="Optional path to write histogram diagnostics as a PNG.")
@@ -2863,6 +2918,10 @@ def main() -> None:
         f"min_sep={scenario_kwargs.get('uav_start_min_separation_m', 0.0)}m "
         f"edge_margin={scenario_kwargs.get('uav_start_edge_margin_m', 0.0)}m"
     )
+    print(
+        "uav overlap penalty: "
+        f"normalization={scenario_kwargs.get('uav_overlap_penalty_normalization', 'raw')}"
+    )
     print("-" * 88)
 
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=not args.stochastic)
@@ -2894,6 +2953,7 @@ def main() -> None:
             f"new_cells={row['avg_new_coverage_cells']:.1f} "
             f"new_frac={row['new_coverage_step_frac']:.2f} "
             f"opp={row['avg_coverage_opportunity_fraction']:.2f} "
+            f"opp_avail={row['avg_coverage_opportunity_available_fraction']:.2f} "
             f"edge={row['edge_step_frac']:.2f} "
             f"corner={row['corner_step_frac']:.2f} "
             f"outside={row['avg_outside_footprint_fraction']:.2f} "
@@ -2985,6 +3045,7 @@ def main() -> None:
         f"inter_uav_overlap={summary['mean_inter_uav_overlap_fraction']:.3f} "
         f"opp_cells={summary['mean_coverage_opportunity_cells']:.1f} "
         f"opp_frac={summary['mean_coverage_opportunity_fraction']:.3f} "
+        f"opp_avail={summary['mean_coverage_opportunity_available_fraction']:.3f} "
         f"frontier={summary['mean_frontier_alignment']:.3f}/"
         f"{summary['mean_frontier_progress_fraction']:.3f}/"
         f"{summary['mean_frontier_uncovered_ratio']:.3f} "
