@@ -222,6 +222,8 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     frontier_obs_empty_steps = 0
     diagnostic_steps = 0
     time_bins = _new_time_bins(TIME_BIN_COUNT)
+    perception_time_bins = _new_time_bins(TIME_BIN_COUNT)
+    survivor_exposure_stats = _new_survivor_exposure_stats(n_survivors)
 
     for step in range(int(scenario_kwargs["max_steps"])):
         prev_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool).copy()
@@ -422,6 +424,22 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             else np.zeros((scenario.n_drones, n_survivors), dtype=bool)
         )
         scout_credit = drone_detections & newly_scouted.reshape(1, -1)
+        perception = _drone_perception_snapshot(scenario, meters_per_sim)
+        perception_step = _update_survivor_exposure_stats(
+            survivor_exposure_stats,
+            perception=perception,
+            drone_detections=drone_detections,
+            prev_scouted=prev_scouted,
+            post_scouted=post_scouted,
+            step=step + 1,
+            n_survivors=n_survivors,
+        )
+        _append_time_bin(
+            perception_time_bins,
+            step=step,
+            max_steps=int(scenario_kwargs["max_steps"]),
+            values=perception_step,
+        )
         for drone_idx, action_vec in enumerate(action_vectors):
             post_pos = scenario.world.agents[drone_idx].state.pos[0].detach().cpu().numpy().astype(float)
             path_positions_sim.append(post_pos.copy())
@@ -884,6 +902,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         _finalize_drone_stats(stats, scenario)
         for stats in per_drone_stats
     ]
+    survivor_exposures = _finalize_survivor_exposure_stats(
+        survivor_exposure_stats,
+        first_scout_steps,
+    )
+    survivor_exposure_summary = _survivor_exposure_summary(survivor_exposures)
     row = {
         "seed": int(seed),
         "max_steps": int(scenario_kwargs["max_steps"]),
@@ -902,6 +925,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             None if value is None else float(value * step_seconds)
             for value in first_scout_steps
         ],
+        "survivor_exposures": survivor_exposures,
         "avg_action_norm": _finite_mean(action_norms),
         "avg_displacement_m": _finite_mean(displacement_m_values),
         "avg_action_displacement_alignment": _finite_mean(action_displacement_alignments),
@@ -1039,6 +1063,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             boundary_distance_m_values,
         ),
         "time_bins": _finalize_time_bins(time_bins),
+        "perception_time_bins": _finalize_time_bins(perception_time_bins),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess_overlap_values]))
             if excess_overlap_values else 0.0
@@ -1070,6 +1095,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         **start_metrics,
         **path_metrics,
         **coverage_shape_metrics,
+        **survivor_exposure_summary,
     }
     row["failure_label"] = _failure_label(row)
     close = getattr(env, "close", None)
@@ -1106,6 +1132,401 @@ def _metric_scalar(scenario: WildfireSearchScenario, name: str) -> float:
         return 0.0
     arr = value.detach().cpu().numpy().astype(float).reshape(-1)
     return float(arr[0]) if arr.size else 0.0
+
+
+def _new_survivor_exposure_stats(n_survivors: int) -> list[dict[str, Any]]:
+    stats: list[dict[str, Any]] = []
+    for survivor_idx in range(max(int(n_survivors), 0)):
+        stats.append({
+            "survivor": int(survivor_idx),
+            "exposure_steps": 0,
+            "pair_exposures": 0,
+            "miss_attempt_steps": 0,
+            "expected_detection_mass": 0.0,
+            "missed_detection_probability_mass": 0.0,
+            "cumulative_no_detection_probability": 1.0,
+            "step_detection_probabilities": [],
+            "step_best_norm_distances": [],
+            "step_best_probability_norm_distances": [],
+            "best_detection_probability": 0.0,
+            "best_pair_detection_probability": 0.0,
+            "best_norm_distance": math.inf,
+            "best_probability_norm_distance": math.inf,
+            "min_distance_m": math.inf,
+            "best_margin_m": -math.inf,
+            "near_edge_exposure_steps": 0,
+            "very_edge_exposure_steps": 0,
+            "central_exposure_steps": 0,
+            "first_exposure_step": None,
+            "last_exposure_step": None,
+            "first_scout_step": None,
+            "scout_drone": None,
+            "scout_probability": math.nan,
+            "scout_distance_m": math.nan,
+            "scout_norm_distance": math.nan,
+            "scout_margin_m": math.nan,
+            "scout_distance_factor": math.nan,
+            "scout_cover_factor": math.nan,
+            "scout_fire_smoke_factor": math.nan,
+            "scout_altitude_quality": math.nan,
+            "land_cover": None,
+        })
+    return stats
+
+
+def _drone_perception_snapshot(
+    scenario: WildfireSearchScenario,
+    meters_per_sim: float,
+) -> dict[str, np.ndarray]:
+    n_drones = int(getattr(scenario, "n_drones", 0))
+    n_survivors = int(getattr(scenario, "n_survivors", 0))
+    if n_drones <= 0 or n_survivors <= 0:
+        shape = (max(n_drones, 0), max(n_survivors, 0))
+        return {
+            "probability": np.zeros(shape, dtype=float),
+            "visible": np.zeros(shape, dtype=bool),
+            "distance_m": np.zeros(shape, dtype=float),
+            "norm_distance": np.full(shape, math.inf, dtype=float),
+            "margin_m": np.full(shape, -math.inf, dtype=float),
+            "distance_factor": np.zeros(shape, dtype=float),
+            "cover_factor": np.zeros(shape, dtype=float),
+            "fire_smoke_factor": np.zeros(shape, dtype=float),
+            "altitude_quality": np.zeros(shape, dtype=float),
+            "land_cover": np.zeros(max(n_survivors, 0), dtype=int),
+        }
+
+    with torch.no_grad():
+        drone_pos = torch.stack(
+            [agent.state.pos for agent in scenario.world.agents[:n_drones]],
+            dim=1,
+        )
+        surv_pos = torch.stack([survivor.state.pos for survivor in scenario._survivors], dim=1)
+        drone_dists = torch.cdist(drone_pos, surv_pos)
+        components = scenario._drone_detection_components(drone_dists, drone_pos, surv_pos)
+
+    probability = components["probability"][0].detach().cpu().numpy().astype(float)
+    visible = components["visible"][0].detach().cpu().numpy().astype(bool)
+    footprint_sim = components["footprint"][0].detach().cpu().numpy().astype(float).reshape(n_drones, 1)
+    distance_sim = drone_dists[0].detach().cpu().numpy().astype(float)
+    distance_m = distance_sim * float(meters_per_sim)
+    footprint_m = footprint_sim * float(meters_per_sim)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        norm_distance = distance_sim / np.maximum(footprint_sim, 1e-12)
+    norm_distance = np.where(np.isfinite(norm_distance), norm_distance, math.inf)
+    margin_m = footprint_m - distance_m
+
+    return {
+        "probability": probability,
+        "visible": visible,
+        "distance_m": distance_m,
+        "norm_distance": norm_distance,
+        "margin_m": margin_m,
+        "distance_factor": components["distance_factor"][0].detach().cpu().numpy().astype(float),
+        "cover_factor": components["cover_factor"][0].detach().cpu().numpy().astype(float),
+        "fire_smoke_factor": components["fire_smoke_factor"][0].detach().cpu().numpy().astype(float),
+        "altitude_quality": components["altitude_quality"][0].detach().cpu().numpy().astype(float),
+        "land_cover": components["survivor_cover"][0].detach().cpu().numpy().astype(int),
+    }
+
+
+def _update_survivor_exposure_stats(
+    stats: list[dict[str, Any]],
+    *,
+    perception: dict[str, np.ndarray],
+    drone_detections: np.ndarray,
+    prev_scouted: np.ndarray,
+    post_scouted: np.ndarray,
+    step: int,
+    n_survivors: int,
+) -> dict[str, float]:
+    probability = np.asarray(perception["probability"], dtype=float)
+    visible = np.asarray(perception["visible"], dtype=bool)
+    norm_distance = np.asarray(perception["norm_distance"], dtype=float)
+    distance_m = np.asarray(perception["distance_m"], dtype=float)
+    margin_m = np.asarray(perception["margin_m"], dtype=float)
+    land_cover = np.asarray(perception["land_cover"], dtype=int).reshape(-1)
+    detections = np.asarray(drone_detections, dtype=bool)
+    n_survivors = max(int(n_survivors), 0)
+
+    exposed_count = 0
+    expected_scouts = 0.0
+    missed_probability_mass = 0.0
+    actual_new_scouts = 0.0
+    best_step_probabilities: list[float] = []
+    best_step_norms: list[float] = []
+    near_edge_exposed = 0
+    central_exposed = 0
+    unscouted_count = int(np.count_nonzero(~prev_scouted))
+
+    for survivor_idx in range(n_survivors):
+        if survivor_idx >= len(stats) or bool(prev_scouted[survivor_idx]):
+            continue
+        stat = stats[survivor_idx]
+        if survivor_idx < land_cover.size:
+            stat["land_cover"] = int(land_cover[survivor_idx])
+
+        survivor_visible = visible[:, survivor_idx] if visible.size else np.zeros(0, dtype=bool)
+        survivor_prob = probability[:, survivor_idx] if probability.size else np.zeros(0, dtype=float)
+        survivor_detected = (
+            detections[:, survivor_idx]
+            if detections.size
+            else np.zeros_like(survivor_prob, dtype=bool)
+        )
+        if not survivor_visible.any():
+            continue
+
+        visible_probs = np.clip(survivor_prob[survivor_visible], 0.0, 1.0)
+        step_detection_probability = float(1.0 - np.prod(1.0 - visible_probs))
+        visible_drone_indices = np.flatnonzero(survivor_visible)
+        visible_norms = norm_distance[visible_drone_indices, survivor_idx]
+        visible_distances = distance_m[visible_drone_indices, survivor_idx]
+        visible_margins = margin_m[visible_drone_indices, survivor_idx]
+
+        best_norm_distance = float(np.nanmin(visible_norms)) if visible_norms.size else math.nan
+        best_probability_local_idx = int(np.nanargmax(visible_probs)) if visible_probs.size else 0
+        best_probability_drone = int(visible_drone_indices[best_probability_local_idx])
+        best_pair_probability = float(visible_probs[best_probability_local_idx]) if visible_probs.size else 0.0
+        best_probability_norm = float(norm_distance[best_probability_drone, survivor_idx])
+        min_distance_m = float(np.nanmin(visible_distances)) if visible_distances.size else math.nan
+        best_margin_m = float(np.nanmax(visible_margins)) if visible_margins.size else math.nan
+
+        exposed_count += 1
+        expected_scouts += step_detection_probability
+        best_step_probabilities.append(step_detection_probability)
+        best_step_norms.append(best_norm_distance)
+        if math.isfinite(best_norm_distance) and best_norm_distance >= 0.75:
+            near_edge_exposed += 1
+        if math.isfinite(best_norm_distance) and best_norm_distance <= 0.50:
+            central_exposed += 1
+
+        stat["exposure_steps"] += 1
+        stat["pair_exposures"] += int(np.count_nonzero(survivor_visible))
+        stat["expected_detection_mass"] += step_detection_probability
+        stat["cumulative_no_detection_probability"] *= max(1.0 - step_detection_probability, 0.0)
+        stat["step_detection_probabilities"].append(step_detection_probability)
+        stat["step_best_norm_distances"].append(best_norm_distance)
+        stat["step_best_probability_norm_distances"].append(best_probability_norm)
+        stat["best_detection_probability"] = max(
+            float(stat["best_detection_probability"]),
+            step_detection_probability,
+        )
+        stat["best_pair_detection_probability"] = max(
+            float(stat["best_pair_detection_probability"]),
+            best_pair_probability,
+        )
+        stat["best_norm_distance"] = min(float(stat["best_norm_distance"]), best_norm_distance)
+        stat["best_probability_norm_distance"] = min(
+            float(stat["best_probability_norm_distance"]),
+            best_probability_norm,
+        )
+        stat["min_distance_m"] = min(float(stat["min_distance_m"]), min_distance_m)
+        stat["best_margin_m"] = max(float(stat["best_margin_m"]), best_margin_m)
+        stat["near_edge_exposure_steps"] += int(math.isfinite(best_norm_distance) and best_norm_distance >= 0.75)
+        stat["very_edge_exposure_steps"] += int(math.isfinite(best_norm_distance) and best_norm_distance >= 0.90)
+        stat["central_exposure_steps"] += int(math.isfinite(best_norm_distance) and best_norm_distance <= 0.50)
+        if stat["first_exposure_step"] is None:
+            stat["first_exposure_step"] = int(step)
+        stat["last_exposure_step"] = int(step)
+
+        detected_now = bool(survivor_detected.any())
+        if not detected_now:
+            stat["miss_attempt_steps"] += 1
+            stat["missed_detection_probability_mass"] += step_detection_probability
+            missed_probability_mass += step_detection_probability
+        else:
+            actual_new_scouts += 1.0
+            detected_drone_indices = np.flatnonzero(survivor_detected)
+            detected_probs = survivor_prob[detected_drone_indices]
+            detected_choice = int(detected_drone_indices[int(np.nanargmax(detected_probs))])
+            stat["first_scout_step"] = int(step)
+            stat["scout_drone"] = int(detected_choice)
+            stat["scout_probability"] = float(probability[detected_choice, survivor_idx])
+            stat["scout_distance_m"] = float(distance_m[detected_choice, survivor_idx])
+            stat["scout_norm_distance"] = float(norm_distance[detected_choice, survivor_idx])
+            stat["scout_margin_m"] = float(margin_m[detected_choice, survivor_idx])
+            stat["scout_distance_factor"] = float(perception["distance_factor"][detected_choice, survivor_idx])
+            stat["scout_cover_factor"] = float(perception["cover_factor"][detected_choice, survivor_idx])
+            stat["scout_fire_smoke_factor"] = float(perception["fire_smoke_factor"][detected_choice, survivor_idx])
+            stat["scout_altitude_quality"] = float(perception["altitude_quality"][detected_choice, survivor_idx])
+
+    return {
+        "unscouted_survivors": float(unscouted_count),
+        "exposed_unscouted_survivors": float(exposed_count),
+        "exposed_unscouted_fraction": float(exposed_count / max(unscouted_count, 1)),
+        "expected_scouts": expected_scouts,
+        "expected_scout_recall": float(expected_scouts / max(n_survivors, 1)),
+        "actual_new_scouts": actual_new_scouts,
+        "actual_new_scout_recall": float(actual_new_scouts / max(n_survivors, 1)),
+        "missed_detection_probability_mass": missed_probability_mass,
+        "missed_detection_recall_mass": float(missed_probability_mass / max(n_survivors, 1)),
+        "mean_exposed_detection_probability": _finite_mean(best_step_probabilities),
+        "max_exposed_detection_probability": max(best_step_probabilities) if best_step_probabilities else math.nan,
+        "mean_exposed_norm_distance": _finite_mean(best_step_norms),
+        "near_edge_exposure_fraction": float(near_edge_exposed / max(exposed_count, 1)),
+        "central_exposure_fraction": float(central_exposed / max(exposed_count, 1)),
+    }
+
+
+def _finalize_survivor_exposure_stats(
+    stats: list[dict[str, Any]],
+    first_scout_steps: list[int | None],
+) -> list[dict[str, Any]]:
+    finalized: list[dict[str, Any]] = []
+    for stat in stats:
+        survivor_idx = int(stat["survivor"])
+        first_scout_step = (
+            first_scout_steps[survivor_idx]
+            if survivor_idx < len(first_scout_steps)
+            else stat.get("first_scout_step")
+        )
+        exposure_steps = int(stat["exposure_steps"])
+        cumulative_detection_probability = 1.0 - float(stat["cumulative_no_detection_probability"])
+        first_exposure_step = stat.get("first_exposure_step")
+        latency = (
+            int(first_scout_step) - int(first_exposure_step)
+            if first_scout_step is not None and first_exposure_step is not None
+            else None
+        )
+        finalized.append({
+            "survivor": survivor_idx,
+            "scouted": bool(first_scout_step is not None),
+            "first_scout_step": None if first_scout_step is None else int(first_scout_step),
+            "first_exposure_step": None if first_exposure_step is None else int(first_exposure_step),
+            "last_exposure_step": (
+                None if stat.get("last_exposure_step") is None else int(stat["last_exposure_step"])
+            ),
+            "exposure_to_scout_latency_steps": latency,
+            "exposure_steps": exposure_steps,
+            "pair_exposures": int(stat["pair_exposures"]),
+            "miss_attempt_steps": int(stat["miss_attempt_steps"]),
+            "expected_detection_mass": float(stat["expected_detection_mass"]),
+            "missed_detection_probability_mass": float(stat["missed_detection_probability_mass"]),
+            "cumulative_detection_probability": cumulative_detection_probability,
+            "avg_step_detection_probability": _finite_mean(stat["step_detection_probabilities"]),
+            "best_detection_probability": float(stat["best_detection_probability"]),
+            "best_pair_detection_probability": float(stat["best_pair_detection_probability"]),
+            "avg_best_norm_distance": _finite_mean(stat["step_best_norm_distances"]),
+            "best_norm_distance": _finite_or_nan(stat["best_norm_distance"]),
+            "best_probability_norm_distance": _finite_or_nan(stat["best_probability_norm_distance"]),
+            "min_distance_m": _finite_or_nan(stat["min_distance_m"]),
+            "best_margin_m": _finite_or_nan(stat["best_margin_m"]),
+            "near_edge_exposure_fraction": (
+                float(stat["near_edge_exposure_steps"] / exposure_steps) if exposure_steps else math.nan
+            ),
+            "very_edge_exposure_fraction": (
+                float(stat["very_edge_exposure_steps"] / exposure_steps) if exposure_steps else math.nan
+            ),
+            "central_exposure_fraction": (
+                float(stat["central_exposure_steps"] / exposure_steps) if exposure_steps else math.nan
+            ),
+            "scout_drone": stat.get("scout_drone"),
+            "scout_probability": float(stat["scout_probability"]),
+            "scout_distance_m": float(stat["scout_distance_m"]),
+            "scout_norm_distance": float(stat["scout_norm_distance"]),
+            "scout_margin_m": float(stat["scout_margin_m"]),
+            "scout_distance_factor": float(stat["scout_distance_factor"]),
+            "scout_cover_factor": float(stat["scout_cover_factor"]),
+            "scout_fire_smoke_factor": float(stat["scout_fire_smoke_factor"]),
+            "scout_altitude_quality": float(stat["scout_altitude_quality"]),
+            "land_cover": stat.get("land_cover"),
+        })
+    return finalized
+
+
+def _finite_or_nan(value: float) -> float:
+    return float(value) if math.isfinite(float(value)) else math.nan
+
+
+def _survivor_exposure_summary(exposures: list[dict[str, Any]]) -> dict[str, float]:
+    scouted = [entry for entry in exposures if bool(entry.get("scouted"))]
+    missed = [entry for entry in exposures if not bool(entry.get("scouted"))]
+    exposed = [entry for entry in exposures if int(entry.get("exposure_steps", 0)) > 0]
+    never_exposed_missed = [entry for entry in missed if int(entry.get("exposure_steps", 0)) <= 0]
+    low_cum_missed = [
+        entry for entry in missed
+        if float(entry.get("cumulative_detection_probability", 0.0)) < 0.50
+    ]
+    high_cum_missed = [
+        entry for entry in missed
+        if float(entry.get("cumulative_detection_probability", 0.0)) >= 0.80
+    ]
+    edge_limited_missed = [
+        entry for entry in missed
+        if math.isfinite(float(entry.get("best_norm_distance", math.nan)))
+        and float(entry.get("best_norm_distance", math.nan)) >= 0.75
+    ]
+    return {
+        "avg_survivor_exposure_steps": _finite_mean([
+            float(entry.get("exposure_steps", math.nan)) for entry in exposures
+        ]),
+        "avg_scouted_survivor_exposure_steps": _finite_mean([
+            float(entry.get("exposure_steps", math.nan)) for entry in scouted
+        ]),
+        "avg_missed_survivor_exposure_steps": _finite_mean([
+            float(entry.get("exposure_steps", math.nan)) for entry in missed
+        ]),
+        "avg_survivor_pair_exposures": _finite_mean([
+            float(entry.get("pair_exposures", math.nan)) for entry in exposures
+        ]),
+        "avg_survivor_cum_detection_probability": _finite_mean([
+            float(entry.get("cumulative_detection_probability", math.nan)) for entry in exposures
+        ]),
+        "avg_scouted_cum_detection_probability": _finite_mean([
+            float(entry.get("cumulative_detection_probability", math.nan)) for entry in scouted
+        ]),
+        "avg_missed_cum_detection_probability": _finite_mean([
+            float(entry.get("cumulative_detection_probability", math.nan)) for entry in missed
+        ]),
+        "avg_survivor_best_detection_probability": _finite_mean([
+            float(entry.get("best_detection_probability", math.nan)) for entry in exposures
+        ]),
+        "avg_missed_best_detection_probability": _finite_mean([
+            float(entry.get("best_detection_probability", math.nan)) for entry in missed
+        ]),
+        "avg_scout_detection_probability": _finite_mean([
+            float(entry.get("scout_probability", math.nan)) for entry in scouted
+        ]),
+        "avg_scout_detection_norm_distance": _finite_mean([
+            float(entry.get("scout_norm_distance", math.nan)) for entry in scouted
+        ]),
+        "avg_scout_detection_margin_m": _finite_mean([
+            float(entry.get("scout_margin_m", math.nan)) for entry in scouted
+        ]),
+        "avg_missed_best_norm_distance": _finite_mean([
+            float(entry.get("best_norm_distance", math.nan)) for entry in missed
+        ]),
+        "avg_missed_min_distance_m": _finite_mean([
+            float(entry.get("min_distance_m", math.nan)) for entry in missed
+        ]),
+        "avg_missed_best_margin_m": _finite_mean([
+            float(entry.get("best_margin_m", math.nan)) for entry in missed
+        ]),
+        "avg_exposed_survivor_edge_fraction": _finite_mean([
+            float(entry.get("near_edge_exposure_fraction", math.nan)) for entry in exposed
+        ]),
+        "avg_scout_exposure_to_scout_latency_steps": _finite_mean([
+            float(entry.get("exposure_to_scout_latency_steps", math.nan)) for entry in scouted
+            if entry.get("exposure_to_scout_latency_steps") is not None
+        ]),
+        "expected_recall_from_exposure": _finite_mean([
+            float(entry.get("cumulative_detection_probability", math.nan)) for entry in exposures
+        ]),
+        "perception_recall_gap": _finite_mean([
+            float(entry.get("cumulative_detection_probability", math.nan)) for entry in exposures
+        ]) - _finite_mean([1.0 if bool(entry.get("scouted")) else 0.0 for entry in exposures]),
+        "missed_never_exposed_fraction": (
+            float(len(never_exposed_missed) / len(missed)) if missed else 0.0
+        ),
+        "missed_low_cum_probability_fraction": (
+            float(len(low_cum_missed) / len(missed)) if missed else 0.0
+        ),
+        "missed_high_cum_probability_fraction": (
+            float(len(high_cum_missed) / len(missed)) if missed else 0.0
+        ),
+        "missed_edge_limited_fraction": (
+            float(len(edge_limited_missed) / len(missed)) if missed else 0.0
+        ),
+    }
 
 
 def _coverage_grid_geometry(scenario: WildfireSearchScenario) -> dict[str, Any]:
@@ -1873,6 +2294,40 @@ def _summarize_time_bins(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
     return summary
 
 
+def _summarize_named_time_bins(rows: list[dict[str, Any]], row_key: str) -> list[dict[str, float]]:
+    max_bins = max((len(row.get(row_key, [])) for row in rows), default=0)
+    summary = []
+    for bin_idx in range(max_bins):
+        entries = [
+            row[row_key][bin_idx]
+            for row in rows
+            if len(row.get(row_key, [])) > bin_idx
+        ]
+        if not entries:
+            continue
+        keys = sorted({
+            key
+            for entry in entries
+            for key in entry.keys()
+            if key not in {"bin", "start_fraction", "end_fraction"}
+        })
+        row_summary: dict[str, float] = {
+            "bin": float(bin_idx),
+            "start_fraction": _finite_mean([
+                float(entry.get("start_fraction", math.nan)) for entry in entries
+            ]),
+            "end_fraction": _finite_mean([
+                float(entry.get("end_fraction", math.nan)) for entry in entries
+            ]),
+        }
+        for key in keys:
+            row_summary[key] = _finite_mean([
+                float(entry.get(key, math.nan)) for entry in entries
+            ])
+        summary.append(row_summary)
+    return summary
+
+
 def _scout_time_bin_series(row: dict[str, Any], bin_count: int) -> tuple[np.ndarray, np.ndarray]:
     n_survivors = max(int(row.get("survivors", 0)), 1)
     max_steps = int(row.get("max_steps", 0))
@@ -1925,6 +2380,78 @@ def _summarize_scout_time_bins(rows: list[dict[str, Any]]) -> list[dict[str, flo
             "median_cumulative_recall": _finite_median(cumulative_values),
         })
     return summary
+
+
+def _summarize_survivor_exposure_outcomes(rows: list[dict[str, Any]]) -> list[dict[str, float | str]]:
+    groups = [
+        (
+            "scouted",
+            [
+                entry
+                for row in rows
+                for entry in row.get("survivor_exposures", [])
+                if bool(entry.get("scouted"))
+            ],
+        ),
+        (
+            "missed",
+            [
+                entry
+                for row in rows
+                for entry in row.get("survivor_exposures", [])
+                if not bool(entry.get("scouted"))
+            ],
+        ),
+    ]
+    summaries: list[dict[str, float | str]] = []
+    for label, entries in groups:
+        summaries.append({
+            "group": label,
+            "survivors": float(len(entries)),
+            "mean_exposure_steps": _finite_mean([
+                float(entry.get("exposure_steps", math.nan)) for entry in entries
+            ]),
+            "mean_pair_exposures": _finite_mean([
+                float(entry.get("pair_exposures", math.nan)) for entry in entries
+            ]),
+            "mean_cumulative_detection_probability": _finite_mean([
+                float(entry.get("cumulative_detection_probability", math.nan)) for entry in entries
+            ]),
+            "mean_best_detection_probability": _finite_mean([
+                float(entry.get("best_detection_probability", math.nan)) for entry in entries
+            ]),
+            "mean_best_pair_detection_probability": _finite_mean([
+                float(entry.get("best_pair_detection_probability", math.nan)) for entry in entries
+            ]),
+            "mean_best_norm_distance": _finite_mean([
+                float(entry.get("best_norm_distance", math.nan)) for entry in entries
+            ]),
+            "mean_avg_best_norm_distance": _finite_mean([
+                float(entry.get("avg_best_norm_distance", math.nan)) for entry in entries
+            ]),
+            "mean_min_distance_m": _finite_mean([
+                float(entry.get("min_distance_m", math.nan)) for entry in entries
+            ]),
+            "mean_best_margin_m": _finite_mean([
+                float(entry.get("best_margin_m", math.nan)) for entry in entries
+            ]),
+            "mean_near_edge_exposure_fraction": _finite_mean([
+                float(entry.get("near_edge_exposure_fraction", math.nan)) for entry in entries
+            ]),
+            "mean_central_exposure_fraction": _finite_mean([
+                float(entry.get("central_exposure_fraction", math.nan)) for entry in entries
+            ]),
+            "mean_scout_probability": _finite_mean([
+                float(entry.get("scout_probability", math.nan)) for entry in entries
+            ]),
+            "mean_scout_norm_distance": _finite_mean([
+                float(entry.get("scout_norm_distance", math.nan)) for entry in entries
+            ]),
+            "mean_scout_margin_m": _finite_mean([
+                float(entry.get("scout_margin_m", math.nan)) for entry in entries
+            ]),
+        })
+    return summaries
 
 
 def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
@@ -2588,6 +3115,75 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_all_scouted_time_s_successes": (
             float(np.mean([row["all_scouted_time_s"] for row in successful])) if successful else math.nan
         ),
+        "mean_survivor_exposure_steps": _finite_mean([
+            row["avg_survivor_exposure_steps"] for row in rows
+        ]),
+        "mean_scouted_survivor_exposure_steps": _finite_mean([
+            row["avg_scouted_survivor_exposure_steps"] for row in rows
+        ]),
+        "mean_missed_survivor_exposure_steps": _finite_mean([
+            row["avg_missed_survivor_exposure_steps"] for row in rows
+        ]),
+        "mean_survivor_pair_exposures": _finite_mean([
+            row["avg_survivor_pair_exposures"] for row in rows
+        ]),
+        "mean_survivor_cum_detection_probability": _finite_mean([
+            row["avg_survivor_cum_detection_probability"] for row in rows
+        ]),
+        "mean_scouted_cum_detection_probability": _finite_mean([
+            row["avg_scouted_cum_detection_probability"] for row in rows
+        ]),
+        "mean_missed_cum_detection_probability": _finite_mean([
+            row["avg_missed_cum_detection_probability"] for row in rows
+        ]),
+        "mean_survivor_best_detection_probability": _finite_mean([
+            row["avg_survivor_best_detection_probability"] for row in rows
+        ]),
+        "mean_missed_best_detection_probability": _finite_mean([
+            row["avg_missed_best_detection_probability"] for row in rows
+        ]),
+        "mean_scout_detection_probability": _finite_mean([
+            row["avg_scout_detection_probability"] for row in rows
+        ]),
+        "mean_scout_detection_norm_distance": _finite_mean([
+            row["avg_scout_detection_norm_distance"] for row in rows
+        ]),
+        "mean_scout_detection_margin_m": _finite_mean([
+            row["avg_scout_detection_margin_m"] for row in rows
+        ]),
+        "mean_missed_best_norm_distance": _finite_mean([
+            row["avg_missed_best_norm_distance"] for row in rows
+        ]),
+        "mean_missed_min_distance_m": _finite_mean([
+            row["avg_missed_min_distance_m"] for row in rows
+        ]),
+        "mean_missed_best_margin_m": _finite_mean([
+            row["avg_missed_best_margin_m"] for row in rows
+        ]),
+        "mean_exposed_survivor_edge_fraction": _finite_mean([
+            row["avg_exposed_survivor_edge_fraction"] for row in rows
+        ]),
+        "mean_scout_exposure_to_scout_latency_steps": _finite_mean([
+            row["avg_scout_exposure_to_scout_latency_steps"] for row in rows
+        ]),
+        "mean_expected_recall_from_exposure": _finite_mean([
+            row["expected_recall_from_exposure"] for row in rows
+        ]),
+        "mean_perception_recall_gap": _finite_mean([
+            row["perception_recall_gap"] for row in rows
+        ]),
+        "mean_missed_never_exposed_fraction": _finite_mean([
+            row["missed_never_exposed_fraction"] for row in rows
+        ]),
+        "mean_missed_low_cum_probability_fraction": _finite_mean([
+            row["missed_low_cum_probability_fraction"] for row in rows
+        ]),
+        "mean_missed_high_cum_probability_fraction": _finite_mean([
+            row["missed_high_cum_probability_fraction"] for row in rows
+        ]),
+        "mean_missed_edge_limited_fraction": _finite_mean([
+            row["missed_edge_limited_fraction"] for row in rows
+        ]),
         "mean_action_norm": _finite_mean([row["avg_action_norm"] for row in rows]),
         "mean_displacement_m": _finite_mean([row["avg_displacement_m"] for row in rows]),
         "mean_action_displacement_alignment": _finite_mean([
@@ -2942,8 +3538,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     summary.update(_distribution_summary(rows))
     summary["per_drone"] = _summarize_per_drone(rows)
     summary["time_bins"] = _summarize_time_bins(rows)
+    summary["perception_time_bins"] = _summarize_named_time_bins(rows, "perception_time_bins")
     summary["scout_time_bins"] = _summarize_scout_time_bins(rows)
     summary["outcome_splits"] = _summarize_outcome_splits(rows)
+    summary["survivor_exposure_outcomes"] = _summarize_survivor_exposure_outcomes(rows)
     return summary
 
 
@@ -3180,6 +3778,16 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
     metrics = {
         "recall": "recall",
         "coverage": "final_coverage_fraction",
+        "expected_recall": "expected_recall_from_exposure",
+        "perception_gap": "perception_recall_gap",
+        "scout_detect_prob": "avg_scout_detection_probability",
+        "scout_norm": "avg_scout_detection_norm_distance",
+        "missed_cum_prob": "avg_missed_cum_detection_probability",
+        "missed_best_prob": "avg_missed_best_detection_probability",
+        "missed_best_norm": "avg_missed_best_norm_distance",
+        "missed_never_exposed": "missed_never_exposed_fraction",
+        "missed_high_prob": "missed_high_cum_probability_fraction",
+        "missed_edge_limited": "missed_edge_limited_fraction",
         "move_m": "avg_displacement_m",
         "new_cells": "avg_new_coverage_cells",
         "raw_new_cells": "avg_raw_new_coverage_cells",
@@ -3409,6 +4017,28 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
     return lines
 
 
+def _format_perception_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
+    lines = []
+    for item in time_bins:
+        start = 100.0 * float(item.get("start_fraction", 0.0))
+        end = 100.0 * float(item.get("end_fraction", 0.0))
+        lines.append(
+            f"  {start:>3.0f}-{end:<3.0f}%: "
+            f"unscouted={item.get('unscouted_survivors', math.nan):.2f} "
+            f"exposed={item.get('exposed_unscouted_survivors', math.nan):.2f} "
+            f"exposed_frac={item.get('exposed_unscouted_fraction', math.nan):.3f} "
+            f"exp_scout={item.get('expected_scouts', math.nan):.3f} "
+            f"actual_scout={item.get('actual_new_scouts', math.nan):.3f} "
+            f"miss_p={item.get('missed_detection_probability_mass', math.nan):.3f} "
+            f"mean_p={item.get('mean_exposed_detection_probability', math.nan):.3f} "
+            f"max_p={item.get('max_exposed_detection_probability', math.nan):.3f} "
+            f"norm={item.get('mean_exposed_norm_distance', math.nan):.3f} "
+            f"edge={item.get('near_edge_exposure_fraction', math.nan):.3f} "
+            f"central={item.get('central_exposure_fraction', math.nan):.3f}"
+        )
+    return lines
+
+
 def _format_scout_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
     lines = []
     for item in time_bins:
@@ -3448,6 +4078,28 @@ def _format_outcome_split_summary(splits: list[dict[str, Any]]) -> list[str]:
             f"hole_share={item.get('coverage_enclosed_hole_share', math.nan):.3f} "
             f"largest_hole={item.get('coverage_largest_enclosed_hole_fraction', math.nan):.3f} "
             f"edge_bias={item.get('coverage_edge_bias', math.nan):.3f}"
+        )
+    return lines
+
+
+def _format_survivor_exposure_outcomes(outcomes: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for item in outcomes:
+        lines.append(
+            f"  {item.get('group', '?')}: "
+            f"n={item.get('survivors', math.nan):.0f} "
+            f"exp_steps={item.get('mean_exposure_steps', math.nan):.1f} "
+            f"pair_exp={item.get('mean_pair_exposures', math.nan):.1f} "
+            f"cum_p={item.get('mean_cumulative_detection_probability', math.nan):.3f} "
+            f"best_p={item.get('mean_best_detection_probability', math.nan):.3f} "
+            f"best_pair_p={item.get('mean_best_pair_detection_probability', math.nan):.3f} "
+            f"best_norm={item.get('mean_best_norm_distance', math.nan):.3f} "
+            f"min_dist={item.get('mean_min_distance_m', math.nan):.1f}m "
+            f"margin={item.get('mean_best_margin_m', math.nan):.1f}m "
+            f"edge_frac={item.get('mean_near_edge_exposure_fraction', math.nan):.3f} "
+            f"central_frac={item.get('mean_central_exposure_fraction', math.nan):.3f} "
+            f"scout_p={item.get('mean_scout_probability', math.nan):.3f} "
+            f"scout_norm={item.get('mean_scout_norm_distance', math.nan):.3f}"
         )
     return lines
 
@@ -3847,6 +4499,96 @@ def _plot_outcome_structure_splits(ax: Any, summary: dict[str, Any]) -> None:
     ax.legend(fontsize=7, frameon=False, ncol=2)
 
 
+def _plot_perception_time_bins(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("perception_time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no perception bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Survivor Exposure", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("exposed", "exposed_unscouted_fraction", "#4f7cff"),
+        ("expected recall", "expected_scout_recall", "#36a269"),
+        ("actual recall", "actual_new_scout_recall", "#d44a3a"),
+        ("miss prob mass", "missed_detection_recall_mass", "#20242c"),
+        ("edge exposed", "near_edge_exposure_fraction", "#8a5cf6"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(centers, values, marker="o", linewidth=1.3, label=label, color=color)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction / recall mass")
+    ax.set_title("Time-Bin Survivor Exposure", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
+def _plot_perception_probability_bins(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("perception_time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no perception bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Detection Probability", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("mean p exposed", "mean_exposed_detection_probability", "#4f7cff"),
+        ("max p exposed", "max_exposed_detection_probability", "#36a269"),
+        ("mean norm", "mean_exposed_norm_distance", "#d44a3a"),
+        ("central exposed", "central_exposure_fraction", "#20242c"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(centers, values, marker="o", linewidth=1.3, label=label, color=color)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction")
+    ax.set_title("Time-Bin Detection Probability", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
+def _plot_survivor_exposure_outcomes(ax: Any, summary: dict[str, Any]) -> None:
+    outcomes = summary.get("survivor_exposure_outcomes", [])
+    if not outcomes:
+        ax.text(0.5, 0.5, "no survivor outcomes", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Survivor Exposure Outcomes", fontsize=10)
+        return
+    labels = [str(row.get("group", "?")) for row in outcomes]
+    x = np.arange(len(labels))
+    width = 0.18
+    series = [
+        ("cum p", "mean_cumulative_detection_probability", "#4f7cff"),
+        ("best p", "mean_best_detection_probability", "#36a269"),
+        ("best norm", "mean_best_norm_distance", "#d44a3a"),
+        ("edge frac", "mean_near_edge_exposure_fraction", "#8a5cf6"),
+    ]
+    for idx, (label, key, color) in enumerate(series):
+        values = [float(row.get(key, math.nan)) for row in outcomes]
+        ax.bar(
+            x + (idx - 1.5) * width,
+            values,
+            width=width,
+            label=label,
+            color=color,
+            alpha=0.85,
+        )
+    ax.set_xticks(x, labels)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("fraction")
+    ax.set_title("Survivor Exposure Outcomes", fontsize=10)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
 def _plot_time_bins_scouts(ax: Any, summary: dict[str, Any]) -> None:
     scout_bins = summary.get("scout_time_bins", [])
     if not scout_bins:
@@ -3996,6 +4738,16 @@ def write_distribution_plots(
     panels = [
         ("Recall", "recall", (0.0, 1.0)),
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
+        ("Expected Recall From Exposure", "expected_recall_from_exposure", (0.0, 1.0)),
+        ("Perception Recall Gap", "perception_recall_gap", (-1.0, 1.0)),
+        ("Scout Detection Probability", "avg_scout_detection_probability", (0.0, 1.0)),
+        ("Scout Norm Distance", "avg_scout_detection_norm_distance", (0.0, 1.0)),
+        ("Missed Cum Detection P", "avg_missed_cum_detection_probability", (0.0, 1.0)),
+        ("Missed Best Detection P", "avg_missed_best_detection_probability", (0.0, 1.0)),
+        ("Missed Best Norm Distance", "avg_missed_best_norm_distance", (0.0, 1.0)),
+        ("Missed Never Exposed", "missed_never_exposed_fraction", (0.0, 1.0)),
+        ("Missed High Cum P", "missed_high_cum_probability_fraction", (0.0, 1.0)),
+        ("Missed Edge Limited", "missed_edge_limited_fraction", (0.0, 1.0)),
         ("Movement / Step (m)", "avg_displacement_m", None),
         ("New Cells / Step", "avg_new_coverage_cells", None),
         ("Candidate Capture", "avg_candidate_capture_fraction", (0.0, 1.0)),
@@ -4020,7 +4772,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(14, 3, figsize=(14, 42), constrained_layout=True)
+    fig, axes = plt.subplots(19, 3, figsize=(14, 57), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -4139,8 +4891,11 @@ def write_distribution_plots(
     _plot_time_bins_revisit_sources(axes_flat[custom_start + 15], summary)
     _plot_outcome_candidate_splits(axes_flat[custom_start + 16], summary)
     _plot_outcome_structure_splits(axes_flat[custom_start + 17], summary)
+    _plot_perception_time_bins(axes_flat[custom_start + 18], summary)
+    _plot_perception_probability_bins(axes_flat[custom_start + 19], summary)
+    _plot_survivor_exposure_outcomes(axes_flat[custom_start + 20], summary)
 
-    for ax in axes_flat[custom_start + 18:]:
+    for ax in axes_flat[custom_start + 21:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -4235,6 +4990,14 @@ def main() -> None:
             f"{_fmt_optional(row['avg_scout_time_s'])}s "
             f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
             f"{_fmt_optional(row['all_scouted_time_s'])}s "
+            f"exp_recall={row['expected_recall_from_exposure']:.2f} "
+            f"scout_p={row['avg_scout_detection_probability']:.2f} "
+            f"scout_norm={row['avg_scout_detection_norm_distance']:.2f} "
+            f"miss_cum_p={row['avg_missed_cum_detection_probability']:.2f} "
+            f"miss_never/high/edge="
+            f"{row['missed_never_exposed_fraction']:.2f}/"
+            f"{row['missed_high_cum_probability_fraction']:.2f}/"
+            f"{row['missed_edge_limited_fraction']:.2f} "
             f"act={row['avg_action_norm']:.3f} "
             f"move={row['avg_displacement_m']:.2f}m "
             f"align={row['avg_action_displacement_alignment']:.3f} "
@@ -4294,6 +5057,28 @@ def main() -> None:
         f"{summary['mean_avg_scout_time_s']:.1f}s "
         f"all_scouted_successes={summary['mean_all_scouted_step_successes']:.1f} steps/"
         f"{summary['mean_all_scouted_time_s_successes']:.1f}s"
+    )
+    print(
+        "survivor perception means: "
+        f"exp_steps={summary['mean_survivor_exposure_steps']:.1f} "
+        f"scouted_exp={summary['mean_scouted_survivor_exposure_steps']:.1f} "
+        f"missed_exp={summary['mean_missed_survivor_exposure_steps']:.1f} "
+        f"cum_p={summary['mean_survivor_cum_detection_probability']:.3f} "
+        f"scouted_cum_p={summary['mean_scouted_cum_detection_probability']:.3f} "
+        f"missed_cum_p={summary['mean_missed_cum_detection_probability']:.3f} "
+        f"scout_p={summary['mean_scout_detection_probability']:.3f} "
+        f"scout_norm={summary['mean_scout_detection_norm_distance']:.3f} "
+        f"scout_margin={summary['mean_scout_detection_margin_m']:.1f}m "
+        f"miss_best_p={summary['mean_missed_best_detection_probability']:.3f} "
+        f"miss_best_norm={summary['mean_missed_best_norm_distance']:.3f} "
+        f"miss_min_dist={summary['mean_missed_min_distance_m']:.1f}m "
+        f"miss_margin={summary['mean_missed_best_margin_m']:.1f}m "
+        f"expected_recall={summary['mean_expected_recall_from_exposure']:.3f} "
+        f"recall_gap={summary['mean_perception_recall_gap']:.3f} "
+        f"miss_never={summary['mean_missed_never_exposed_fraction']:.3f} "
+        f"miss_low_p={summary['mean_missed_low_cum_probability_fraction']:.3f} "
+        f"miss_high_p={summary['mean_missed_high_cum_probability_fraction']:.3f} "
+        f"miss_edge={summary['mean_missed_edge_limited_fraction']:.3f}"
     )
     print(
         "action/motion means: "
@@ -4457,9 +5242,17 @@ def main() -> None:
         print("time-bin means:")
         for line in _format_time_bin_summary(summary["time_bins"]):
             print(line)
+    if summary.get("perception_time_bins"):
+        print("survivor perception time-bins:")
+        for line in _format_perception_time_bin_summary(summary["perception_time_bins"]):
+            print(line)
     if summary.get("scout_time_bins"):
         print("survivor discovery time-bins:")
         for line in _format_scout_time_bin_summary(summary["scout_time_bins"]):
+            print(line)
+    if summary.get("survivor_exposure_outcomes"):
+        print("scouted/missed survivor exposure splits:")
+        for line in _format_survivor_exposure_outcomes(summary["survivor_exposure_outcomes"]):
             print(line)
     if summary.get("outcome_splits"):
         print("success/failure diagnostic splits:")
