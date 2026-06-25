@@ -14,6 +14,7 @@ import copy
 import json
 import math
 import sys
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -2402,16 +2403,19 @@ def _coverage_shape_metrics(
         return {
             "coverage_bbox_area_fraction": 0.0,
             "coverage_bbox_fill_fraction": 0.0,
+            "coverage_bbox_hole_fraction": 0.0,
             "coverage_center_fraction": 0.0,
             "coverage_border_band_fraction": 0.0,
             "coverage_interior_fraction": 0.0,
             "coverage_edge_bias": 0.0,
+            **_uncovered_component_metrics(~covered),
         }
 
     yy, xx = np.nonzero(covered)
     bbox_area = float((xx.max() - xx.min() + 1) * (yy.max() - yy.min() + 1))
     total_cells = float(size_x * size_y)
     bbox_fill = float(covered.sum() / max(bbox_area, 1.0))
+    bbox_hole_fraction = 1.0 - bbox_fill
 
     center_margin_x = size_x // 4
     center_margin_y = size_y // 4
@@ -2439,10 +2443,85 @@ def _coverage_shape_metrics(
     return {
         "coverage_bbox_area_fraction": float(bbox_area / total_cells),
         "coverage_bbox_fill_fraction": bbox_fill,
+        "coverage_bbox_hole_fraction": bbox_hole_fraction,
         "coverage_center_fraction": center_fraction,
         "coverage_border_band_fraction": border_fraction,
         "coverage_interior_fraction": interior_fraction,
         "coverage_edge_bias": border_fraction - interior_fraction,
+        **_uncovered_component_metrics(~covered),
+    }
+
+
+def _uncovered_component_metrics(uncovered_grid: np.ndarray) -> dict[str, float]:
+    uncovered = np.asarray(uncovered_grid, dtype=bool)
+    if uncovered.ndim != 2:
+        return {
+            "coverage_uncovered_component_count": 0.0,
+            "coverage_enclosed_uncovered_component_count": 0.0,
+            "coverage_uncovered_fraction": 0.0,
+            "coverage_enclosed_uncovered_fraction": 0.0,
+            "coverage_largest_uncovered_component_fraction": 0.0,
+            "coverage_largest_enclosed_hole_fraction": 0.0,
+            "coverage_enclosed_hole_share": 0.0,
+        }
+
+    height, width = uncovered.shape
+    total_cells = float(max(height * width, 1))
+    uncovered_total = int(uncovered.sum())
+    if uncovered_total == 0:
+        return {
+            "coverage_uncovered_component_count": 0.0,
+            "coverage_enclosed_uncovered_component_count": 0.0,
+            "coverage_uncovered_fraction": 0.0,
+            "coverage_enclosed_uncovered_fraction": 0.0,
+            "coverage_largest_uncovered_component_fraction": 0.0,
+            "coverage_largest_enclosed_hole_fraction": 0.0,
+            "coverage_enclosed_hole_share": 0.0,
+        }
+
+    visited = np.zeros_like(uncovered, dtype=bool)
+    component_count = 0
+    enclosed_count = 0
+    enclosed_cells = 0
+    largest_component = 0
+    largest_enclosed = 0
+    for y in range(height):
+        for x in range(width):
+            if not uncovered[y, x] or visited[y, x]:
+                continue
+            component_count += 1
+            touches_border = False
+            size = 0
+            queue: deque[tuple[int, int]] = deque([(y, x)])
+            visited[y, x] = True
+            while queue:
+                cy, cx = queue.popleft()
+                size += 1
+                if cy == 0 or cx == 0 or cy == height - 1 or cx == width - 1:
+                    touches_border = True
+                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                    if (
+                        0 <= ny < height
+                        and 0 <= nx < width
+                        and uncovered[ny, nx]
+                        and not visited[ny, nx]
+                    ):
+                        visited[ny, nx] = True
+                        queue.append((ny, nx))
+            largest_component = max(largest_component, size)
+            if not touches_border:
+                enclosed_count += 1
+                enclosed_cells += size
+                largest_enclosed = max(largest_enclosed, size)
+
+    return {
+        "coverage_uncovered_component_count": float(component_count),
+        "coverage_enclosed_uncovered_component_count": float(enclosed_count),
+        "coverage_uncovered_fraction": float(uncovered_total / total_cells),
+        "coverage_enclosed_uncovered_fraction": float(enclosed_cells / total_cells),
+        "coverage_largest_uncovered_component_fraction": float(largest_component / total_cells),
+        "coverage_largest_enclosed_hole_fraction": float(largest_enclosed / total_cells),
+        "coverage_enclosed_hole_share": float(enclosed_cells / max(uncovered_total, 1)),
     }
 
 
@@ -2825,6 +2904,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_coverage_bbox_fill_fraction": _finite_mean([
             row["coverage_bbox_fill_fraction"] for row in rows
         ]),
+        "mean_coverage_bbox_hole_fraction": _finite_mean([
+            row["coverage_bbox_hole_fraction"] for row in rows
+        ]),
         "mean_coverage_center_fraction": _finite_mean([
             row["coverage_center_fraction"] for row in rows
         ]),
@@ -2835,12 +2917,134 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             row["coverage_interior_fraction"] for row in rows
         ]),
         "mean_coverage_edge_bias": _finite_mean([row["coverage_edge_bias"] for row in rows]),
+        "mean_coverage_uncovered_component_count": _finite_mean([
+            row["coverage_uncovered_component_count"] for row in rows
+        ]),
+        "mean_coverage_enclosed_uncovered_component_count": _finite_mean([
+            row["coverage_enclosed_uncovered_component_count"] for row in rows
+        ]),
+        "mean_coverage_uncovered_fraction": _finite_mean([
+            row["coverage_uncovered_fraction"] for row in rows
+        ]),
+        "mean_coverage_enclosed_uncovered_fraction": _finite_mean([
+            row["coverage_enclosed_uncovered_fraction"] for row in rows
+        ]),
+        "mean_coverage_largest_uncovered_component_fraction": _finite_mean([
+            row["coverage_largest_uncovered_component_fraction"] for row in rows
+        ]),
+        "mean_coverage_largest_enclosed_hole_fraction": _finite_mean([
+            row["coverage_largest_enclosed_hole_fraction"] for row in rows
+        ]),
+        "mean_coverage_enclosed_hole_share": _finite_mean([
+            row["coverage_enclosed_hole_share"] for row in rows
+        ]),
     }
     summary.update(_distribution_summary(rows))
     summary["per_drone"] = _summarize_per_drone(rows)
     summary["time_bins"] = _summarize_time_bins(rows)
     summary["scout_time_bins"] = _summarize_scout_time_bins(rows)
+    summary["outcome_splits"] = _summarize_outcome_splits(rows)
     return summary
+
+
+def _time_bin_value(row: dict[str, Any], bin_idx: int, key: str) -> float:
+    bins = row.get("time_bins", [])
+    if not bins:
+        return math.nan
+    idx = bin_idx if bin_idx >= 0 else len(bins) + bin_idx
+    if idx < 0 or idx >= len(bins):
+        return math.nan
+    return float(bins[idx].get(key, math.nan))
+
+
+def _summarize_outcome_splits(rows: list[dict[str, Any]]) -> list[dict[str, float | str]]:
+    groups = [
+        ("success", [row for row in rows if bool(row.get("full_success", 0.0))]),
+        ("failure", [row for row in rows if not bool(row.get("full_success", 0.0))]),
+    ]
+    summaries: list[dict[str, float | str]] = []
+    for label, entries in groups:
+        summaries.append({
+            "group": label,
+            "episodes": float(len(entries)),
+            "mean_recall": _finite_mean([float(row.get("recall", math.nan)) for row in entries]),
+            "mean_final_coverage_fraction": _finite_mean([
+                float(row.get("final_coverage_fraction", math.nan)) for row in entries
+            ]),
+            "early_candidate_capture": _finite_mean([
+                _time_bin_value(row, 0, "candidate_capture_fraction") for row in entries
+            ]),
+            "early_candidate_best_new_cells": _finite_mean([
+                _time_bin_value(row, 0, "candidate_best_new_cells") for row in entries
+            ]),
+            "early_candidate_regret": _finite_mean([
+                _time_bin_value(row, 0, "candidate_new_cell_regret") for row in entries
+            ]),
+            "early_candidate_action_rank": _finite_mean([
+                _time_bin_value(row, 0, "candidate_action_rank") for row in entries
+            ]),
+            "early_candidate_avoidable_overlap": _finite_mean([
+                _time_bin_value(row, 0, "candidate_avoidable_overlap") for row in entries
+            ]),
+            "mid_candidate_capture": _finite_mean([
+                _time_bin_value(row, 2, "candidate_capture_fraction") for row in entries
+            ]),
+            "late_candidate_capture": _finite_mean([
+                _time_bin_value(row, -1, "candidate_capture_fraction") for row in entries
+            ]),
+            "late_candidate_best_new_cells": _finite_mean([
+                _time_bin_value(row, -1, "candidate_best_new_cells") for row in entries
+            ]),
+            "late_candidate_regret": _finite_mean([
+                _time_bin_value(row, -1, "candidate_new_cell_regret") for row in entries
+            ]),
+            "late_candidate_action_rank": _finite_mean([
+                _time_bin_value(row, -1, "candidate_action_rank") for row in entries
+            ]),
+            "late_candidate_avoidable_overlap": _finite_mean([
+                _time_bin_value(row, -1, "candidate_avoidable_overlap") for row in entries
+            ]),
+            "avg_candidate_capture": _finite_mean([
+                float(row.get("avg_candidate_capture_fraction", math.nan)) for row in entries
+            ]),
+            "avg_candidate_regret": _finite_mean([
+                float(row.get("avg_candidate_new_cell_regret", math.nan)) for row in entries
+            ]),
+            "avg_candidate_avoidable_overlap": _finite_mean([
+                float(row.get("avg_candidate_avoidable_overlap", math.nan)) for row in entries
+            ]),
+            "moving_no_new_coverage_frac": _finite_mean([
+                float(row.get("moving_no_new_coverage_frac", math.nan)) for row in entries
+            ]),
+            "coverage_bbox_fill_fraction": _finite_mean([
+                float(row.get("coverage_bbox_fill_fraction", math.nan)) for row in entries
+            ]),
+            "coverage_bbox_hole_fraction": _finite_mean([
+                float(row.get("coverage_bbox_hole_fraction", math.nan)) for row in entries
+            ]),
+            "coverage_enclosed_uncovered_fraction": _finite_mean([
+                float(row.get("coverage_enclosed_uncovered_fraction", math.nan)) for row in entries
+            ]),
+            "coverage_enclosed_hole_share": _finite_mean([
+                float(row.get("coverage_enclosed_hole_share", math.nan)) for row in entries
+            ]),
+            "coverage_largest_enclosed_hole_fraction": _finite_mean([
+                float(row.get("coverage_largest_enclosed_hole_fraction", math.nan)) for row in entries
+            ]),
+            "coverage_largest_uncovered_component_fraction": _finite_mean([
+                float(row.get("coverage_largest_uncovered_component_fraction", math.nan)) for row in entries
+            ]),
+            "coverage_edge_bias": _finite_mean([
+                float(row.get("coverage_edge_bias", math.nan)) for row in entries
+            ]),
+            "path_bbox_area_fraction": _finite_mean([
+                float(row.get("path_bbox_area_fraction", math.nan)) for row in entries
+            ]),
+            "edge_step_frac": _finite_mean([
+                float(row.get("edge_step_frac", math.nan)) for row in entries
+            ]),
+        })
+    return summaries
 
 
 def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3035,6 +3239,12 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "frontier_new_corr": "frontier_progress_new_cells_corr",
         "edge_frac": "edge_step_frac",
         "corner_frac": "corner_step_frac",
+        "bbox_fill": "coverage_bbox_fill_fraction",
+        "bbox_hole": "coverage_bbox_hole_fraction",
+        "enclosed_hole": "coverage_enclosed_uncovered_fraction",
+        "enclosed_hole_share": "coverage_enclosed_hole_share",
+        "largest_hole": "coverage_largest_enclosed_hole_fraction",
+        "largest_uncovered": "coverage_largest_uncovered_component_fraction",
         "center_cov": "coverage_center_fraction",
         "moving_no_new": "moving_no_new_coverage_frac",
         "start_pair": "min_start_pair_distance_m",
@@ -3210,6 +3420,34 @@ def _format_scout_time_bin_summary(time_bins: list[dict[str, float]]) -> list[st
             f"new_med={item.get('median_new_recall', math.nan):.3f} "
             f"cum_mean={item.get('mean_cumulative_recall', math.nan):.3f} "
             f"cum_med={item.get('median_cumulative_recall', math.nan):.3f}"
+        )
+    return lines
+
+
+def _format_outcome_split_summary(splits: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for item in splits:
+        lines.append(
+            f"  {item.get('group', '?')}: "
+            f"n={item.get('episodes', math.nan):.0f} "
+            f"recall={item.get('mean_recall', math.nan):.3f} "
+            f"cov={item.get('mean_final_coverage_fraction', math.nan):.3f} "
+            f"cand_cap early/mid/late="
+            f"{item.get('early_candidate_capture', math.nan):.3f}/"
+            f"{item.get('mid_candidate_capture', math.nan):.3f}/"
+            f"{item.get('late_candidate_capture', math.nan):.3f} "
+            f"cand_reg early/late="
+            f"{item.get('early_candidate_regret', math.nan):.1f}/"
+            f"{item.get('late_candidate_regret', math.nan):.1f} "
+            f"rank early/late="
+            f"{item.get('early_candidate_action_rank', math.nan):.2f}/"
+            f"{item.get('late_candidate_action_rank', math.nan):.2f} "
+            f"bbox_fill={item.get('coverage_bbox_fill_fraction', math.nan):.3f} "
+            f"bbox_hole={item.get('coverage_bbox_hole_fraction', math.nan):.3f} "
+            f"enclosed={item.get('coverage_enclosed_uncovered_fraction', math.nan):.3f} "
+            f"hole_share={item.get('coverage_enclosed_hole_share', math.nan):.3f} "
+            f"largest_hole={item.get('coverage_largest_enclosed_hole_fraction', math.nan):.3f} "
+            f"edge_bias={item.get('coverage_edge_bias', math.nan):.3f}"
         )
     return lines
 
@@ -3551,6 +3789,64 @@ def _plot_time_bins_revisit_sources(ax: Any, summary: dict[str, Any]) -> None:
     ax.legend(fontsize=7, frameon=False, ncol=2)
 
 
+def _plot_outcome_candidate_splits(ax: Any, summary: dict[str, Any]) -> None:
+    splits = summary.get("outcome_splits", [])
+    if not splits:
+        ax.text(0.5, 0.5, "no outcome splits", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Outcome Candidate Capture", fontsize=10)
+        return
+    labels = [str(row.get("group", "?")) for row in splits]
+    x = np.arange(len(labels))
+    width = 0.24
+    series = [
+        ("early", "early_candidate_capture", "#4f7cff"),
+        ("mid", "mid_candidate_capture", "#36a269"),
+        ("late", "late_candidate_capture", "#d44a3a"),
+    ]
+    for idx, (label, key, color) in enumerate(series):
+        values = [float(row.get(key, math.nan)) for row in splits]
+        ax.bar(x + (idx - 1) * width, values, width=width, label=label, color=color, alpha=0.85)
+    ax.set_xticks(x, labels)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("actual / best candidate")
+    ax.set_title("Outcome Candidate Capture", fontsize=10)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(fontsize=8, frameon=False)
+
+
+def _plot_outcome_structure_splits(ax: Any, summary: dict[str, Any]) -> None:
+    splits = summary.get("outcome_splits", [])
+    if not splits:
+        ax.text(0.5, 0.5, "no outcome splits", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Outcome Coverage Structure", fontsize=10)
+        return
+    labels = [str(row.get("group", "?")) for row in splits]
+    x = np.arange(len(labels))
+    width = 0.20
+    series = [
+        ("bbox fill", "coverage_bbox_fill_fraction", "#4f7cff"),
+        ("bbox holes", "coverage_bbox_hole_fraction", "#d44a3a"),
+        ("enclosed", "coverage_enclosed_uncovered_fraction", "#8a5cf6"),
+        ("edge bias", "coverage_edge_bias", "#20242c"),
+    ]
+    for idx, (label, key, color) in enumerate(series):
+        values = [float(row.get(key, math.nan)) for row in splits]
+        ax.bar(
+            x + (idx - 1.5) * width,
+            values,
+            width=width,
+            label=label,
+            color=color,
+            alpha=0.85,
+        )
+    ax.set_xticks(x, labels)
+    ax.set_ylim(-0.25, 1.0)
+    ax.set_ylabel("fraction")
+    ax.set_title("Outcome Coverage Structure", fontsize=10)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
 def _plot_time_bins_scouts(ax: Any, summary: dict[str, Any]) -> None:
     scout_bins = summary.get("scout_time_bins", [])
     if not scout_bins:
@@ -3841,8 +4137,10 @@ def write_distribution_plots(
     _plot_time_bins_coverage_opportunity(axes_flat[custom_start + 13], summary)
     _plot_time_bins_counterfactual(axes_flat[custom_start + 14], summary)
     _plot_time_bins_revisit_sources(axes_flat[custom_start + 15], summary)
+    _plot_outcome_candidate_splits(axes_flat[custom_start + 16], summary)
+    _plot_outcome_structure_splits(axes_flat[custom_start + 17], summary)
 
-    for ax in axes_flat[custom_start + 16:]:
+    for ax in axes_flat[custom_start + 18:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -4128,10 +4426,17 @@ def main() -> None:
     print(
         "coverage-shape means: "
         f"bbox_fill={summary['mean_coverage_bbox_fill_fraction']:.3f} "
+        f"bbox_hole={summary['mean_coverage_bbox_hole_fraction']:.3f} "
         f"center={summary['mean_coverage_center_fraction']:.3f} "
         f"border_band={summary['mean_coverage_border_band_fraction']:.3f} "
         f"interior={summary['mean_coverage_interior_fraction']:.3f} "
-        f"edge_bias={summary['mean_coverage_edge_bias']:.3f}"
+        f"edge_bias={summary['mean_coverage_edge_bias']:.3f} "
+        f"uncovered_comp={summary['mean_coverage_uncovered_component_count']:.1f} "
+        f"enclosed_comp={summary['mean_coverage_enclosed_uncovered_component_count']:.1f} "
+        f"enclosed_frac={summary['mean_coverage_enclosed_uncovered_fraction']:.3f} "
+        f"hole_share={summary['mean_coverage_enclosed_hole_share']:.3f} "
+        f"largest_hole={summary['mean_coverage_largest_enclosed_hole_fraction']:.3f} "
+        f"largest_uncovered={summary['mean_coverage_largest_uncovered_component_fraction']:.3f}"
     )
     print(
         "failure-mode fractions: "
@@ -4155,6 +4460,10 @@ def main() -> None:
     if summary.get("scout_time_bins"):
         print("survivor discovery time-bins:")
         for line in _format_scout_time_bin_summary(summary["scout_time_bins"]):
+            print(line)
+    if summary.get("outcome_splits"):
+        print("success/failure diagnostic splits:")
+        for line in _format_outcome_split_summary(summary["outcome_splits"]):
             print(line)
     print(
         "failure labels: "
