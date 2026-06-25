@@ -277,7 +277,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))
 
     def test_uav_survivor_diagnostic_build_args(self):
-        _, _, env_args = build_args(
+        _, algo_args, env_args = build_args(
             num_env_steps=100,
             episode_length=50,
             seed=1,
@@ -306,7 +306,8 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["n_drones"], 1)
+        self.assertTrue(algo_args["algo"]["share_param"])
+        self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 0)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertFalse(scenario["known_survivors_at_reset"])
@@ -345,7 +346,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_drone_climb_cost"], 0.0)
 
     def test_uav_survivor_diagnostic_uses_current_defaults(self):
-        _, _, env_args = build_args(
+        _, algo_args, env_args = build_args(
             num_env_steps=100,
             episode_length=50,
             seed=1,
@@ -357,7 +358,8 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["n_drones"], 1)
+        self.assertTrue(algo_args["algo"]["share_param"])
+        self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 0)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["r_drone_scout"], 2.0)
@@ -376,8 +378,13 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
         self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.0)
         self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.20)
-        self.assertNotIn("uav_frontier_obs", scenario)
-        self.assertNotIn("r_uav_frontier_alignment", scenario)
+        self.assertTrue(scenario["uav_frontier_obs"])
+        self.assertEqual(scenario["uav_frontier_obs_radius_m"], 150.0)
+        self.assertEqual(scenario["uav_frontier_mode"], "sector_topk")
+        self.assertEqual(scenario["uav_frontier_sectors"], 8)
+        self.assertEqual(scenario["uav_frontier_top_k"], 2)
+        self.assertTrue(scenario["uav_frontier_ownership"])
+        self.assertEqual(scenario["r_uav_frontier_alignment"], 0.10)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
@@ -474,6 +481,7 @@ class HappoCheckpointTests(unittest.TestCase):
             uav_inter_uav_overlap_penalty=0.0,
             uav_inter_uav_overlap_allowed=0.0,
             uav_outside_footprint_penalty=0.0,
+            uav_frontier_alignment_reward=0.0,
         )
 
         scenario = env_args["scenario_kwargs"]
@@ -484,6 +492,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_inter_uav_overlap"], 0.0)
         self.assertEqual(scenario["uav_inter_uav_overlap_allowed"], 0.0)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.0)
+        self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
 
     def test_uav_survivor_diagnostic_can_use_two_drones(self):
         _, _, env_args = build_args(
@@ -667,7 +676,7 @@ class HappoCheckpointTests(unittest.TestCase):
         )
 
         scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["n_drones"], 1)
+        self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 0)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["r_found_survivor"], 0.0)
@@ -726,7 +735,9 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(scenario["terrain_cache_path"].endswith("malibu_creek_500m_128.npz"))
         self.assertEqual(scenario["r_found_survivor"], 0.0)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 246)
+        self.assertTrue(scenario["uav_frontier_obs"])
+        self.assertEqual(scenario["r_uav_frontier_alignment"], 0.10)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 258)
 
     def test_diagnostic_modes_are_mutually_exclusive(self):
         with self.assertRaises(ValueError):

@@ -49,11 +49,13 @@ DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID = 6
 DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID = 9
 DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M = 150.0
 DEFAULT_UAV_FRONTIER_OBS_RADIUS_M = 150.0
+DEFAULT_UAV_DIAG_DRONES = 3
 DEFAULT_UAV_DIAG_COVERAGE_REWARD = 20.0
 DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD = 0.001
 DEFAULT_UAV_DIAG_OVERLAP_PENALTY = 0.10
 DEFAULT_UAV_DIAG_OVERLAP_ALLOWED = 0.10
 DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY = 0.10
+DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD = 0.10
 DEFAULT_UAV_DIAG_ENTROPY_COEF = 0.05
 DEFAULT_UAV_DIAG_EPISODE_LENGTH = 300
 DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS = 8
@@ -146,7 +148,7 @@ def build_args(
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
     linear_lr_decay: bool = False,
-    share_param: bool = False,
+    share_param: bool | None = None,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
     drone_min_footprint_m: float = 0.0,
@@ -165,7 +167,7 @@ def build_args(
     r_drone_confirm: float = 0.0,
     local_coverage_obs_grid: int = 0,
     local_coverage_obs_radius_m: float = 150.0,
-    uav_frontier_obs: bool = False,
+    uav_frontier_obs: bool | None = None,
     uav_frontier_obs_radius_m: float = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
     uav_frontier_mode: str = DEFAULT_UAV_FRONTIER_MODE,
     uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
@@ -173,7 +175,7 @@ def build_args(
     uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
-    uav_diagnostic_drones: int = 1,
+    uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
     uav_no_global_coverage_obs: bool = False,
@@ -187,7 +189,7 @@ def build_args(
     uav_move_coverage_cap: float = 0.1,
     uav_coverage_opportunity_reward: float | None = None,
     uav_coverage_opportunity_cap: float = 1.0,
-    uav_frontier_alignment_reward: float = 0.0,
+    uav_frontier_alignment_reward: float | None = None,
     uav_overlap_penalty: float | None = None,
     uav_overlap_allowed: float | None = None,
     uav_overlap_penalty_normalization: str = "raw",
@@ -231,12 +233,24 @@ def build_args(
         if local_coverage_obs_grid <= 0:
             local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
+        if uav_frontier_obs is None:
+            uav_frontier_obs = True
+        if uav_frontier_alignment_reward is None:
+            uav_frontier_alignment_reward = DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD
+        if share_param is None:
+            share_param = True
         if uav_start_min_separation_m is None:
             uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
         if uav_start_edge_margin_m is None:
             uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
         if action_transform == "clip":
             action_transform = "radial_tanh"
+    if uav_frontier_obs is None:
+        uav_frontier_obs = False
+    if uav_frontier_alignment_reward is None:
+        uav_frontier_alignment_reward = 0.0
+    if share_param is None:
+        share_param = False
     uav_coverage_normalization = str(uav_coverage_normalization).replace("-", "_").lower()
     if uav_coverage_normalization not in {"map", "opportunity"}:
         raise ValueError("uav_coverage_normalization must be one of: map, opportunity")
@@ -673,9 +687,12 @@ def main():
                    help="Critic learning rate.")
     p.add_argument("--linear-lr-decay", action="store_true",
                    help="Linearly decay actor/critic learning rates over training.")
-    p.add_argument("--share-param", action="store_true",
+    p.set_defaults(share_param=None)
+    p.add_argument("--share-param", dest="share_param", action="store_true",
                    help="Enable HARL global actor parameter sharing. Use only for homogeneous-agent "
                         "runs such as UAV-only diagnostics; mixed UAV/UGV sharing needs class-wise sharing.")
+    p.add_argument("--no-share-param", dest="share_param", action="store_false",
+                   help="Disable HARL global actor parameter sharing, overriding UAV diagnostic defaults.")
     p.add_argument("--terrain-cnn-encoder", action="store_true",
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
@@ -752,9 +769,12 @@ def main():
     p.add_argument("--local-coverage-obs-radius-m", type=float, default=150.0,
                    help="Physical half-width/radius in meters for --local-coverage-obs-grid. "
                         "Example: 150 with K=9 gives bins about 33m wide on a 500m map.")
-    p.add_argument("--uav-frontier-obs", action="store_true",
+    p.set_defaults(uav_frontier_obs=None)
+    p.add_argument("--uav-frontier-obs", dest="uav_frontier_obs", action="store_true",
                    help="Add UAV frontier features: direction, distance, and local uncovered ratio "
                         "toward nearby unsearched team-coverage cells.")
+    p.add_argument("--uav-no-frontier-obs", dest="uav_frontier_obs", action="store_false",
+                   help="Disable UAV frontier observation, overriding UAV diagnostic defaults.")
     p.add_argument("--uav-frontier-obs-radius-m", type=float, default=DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
                    help="Physical radius in meters used for --uav-frontier-obs and frontier-alignment reward.")
     p.add_argument("--uav-frontier-mode", choices=("centroid", "sector_topk", "sector-topk"),
@@ -777,7 +797,7 @@ def main():
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
                    help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
-    p.add_argument("--uav-diagnostic-drones", type=int, default=1,
+    p.add_argument("--uav-diagnostic-drones", type=int, default=DEFAULT_UAV_DIAG_DRONES,
                    help="Number of UAVs in --uav-survivor-diagnostic mode.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
@@ -815,7 +835,7 @@ def main():
     p.add_argument("--uav-coverage-opportunity-cap", type=float, default=1.0,
                    help="Cap applied to the opportunity capture fraction when "
                         "--uav-coverage-normalization opportunity is used.")
-    p.add_argument("--uav-frontier-alignment-reward", type=float, default=0.0,
+    p.add_argument("--uav-frontier-alignment-reward", type=float, default=None,
                    help="Reward scale for clamped progress toward the local uncovered frontier. "
                         "Use with --uav-frontier-obs for the cleanest learning signal.")
     p.add_argument("--uav-overlap-penalty", type=float, default=None,
@@ -946,7 +966,7 @@ def main():
         args.uav_coverage_opportunity_reward = None
     if args.uav_coverage_opportunity_cap < 0.0:
         p.error("--uav-coverage-opportunity-cap must be nonnegative")
-    if args.uav_frontier_alignment_reward < 0.0:
+    if args.uav_frontier_alignment_reward is not None and args.uav_frontier_alignment_reward < 0.0:
         p.error("--uav-frontier-alignment-reward must be nonnegative")
     if args.uav_overlap_penalty is not None and args.uav_overlap_penalty < 0.0:
         p.error("--uav-overlap-penalty must be nonnegative")
@@ -1012,6 +1032,12 @@ def main():
         if args.local_coverage_obs_grid <= 0:
             args.local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             args.local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
+        if args.uav_frontier_obs is None:
+            args.uav_frontier_obs = True
+        if args.uav_frontier_alignment_reward is None:
+            args.uav_frontier_alignment_reward = DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD
+        if args.share_param is None:
+            args.share_param = True
         if args.uav_start_min_separation_m is None:
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
         if args.uav_start_edge_margin_m is None:
@@ -1020,6 +1046,12 @@ def main():
             args.action_transform = "radial_tanh"
         if args.n_rollout_threads == 1:
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
+    if args.uav_frontier_obs is None:
+        args.uav_frontier_obs = False
+    if args.uav_frontier_alignment_reward is None:
+        args.uav_frontier_alignment_reward = 0.0
+    if args.share_param is None:
+        args.share_param = False
 
     (
         args.uav_coverage_reward,
