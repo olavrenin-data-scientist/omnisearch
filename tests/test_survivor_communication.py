@@ -69,6 +69,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario = env.scenario
 
         self.assertEqual(scenario.r_found_survivor, 10.0)
+        self.assertEqual(scenario.r_all_survivors_found, 0.0)
         self.assertEqual(scenario.r_drone_scout, 2.0)
         self.assertEqual(scenario.r_ground_confirm, 4.0)
         self.assertEqual(scenario.r_drone_shaping, 0.30)
@@ -82,6 +83,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.r_drone_climb_cost, -0.005)
         self.assertEqual(scenario.r_time_penalty, -0.0005)
         self.assertEqual(scenario.r_coverage, 5.0)
+        self.assertEqual(scenario.r_uav_coverage_threshold, 0.0)
+        self.assertEqual(scenario.uav_coverage_threshold_fraction, 0.95)
         self.assertEqual(scenario.ground_approach_milestone_radii_m, (75.0, 50.0, 40.0, 30.0, 20.0))
         torch.testing.assert_close(
             scenario.ground_approach_milestone_rewards_tensor.cpu(),
@@ -100,6 +103,66 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertTrue(scenario.drone_can_confirm)
         self.assertFalse(hasattr(scenario, "drone_scouts_confirm_survivors"))
+
+    def test_all_survivors_found_reward_fires_once(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=0,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            drone_can_confirm=True,
+            r_found_survivor=0.0,
+            r_all_survivors_found=7.0,
+            r_drone_scout=0.0,
+            r_drone_shaping=0.0,
+            r_time_penalty=0.0,
+            r_coverage=0.0,
+            drone_detection_quality=(1.0, 1.0, 1.0),
+            drone_cover_detection_factors=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            drone_energy_costs=(0.0, 0.0, 0.0),
+        )
+        env.reset()
+        scenario = env.scenario
+        drone = env.agents[0]
+        survivor = scenario._survivors[0]
+        drone.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        survivor.state.pos[:] = torch.tensor([[0.0, 0.0]])
+
+        scenario._compute_step_rewards()
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([7.0]))
+        torch.testing.assert_close(scenario.metric_reward_all_survivors_found, torch.tensor([7.0]))
+
+        scenario._compute_step_rewards()
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(scenario.metric_reward_all_survivors_found, torch.tensor([0.0]))
+
+    def test_uav_coverage_threshold_reward_fires_once(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=0,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            r_found_survivor=0.0,
+            r_drone_scout=0.0,
+            r_drone_shaping=0.0,
+            r_time_penalty=0.0,
+            r_coverage=0.0,
+            r_uav_coverage_threshold=5.0,
+            uav_coverage_threshold_fraction=0.0001,
+            drone_energy_costs=(0.0, 0.0, 0.0),
+        )
+        env.reset()
+        scenario = env.scenario
+        drone = env.agents[0]
+        drone.state.pos[:] = torch.tensor([[0.0, 0.0]])
+
+        scenario._compute_step_rewards()
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([5.0]))
+        torch.testing.assert_close(scenario.metric_reward_uav_coverage_threshold, torch.tensor([5.0]))
+
+        scenario._compute_step_rewards()
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(scenario.metric_reward_uav_coverage_threshold, torch.tensor([0.0]))
 
     def test_ground_action_magnitude_is_normalized_before_terrain_speed(self):
         env = self._diagnostic_env()

@@ -452,6 +452,7 @@ class WildfireSearchScenario(BaseScenario):
 
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 10.0)
+        self.r_all_survivors_found = kwargs.pop("r_all_survivors_found", 0.0)
         self.r_drone_scout    = kwargs.pop("r_drone_scout", 2.0)
         self.r_ground_confirm = kwargs.pop("r_ground_confirm", 4.0)
         self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.0005)
@@ -503,6 +504,11 @@ class WildfireSearchScenario(BaseScenario):
         if self.uav_coverage_normalization not in {"map", "opportunity"}:
             raise ValueError("uav_coverage_normalization must be one of: map, opportunity")
         self.uav_coverage_opportunity_cap = max(float(kwargs.pop("uav_coverage_opportunity_cap", 1.0)), 0.0)
+        self.r_uav_coverage_threshold = max(float(kwargs.pop("r_uav_coverage_threshold", 0.0)), 0.0)
+        self.uav_coverage_threshold_fraction = min(
+            max(float(kwargs.pop("uav_coverage_threshold_fraction", 0.95)), 0.0),
+            1.0,
+        )
         self.r_uav_frontier_alignment = max(float(kwargs.pop("r_uav_frontier_alignment", 0.0)), 0.0)
         self.r_uav_overlap = max(float(kwargs.pop("r_uav_overlap", 0.0)), 0.0)
         self.uav_overlap_allowed = min(
@@ -856,9 +862,11 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_new_confirmations = torch.zeros(batch_dim, device=device)
         self.metric_full_success = torch.zeros(batch_dim, device=device)
         self.metric_reward_team = torch.zeros(batch_dim, device=device)
+        self.metric_reward_all_survivors_found = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_move_coverage = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_coverage_threshold = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
@@ -931,9 +939,11 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_new_confirmations,
             self.metric_full_success,
             self.metric_reward_team,
+            self.metric_reward_all_survivors_found,
             self.metric_reward_drone_scout,
             self.metric_reward_drone_progress,
             self.metric_reward_uav_move_coverage,
+            self.metric_reward_uav_coverage_threshold,
             self.metric_reward_uav_frontier_alignment,
             self.metric_uav_frontier_alignment,
             self.metric_uav_frontier_alignment_by_drone,
@@ -2287,10 +2297,16 @@ class WildfireSearchScenario(BaseScenario):
             self.step_drone_confirmations = torch.zeros_like(drone_seen)
             confirmed_by_drone = torch.zeros_like(confirmed_by_ground)
 
+        previously_all_found = self.found_survivors.all(dim=1)
         newly_found = (confirmed_by_ground | confirmed_by_drone) & ~self.found_survivors
 
         self.scouted_survivors = self.scouted_survivors | newly_scouted
         self.found_survivors   = self.found_survivors   | newly_found
+        all_survivors_found_now = (
+            self.found_survivors.all(dim=1)
+            & ~previously_all_found
+            & (self.n_survivors > 0)
+        )
         self._record_local_survivor_knowledge(drone_seen, eligible_ground_confirmations)
 
         # Dense potential-based shaping (Ng et al. 1999): α · (prev_dist − curr_dist)
@@ -2496,8 +2512,12 @@ class WildfireSearchScenario(BaseScenario):
             torch.full_like(curr_ground_target_idx, -1),
         )
 
+        all_survivors_found_reward = (
+            all_survivors_found_now.float() * self.r_all_survivors_found
+        )
         team_reward = (
             newly_found.float().sum(dim=1) * self.r_found_survivor
+            + all_survivors_found_reward
             + self.r_time_penalty
         )
 
@@ -2535,6 +2555,7 @@ class WildfireSearchScenario(BaseScenario):
             uav_frontier_progress_fraction,
             uav_frontier_uncovered_ratio,
         ) = self._uav_frontier_alignment_reward(drone_pos)
+        previous_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
         (
             coverage_new,
             uav_overlap_fraction,
@@ -2544,6 +2565,15 @@ class WildfireSearchScenario(BaseScenario):
             uav_coverage_opportunity_cells,
             uav_coverage_opportunity_available_fraction,
         ) = self._coverage_reward(drone_pos)  # [B, D]
+        current_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
+        coverage_threshold_crossed = (
+            (previous_coverage_fraction < self.uav_coverage_threshold_fraction)
+            & (current_coverage_fraction >= self.uav_coverage_threshold_fraction)
+        )
+        uav_coverage_threshold_reward = (
+            coverage_threshold_crossed.float() * self.r_uav_coverage_threshold
+        )
+        team_reward = team_reward + uav_coverage_threshold_reward
         (
             uav_move_coverage_reward,
             drone_displacement_m,
@@ -2578,9 +2608,11 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_new_confirmations = newly_found.float().sum(dim=1)
         self.metric_full_success = self.found_survivors.all(dim=1).float()
         self.metric_reward_team = team_reward
+        self.metric_reward_all_survivors_found = all_survivors_found_reward
         self.metric_reward_drone_scout = (scout_per_drone * self.r_drone_scout).sum(dim=1)
         self.metric_reward_drone_progress = drone_shaping.sum(dim=1)
         self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
+        self.metric_reward_uav_coverage_threshold = uav_coverage_threshold_reward
         self.metric_reward_uav_frontier_alignment = uav_frontier_alignment_reward.sum(dim=1)
         self.metric_uav_frontier_alignment_by_drone = uav_frontier_alignment
         self.metric_uav_frontier_progress_fraction_by_drone = uav_frontier_progress_fraction
@@ -3138,6 +3170,7 @@ class WildfireSearchScenario(BaseScenario):
         if (
             self.r_coverage <= 0.0
             and self.r_uav_move_coverage <= 0.0
+            and self.r_uav_coverage_threshold <= 0.0
             and self.coverage_obs_grid <= 0
             and not self.uav_frontier_obs
             and self.r_uav_frontier_alignment <= 0.0
@@ -4537,9 +4570,11 @@ class WildfireSearchScenario(BaseScenario):
             "mission/n_confirmed": self.found_survivors.sum(dim=1).float(),
             "mission/full_success": self.metric_full_success,
             "reward/team": self.metric_reward_team,
+            "reward/all_survivors_found": self.metric_reward_all_survivors_found,
             "reward/drone_scout": self.metric_reward_drone_scout,
             "reward/drone_progress": self.metric_reward_drone_progress,
             "reward/uav_move_coverage": self.metric_reward_uav_move_coverage,
+            "reward/uav_coverage_threshold": self.metric_reward_uav_coverage_threshold,
             "reward/uav_frontier_alignment": self.metric_reward_uav_frontier_alignment,
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,

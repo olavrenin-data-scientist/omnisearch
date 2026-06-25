@@ -364,6 +364,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["r_drone_scout"], 2.0)
         self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_all_survivors_found"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 20.0)
         self.assertEqual(scenario["uav_coverage_normalization"], "map")
@@ -373,6 +374,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
         self.assertEqual(scenario["uav_move_coverage_normalization"], "raw")
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)
+        self.assertEqual(scenario["r_uav_coverage_threshold"], 0.0)
+        self.assertEqual(scenario["uav_coverage_threshold_fraction"], 0.95)
         self.assertEqual(scenario["r_uav_overlap"], 0.10)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.10)
         self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
@@ -680,6 +683,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_ground"], 0)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_all_survivors_found"], 0.0)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 20.0)
@@ -687,6 +691,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
         self.assertEqual(scenario["uav_move_coverage_normalization"], "raw")
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
+        self.assertEqual(scenario["r_uav_coverage_threshold"], 0.0)
+        self.assertEqual(scenario["uav_coverage_threshold_fraction"], 0.95)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
         self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
@@ -708,10 +714,45 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["r_drone_scout"], 2.0)
         self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_all_survivors_found"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 20.0)
         self.assertEqual(scenario["coverage_obs_grid"], 6)
         self.assertEqual(scenario["local_coverage_obs_grid"], 9)
+
+    def test_uav_diagnostic_can_set_all_survivors_reward(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_completion_bonus",
+            uav_survivor_diagnostic=True,
+            uav_all_survivors_reward=8.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_found_survivor"], 0.0)
+        self.assertEqual(scenario["r_all_survivors_found"], 8.0)
+        self.assertEqual(scenario["r_drone_scout"], 2.0)
+
+    def test_uav_diagnostic_can_set_coverage_threshold_reward(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_coverage_threshold_bonus",
+            uav_survivor_diagnostic=True,
+            uav_coverage_threshold_reward=6.0,
+            uav_coverage_threshold_fraction=0.90,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["r_uav_coverage_threshold"], 6.0)
+        self.assertEqual(scenario["uav_coverage_threshold_fraction"], 0.90)
 
     def test_uav_diagnostic_can_disable_default_global_coverage_observation(self):
         _, algo_args, env_args = build_args(

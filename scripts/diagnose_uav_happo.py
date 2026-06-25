@@ -96,6 +96,15 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     policy.reset()
     scenario = env.scenario
     start_metrics = _start_metrics(scenario)
+    coverage_geometry = _coverage_grid_geometry(scenario)
+    individual_coverage_history = np.zeros(
+        (
+            int(scenario.n_drones),
+            int(scenario.fire_grid_size),
+            int(scenario.fire_grid_size),
+        ),
+        dtype=bool,
+    )
 
     n_survivors = int(scenario.n_survivors)
     first_scout_steps: list[int | None] = [None] * n_survivors
@@ -111,11 +120,23 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     action_frontier_intent_values: list[float] = []
     action_frontier_movement_gap_values: list[float] = []
     new_coverage_cells_values: list[float] = []
+    raw_new_coverage_cells_values: list[float] = []
     outside_footprint_values: list[float] = []
     overlap_values: list[float] = []
     expected_overlap_values: list[float] = []
     excess_overlap_values: list[float] = []
     inter_uav_overlap_values: list[float] = []
+    any_history_revisit_values: list[float] = []
+    own_history_revisit_values: list[float] = []
+    teammate_history_revisit_values: list[float] = []
+    own_only_revisit_values: list[float] = []
+    teammate_only_revisit_values: list[float] = []
+    shared_history_revisit_values: list[float] = []
+    unavoidable_revisit_values: list[float] = []
+    avoidable_revisit_values: list[float] = []
+    frontier_expected_new_cells_values: list[float] = []
+    frontier_new_cell_capture_values: list[float] = []
+    frontier_new_cell_gap_values: list[float] = []
     frontier_alignment_values: list[float] = []
     frontier_progress_values: list[float] = []
     frontier_uncovered_ratio_values: list[float] = []
@@ -141,7 +162,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     penalty_uav_overlap_values: list[float] = []
     penalty_uav_inter_overlap_values: list[float] = []
     penalty_uav_outside_footprint_values: list[float] = []
+    reward_uav_coverage_threshold_values: list[float] = []
     reward_uav_scout_values: list[float] = []
+    reward_team_values: list[float] = []
+    reward_all_survivors_found_values: list[float] = []
     reward_uav_aux_values: list[float] = []
     frontier_abs_reward_share_values: list[float] = []
     frontier_progress_edge_values: list[float] = []
@@ -177,7 +201,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             agent.state.pos[0].detach().cpu().numpy().astype(float).copy()
             for agent in scenario.world.agents[:scenario.n_drones]
         ]
+        pre_team_coverage = scenario.coverage_grid[0].detach().cpu().numpy().astype(bool).copy()
+        pre_individual_coverage = individual_coverage_history.copy()
         if scenario.n_drones > 0:
+            pre_drone_pos_array = np.asarray(pre_drone_pos, dtype=float)
             pre_drone_pos_tensor = torch.stack(
                 [agent.state.pos for agent in scenario.world.agents[:scenario.n_drones]],
                 dim=1,
@@ -190,9 +217,40 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 .astype(float)
             )
             coverage_signal = _coverage_signal_snapshot(scenario, pre_drone_pos_tensor, frontier_obs)
+            pre_footprint_radius_sim = (
+                scenario._drone_camera_ranges()[0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+                .reshape(-1)
+            )
+            max_step_sim = (
+                float(getattr(scenario, "drone_speed_mps", 0.0))
+                * float(getattr(scenario, "sim_step_seconds", 1.0))
+                * max(
+                    float(
+                        scenario.terrain_sim_units_per_meter[0]
+                        .detach()
+                        .cpu()
+                        .item()
+                    ),
+                    1e-9,
+                )
+            )
+            frontier_expected_new_cells = _frontier_expected_new_cells(
+                scenario=scenario,
+                geometry=coverage_geometry,
+                positions=pre_drone_pos_array,
+                footprint_radii_sim=pre_footprint_radius_sim,
+                pre_team_coverage=pre_team_coverage,
+                frontier_obs=frontier_obs,
+                max_step_sim=max_step_sim,
+            )
         else:
             frontier_obs = np.zeros((0, 4), dtype=float)
             coverage_signal = _empty_coverage_signal_snapshot(0)
+            frontier_expected_new_cells = np.zeros(0, dtype=float)
         frontier_pairwise = _pairwise_direction_metrics(frontier_obs[:, :2])
         local_pairwise = _pairwise_direction_metrics(coverage_signal["local_vec"])
         global_pairwise = _pairwise_direction_metrics(coverage_signal["global_vec"])
@@ -274,6 +332,51 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             "metric_uav_footprint_radius_m_by_drone",
             scenario.n_drones,
         )
+        team_reward = _metric_scalar(scenario, "metric_reward_team")
+        all_survivors_found_reward = _metric_scalar(
+            scenario,
+            "metric_reward_all_survivors_found",
+        )
+        coverage_threshold_reward = _metric_scalar(
+            scenario,
+            "metric_reward_uav_coverage_threshold",
+        )
+        if scenario.n_drones > 0:
+            post_drone_pos_array = np.asarray(
+                [
+                    agent.state.pos[0].detach().cpu().numpy().astype(float)
+                    for agent in scenario.world.agents[:scenario.n_drones]
+                ],
+                dtype=float,
+            )
+            post_footprint_radius_sim = (
+                scenario._drone_camera_ranges()[0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+                .reshape(-1)
+            )
+            current_claims = _footprint_claims(
+                post_drone_pos_array,
+                post_footprint_radius_sim,
+                coverage_geometry,
+            )
+            revisit = _revisit_decomposition(
+                current_claims,
+                pre_individual_coverage,
+                pre_team_coverage,
+            )
+            raw_new_coverage_cells = (
+                current_claims & ~pre_team_coverage.reshape(1, *pre_team_coverage.shape)
+            ).sum(axis=(1, 2)).astype(float)
+        else:
+            current_claims = np.zeros(
+                (0, int(scenario.fire_grid_size), int(scenario.fire_grid_size)),
+                dtype=bool,
+            )
+            revisit = _empty_revisit_decomposition(0)
+            raw_new_coverage_cells = np.zeros(0, dtype=float)
         post_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         newly_scouted = post_scouted & ~prev_scouted
         drone_detections = (
@@ -289,15 +392,36 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             action_norm = float(np.linalg.norm(action_vec))
             displacement_m = float(np.linalg.norm(displacement_vec) * meters_per_sim)
             new_cells = float(coverage_cells[drone_idx])
+            raw_new_cells = float(raw_new_coverage_cells[drone_idx])
             action_norms.append(action_norm)
             displacement_m_values.append(displacement_m)
             new_coverage_cells_values.append(new_cells)
+            raw_new_coverage_cells_values.append(raw_new_cells)
             outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
             overlap = float(overlap_fraction[drone_idx])
             footprint_radius = float(footprint_radius_m[drone_idx])
             expected_overlap = float(expected_overlap_fraction[drone_idx])
             excess_overlap = float(excess_overlap_fraction[drone_idx])
             inter_uav_overlap = float(inter_uav_overlap_fraction[drone_idx])
+            any_history_revisit = float(revisit["any_history"][drone_idx])
+            own_history_revisit = float(revisit["own_history"][drone_idx])
+            teammate_history_revisit = float(revisit["teammate_history"][drone_idx])
+            own_only_revisit = float(revisit["own_only"][drone_idx])
+            teammate_only_revisit = float(revisit["teammate_only"][drone_idx])
+            shared_history_revisit = float(revisit["shared_history"][drone_idx])
+            unavoidable_revisit = min(any_history_revisit, expected_overlap)
+            avoidable_revisit = max(any_history_revisit - expected_overlap, 0.0)
+            frontier_expected_cells = float(frontier_expected_new_cells[drone_idx])
+            frontier_new_cell_capture = (
+                raw_new_cells / frontier_expected_cells
+                if frontier_expected_cells > 1e-9
+                else math.nan
+            )
+            frontier_new_cell_gap = (
+                frontier_expected_cells - raw_new_cells
+                if frontier_expected_cells > 1e-9
+                else math.nan
+            )
             opportunity_cells = float(coverage_opportunity_cells[drone_idx])
             opportunity_fraction = float(coverage_opportunity_fraction[drone_idx])
             opportunity_available_fraction = float(
@@ -363,6 +487,9 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
                 scout_reward=scout_reward,
             )
+            reward_terms["team"] = team_reward
+            reward_terms["all_survivors_found"] = all_survivors_found_reward
+            reward_terms["coverage_threshold"] = coverage_threshold_reward
             distances_to_edges = _distances_to_edges_m(
                 np.asarray([post_pos], dtype=float),
                 scenario,
@@ -376,6 +503,17 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             expected_overlap_values.append(expected_overlap)
             excess_overlap_values.append(excess_overlap)
             inter_uav_overlap_values.append(inter_uav_overlap)
+            any_history_revisit_values.append(any_history_revisit)
+            own_history_revisit_values.append(own_history_revisit)
+            teammate_history_revisit_values.append(teammate_history_revisit)
+            own_only_revisit_values.append(own_only_revisit)
+            teammate_only_revisit_values.append(teammate_only_revisit)
+            shared_history_revisit_values.append(shared_history_revisit)
+            unavoidable_revisit_values.append(unavoidable_revisit)
+            avoidable_revisit_values.append(avoidable_revisit)
+            frontier_expected_new_cells_values.append(frontier_expected_cells)
+            frontier_new_cell_capture_values.append(frontier_new_cell_capture)
+            frontier_new_cell_gap_values.append(frontier_new_cell_gap)
             coverage_opportunity_cells_values.append(opportunity_cells)
             coverage_opportunity_fraction_values.append(opportunity_fraction)
             coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
@@ -408,7 +546,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
             penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
             penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+            reward_uav_coverage_threshold_values.append(reward_terms["coverage_threshold"])
             reward_uav_scout_values.append(reward_terms["scout"])
+            reward_team_values.append(reward_terms["team"])
+            reward_all_survivors_found_values.append(reward_terms["all_survivors_found"])
             reward_uav_aux_values.append(reward_terms["aux"])
             frontier_abs_reward_share_values.append(reward_terms["frontier_abs_share"])
             if is_edge_step:
@@ -429,11 +570,23 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["action_norms"].append(action_norm)
             drone_stats["displacement_m"].append(displacement_m)
             drone_stats["new_coverage_cells"].append(new_cells)
+            drone_stats["raw_new_coverage_cells"].append(raw_new_cells)
             drone_stats["outside_footprint"].append(float(outside_footprint_fraction[drone_idx]))
             drone_stats["overlap"].append(overlap)
             drone_stats["expected_overlap"].append(expected_overlap)
             drone_stats["excess_overlap"].append(excess_overlap)
             drone_stats["inter_uav_overlap"].append(inter_uav_overlap)
+            drone_stats["any_history_revisit"].append(any_history_revisit)
+            drone_stats["own_history_revisit"].append(own_history_revisit)
+            drone_stats["teammate_history_revisit"].append(teammate_history_revisit)
+            drone_stats["own_only_revisit"].append(own_only_revisit)
+            drone_stats["teammate_only_revisit"].append(teammate_only_revisit)
+            drone_stats["shared_history_revisit"].append(shared_history_revisit)
+            drone_stats["unavoidable_revisit"].append(unavoidable_revisit)
+            drone_stats["avoidable_revisit"].append(avoidable_revisit)
+            drone_stats["frontier_expected_new_cells"].append(frontier_expected_cells)
+            drone_stats["frontier_new_cell_capture"].append(frontier_new_cell_capture)
+            drone_stats["frontier_new_cell_gap"].append(frontier_new_cell_gap)
             drone_stats["coverage_opportunity_cells"].append(opportunity_cells)
             drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
             drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
@@ -527,6 +680,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "action_norm": action_norm,
                     "displacement_m": displacement_m,
                     "new_coverage_cells": new_cells,
+                    "raw_new_coverage_cells": raw_new_cells,
                     "action_displacement_alignment": action_displacement_alignment,
                     "frontier_obs_distance": frontier_obs_distance,
                     "frontier_obs_vector_norm": frontier_obs_norm,
@@ -553,10 +707,24 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "overlap_penalty": reward_terms["overlap_penalty"],
                     "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
                     "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                    "coverage_threshold_reward": reward_terms["coverage_threshold"],
                     "scout_reward": reward_terms["scout"],
+                    "team_reward": reward_terms["team"],
+                    "all_survivors_reward": reward_terms["all_survivors_found"],
                     "aux_reward": reward_terms["aux"],
                     "overlap": overlap,
                     "excess_overlap": excess_overlap,
+                    "any_history_revisit": any_history_revisit,
+                    "own_history_revisit": own_history_revisit,
+                    "teammate_history_revisit": teammate_history_revisit,
+                    "own_only_revisit": own_only_revisit,
+                    "teammate_only_revisit": teammate_only_revisit,
+                    "shared_history_revisit": shared_history_revisit,
+                    "unavoidable_revisit": unavoidable_revisit,
+                    "avoidable_revisit": avoidable_revisit,
+                    "frontier_expected_new_cells": frontier_expected_cells,
+                    "frontier_new_cell_capture": frontier_new_cell_capture,
+                    "frontier_new_cell_gap": frontier_new_cell_gap,
                     "coverage_opportunity_cells": opportunity_cells,
                     "coverage_opportunity_fraction": opportunity_fraction,
                     "coverage_opportunity_available_fraction": opportunity_available_fraction,
@@ -576,6 +744,9 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "frontier_high_progress": float(frontier_progress_frac >= 0.50),
                 },
             )
+
+        if scenario.n_drones > 0:
+            individual_coverage_history |= current_claims
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         for survivor_idx, is_scouted in enumerate(scouted):
@@ -634,6 +805,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_action_frontier_intent": _finite_mean(action_frontier_intent_values),
         "avg_action_frontier_movement_gap": _finite_mean(action_frontier_movement_gap_values),
         "avg_new_coverage_cells": _finite_mean(new_coverage_cells_values),
+        "avg_raw_new_coverage_cells": _finite_mean(raw_new_coverage_cells_values),
         "avg_outside_footprint_fraction": _finite_mean(outside_footprint_values),
         "max_outside_footprint_fraction": max(outside_footprint_values) if outside_footprint_values else 0.0,
         "outside_footprint_step_frac_10": (
@@ -644,6 +816,17 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_expected_overlap_fraction": _finite_mean(expected_overlap_values),
         "avg_excess_overlap_fraction": _finite_mean(excess_overlap_values),
         "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav_overlap_values),
+        "avg_any_history_revisit_fraction": _finite_mean(any_history_revisit_values),
+        "avg_own_history_revisit_fraction": _finite_mean(own_history_revisit_values),
+        "avg_teammate_history_revisit_fraction": _finite_mean(teammate_history_revisit_values),
+        "avg_own_only_revisit_fraction": _finite_mean(own_only_revisit_values),
+        "avg_teammate_only_revisit_fraction": _finite_mean(teammate_only_revisit_values),
+        "avg_shared_history_revisit_fraction": _finite_mean(shared_history_revisit_values),
+        "avg_unavoidable_revisit_fraction": _finite_mean(unavoidable_revisit_values),
+        "avg_avoidable_revisit_fraction": _finite_mean(avoidable_revisit_values),
+        "avg_frontier_expected_new_cells": _finite_mean(frontier_expected_new_cells_values),
+        "avg_frontier_new_cell_capture_fraction": _finite_mean(frontier_new_cell_capture_values),
+        "avg_frontier_new_cell_gap": _finite_mean(frontier_new_cell_gap_values),
         "avg_coverage_opportunity_cells": _finite_mean(coverage_opportunity_cells_values),
         "avg_coverage_opportunity_fraction": _finite_mean(coverage_opportunity_fraction_values),
         "avg_coverage_opportunity_available_fraction": _finite_mean(
@@ -671,7 +854,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
         "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
         "avg_penalty_uav_outside_footprint": _finite_mean(penalty_uav_outside_footprint_values),
+        "avg_reward_uav_coverage_threshold": _finite_mean(reward_uav_coverage_threshold_values),
         "avg_reward_uav_scout": _finite_mean(reward_uav_scout_values),
+        "avg_reward_team": _finite_mean(reward_team_values),
+        "avg_reward_all_survivors_found": _finite_mean(reward_all_survivors_found_values),
         "avg_reward_uav_aux": _finite_mean(reward_uav_aux_values),
         "avg_frontier_abs_reward_share": _finite_mean(frontier_abs_reward_share_values),
         "frontier_high_progress_step_frac": (
@@ -698,6 +884,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "frontier_edge_outside_mean": _finite_mean(frontier_outside_edge_values),
         "frontier_interior_outside_mean": _finite_mean(frontier_outside_interior_values),
         "frontier_progress_new_cells_corr": _safe_corr(frontier_progress_values, new_coverage_cells_values),
+        "frontier_expected_raw_new_cells_corr": _safe_corr(
+            frontier_expected_new_cells_values,
+            raw_new_coverage_cells_values,
+        ),
         "frontier_progress_boundary_distance_corr": _safe_corr(
             frontier_progress_values,
             boundary_distance_m_values,
@@ -748,6 +938,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             float(np.mean([value >= 1.0 for value in new_coverage_cells_values]))
             if new_coverage_cells_values else 0.0
         ),
+        "raw_new_coverage_step_frac": (
+            float(np.mean([value >= 1.0 for value in raw_new_coverage_cells_values]))
+            if raw_new_coverage_cells_values else 0.0
+        ),
         "low_action_high_motion_frac": low_action_high_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "high_action_low_motion_frac": high_action_low_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "moving_no_new_coverage_frac": moving_no_new_coverage / diagnostic_steps if diagnostic_steps else 0.0,
@@ -783,6 +977,176 @@ def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) ->
     if arr.size == 1:
         return np.repeat(arr, n_drones)
     return np.resize(arr, n_drones)
+
+
+def _metric_scalar(scenario: WildfireSearchScenario, name: str) -> float:
+    value = getattr(scenario, name, None)
+    if value is None:
+        return 0.0
+    arr = value.detach().cpu().numpy().astype(float).reshape(-1)
+    return float(arr[0]) if arr.size else 0.0
+
+
+def _coverage_grid_geometry(scenario: WildfireSearchScenario) -> dict[str, Any]:
+    G = int(scenario.fire_grid_size)
+    cell_width = 2.0 * float(scenario.x_semidim) / max(G, 1)
+    cell_height = 2.0 * float(scenario.y_semidim) / max(G, 1)
+    return {
+        "G": G,
+        "cell_width": cell_width,
+        "cell_height": cell_height,
+        "xs": np.linspace(
+            -float(scenario.x_semidim) + cell_width / 2.0,
+            float(scenario.x_semidim) - cell_width / 2.0,
+            G,
+        ),
+        "ys": np.linspace(
+            -float(scenario.y_semidim) + cell_height / 2.0,
+            float(scenario.y_semidim) - cell_height / 2.0,
+            G,
+        ),
+    }
+
+
+def _footprint_claim_mask(
+    position: np.ndarray,
+    radius_sim: float,
+    geometry: dict[str, Any],
+) -> np.ndarray:
+    xs = np.asarray(geometry["xs"], dtype=float)
+    ys = np.asarray(geometry["ys"], dtype=float)
+    cell_width = float(geometry["cell_width"])
+    cell_height = float(geometry["cell_height"])
+    pos = np.asarray(position, dtype=float).reshape(-1)
+    dx = np.maximum(np.abs(xs.reshape(1, -1) - float(pos[0])) - cell_width / 2.0, 0.0)
+    dy = np.maximum(np.abs(ys.reshape(-1, 1) - float(pos[1])) - cell_height / 2.0, 0.0)
+    radius = max(float(radius_sim), 0.0)
+    return dx * dx + dy * dy <= radius * radius
+
+
+def _footprint_claims(
+    positions: np.ndarray,
+    radii_sim: np.ndarray,
+    geometry: dict[str, Any],
+) -> np.ndarray:
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 2)
+    radii_arr = np.asarray(radii_sim, dtype=float).reshape(-1)
+    G = int(geometry["G"])
+    if positions_arr.shape[0] == 0:
+        return np.zeros((0, G, G), dtype=bool)
+    xs = np.asarray(geometry["xs"], dtype=float)
+    ys = np.asarray(geometry["ys"], dtype=float)
+    cell_width = float(geometry["cell_width"])
+    cell_height = float(geometry["cell_height"])
+    if len(radii_arr) == 0:
+        radii = np.zeros(positions_arr.shape[0], dtype=float)
+    elif len(radii_arr) == positions_arr.shape[0]:
+        radii = radii_arr
+    else:
+        radii = np.resize(radii_arr, positions_arr.shape[0])
+    dx = np.maximum(
+        np.abs(xs.reshape(1, 1, G) - positions_arr[:, 0].reshape(-1, 1, 1))
+        - cell_width / 2.0,
+        0.0,
+    )
+    dy = np.maximum(
+        np.abs(ys.reshape(1, G, 1) - positions_arr[:, 1].reshape(-1, 1, 1))
+        - cell_height / 2.0,
+        0.0,
+    )
+    radii = np.maximum(radii.reshape(-1, 1, 1), 0.0)
+    return dx * dx + dy * dy <= radii * radii
+
+
+def _empty_revisit_decomposition(n_drones: int) -> dict[str, np.ndarray]:
+    n = max(int(n_drones), 0)
+    return {
+        "any_history": np.zeros(n, dtype=float),
+        "own_history": np.zeros(n, dtype=float),
+        "teammate_history": np.zeros(n, dtype=float),
+        "own_only": np.zeros(n, dtype=float),
+        "teammate_only": np.zeros(n, dtype=float),
+        "shared_history": np.zeros(n, dtype=float),
+    }
+
+
+def _revisit_decomposition(
+    current_claims: np.ndarray,
+    individual_history: np.ndarray,
+    team_history: np.ndarray,
+) -> dict[str, np.ndarray]:
+    claims = np.asarray(current_claims, dtype=bool)
+    if claims.ndim != 3 or claims.shape[0] == 0:
+        return _empty_revisit_decomposition(0)
+    history = np.asarray(individual_history, dtype=bool)
+    if history.shape != claims.shape:
+        history = np.zeros_like(claims, dtype=bool)
+    team = np.asarray(team_history, dtype=bool)
+    if team.shape != claims.shape[1:]:
+        team = history.any(axis=0)
+
+    out = _empty_revisit_decomposition(claims.shape[0])
+    for drone_idx, claim in enumerate(claims):
+        denom = float(max(int(claim.sum()), 1))
+        own = history[drone_idx]
+        if claims.shape[0] > 1:
+            teammate = np.delete(history, drone_idx, axis=0).any(axis=0)
+        else:
+            teammate = np.zeros_like(own, dtype=bool)
+        shared = own & teammate
+        out["any_history"][drone_idx] = float((claim & team).sum() / denom)
+        out["own_history"][drone_idx] = float((claim & own).sum() / denom)
+        out["teammate_history"][drone_idx] = float((claim & teammate).sum() / denom)
+        out["own_only"][drone_idx] = float((claim & own & ~teammate).sum() / denom)
+        out["teammate_only"][drone_idx] = float((claim & teammate & ~own).sum() / denom)
+        out["shared_history"][drone_idx] = float((claim & shared).sum() / denom)
+    return out
+
+
+def _frontier_expected_new_cells(
+    *,
+    scenario: WildfireSearchScenario,
+    geometry: dict[str, Any],
+    positions: np.ndarray,
+    footprint_radii_sim: np.ndarray,
+    pre_team_coverage: np.ndarray,
+    frontier_obs: np.ndarray,
+    max_step_sim: float,
+) -> np.ndarray:
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 2)
+    radii_arr = np.asarray(footprint_radii_sim, dtype=float).reshape(-1)
+    expected = np.zeros(positions_arr.shape[0], dtype=float)
+    if positions_arr.shape[0] == 0:
+        return expected
+    coverage = np.asarray(pre_team_coverage, dtype=bool)
+    candidate_positions: list[np.ndarray] = []
+    candidate_radii: list[float] = []
+    candidate_drones: list[int] = []
+    for drone_idx, pos in enumerate(positions_arr):
+        candidates = _valid_frontier_candidates(
+            _frontier_candidates_for_drone(scenario, frontier_obs, drone_idx)
+        )
+        for row in candidates:
+            direction = np.asarray(row[:2], dtype=float)
+            norm = float(np.linalg.norm(direction))
+            if norm <= 1e-12:
+                continue
+            candidate_positions.append(pos + direction / norm * max(float(max_step_sim), 0.0))
+            candidate_radii.append(
+                float(radii_arr[min(drone_idx, len(radii_arr) - 1)]) if len(radii_arr) else 0.0
+            )
+            candidate_drones.append(drone_idx)
+    if not candidate_positions:
+        return expected
+    masks = _footprint_claims(
+        np.asarray(candidate_positions, dtype=float),
+        np.asarray(candidate_radii, dtype=float),
+        geometry,
+    )
+    values = (masks & ~coverage.reshape(1, *coverage.shape)).sum(axis=(1, 2)).astype(float)
+    for drone_idx, value in zip(candidate_drones, values):
+        expected[int(drone_idx)] = max(float(expected[int(drone_idx)]), float(value))
+    return expected
 
 
 def _empty_coverage_signal_snapshot(n_drones: int) -> dict[str, np.ndarray]:
@@ -1317,11 +1681,23 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "alignments_new_cov": [],
         "alignments_no_new_cov": [],
         "new_coverage_cells": [],
+        "raw_new_coverage_cells": [],
         "outside_footprint": [],
         "overlap": [],
         "expected_overlap": [],
         "excess_overlap": [],
         "inter_uav_overlap": [],
+        "any_history_revisit": [],
+        "own_history_revisit": [],
+        "teammate_history_revisit": [],
+        "own_only_revisit": [],
+        "teammate_only_revisit": [],
+        "shared_history_revisit": [],
+        "unavoidable_revisit": [],
+        "avoidable_revisit": [],
+        "frontier_expected_new_cells": [],
+        "frontier_new_cell_capture": [],
+        "frontier_new_cell_gap": [],
         "coverage_opportunity_cells": [],
         "coverage_opportunity_fraction": [],
         "coverage_opportunity_available_fraction": [],
@@ -1348,7 +1724,10 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
             "outside_footprint_penalty": [],
+            "coverage_threshold": [],
             "scout": [],
+            "team": [],
+            "all_survivors_found": [],
             "aux": [],
             "frontier_abs_share": [],
         },
@@ -1387,8 +1766,20 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         meters_per_sim = 1.0 / max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
         final_position_m = (np.asarray(positions[-1], dtype=float) * meters_per_sim).round(6).tolist()
     new_cells = stats["new_coverage_cells"]
+    raw_new_cells = stats["raw_new_coverage_cells"]
     excess = stats["excess_overlap"]
     inter_uav = stats["inter_uav_overlap"]
+    any_history_revisit = stats["any_history_revisit"]
+    own_history_revisit = stats["own_history_revisit"]
+    teammate_history_revisit = stats["teammate_history_revisit"]
+    own_only_revisit = stats["own_only_revisit"]
+    teammate_only_revisit = stats["teammate_only_revisit"]
+    shared_history_revisit = stats["shared_history_revisit"]
+    unavoidable_revisit = stats["unavoidable_revisit"]
+    avoidable_revisit = stats["avoidable_revisit"]
+    frontier_expected_new_cells = stats["frontier_expected_new_cells"]
+    frontier_new_cell_capture = stats["frontier_new_cell_capture"]
+    frontier_new_cell_gap = stats["frontier_new_cell_gap"]
     opportunity_cells = stats["coverage_opportunity_cells"]
     opportunity_fraction = stats["coverage_opportunity_fraction"]
     opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
@@ -1428,10 +1819,16 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_action_frontier_intent": _finite_mean(action_frontier_intent),
         "avg_action_frontier_movement_gap": _finite_mean(action_frontier_gap),
         "avg_new_coverage_cells": _finite_mean(new_cells),
+        "avg_raw_new_coverage_cells": _finite_mean(raw_new_cells),
         "total_new_coverage_cells": float(np.sum(new_cells)) if new_cells else 0.0,
+        "total_raw_new_coverage_cells": float(np.sum(raw_new_cells)) if raw_new_cells else 0.0,
         "new_coverage_step_frac": (
             float(np.mean([value >= 1.0 for value in new_cells]))
             if new_cells else 0.0
+        ),
+        "raw_new_coverage_step_frac": (
+            float(np.mean([value >= 1.0 for value in raw_new_cells]))
+            if raw_new_cells else 0.0
         ),
         "avg_outside_footprint_fraction": _finite_mean(outside),
         "max_outside_footprint_fraction": max(outside) if outside else 0.0,
@@ -1439,6 +1836,17 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_expected_overlap_fraction": _finite_mean(stats["expected_overlap"]),
         "avg_excess_overlap_fraction": _finite_mean(excess),
         "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav),
+        "avg_any_history_revisit_fraction": _finite_mean(any_history_revisit),
+        "avg_own_history_revisit_fraction": _finite_mean(own_history_revisit),
+        "avg_teammate_history_revisit_fraction": _finite_mean(teammate_history_revisit),
+        "avg_own_only_revisit_fraction": _finite_mean(own_only_revisit),
+        "avg_teammate_only_revisit_fraction": _finite_mean(teammate_only_revisit),
+        "avg_shared_history_revisit_fraction": _finite_mean(shared_history_revisit),
+        "avg_unavoidable_revisit_fraction": _finite_mean(unavoidable_revisit),
+        "avg_avoidable_revisit_fraction": _finite_mean(avoidable_revisit),
+        "avg_frontier_expected_new_cells": _finite_mean(frontier_expected_new_cells),
+        "avg_frontier_new_cell_capture_fraction": _finite_mean(frontier_new_cell_capture),
+        "avg_frontier_new_cell_gap": _finite_mean(frontier_new_cell_gap),
         "avg_coverage_opportunity_cells": _finite_mean(opportunity_cells),
         "avg_coverage_opportunity_fraction": _finite_mean(opportunity_fraction),
         "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
@@ -1460,7 +1868,10 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
         "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
         "avg_penalty_uav_outside_footprint": _finite_mean(reward_terms["outside_footprint_penalty"]),
+        "avg_reward_uav_coverage_threshold": _finite_mean(reward_terms["coverage_threshold"]),
         "avg_reward_uav_scout": _finite_mean(reward_terms["scout"]),
+        "avg_reward_team": _finite_mean(reward_terms["team"]),
+        "avg_reward_all_survivors_found": _finite_mean(reward_terms["all_survivors_found"]),
         "avg_reward_uav_aux": _finite_mean(reward_terms["aux"]),
         "avg_frontier_abs_reward_share": _finite_mean(reward_terms["frontier_abs_share"]),
         "frontier_high_progress_step_frac": high_frontier / steps if steps else 0.0,
@@ -1831,6 +2242,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             row["avg_action_frontier_movement_gap"] for row in rows
         ]),
         "mean_new_coverage_cells": _finite_mean([row["avg_new_coverage_cells"] for row in rows]),
+        "mean_raw_new_coverage_cells": _finite_mean([
+            row["avg_raw_new_coverage_cells"] for row in rows
+        ]),
         "mean_outside_footprint_fraction": _finite_mean([
             row["avg_outside_footprint_fraction"] for row in rows
         ]),
@@ -1846,6 +2260,39 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_inter_uav_overlap_fraction": _finite_mean([
             row["avg_inter_uav_overlap_fraction"] for row in rows
+        ]),
+        "mean_any_history_revisit_fraction": _finite_mean([
+            row["avg_any_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_own_history_revisit_fraction": _finite_mean([
+            row["avg_own_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_teammate_history_revisit_fraction": _finite_mean([
+            row["avg_teammate_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_own_only_revisit_fraction": _finite_mean([
+            row["avg_own_only_revisit_fraction"] for row in rows
+        ]),
+        "mean_teammate_only_revisit_fraction": _finite_mean([
+            row["avg_teammate_only_revisit_fraction"] for row in rows
+        ]),
+        "mean_shared_history_revisit_fraction": _finite_mean([
+            row["avg_shared_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_unavoidable_revisit_fraction": _finite_mean([
+            row["avg_unavoidable_revisit_fraction"] for row in rows
+        ]),
+        "mean_avoidable_revisit_fraction": _finite_mean([
+            row["avg_avoidable_revisit_fraction"] for row in rows
+        ]),
+        "mean_frontier_expected_new_cells": _finite_mean([
+            row["avg_frontier_expected_new_cells"] for row in rows
+        ]),
+        "mean_frontier_new_cell_capture_fraction": _finite_mean([
+            row["avg_frontier_new_cell_capture_fraction"] for row in rows
+        ]),
+        "mean_frontier_new_cell_gap": _finite_mean([
+            row["avg_frontier_new_cell_gap"] for row in rows
         ]),
         "mean_coverage_opportunity_cells": _finite_mean([
             row["avg_coverage_opportunity_cells"] for row in rows
@@ -1922,8 +2369,17 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_penalty_uav_outside_footprint": _finite_mean([
             row["avg_penalty_uav_outside_footprint"] for row in rows
         ]),
+        "mean_reward_uav_coverage_threshold": _finite_mean([
+            row["avg_reward_uav_coverage_threshold"] for row in rows
+        ]),
         "mean_reward_uav_scout": _finite_mean([
             row["avg_reward_uav_scout"] for row in rows
+        ]),
+        "mean_reward_team": _finite_mean([
+            row["avg_reward_team"] for row in rows
+        ]),
+        "mean_reward_all_survivors_found": _finite_mean([
+            row["avg_reward_all_survivors_found"] for row in rows
         ]),
         "mean_reward_uav_aux": _finite_mean([
             row["avg_reward_uav_aux"] for row in rows
@@ -1970,6 +2426,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_frontier_progress_new_cells_corr": _finite_mean([
             row["frontier_progress_new_cells_corr"] for row in rows
         ]),
+        "mean_frontier_expected_raw_new_cells_corr": _finite_mean([
+            row["frontier_expected_raw_new_cells_corr"] for row in rows
+        ]),
         "mean_frontier_progress_boundary_distance_corr": _finite_mean([
             row["frontier_progress_boundary_distance_corr"] for row in rows
         ]),
@@ -2005,6 +2464,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_overlap_step_frac_60": _finite_mean([row["overlap_step_frac_60"] for row in rows]),
         "mean_new_coverage_step_frac": _finite_mean([row["new_coverage_step_frac"] for row in rows]),
+        "mean_raw_new_coverage_step_frac": _finite_mean([
+            row["raw_new_coverage_step_frac"] for row in rows
+        ]),
         "mean_low_action_high_motion_frac": _finite_mean([
             row["low_action_high_motion_frac"] for row in rows
         ]),
@@ -2064,13 +2526,27 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_action_frontier_intent",
         "avg_action_frontier_movement_gap",
         "avg_new_coverage_cells",
+        "avg_raw_new_coverage_cells",
         "total_new_coverage_cells",
+        "total_raw_new_coverage_cells",
         "new_coverage_step_frac",
+        "raw_new_coverage_step_frac",
         "avg_outside_footprint_fraction",
         "avg_overlap_fraction",
         "avg_expected_overlap_fraction",
         "avg_excess_overlap_fraction",
         "avg_inter_uav_overlap_fraction",
+        "avg_any_history_revisit_fraction",
+        "avg_own_history_revisit_fraction",
+        "avg_teammate_history_revisit_fraction",
+        "avg_own_only_revisit_fraction",
+        "avg_teammate_only_revisit_fraction",
+        "avg_shared_history_revisit_fraction",
+        "avg_unavoidable_revisit_fraction",
+        "avg_avoidable_revisit_fraction",
+        "avg_frontier_expected_new_cells",
+        "avg_frontier_new_cell_capture_fraction",
+        "avg_frontier_new_cell_gap",
         "avg_coverage_opportunity_cells",
         "avg_coverage_opportunity_fraction",
         "avg_coverage_opportunity_available_fraction",
@@ -2092,7 +2568,10 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_penalty_uav_overlap",
         "avg_penalty_uav_inter_overlap",
         "avg_penalty_uav_outside_footprint",
+        "avg_reward_uav_coverage_threshold",
         "avg_reward_uav_scout",
+        "avg_reward_team",
+        "avg_reward_all_survivors_found",
         "avg_reward_uav_aux",
         "avg_frontier_abs_reward_share",
         "frontier_high_progress_step_frac",
@@ -2153,11 +2632,23 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "coverage": "final_coverage_fraction",
         "move_m": "avg_displacement_m",
         "new_cells": "avg_new_coverage_cells",
+        "raw_new_cells": "avg_raw_new_coverage_cells",
         "outside": "avg_outside_footprint_fraction",
         "overlap": "avg_overlap_fraction",
         "expected_overlap": "avg_expected_overlap_fraction",
         "excess_overlap": "avg_excess_overlap_fraction",
         "inter_uav_overlap": "avg_inter_uav_overlap_fraction",
+        "any_revisit": "avg_any_history_revisit_fraction",
+        "own_revisit": "avg_own_history_revisit_fraction",
+        "team_revisit": "avg_teammate_history_revisit_fraction",
+        "own_only_revisit": "avg_own_only_revisit_fraction",
+        "team_only_revisit": "avg_teammate_only_revisit_fraction",
+        "shared_revisit": "avg_shared_history_revisit_fraction",
+        "unavoidable_revisit": "avg_unavoidable_revisit_fraction",
+        "avoidable_revisit": "avg_avoidable_revisit_fraction",
+        "frontier_expected_new": "avg_frontier_expected_new_cells",
+        "frontier_new_capture": "avg_frontier_new_cell_capture_fraction",
+        "frontier_new_gap": "avg_frontier_new_cell_gap",
         "coverage_opportunity_cells": "avg_coverage_opportunity_cells",
         "coverage_opportunity": "avg_coverage_opportunity_fraction",
         "coverage_opportunity_available": "avg_coverage_opportunity_available_fraction",
@@ -2235,12 +2726,18 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"path={drone['path_length_m']:.0f}m "
             f"move={drone['avg_displacement_m']:.1f}m "
             f"new={drone['avg_new_coverage_cells']:.1f} "
+            f"raw={drone['avg_raw_new_coverage_cells']:.1f} "
             f"opp={drone['avg_coverage_opportunity_fraction']:.2f} "
             f"opp_avail={drone['avg_coverage_opportunity_available_fraction']:.2f} "
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
             f"excess={drone['avg_excess_overlap_fraction']:.2f} "
+            f"own_rev={drone['avg_own_history_revisit_fraction']:.2f} "
+            f"team_rev={drone['avg_teammate_history_revisit_fraction']:.2f} "
+            f"avoid_rev={drone['avg_avoidable_revisit_fraction']:.2f} "
             f"inter={drone['avg_inter_uav_overlap_fraction']:.2f} "
+            f"front_exp={drone['avg_frontier_expected_new_cells']:.1f} "
+            f"front_cap={drone['avg_frontier_new_cell_capture_fraction']:.2f} "
             f"front={drone['avg_frontier_alignment']:.2f}/"
             f"{drone['avg_frontier_progress_fraction']:.2f}/"
             f"{drone['avg_frontier_uncovered_ratio']:.2f} "
@@ -2263,13 +2760,19 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"path={drone['mean_path_length_m']:.1f}m "
             f"move={drone['mean_avg_displacement_m']:.2f}m "
             f"new_cells={drone['mean_avg_new_coverage_cells']:.1f} "
+            f"raw_new={drone['mean_avg_raw_new_coverage_cells']:.1f} "
             f"opp={drone['mean_avg_coverage_opportunity_fraction']:.3f} "
             f"opp_avail={drone['mean_avg_coverage_opportunity_available_fraction']:.3f} "
             f"edge={drone['mean_edge_step_frac']:.3f} "
             f"corner={drone['mean_corner_step_frac']:.3f} "
             f"outside={drone['mean_avg_outside_footprint_fraction']:.3f} "
             f"excess={drone['mean_avg_excess_overlap_fraction']:.3f} "
+            f"own_rev={drone['mean_avg_own_history_revisit_fraction']:.3f} "
+            f"team_rev={drone['mean_avg_teammate_history_revisit_fraction']:.3f} "
+            f"avoid_rev={drone['mean_avg_avoidable_revisit_fraction']:.3f} "
             f"inter={drone['mean_avg_inter_uav_overlap_fraction']:.3f} "
+            f"front_exp={drone['mean_avg_frontier_expected_new_cells']:.1f} "
+            f"front_cap={drone['mean_avg_frontier_new_cell_capture_fraction']:.3f} "
             f"front={drone['mean_avg_frontier_alignment']:.3f}/"
             f"{drone['mean_avg_frontier_progress_fraction']:.3f}/"
             f"{drone['mean_avg_frontier_uncovered_ratio']:.3f} "
@@ -2294,12 +2797,18 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"cov={item.get('coverage_fraction', math.nan):.3f} "
             f"move={item.get('displacement_m', math.nan):.2f}m "
             f"new={item.get('new_coverage_cells', math.nan):.1f} "
+            f"raw={item.get('raw_new_coverage_cells', math.nan):.1f} "
             f"opp={item.get('coverage_opportunity_fraction', math.nan):.3f} "
             f"opp_avail={item.get('coverage_opportunity_available_fraction', math.nan):.3f} "
             f"edge={item.get('edge_step', math.nan):.3f} "
             f"overlap={item.get('overlap', math.nan):.3f} "
             f"excess={item.get('excess_overlap', math.nan):.3f} "
+            f"own_rev={item.get('own_history_revisit', math.nan):.3f} "
+            f"team_rev={item.get('teammate_history_revisit', math.nan):.3f} "
+            f"avoid_rev={item.get('avoidable_revisit', math.nan):.3f} "
             f"outside={item.get('outside_footprint', math.nan):.3f} "
+            f"front_exp={item.get('frontier_expected_new_cells', math.nan):.1f} "
+            f"front_cap={item.get('frontier_new_cell_capture', math.nan):.3f} "
             f"moving_nonew={item.get('moving_no_new_coverage', math.nan):.3f} "
             f"obs_dist={item.get('frontier_obs_distance', math.nan):.3f} "
             f"f_loc={item.get('frontier_local_coverage_cos', math.nan):.3f} "
@@ -2474,7 +2983,10 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("coverage", "coverage_reward", "#4f7cff", False),
         ("move cov", "move_coverage_reward", "#36a269", False),
         ("frontier", "frontier_reward", "#8a5cf6", False),
+        ("coverage95", "coverage_threshold_reward", "#0f9d58", False),
         ("scout", "scout_reward", "#d4a72c", False),
+        ("team", "team_reward", "#2d8cff", False),
+        ("all found", "all_survivors_reward", "#18a999", False),
         ("overlap pen", "overlap_penalty", "#d44a3a", True),
         ("inter pen", "inter_uav_overlap_penalty", "#e07b39", True),
         ("outside pen", "outside_footprint_penalty", "#20242c", True),
@@ -2565,6 +3077,42 @@ def _plot_time_bins_coverage_opportunity(ax: Any, summary: dict[str, Any]) -> No
     lines = line_cells + line_fraction + line_available
     ax.legend(lines, [line.get_label() for line in lines], fontsize=8, frameon=False)
     ax.set_title("Time-Bin Coverage Opportunity (mean)", fontsize=10)
+
+
+def _plot_time_bins_revisit_sources(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Revisit Sources (mean)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("own only", "own_only_revisit", "#4f7cff"),
+        ("teammate only", "teammate_only_revisit", "#36a269"),
+        ("shared old", "shared_history_revisit", "#8a5cf6"),
+        ("avoidable", "avoidable_revisit", "#d44a3a"),
+        ("capture", "frontier_new_cell_capture", "#20242c"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(
+            centers,
+            values,
+            marker="o",
+            linewidth=1.3,
+            label=label,
+            color=color,
+        )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction")
+    ax.set_title("Time-Bin Revisit Sources (mean)", fontsize=10)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=7, frameon=False, ncol=2)
 
 
 def _plot_time_bins_scouts(ax: Any, summary: dict[str, Any]) -> None:
@@ -2851,8 +3399,9 @@ def write_distribution_plots(
     _plot_time_bins_frontier_inputs(axes_flat[32], summary)
     _plot_time_bins_frontier_reward_yield(axes_flat[33], summary)
     _plot_time_bins_coverage_opportunity(axes_flat[34], summary)
+    _plot_time_bins_revisit_sources(axes_flat[35], summary)
 
-    for ax in axes_flat[35:]:
+    for ax in axes_flat[36:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -2951,7 +3500,9 @@ def main() -> None:
             f"move={row['avg_displacement_m']:.2f}m "
             f"align={row['avg_action_displacement_alignment']:.3f} "
             f"new_cells={row['avg_new_coverage_cells']:.1f} "
+            f"raw_new={row['avg_raw_new_coverage_cells']:.1f} "
             f"new_frac={row['new_coverage_step_frac']:.2f} "
+            f"raw_frac={row['raw_new_coverage_step_frac']:.2f} "
             f"opp={row['avg_coverage_opportunity_fraction']:.2f} "
             f"opp_avail={row['avg_coverage_opportunity_available_fraction']:.2f} "
             f"edge={row['edge_step_frac']:.2f} "
@@ -2961,6 +3512,11 @@ def main() -> None:
             f"exp_ov={row['avg_expected_overlap_fraction']:.2f} "
             f"excess_ov={row['avg_excess_overlap_fraction']:.2f} "
             f"inter_ov={row['avg_inter_uav_overlap_fraction']:.2f} "
+            f"own_rev={row['avg_own_history_revisit_fraction']:.2f} "
+            f"team_rev={row['avg_teammate_history_revisit_fraction']:.2f} "
+            f"avoid_rev={row['avg_avoidable_revisit_fraction']:.2f} "
+            f"front_exp={row['avg_frontier_expected_new_cells']:.1f} "
+            f"front_cap={row['avg_frontier_new_cell_capture_fraction']:.2f} "
             f"front={row['avg_frontier_alignment']:.2f}/"
             f"{row['avg_frontier_progress_fraction']:.2f}/"
             f"{row['avg_frontier_uncovered_ratio']:.2f} "
@@ -3002,7 +3558,9 @@ def main() -> None:
         f"align_new={summary['mean_action_displacement_alignment_new_cov']:.3f} "
         f"align_nonew={summary['mean_action_displacement_alignment_no_new_cov']:.3f} "
         f"new_cells={summary['mean_new_coverage_cells']:.1f} "
-        f"new_step_frac={summary['mean_new_coverage_step_frac']:.3f}"
+        f"raw_new={summary['mean_raw_new_coverage_cells']:.1f} "
+        f"new_step_frac={summary['mean_new_coverage_step_frac']:.3f} "
+        f"raw_new_step_frac={summary['mean_raw_new_coverage_step_frac']:.3f}"
     )
     print(
         "frontier observation/action means: "
@@ -3043,6 +3601,16 @@ def main() -> None:
         f"expected_overlap={summary['mean_expected_overlap_fraction']:.3f} "
         f"excess_overlap={summary['mean_excess_overlap_fraction']:.3f} "
         f"inter_uav_overlap={summary['mean_inter_uav_overlap_fraction']:.3f} "
+        f"own_revisit={summary['mean_own_history_revisit_fraction']:.3f} "
+        f"teammate_revisit={summary['mean_teammate_history_revisit_fraction']:.3f} "
+        f"own_only={summary['mean_own_only_revisit_fraction']:.3f} "
+        f"teammate_only={summary['mean_teammate_only_revisit_fraction']:.3f} "
+        f"shared_old={summary['mean_shared_history_revisit_fraction']:.3f} "
+        f"unavoidable={summary['mean_unavoidable_revisit_fraction']:.3f} "
+        f"avoidable={summary['mean_avoidable_revisit_fraction']:.3f} "
+        f"frontier_expected_new={summary['mean_frontier_expected_new_cells']:.1f} "
+        f"frontier_capture={summary['mean_frontier_new_cell_capture_fraction']:.3f} "
+        f"frontier_gap={summary['mean_frontier_new_cell_gap']:.1f} "
         f"opp_cells={summary['mean_coverage_opportunity_cells']:.1f} "
         f"opp_frac={summary['mean_coverage_opportunity_fraction']:.3f} "
         f"opp_avail={summary['mean_coverage_opportunity_available_fraction']:.3f} "
@@ -3059,10 +3627,13 @@ def main() -> None:
         f"coverage={summary['mean_reward_uav_coverage']:.4f} "
         f"move_cov={summary['mean_reward_uav_move_coverage']:.4f} "
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
+        f"coverage95={summary['mean_reward_uav_coverage_threshold']:.4f} "
         f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
         f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
         f"outside_pen={summary['mean_penalty_uav_outside_footprint']:.4f} "
         f"scout={summary['mean_reward_uav_scout']:.4f} "
+        f"team={summary['mean_reward_team']:.4f} "
+        f"all_found={summary['mean_reward_all_survivors_found']:.4f} "
         f"aux_net={summary['mean_reward_uav_aux']:.4f} "
         f"frontier_abs_share={summary['mean_frontier_abs_reward_share']:.3f}"
     )

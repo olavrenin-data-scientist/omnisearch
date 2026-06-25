@@ -181,12 +181,15 @@ def build_args(
     uav_no_global_coverage_obs: bool = False,
     uav_coverage_only: bool = False,
     uav_found_survivor_reward: float | None = None,
+    uav_all_survivors_reward: float | None = None,
     uav_time_penalty: float | None = None,
     uav_coverage_reward: float | None = None,
     uav_coverage_normalization: str = "map",
     uav_move_coverage_reward: float | None = None,
     uav_move_coverage_normalization: str = "raw",
     uav_move_coverage_cap: float = 0.1,
+    uav_coverage_threshold_reward: float | None = None,
+    uav_coverage_threshold_fraction: float = 0.95,
     uav_coverage_opportunity_reward: float | None = None,
     uav_coverage_opportunity_cap: float = 1.0,
     uav_frontier_alignment_reward: float | None = None,
@@ -312,6 +315,11 @@ def build_args(
     if uav_move_coverage_reward < 0.0:
         raise ValueError("uav_move_coverage_reward must be nonnegative")
     uav_move_coverage_cap = max(float(uav_move_coverage_cap), 0.0)
+    if uav_coverage_threshold_reward is not None and float(uav_coverage_threshold_reward) < 0.0:
+        raise ValueError("uav_coverage_threshold_reward must be nonnegative")
+    uav_coverage_threshold_fraction = float(uav_coverage_threshold_fraction)
+    if not 0.0 <= uav_coverage_threshold_fraction <= 1.0:
+        raise ValueError("uav_coverage_threshold_fraction must be in [0, 1]")
     uav_coverage_opportunity_cap = max(float(uav_coverage_opportunity_cap), 0.0)
     uav_overlap_penalty = float(uav_overlap_penalty)
     if uav_overlap_penalty < 0.0:
@@ -602,12 +610,20 @@ def build_args(
         scenario_kwargs.update(distance_kwargs)
     if uav_survivor_diagnostic:
         found_reward = 0.0
+        all_survivors_reward = 0.0
         scout_reward = 0.0 if uav_coverage_only else 2.0
         time_penalty = 0.0
         if uav_found_survivor_reward is not None:
             found_reward = float(uav_found_survivor_reward)
+        if uav_all_survivors_reward is not None:
+            all_survivors_reward = float(uav_all_survivors_reward)
         if uav_time_penalty is not None:
             time_penalty = float(uav_time_penalty)
+        coverage_threshold_reward = (
+            0.0
+            if uav_coverage_threshold_reward is None
+            else float(uav_coverage_threshold_reward)
+        )
         scenario_kwargs.update({
             "n_drones": uav_diagnostic_drones,
             "n_ground": 0,
@@ -617,6 +633,7 @@ def build_args(
             "disable_fire": True,
             "comms_dropout": 0.0,
             "r_found_survivor": found_reward,
+            "r_all_survivors_found": all_survivors_reward,
             "r_drone_scout": scout_reward,
             "r_ground_confirm": 0.0,
             "r_drone_shaping": 0.0,
@@ -634,6 +651,8 @@ def build_args(
             "r_uav_move_coverage": uav_move_coverage_reward,
             "uav_move_coverage_normalization": uav_move_coverage_normalization,
             "r_uav_move_coverage_cap": uav_move_coverage_cap,
+            "r_uav_coverage_threshold": coverage_threshold_reward,
+            "uav_coverage_threshold_fraction": uav_coverage_threshold_fraction,
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_overlap": uav_overlap_penalty,
             "uav_overlap_allowed": uav_overlap_allowed,
@@ -811,6 +830,9 @@ def main():
                    help="In UAV diagnostic mode, keep local coverage observation but disable the default global coverage map.")
     p.add_argument("--uav-found-survivor-reward", type=float, default=None,
                    help="Override r_found_survivor in UAV diagnostic mode.")
+    p.add_argument("--uav-all-survivors-reward", type=float, default=None,
+                   help="One-time team reward when the final survivor is found in UAV diagnostic mode. "
+                        "Omit for 0; pass a positive value to add an explicit mission-completion bonus.")
     p.add_argument("--uav-time-penalty", type=float, default=None,
                    help="Override r_time_penalty in UAV diagnostic mode.")
     p.add_argument("--uav-coverage-reward", type=float, default=None,
@@ -830,6 +852,11 @@ def main():
                         "(new_cells / one-step reachable uncovered cells).")
     p.add_argument("--uav-move-coverage-cap", type=float, default=0.1,
                    help="Per-drone, per-step cap for the UAV movement-coverage reward.")
+    p.add_argument("--uav-coverage-threshold-reward", type=float, default=None,
+                   help="One-time team reward when UAV coverage crosses the threshold fraction. "
+                        "Omit for 0 in UAV diagnostic mode.")
+    p.add_argument("--uav-coverage-threshold-fraction", type=float, default=0.95,
+                   help="Coverage fraction that triggers --uav-coverage-threshold-reward. Default 0.95.")
     p.add_argument("--uav-coverage-opportunity-reward", type=float, default=None,
                    help=argparse.SUPPRESS)
     p.add_argument("--uav-coverage-opportunity-cap", type=float, default=1.0,
@@ -944,10 +971,19 @@ def main():
         p.error("--uav-coverage-reward must be nonnegative")
     if args.uav_found_survivor_reward is not None and args.uav_found_survivor_reward < 0.0:
         p.error("--uav-found-survivor-reward must be nonnegative")
+    if args.uav_all_survivors_reward is not None and args.uav_all_survivors_reward < 0.0:
+        p.error("--uav-all-survivors-reward must be nonnegative")
     if args.uav_move_coverage_reward is not None and args.uav_move_coverage_reward < 0.0:
         p.error("--uav-move-coverage-reward must be nonnegative")
     if args.uav_move_coverage_cap < 0.0:
         p.error("--uav-move-coverage-cap must be nonnegative")
+    if (
+        args.uav_coverage_threshold_reward is not None
+        and args.uav_coverage_threshold_reward < 0.0
+    ):
+        p.error("--uav-coverage-threshold-reward must be nonnegative")
+    if not 0.0 <= args.uav_coverage_threshold_fraction <= 1.0:
+        p.error("--uav-coverage-threshold-fraction must be in [0, 1]")
     if args.uav_coverage_opportunity_reward is not None and args.uav_coverage_opportunity_reward < 0.0:
         p.error("--uav-coverage-opportunity-reward must be nonnegative")
     if (
@@ -1153,11 +1189,14 @@ def main():
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
+    print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_coverage_normalization: {args.uav_coverage_normalization}")
     print(f" uav_move_coverage_reward: {args.uav_move_coverage_reward}")
     print(f" uav_move_coverage_normalization: {args.uav_move_coverage_normalization}")
     print(f" uav_move_coverage_cap: {args.uav_move_coverage_cap}")
+    print(f" uav_coverage_threshold_reward: {args.uav_coverage_threshold_reward}")
+    print(f" uav_coverage_threshold_fraction: {args.uav_coverage_threshold_fraction}")
     print(f" uav_coverage_opportunity_cap: {args.uav_coverage_opportunity_cap}")
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
@@ -1222,12 +1261,15 @@ def main():
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
         uav_coverage_only = args.uav_coverage_only,
         uav_found_survivor_reward = args.uav_found_survivor_reward,
+        uav_all_survivors_reward = args.uav_all_survivors_reward,
         uav_time_penalty = args.uav_time_penalty,
         uav_coverage_reward = args.uav_coverage_reward,
         uav_coverage_normalization = args.uav_coverage_normalization,
         uav_move_coverage_reward = args.uav_move_coverage_reward,
         uav_move_coverage_normalization = args.uav_move_coverage_normalization,
         uav_move_coverage_cap = args.uav_move_coverage_cap,
+        uav_coverage_threshold_reward = args.uav_coverage_threshold_reward,
+        uav_coverage_threshold_fraction = args.uav_coverage_threshold_fraction,
         uav_coverage_opportunity_reward = args.uav_coverage_opportunity_reward,
         uav_coverage_opportunity_cap = args.uav_coverage_opportunity_cap,
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
