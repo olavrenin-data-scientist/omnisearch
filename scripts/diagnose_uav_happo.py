@@ -30,6 +30,20 @@ from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
 
 TIME_BIN_COUNT = 5
+COUNTERFACTUAL_CANDIDATE_DIRECTIONS = np.asarray(
+    [
+        [1.0, 0.0],
+        [math.sqrt(0.5), math.sqrt(0.5)],
+        [0.0, 1.0],
+        [-math.sqrt(0.5), math.sqrt(0.5)],
+        [-1.0, 0.0],
+        [-math.sqrt(0.5), -math.sqrt(0.5)],
+        [0.0, -1.0],
+        [math.sqrt(0.5), -math.sqrt(0.5)],
+        [0.0, 0.0],
+    ],
+    dtype=float,
+)
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -137,6 +151,19 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     frontier_expected_new_cells_values: list[float] = []
     frontier_new_cell_capture_values: list[float] = []
     frontier_new_cell_gap_values: list[float] = []
+    candidate_best_new_cells_values: list[float] = []
+    candidate_capture_fraction_values: list[float] = []
+    candidate_new_cell_regret_values: list[float] = []
+    candidate_best_new_overlap_values: list[float] = []
+    candidate_best_useful_overlap_values: list[float] = []
+    candidate_avoidable_overlap_values: list[float] = []
+    candidate_action_rank_values: list[float] = []
+    candidate_movement_rank_values: list[float] = []
+    candidate_action_capture_values: list[float] = []
+    candidate_movement_capture_values: list[float] = []
+    candidate_action_best_alignment_values: list[float] = []
+    candidate_movement_best_alignment_values: list[float] = []
+    candidate_no_opportunity_values: list[float] = []
     frontier_alignment_values: list[float] = []
     frontier_progress_values: list[float] = []
     frontier_uncovered_ratio_values: list[float] = []
@@ -247,10 +274,19 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 frontier_obs=frontier_obs,
                 max_step_sim=max_step_sim,
             )
+            counterfactual = _counterfactual_move_diagnostics(
+                scenario=scenario,
+                geometry=coverage_geometry,
+                positions=pre_drone_pos_array,
+                footprint_radii_sim=pre_footprint_radius_sim,
+                pre_team_coverage=pre_team_coverage,
+                max_step_sim=max_step_sim,
+            )
         else:
             frontier_obs = np.zeros((0, 4), dtype=float)
             coverage_signal = _empty_coverage_signal_snapshot(0)
             frontier_expected_new_cells = np.zeros(0, dtype=float)
+            counterfactual = _empty_counterfactual_move_diagnostics(0)
         frontier_pairwise = _pairwise_direction_metrics(frontier_obs[:, :2])
         local_pairwise = _pairwise_direction_metrics(coverage_signal["local_vec"])
         global_pairwise = _pairwise_direction_metrics(coverage_signal["global_vec"])
@@ -422,6 +458,38 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 if frontier_expected_cells > 1e-9
                 else math.nan
             )
+            candidate_new_cells = counterfactual["new_cells"][drone_idx]
+            candidate_best_new_cells = float(counterfactual["best_new_cells"][drone_idx])
+            candidate_best_new_overlap = float(counterfactual["best_new_overlap"][drone_idx])
+            candidate_best_useful_overlap = float(counterfactual["best_useful_overlap"][drone_idx])
+            candidate_capture_fraction = (
+                raw_new_cells / candidate_best_new_cells
+                if candidate_best_new_cells > 1e-9
+                else math.nan
+            )
+            candidate_new_cell_regret = (
+                max(candidate_best_new_cells - raw_new_cells, 0.0)
+                if candidate_best_new_cells > 1e-9
+                else math.nan
+            )
+            candidate_action = _counterfactual_choice_metrics(
+                action_vec[:2],
+                counterfactual["directions"],
+                candidate_new_cells,
+                counterfactual["best_new_direction"][drone_idx],
+            )
+            candidate_movement = _counterfactual_choice_metrics(
+                displacement_vec[:2],
+                counterfactual["directions"],
+                candidate_new_cells,
+                counterfactual["best_new_direction"][drone_idx],
+            )
+            candidate_avoidable_overlap = (
+                max(any_history_revisit - candidate_best_useful_overlap, 0.0)
+                if math.isfinite(candidate_best_useful_overlap)
+                else math.nan
+            )
+            candidate_no_opportunity = float(candidate_best_new_cells < 1.0)
             opportunity_cells = float(coverage_opportunity_cells[drone_idx])
             opportunity_fraction = float(coverage_opportunity_fraction[drone_idx])
             opportunity_available_fraction = float(
@@ -514,6 +582,19 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             frontier_expected_new_cells_values.append(frontier_expected_cells)
             frontier_new_cell_capture_values.append(frontier_new_cell_capture)
             frontier_new_cell_gap_values.append(frontier_new_cell_gap)
+            candidate_best_new_cells_values.append(candidate_best_new_cells)
+            candidate_capture_fraction_values.append(candidate_capture_fraction)
+            candidate_new_cell_regret_values.append(candidate_new_cell_regret)
+            candidate_best_new_overlap_values.append(candidate_best_new_overlap)
+            candidate_best_useful_overlap_values.append(candidate_best_useful_overlap)
+            candidate_avoidable_overlap_values.append(candidate_avoidable_overlap)
+            candidate_action_rank_values.append(candidate_action["rank"])
+            candidate_movement_rank_values.append(candidate_movement["rank"])
+            candidate_action_capture_values.append(candidate_action["capture_fraction"])
+            candidate_movement_capture_values.append(candidate_movement["capture_fraction"])
+            candidate_action_best_alignment_values.append(candidate_action["best_alignment"])
+            candidate_movement_best_alignment_values.append(candidate_movement["best_alignment"])
+            candidate_no_opportunity_values.append(candidate_no_opportunity)
             coverage_opportunity_cells_values.append(opportunity_cells)
             coverage_opportunity_fraction_values.append(opportunity_fraction)
             coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
@@ -587,6 +668,19 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["frontier_expected_new_cells"].append(frontier_expected_cells)
             drone_stats["frontier_new_cell_capture"].append(frontier_new_cell_capture)
             drone_stats["frontier_new_cell_gap"].append(frontier_new_cell_gap)
+            drone_stats["candidate_best_new_cells"].append(candidate_best_new_cells)
+            drone_stats["candidate_capture_fraction"].append(candidate_capture_fraction)
+            drone_stats["candidate_new_cell_regret"].append(candidate_new_cell_regret)
+            drone_stats["candidate_best_new_overlap"].append(candidate_best_new_overlap)
+            drone_stats["candidate_best_useful_overlap"].append(candidate_best_useful_overlap)
+            drone_stats["candidate_avoidable_overlap"].append(candidate_avoidable_overlap)
+            drone_stats["candidate_action_rank"].append(candidate_action["rank"])
+            drone_stats["candidate_movement_rank"].append(candidate_movement["rank"])
+            drone_stats["candidate_action_capture_fraction"].append(candidate_action["capture_fraction"])
+            drone_stats["candidate_movement_capture_fraction"].append(candidate_movement["capture_fraction"])
+            drone_stats["candidate_action_best_alignment"].append(candidate_action["best_alignment"])
+            drone_stats["candidate_movement_best_alignment"].append(candidate_movement["best_alignment"])
+            drone_stats["candidate_no_opportunity"].append(candidate_no_opportunity)
             drone_stats["coverage_opportunity_cells"].append(opportunity_cells)
             drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
             drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
@@ -725,6 +819,19 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "frontier_expected_new_cells": frontier_expected_cells,
                     "frontier_new_cell_capture": frontier_new_cell_capture,
                     "frontier_new_cell_gap": frontier_new_cell_gap,
+                    "candidate_best_new_cells": candidate_best_new_cells,
+                    "candidate_capture_fraction": candidate_capture_fraction,
+                    "candidate_new_cell_regret": candidate_new_cell_regret,
+                    "candidate_best_new_overlap": candidate_best_new_overlap,
+                    "candidate_best_useful_overlap": candidate_best_useful_overlap,
+                    "candidate_avoidable_overlap": candidate_avoidable_overlap,
+                    "candidate_action_rank": candidate_action["rank"],
+                    "candidate_movement_rank": candidate_movement["rank"],
+                    "candidate_action_capture_fraction": candidate_action["capture_fraction"],
+                    "candidate_movement_capture_fraction": candidate_movement["capture_fraction"],
+                    "candidate_action_best_alignment": candidate_action["best_alignment"],
+                    "candidate_movement_best_alignment": candidate_movement["best_alignment"],
+                    "candidate_no_opportunity": candidate_no_opportunity,
                     "coverage_opportunity_cells": opportunity_cells,
                     "coverage_opportunity_fraction": opportunity_fraction,
                     "coverage_opportunity_available_fraction": opportunity_available_fraction,
@@ -827,6 +934,19 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_frontier_expected_new_cells": _finite_mean(frontier_expected_new_cells_values),
         "avg_frontier_new_cell_capture_fraction": _finite_mean(frontier_new_cell_capture_values),
         "avg_frontier_new_cell_gap": _finite_mean(frontier_new_cell_gap_values),
+        "avg_candidate_best_new_cells": _finite_mean(candidate_best_new_cells_values),
+        "avg_candidate_capture_fraction": _finite_mean(candidate_capture_fraction_values),
+        "avg_candidate_new_cell_regret": _finite_mean(candidate_new_cell_regret_values),
+        "avg_candidate_best_new_overlap": _finite_mean(candidate_best_new_overlap_values),
+        "avg_candidate_best_useful_overlap": _finite_mean(candidate_best_useful_overlap_values),
+        "avg_candidate_avoidable_overlap": _finite_mean(candidate_avoidable_overlap_values),
+        "avg_candidate_action_rank": _finite_mean(candidate_action_rank_values),
+        "avg_candidate_movement_rank": _finite_mean(candidate_movement_rank_values),
+        "avg_candidate_action_capture_fraction": _finite_mean(candidate_action_capture_values),
+        "avg_candidate_movement_capture_fraction": _finite_mean(candidate_movement_capture_values),
+        "avg_candidate_action_best_alignment": _finite_mean(candidate_action_best_alignment_values),
+        "avg_candidate_movement_best_alignment": _finite_mean(candidate_movement_best_alignment_values),
+        "candidate_no_opportunity_frac": _finite_mean(candidate_no_opportunity_values),
         "avg_coverage_opportunity_cells": _finite_mean(coverage_opportunity_cells_values),
         "avg_coverage_opportunity_fraction": _finite_mean(coverage_opportunity_fraction_values),
         "avg_coverage_opportunity_available_fraction": _finite_mean(
@@ -1101,6 +1221,141 @@ def _revisit_decomposition(
         out["teammate_only"][drone_idx] = float((claim & teammate & ~own).sum() / denom)
         out["shared_history"][drone_idx] = float((claim & shared).sum() / denom)
     return out
+
+
+def _empty_counterfactual_move_diagnostics(n_drones: int) -> dict[str, np.ndarray]:
+    n = max(int(n_drones), 0)
+    c = COUNTERFACTUAL_CANDIDATE_DIRECTIONS.shape[0]
+    return {
+        "directions": COUNTERFACTUAL_CANDIDATE_DIRECTIONS.copy(),
+        "new_cells": np.zeros((n, c), dtype=float),
+        "overlap": np.zeros((n, c), dtype=float),
+        "best_new_cells": np.zeros(n, dtype=float),
+        "best_new_overlap": np.full(n, math.nan, dtype=float),
+        "best_useful_overlap": np.full(n, math.nan, dtype=float),
+        "best_new_direction": np.zeros((n, 2), dtype=float),
+        "useful_candidate_count": np.zeros(n, dtype=float),
+        "good_candidate_fraction": np.zeros(n, dtype=float),
+    }
+
+
+def _counterfactual_move_diagnostics(
+    *,
+    scenario: WildfireSearchScenario,
+    geometry: dict[str, Any],
+    positions: np.ndarray,
+    footprint_radii_sim: np.ndarray,
+    pre_team_coverage: np.ndarray,
+    max_step_sim: float,
+) -> dict[str, np.ndarray]:
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 2)
+    n_drones = positions_arr.shape[0]
+    if n_drones == 0:
+        return _empty_counterfactual_move_diagnostics(0)
+
+    directions = COUNTERFACTUAL_CANDIDATE_DIRECTIONS.copy()
+    radii_arr = np.asarray(footprint_radii_sim, dtype=float).reshape(-1)
+    if radii_arr.size == 0:
+        radii_arr = np.zeros(n_drones, dtype=float)
+    elif radii_arr.size != n_drones:
+        radii_arr = np.resize(radii_arr, n_drones)
+
+    step = max(float(max_step_sim), 0.0)
+    x_min = -float(scenario.x_semidim) + float(scenario.agent_radius)
+    x_max = float(scenario.x_semidim) - float(scenario.agent_radius)
+    y_min = -float(scenario.y_semidim) + float(scenario.agent_radius)
+    y_max = float(scenario.y_semidim) - float(scenario.agent_radius)
+    candidate_positions = positions_arr[:, None, :] + directions[None, :, :] * step
+    candidate_positions[..., 0] = np.clip(candidate_positions[..., 0], x_min, x_max)
+    candidate_positions[..., 1] = np.clip(candidate_positions[..., 1], y_min, y_max)
+
+    flat_positions = candidate_positions.reshape(-1, 2)
+    flat_radii = np.repeat(radii_arr, directions.shape[0])
+    masks = _footprint_claims(flat_positions, flat_radii, geometry).reshape(
+        n_drones,
+        directions.shape[0],
+        int(geometry["G"]),
+        int(geometry["G"]),
+    )
+    coverage = np.asarray(pre_team_coverage, dtype=bool)
+    new_cells = (masks & ~coverage.reshape(1, 1, *coverage.shape)).sum(axis=(2, 3)).astype(float)
+    claim_sizes = masks.sum(axis=(2, 3)).astype(float)
+    overlap_cells = (masks & coverage.reshape(1, 1, *coverage.shape)).sum(axis=(2, 3)).astype(float)
+    overlap = np.divide(
+        overlap_cells,
+        np.maximum(claim_sizes, 1.0),
+        out=np.zeros_like(overlap_cells, dtype=float),
+        where=claim_sizes > 0,
+    )
+
+    out = _empty_counterfactual_move_diagnostics(n_drones)
+    out["new_cells"] = new_cells
+    out["overlap"] = overlap
+    for drone_idx in range(n_drones):
+        candidate_new = new_cells[drone_idx]
+        candidate_overlap = overlap[drone_idx]
+        best_new = float(np.max(candidate_new)) if candidate_new.size else 0.0
+        out["best_new_cells"][drone_idx] = best_new
+        if best_new > 0.0:
+            # Prefer lower-overlap candidates when several directions uncover the
+            # same number of cells, so the "best" direction is also search-efficient.
+            best_mask = np.isclose(candidate_new, best_new, rtol=0.0, atol=1e-9)
+            best_candidates = np.flatnonzero(best_mask)
+            best_idx = int(best_candidates[np.argmin(candidate_overlap[best_candidates])])
+            out["best_new_overlap"][drone_idx] = float(candidate_overlap[best_idx])
+            out["best_new_direction"][drone_idx] = directions[best_idx]
+            useful_threshold = max(1.0, 0.5 * best_new)
+            useful_mask = candidate_new >= useful_threshold
+            out["useful_candidate_count"][drone_idx] = float(np.count_nonzero(useful_mask))
+            out["good_candidate_fraction"][drone_idx] = float(
+                np.count_nonzero(useful_mask) / max(len(candidate_new), 1)
+            )
+            out["best_useful_overlap"][drone_idx] = float(np.min(candidate_overlap[useful_mask]))
+        else:
+            stay_idx = directions.shape[0] - 1
+            out["best_new_overlap"][drone_idx] = float(candidate_overlap[stay_idx])
+            out["best_useful_overlap"][drone_idx] = math.nan
+            out["best_new_direction"][drone_idx] = np.zeros(2, dtype=float)
+    return out
+
+
+def _counterfactual_choice_metrics(
+    vector: np.ndarray,
+    candidate_directions: np.ndarray,
+    candidate_new_cells: np.ndarray,
+    best_direction: np.ndarray,
+) -> dict[str, float]:
+    directions = np.asarray(candidate_directions, dtype=float).reshape(-1, 2)
+    new_cells = np.asarray(candidate_new_cells, dtype=float).reshape(-1)
+    if directions.shape[0] == 0 or new_cells.shape[0] == 0:
+        return {
+            "new_cells": math.nan,
+            "rank": math.nan,
+            "capture_fraction": math.nan,
+            "best_alignment": math.nan,
+        }
+
+    vec = np.asarray(vector, dtype=float).reshape(-1)[:2]
+    vec_norm = float(np.linalg.norm(vec))
+    if vec_norm <= 1e-9:
+        chosen_idx = directions.shape[0] - 1
+        best_alignment = math.nan
+    else:
+        move_dirs = directions[:-1]
+        cosines = move_dirs @ (vec / vec_norm)
+        chosen_idx = int(np.argmax(cosines))
+        best_alignment = _cosine_or_nan(vec, np.asarray(best_direction, dtype=float))
+
+    chosen_new = float(new_cells[chosen_idx])
+    best_new = float(np.max(new_cells)) if new_cells.size else 0.0
+    rank = 1.0 + float(np.count_nonzero(new_cells > chosen_new + 1e-9))
+    capture = chosen_new / best_new if best_new > 1e-9 else math.nan
+    return {
+        "new_cells": chosen_new,
+        "rank": rank,
+        "capture_fraction": capture,
+        "best_alignment": best_alignment,
+    }
 
 
 def _frontier_expected_new_cells(
@@ -1698,6 +1953,19 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "frontier_expected_new_cells": [],
         "frontier_new_cell_capture": [],
         "frontier_new_cell_gap": [],
+        "candidate_best_new_cells": [],
+        "candidate_capture_fraction": [],
+        "candidate_new_cell_regret": [],
+        "candidate_best_new_overlap": [],
+        "candidate_best_useful_overlap": [],
+        "candidate_avoidable_overlap": [],
+        "candidate_action_rank": [],
+        "candidate_movement_rank": [],
+        "candidate_action_capture_fraction": [],
+        "candidate_movement_capture_fraction": [],
+        "candidate_action_best_alignment": [],
+        "candidate_movement_best_alignment": [],
+        "candidate_no_opportunity": [],
         "coverage_opportunity_cells": [],
         "coverage_opportunity_fraction": [],
         "coverage_opportunity_available_fraction": [],
@@ -1780,6 +2048,19 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     frontier_expected_new_cells = stats["frontier_expected_new_cells"]
     frontier_new_cell_capture = stats["frontier_new_cell_capture"]
     frontier_new_cell_gap = stats["frontier_new_cell_gap"]
+    candidate_best_new_cells = stats["candidate_best_new_cells"]
+    candidate_capture_fraction = stats["candidate_capture_fraction"]
+    candidate_new_cell_regret = stats["candidate_new_cell_regret"]
+    candidate_best_new_overlap = stats["candidate_best_new_overlap"]
+    candidate_best_useful_overlap = stats["candidate_best_useful_overlap"]
+    candidate_avoidable_overlap = stats["candidate_avoidable_overlap"]
+    candidate_action_rank = stats["candidate_action_rank"]
+    candidate_movement_rank = stats["candidate_movement_rank"]
+    candidate_action_capture = stats["candidate_action_capture_fraction"]
+    candidate_movement_capture = stats["candidate_movement_capture_fraction"]
+    candidate_action_best_alignment = stats["candidate_action_best_alignment"]
+    candidate_movement_best_alignment = stats["candidate_movement_best_alignment"]
+    candidate_no_opportunity = stats["candidate_no_opportunity"]
     opportunity_cells = stats["coverage_opportunity_cells"]
     opportunity_fraction = stats["coverage_opportunity_fraction"]
     opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
@@ -1847,6 +2128,19 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_frontier_expected_new_cells": _finite_mean(frontier_expected_new_cells),
         "avg_frontier_new_cell_capture_fraction": _finite_mean(frontier_new_cell_capture),
         "avg_frontier_new_cell_gap": _finite_mean(frontier_new_cell_gap),
+        "avg_candidate_best_new_cells": _finite_mean(candidate_best_new_cells),
+        "avg_candidate_capture_fraction": _finite_mean(candidate_capture_fraction),
+        "avg_candidate_new_cell_regret": _finite_mean(candidate_new_cell_regret),
+        "avg_candidate_best_new_overlap": _finite_mean(candidate_best_new_overlap),
+        "avg_candidate_best_useful_overlap": _finite_mean(candidate_best_useful_overlap),
+        "avg_candidate_avoidable_overlap": _finite_mean(candidate_avoidable_overlap),
+        "avg_candidate_action_rank": _finite_mean(candidate_action_rank),
+        "avg_candidate_movement_rank": _finite_mean(candidate_movement_rank),
+        "avg_candidate_action_capture_fraction": _finite_mean(candidate_action_capture),
+        "avg_candidate_movement_capture_fraction": _finite_mean(candidate_movement_capture),
+        "avg_candidate_action_best_alignment": _finite_mean(candidate_action_best_alignment),
+        "avg_candidate_movement_best_alignment": _finite_mean(candidate_movement_best_alignment),
+        "candidate_no_opportunity_frac": _finite_mean(candidate_no_opportunity),
         "avg_coverage_opportunity_cells": _finite_mean(opportunity_cells),
         "avg_coverage_opportunity_fraction": _finite_mean(opportunity_fraction),
         "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
@@ -2294,6 +2588,45 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_frontier_new_cell_gap": _finite_mean([
             row["avg_frontier_new_cell_gap"] for row in rows
         ]),
+        "mean_candidate_best_new_cells": _finite_mean([
+            row["avg_candidate_best_new_cells"] for row in rows
+        ]),
+        "mean_candidate_capture_fraction": _finite_mean([
+            row["avg_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_candidate_new_cell_regret": _finite_mean([
+            row["avg_candidate_new_cell_regret"] for row in rows
+        ]),
+        "mean_candidate_best_new_overlap": _finite_mean([
+            row["avg_candidate_best_new_overlap"] for row in rows
+        ]),
+        "mean_candidate_best_useful_overlap": _finite_mean([
+            row["avg_candidate_best_useful_overlap"] for row in rows
+        ]),
+        "mean_candidate_avoidable_overlap": _finite_mean([
+            row["avg_candidate_avoidable_overlap"] for row in rows
+        ]),
+        "mean_candidate_action_rank": _finite_mean([
+            row["avg_candidate_action_rank"] for row in rows
+        ]),
+        "mean_candidate_movement_rank": _finite_mean([
+            row["avg_candidate_movement_rank"] for row in rows
+        ]),
+        "mean_candidate_action_capture_fraction": _finite_mean([
+            row["avg_candidate_action_capture_fraction"] for row in rows
+        ]),
+        "mean_candidate_movement_capture_fraction": _finite_mean([
+            row["avg_candidate_movement_capture_fraction"] for row in rows
+        ]),
+        "mean_candidate_action_best_alignment": _finite_mean([
+            row["avg_candidate_action_best_alignment"] for row in rows
+        ]),
+        "mean_candidate_movement_best_alignment": _finite_mean([
+            row["avg_candidate_movement_best_alignment"] for row in rows
+        ]),
+        "mean_candidate_no_opportunity_frac": _finite_mean([
+            row["candidate_no_opportunity_frac"] for row in rows
+        ]),
         "mean_coverage_opportunity_cells": _finite_mean([
             row["avg_coverage_opportunity_cells"] for row in rows
         ]),
@@ -2547,6 +2880,19 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_frontier_expected_new_cells",
         "avg_frontier_new_cell_capture_fraction",
         "avg_frontier_new_cell_gap",
+        "avg_candidate_best_new_cells",
+        "avg_candidate_capture_fraction",
+        "avg_candidate_new_cell_regret",
+        "avg_candidate_best_new_overlap",
+        "avg_candidate_best_useful_overlap",
+        "avg_candidate_avoidable_overlap",
+        "avg_candidate_action_rank",
+        "avg_candidate_movement_rank",
+        "avg_candidate_action_capture_fraction",
+        "avg_candidate_movement_capture_fraction",
+        "avg_candidate_action_best_alignment",
+        "avg_candidate_movement_best_alignment",
+        "candidate_no_opportunity_frac",
         "avg_coverage_opportunity_cells",
         "avg_coverage_opportunity_fraction",
         "avg_coverage_opportunity_available_fraction",
@@ -2649,6 +2995,17 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "frontier_expected_new": "avg_frontier_expected_new_cells",
         "frontier_new_capture": "avg_frontier_new_cell_capture_fraction",
         "frontier_new_gap": "avg_frontier_new_cell_gap",
+        "candidate_best_new": "avg_candidate_best_new_cells",
+        "candidate_capture": "avg_candidate_capture_fraction",
+        "candidate_regret": "avg_candidate_new_cell_regret",
+        "candidate_best_overlap": "avg_candidate_best_new_overlap",
+        "candidate_useful_overlap": "avg_candidate_best_useful_overlap",
+        "candidate_avoidable": "avg_candidate_avoidable_overlap",
+        "candidate_action_rank": "avg_candidate_action_rank",
+        "candidate_movement_rank": "avg_candidate_movement_rank",
+        "candidate_action_capture": "avg_candidate_action_capture_fraction",
+        "candidate_movement_capture": "avg_candidate_movement_capture_fraction",
+        "candidate_no_opportunity": "candidate_no_opportunity_frac",
         "coverage_opportunity_cells": "avg_coverage_opportunity_cells",
         "coverage_opportunity": "avg_coverage_opportunity_fraction",
         "coverage_opportunity_available": "avg_coverage_opportunity_available_fraction",
@@ -2738,6 +3095,11 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"inter={drone['avg_inter_uav_overlap_fraction']:.2f} "
             f"front_exp={drone['avg_frontier_expected_new_cells']:.1f} "
             f"front_cap={drone['avg_frontier_new_cell_capture_fraction']:.2f} "
+            f"cand_best={drone['avg_candidate_best_new_cells']:.1f} "
+            f"cand_cap={drone['avg_candidate_capture_fraction']:.2f} "
+            f"cand_rank={drone['avg_candidate_action_rank']:.1f}/"
+            f"{drone['avg_candidate_movement_rank']:.1f} "
+            f"cand_avoid={drone['avg_candidate_avoidable_overlap']:.2f} "
             f"front={drone['avg_frontier_alignment']:.2f}/"
             f"{drone['avg_frontier_progress_fraction']:.2f}/"
             f"{drone['avg_frontier_uncovered_ratio']:.2f} "
@@ -2773,6 +3135,12 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"inter={drone['mean_avg_inter_uav_overlap_fraction']:.3f} "
             f"front_exp={drone['mean_avg_frontier_expected_new_cells']:.1f} "
             f"front_cap={drone['mean_avg_frontier_new_cell_capture_fraction']:.3f} "
+            f"cand_best={drone['mean_avg_candidate_best_new_cells']:.1f} "
+            f"cand_cap={drone['mean_avg_candidate_capture_fraction']:.3f} "
+            f"cand_reg={drone['mean_avg_candidate_new_cell_regret']:.1f} "
+            f"cand_rank={drone['mean_avg_candidate_action_rank']:.2f}/"
+            f"{drone['mean_avg_candidate_movement_rank']:.2f} "
+            f"cand_avoid={drone['mean_avg_candidate_avoidable_overlap']:.3f} "
             f"front={drone['mean_avg_frontier_alignment']:.3f}/"
             f"{drone['mean_avg_frontier_progress_fraction']:.3f}/"
             f"{drone['mean_avg_frontier_uncovered_ratio']:.3f} "
@@ -2809,6 +3177,12 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"outside={item.get('outside_footprint', math.nan):.3f} "
             f"front_exp={item.get('frontier_expected_new_cells', math.nan):.1f} "
             f"front_cap={item.get('frontier_new_cell_capture', math.nan):.3f} "
+            f"cand_best={item.get('candidate_best_new_cells', math.nan):.1f} "
+            f"cand_cap={item.get('candidate_capture_fraction', math.nan):.3f} "
+            f"cand_reg={item.get('candidate_new_cell_regret', math.nan):.1f} "
+            f"cand_rank={item.get('candidate_action_rank', math.nan):.2f}/"
+            f"{item.get('candidate_movement_rank', math.nan):.2f} "
+            f"cand_avoid={item.get('candidate_avoidable_overlap', math.nan):.3f} "
             f"moving_nonew={item.get('moving_no_new_coverage', math.nan):.3f} "
             f"obs_dist={item.get('frontier_obs_distance', math.nan):.3f} "
             f"f_loc={item.get('frontier_local_coverage_cos', math.nan):.3f} "
@@ -3079,6 +3453,68 @@ def _plot_time_bins_coverage_opportunity(ax: Any, summary: dict[str, Any]) -> No
     ax.set_title("Time-Bin Coverage Opportunity (mean)", fontsize=10)
 
 
+def _plot_time_bins_counterfactual(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Counterfactual Moves (mean)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    best_new = [float(row.get("candidate_best_new_cells", math.nan)) for row in time_bins]
+    actual_new = [float(row.get("raw_new_coverage_cells", math.nan)) for row in time_bins]
+    line_best = ax.plot(
+        centers,
+        best_new,
+        marker="o",
+        linewidth=1.6,
+        label="best new",
+        color="#4f7cff",
+    )
+    line_actual = ax.plot(
+        centers,
+        actual_new,
+        marker="o",
+        linewidth=1.4,
+        label="actual new",
+        color="#36a269",
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("cells / drone-step")
+    ax.grid(alpha=0.25)
+
+    ax_frac = ax.twinx()
+    frac_series = [
+        ("capture", "candidate_capture_fraction", "#d44a3a"),
+        ("action rank / 9", "candidate_action_rank", "#8a5cf6"),
+        ("cand avoid", "candidate_avoidable_overlap", "#20242c"),
+    ]
+    frac_lines = []
+    for label, key, color in frac_series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        if key == "candidate_action_rank":
+            values = [value / 9.0 if math.isfinite(value) else math.nan for value in values]
+        frac_lines.extend(
+            ax_frac.plot(
+                centers,
+                values,
+                marker="o",
+                linewidth=1.2,
+                label=label,
+                color=color,
+            )
+        )
+    ax_frac.set_ylim(0.0, 1.0)
+    ax_frac.set_ylabel("fraction")
+
+    lines = line_best + line_actual + frac_lines
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=7, frameon=False)
+    ax.set_title("Time-Bin Counterfactual Moves (mean)", fontsize=10)
+
+
 def _plot_time_bins_revisit_sources(ax: Any, summary: dict[str, Any]) -> None:
     time_bins = summary.get("time_bins", [])
     if not time_bins:
@@ -3266,6 +3702,9 @@ def write_distribution_plots(
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
         ("Movement / Step (m)", "avg_displacement_m", None),
         ("New Cells / Step", "avg_new_coverage_cells", None),
+        ("Candidate Capture", "avg_candidate_capture_fraction", (0.0, 1.0)),
+        ("Candidate Regret Cells", "avg_candidate_new_cell_regret", None),
+        ("Candidate Action Rank", "avg_candidate_action_rank", (1.0, 9.0)),
         ("Outside Footprint", "avg_outside_footprint_fraction", (0.0, 1.0)),
         ("Overlap", "avg_overlap_fraction", (0.0, 1.0)),
         ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
@@ -3285,7 +3724,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(12, 3, figsize=(14, 36), constrained_layout=True)
+    fig, axes = plt.subplots(14, 3, figsize=(14, 42), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -3309,38 +3748,39 @@ def write_distribution_plots(
         ax.set_ylabel("episodes")
         ax.grid(axis="y", alpha=0.25)
 
+    custom_start = len(panels)
     _plot_per_drone_bars(
-        axes_flat[21],
+        axes_flat[custom_start],
         summary,
         "mean_path_length_m",
         "Per-Drone Path Length",
         "m",
     )
     _plot_per_drone_bars(
-        axes_flat[22],
+        axes_flat[custom_start + 1],
         summary,
         "mean_edge_step_frac",
         "Per-Drone Edge Fraction",
         "fraction",
     )
     _plot_per_drone_bars(
-        axes_flat[23],
+        axes_flat[custom_start + 2],
         summary,
         "mean_avg_reward_uav_frontier",
         "Per-Drone Frontier Reward",
         "reward",
     )
-    _plot_time_bins(axes_flat[24], summary)
+    _plot_time_bins(axes_flat[custom_start + 3], summary)
 
     _plot_per_drone_bars(
-        axes_flat[25],
+        axes_flat[custom_start + 4],
         summary,
         "mean_avg_excess_overlap_fraction",
         "Per-Drone Excess Overlap",
         "fraction",
     )
 
-    heat_ax = axes_flat[26]
+    heat_ax = axes_flat[custom_start + 5]
     heat_ax.clear()
     starts = [
         position
@@ -3375,7 +3815,7 @@ def write_distribution_plots(
         heat_ax.text(0.5, 0.5, "no starts", ha="center", va="center", transform=heat_ax.transAxes)
         heat_ax.set_title("UAV Start Heatmap", fontsize=10)
 
-    label_ax = axes_flat[27]
+    label_ax = axes_flat[custom_start + 6]
     label_ax.clear()
     if label_counts:
         labels = list(label_counts.keys())
@@ -3392,16 +3832,17 @@ def write_distribution_plots(
         label_ax.text(0.5, 0.5, "no labels", ha="center", va="center", transform=label_ax.transAxes)
     label_ax.grid(axis="x", alpha=0.25)
 
-    _plot_time_bins_coverage_signals(axes_flat[28], summary)
-    _plot_time_bins_search_efficiency(axes_flat[29], summary)
-    _plot_time_bins_reward_scale(axes_flat[30], summary)
-    _plot_time_bins_scouts(axes_flat[31], summary)
-    _plot_time_bins_frontier_inputs(axes_flat[32], summary)
-    _plot_time_bins_frontier_reward_yield(axes_flat[33], summary)
-    _plot_time_bins_coverage_opportunity(axes_flat[34], summary)
-    _plot_time_bins_revisit_sources(axes_flat[35], summary)
+    _plot_time_bins_coverage_signals(axes_flat[custom_start + 7], summary)
+    _plot_time_bins_search_efficiency(axes_flat[custom_start + 8], summary)
+    _plot_time_bins_reward_scale(axes_flat[custom_start + 9], summary)
+    _plot_time_bins_scouts(axes_flat[custom_start + 10], summary)
+    _plot_time_bins_frontier_inputs(axes_flat[custom_start + 11], summary)
+    _plot_time_bins_frontier_reward_yield(axes_flat[custom_start + 12], summary)
+    _plot_time_bins_coverage_opportunity(axes_flat[custom_start + 13], summary)
+    _plot_time_bins_counterfactual(axes_flat[custom_start + 14], summary)
+    _plot_time_bins_revisit_sources(axes_flat[custom_start + 15], summary)
 
-    for ax in axes_flat[36:]:
+    for ax in axes_flat[custom_start + 16:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -3517,6 +3958,12 @@ def main() -> None:
             f"avoid_rev={row['avg_avoidable_revisit_fraction']:.2f} "
             f"front_exp={row['avg_frontier_expected_new_cells']:.1f} "
             f"front_cap={row['avg_frontier_new_cell_capture_fraction']:.2f} "
+            f"cand_best={row['avg_candidate_best_new_cells']:.1f} "
+            f"cand_cap={row['avg_candidate_capture_fraction']:.2f} "
+            f"cand_reg={row['avg_candidate_new_cell_regret']:.1f} "
+            f"cand_rank={row['avg_candidate_action_rank']:.1f}/"
+            f"{row['avg_candidate_movement_rank']:.1f} "
+            f"cand_avoid={row['avg_candidate_avoidable_overlap']:.2f} "
             f"front={row['avg_frontier_alignment']:.2f}/"
             f"{row['avg_frontier_progress_fraction']:.2f}/"
             f"{row['avg_frontier_uncovered_ratio']:.2f} "
@@ -3592,6 +4039,22 @@ def main() -> None:
         f"front_pair_same={summary['mean_frontier_pairwise_same_dir']:.3f} "
         f"local_pair_same={summary['mean_local_pairwise_same_dir']:.3f} "
         f"global_pair_same={summary['mean_global_pairwise_same_dir']:.3f}"
+    )
+    print(
+        "counterfactual move means: "
+        f"best_new={summary['mean_candidate_best_new_cells']:.1f} "
+        f"capture={summary['mean_candidate_capture_fraction']:.3f} "
+        f"regret={summary['mean_candidate_new_cell_regret']:.1f} "
+        f"best_overlap={summary['mean_candidate_best_new_overlap']:.3f} "
+        f"useful_overlap={summary['mean_candidate_best_useful_overlap']:.3f} "
+        f"cand_avoidable={summary['mean_candidate_avoidable_overlap']:.3f} "
+        f"action_rank={summary['mean_candidate_action_rank']:.2f} "
+        f"movement_rank={summary['mean_candidate_movement_rank']:.2f} "
+        f"action_cap={summary['mean_candidate_action_capture_fraction']:.3f} "
+        f"move_cap={summary['mean_candidate_movement_capture_fraction']:.3f} "
+        f"action_best_align={summary['mean_candidate_action_best_alignment']:.3f} "
+        f"move_best_align={summary['mean_candidate_movement_best_alignment']:.3f} "
+        f"no_opp={summary['mean_candidate_no_opportunity_frac']:.3f}"
     )
     print(
         "footprint/revisit means: "
