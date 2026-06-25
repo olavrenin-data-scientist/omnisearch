@@ -714,28 +714,35 @@ def write_distribution_plots(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    plt.rcParams.update({
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.titleweight": "semibold",
+        "legend.frameon": False,
+    })
+
     strategies = list(summary["strategies"])
     colors = _strategy_colors(strategies)
     fig, axes = plt.subplots(5, 3, figsize=(15, 22), constrained_layout=True)
     axes_flat = axes.ravel()
 
     hist_panels = [
-        ("Recall", "recall", (0.0, 1.0)),
-        ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
-        ("Movement / Step (m)", "avg_displacement_m", None),
-        ("New Cells / Step", "avg_new_coverage_cells", None),
-        ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
-        ("Moving No New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0)),
+        ("Survivor Recall", "recall", (0.0, 1.0), "survivors scouted / total survivors"),
+        ("Final Coverage", "final_coverage_fraction", (0.0, 1.0), "fraction of map covered"),
+        ("Movement per Drone-Step", "avg_displacement_m", None, "meters / drone-step"),
+        ("New Cells per Drone-Step", "avg_new_coverage_cells", None, "new coverage cells / drone-step"),
+        ("Excess Footprint Overlap", "avg_excess_overlap_fraction", (0.0, 1.0), "fraction above expected overlap"),
+        ("Moving Without New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0), "fraction of drone-steps"),
     ]
-    for ax, (title, key, xlim) in zip(axes_flat[:6], hist_panels):
-        _plot_overlay_hist(ax, rows, strategies, colors, key, title, xlim)
+    for ax, (title, key, xlim, xlabel) in zip(axes_flat[:6], hist_panels):
+        _plot_overlay_hist(ax, rows, strategies, colors, key, title, xlabel, xlim)
 
     _plot_strategy_bars(
         axes_flat[6],
         summary,
         "mean_recall",
         "Mean Recall",
-        "recall",
+        "mean recall",
         colors,
         ylim=(0.0, 1.0),
     )
@@ -744,7 +751,7 @@ def write_distribution_plots(
         summary,
         "mean_final_coverage_fraction",
         "Mean Coverage",
-        "coverage",
+        "mean final coverage",
         colors,
         ylim=(0.0, 1.0),
     )
@@ -753,7 +760,7 @@ def write_distribution_plots(
         summary,
         "mean_displacement_m",
         "Movement / Step",
-        "m",
+        "meters / drone-step",
         colors,
     )
     _plot_time_bin_lines(
@@ -769,7 +776,7 @@ def write_distribution_plots(
         summary,
         "coverage_fraction",
         "Time-Bin Coverage",
-        "coverage",
+        "coverage fraction",
         colors,
         ylim=(0.0, 1.0),
     )
@@ -793,7 +800,7 @@ def write_distribution_plots(
         f"(n={int(sum(summary['by_strategy'][s]['episodes'] for s in strategies))} episodes)",
         fontsize=15,
     )
-    fig.savefig(path, dpi=160)
+    fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -817,29 +824,84 @@ def _plot_overlay_hist(
     colors: dict[str, str],
     key: str,
     title: str,
+    xlabel: str,
     xlim: tuple[float, float] | None,
 ) -> None:
     plotted = False
+    values_by_strategy: dict[str, list[float]] = {}
     for strategy in strategies:
         values = [
             float(row[key])
             for row in rows
             if row["strategy"] == strategy and key in row and math.isfinite(float(row[key]))
         ]
+        values_by_strategy[strategy] = values
+    all_values = [
+        value
+        for values in values_by_strategy.values()
+        for value in values
+    ]
+    bins = _shared_hist_bins(all_values, xlim)
+    legend_lines = []
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    for strategy in strategies:
+        values = values_by_strategy[strategy]
         if not values:
             continue
-        bins = min(max(len(values) // 3, 6), 24)
-        ax.hist(values, bins=bins, alpha=0.38, label=strategy, color=colors[strategy])
-        ax.axvline(float(np.mean(values)), color=colors[strategy], linewidth=1.4)
+        mean_value = float(np.mean(values))
+        median_value = float(np.median(values))
+        ax.hist(
+            values,
+            bins=bins,
+            alpha=0.28,
+            color=colors[strategy],
+            edgecolor=colors[strategy],
+            linewidth=0.6,
+        )
+        ax.axvline(mean_value, color=colors[strategy], linewidth=1.8)
+        ax.axvline(median_value, color=colors[strategy], linewidth=1.4, linestyle="--")
+        legend_lines.extend([
+            Patch(
+                facecolor=colors[strategy],
+                edgecolor=colors[strategy],
+                alpha=0.28,
+                label=f"{strategy} dist (n={len(values)})",
+            ),
+            Line2D([0], [0], color=colors[strategy], linewidth=1.8, label=f"{strategy} mean {mean_value:.3f}"),
+            Line2D([0], [0], color=colors[strategy], linewidth=1.4, linestyle="--", label=f"{strategy} med {median_value:.3f}"),
+        ])
         plotted = True
     if not plotted:
         ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
     if xlim is not None:
         ax.set_xlim(*xlim)
-    ax.set_title(title, fontsize=10)
+    ax.set_title(title, fontsize=11)
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("episodes")
-    ax.grid(axis="y", alpha=0.25)
-    ax.legend(fontsize=8, frameon=False)
+    ax.grid(axis="y", alpha=0.22)
+    if legend_lines:
+        ax.legend(handles=legend_lines, fontsize=7, loc="best", ncol=1)
+
+
+def _shared_hist_bins(values: list[float], xlim: tuple[float, float] | None) -> np.ndarray | int:
+    if not values:
+        return 10
+    if xlim is not None:
+        low, high = xlim
+        return np.linspace(low, high, 21)
+    arr = np.asarray(values, dtype=float)
+    low = float(np.nanmin(arr))
+    high = float(np.nanmax(arr))
+    if not math.isfinite(low) or not math.isfinite(high):
+        return 10
+    if abs(high - low) <= 1e-12:
+        pad = max(abs(low) * 0.05, 1.0)
+        low -= pad
+        high += pad
+    bins = min(max(len(values) // 8, 8), 28)
+    return np.linspace(low, high, bins + 1)
 
 
 def _plot_strategy_bars(
@@ -854,13 +916,23 @@ def _plot_strategy_bars(
     strategies = list(summary["strategies"])
     values = [float(summary["by_strategy"][strategy].get(key, math.nan)) for strategy in strategies]
     x = np.arange(len(strategies))
-    ax.bar(x, values, color=[colors[strategy] for strategy in strategies], alpha=0.82)
+    bars = ax.bar(x, values, color=[colors[strategy] for strategy in strategies], alpha=0.82)
+    for bar, value in zip(bars, values):
+        if math.isfinite(value):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height(),
+                f"{value:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
     ax.set_xticks(x, strategies, rotation=25, ha="right")
     ax.set_ylabel(ylabel)
-    ax.set_title(title, fontsize=10)
+    ax.set_title(title, fontsize=11)
     if ylim is not None:
         ax.set_ylim(*ylim)
-    ax.grid(axis="y", alpha=0.25)
+    ax.grid(axis="y", alpha=0.22)
 
 
 def _plot_time_bin_lines(
@@ -881,15 +953,15 @@ def _plot_time_bin_lines(
             for row in bins
         ]
         values = [float(row.get(key, math.nan)) for row in bins]
-        ax.plot(centers, values, marker="o", linewidth=1.5, label=strategy, color=colors[strategy])
+        ax.plot(centers, values, marker="o", linewidth=1.8, markersize=4, label=strategy, color=colors[strategy])
     ax.set_xlim(0.0, 1.0)
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.set_xlabel("episode fraction")
     ax.set_ylabel(ylabel)
-    ax.set_title(title, fontsize=10)
-    ax.grid(alpha=0.25)
-    ax.legend(fontsize=8, frameon=False)
+    ax.set_title(title, fontsize=11)
+    ax.grid(alpha=0.22)
+    ax.legend(fontsize=8)
 
 
 def _plot_time_bin_multi(
@@ -914,7 +986,7 @@ def _plot_time_bin_multi(
                 centers,
                 values,
                 marker="o",
-                linewidth=1.2,
+                linewidth=1.4,
                 linestyle=linestyles[idx % len(linestyles)],
                 label=f"{strategy} {label}",
                 color=colors[strategy],
@@ -924,9 +996,9 @@ def _plot_time_bin_multi(
     ax.set_ylim(0.0, 1.0)
     ax.set_xlabel("episode fraction")
     ax.set_ylabel("fraction")
-    ax.set_title(title, fontsize=10)
-    ax.grid(alpha=0.25)
-    ax.legend(fontsize=7, frameon=False, ncol=2)
+    ax.set_title(title, fontsize=11)
+    ax.grid(alpha=0.22)
+    ax.legend(fontsize=7, ncol=2)
 
 
 def _plot_scout_time_bins(ax: Any, summary: dict[str, Any], colors: dict[str, str]) -> None:
@@ -939,14 +1011,14 @@ def _plot_scout_time_bins(ax: Any, summary: dict[str, Any], colors: dict[str, st
             for row in bins
         ]
         values = [float(row.get("mean_cumulative_recall", math.nan)) for row in bins]
-        ax.plot(centers, values, marker="o", linewidth=1.6, label=strategy, color=colors[strategy])
+        ax.plot(centers, values, marker="o", linewidth=1.8, markersize=4, label=strategy, color=colors[strategy])
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.set_xlabel("episode fraction")
     ax.set_ylabel("cumulative recall")
-    ax.set_title("Survivor Discovery Over Time", fontsize=10)
-    ax.grid(alpha=0.25)
-    ax.legend(fontsize=8, frameon=False)
+    ax.set_title("Survivor Discovery Over Time", fontsize=11)
+    ax.grid(alpha=0.22)
+    ax.legend(fontsize=8)
 
 
 def _plot_per_drone_bars(
@@ -978,9 +1050,9 @@ def _plot_per_drone_bars(
         ax.bar(x + offset, values, width=width, color=colors[strategy], alpha=0.82, label=strategy)
     ax.set_xticks(x, [f"d{idx}" for idx in drone_indices])
     ax.set_ylabel(ylabel)
-    ax.set_title(title, fontsize=10)
-    ax.grid(axis="y", alpha=0.25)
-    ax.legend(fontsize=8, frameon=False)
+    ax.set_title(title, fontsize=11)
+    ax.grid(axis="y", alpha=0.22)
+    ax.legend(fontsize=8)
 
 
 def _plot_failure_labels(ax: Any, summary: dict[str, Any], colors: dict[str, str]) -> None:
@@ -1000,11 +1072,24 @@ def _plot_failure_labels(ax: Any, summary: dict[str, Any], colors: dict[str, str
         values = [float(counts.get(label, 0)) for label in labels]
         offset = (idx - (len(strategies) - 1) / 2.0) * width
         ax.bar(x + offset, values, width=width, color=colors[strategy], alpha=0.82, label=strategy)
-    ax.set_xticks(x, labels, rotation=25, ha="right")
+    ax.set_xticks(x, [_wrap_label(label) for label in labels], rotation=0, ha="center")
     ax.set_ylabel("episodes")
-    ax.set_title("Failure Labels", fontsize=10)
-    ax.grid(axis="y", alpha=0.25)
-    ax.legend(fontsize=8, frameon=False)
+    ax.set_title("Failure Labels", fontsize=11)
+    ax.grid(axis="y", alpha=0.22)
+    ax.legend(fontsize=8)
+
+
+def _wrap_label(label: str) -> str:
+    replacements = {
+        "survivor_miss_despite_coverage": "missed survivors\nwith high coverage",
+        "wasteful_revisit": "wasteful\nrevisit",
+        "partial_search": "partial\nsearch",
+        "low_coverage": "low\ncoverage",
+        "edge_trap": "edge\ntrap",
+    }
+    if label in replacements:
+        return replacements[label]
+    return label.replace("_", "\n") if len(label) > 12 else label
 
 
 def _fmt_optional(value: float | int | None) -> str:
