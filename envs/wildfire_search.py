@@ -521,6 +521,9 @@ class WildfireSearchScenario(BaseScenario):
         ).replace("-", "_").lower()
         if self.uav_overlap_penalty_normalization not in {"raw", "opportunity"}:
             raise ValueError("uav_overlap_penalty_normalization must be one of: raw, opportunity")
+        self.r_uav_confidence = max(float(kwargs.pop("r_uav_confidence", 0.0)), 0.0)
+        self.uav_confidence_gamma = max(float(kwargs.pop("uav_confidence_gamma", 2.0)), 0.0)
+        self.uav_confidence_eps = max(float(kwargs.pop("uav_confidence_eps", 0.05)), 0.0)
         self.r_uav_inter_uav_overlap = max(float(kwargs.pop("r_uav_inter_uav_overlap", 0.0)), 0.0)
         self.uav_inter_uav_overlap_allowed = min(
             max(float(kwargs.pop("uav_inter_uav_overlap_allowed", 0.20)), 0.0),
@@ -902,9 +905,13 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_coverage_opportunity_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_coverage_opportunity_available_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_coverage_opportunity_available_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_reward_uav_confidence = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_confidence_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_confidence_mean = torch.zeros(batch_dim, device=device)
         self.metric_uav_confidence_gain = torch.zeros(batch_dim, device=device)
         self.metric_uav_confidence_gain_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_weighted_confidence_gain = torch.zeros(batch_dim, device=device)
+        self.metric_uav_weighted_confidence_gain_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_confidence_low_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_confidence_high_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_step_detection_probability = torch.zeros(batch_dim, device=device)
@@ -986,9 +993,13 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_uav_coverage_opportunity_fraction_by_drone,
             self.metric_uav_coverage_opportunity_available_fraction,
             self.metric_uav_coverage_opportunity_available_fraction_by_drone,
+            self.metric_reward_uav_confidence,
+            self.metric_reward_uav_confidence_by_drone,
             self.metric_uav_confidence_mean,
             self.metric_uav_confidence_gain,
             self.metric_uav_confidence_gain_by_drone,
+            self.metric_uav_weighted_confidence_gain,
+            self.metric_uav_weighted_confidence_gain_by_drone,
             self.metric_uav_confidence_low_fraction,
             self.metric_uav_confidence_high_fraction,
             self.metric_uav_step_detection_probability,
@@ -2585,7 +2596,7 @@ class WildfireSearchScenario(BaseScenario):
             uav_coverage_opportunity_cells,
             uav_coverage_opportunity_available_fraction,
         ) = self._coverage_reward(drone_pos)  # [B, D]
-        self._update_uav_confidence_diagnostics(drone_pos)
+        uav_confidence_reward = self._update_uav_confidence(drone_pos)
         current_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
         coverage_threshold_crossed = (
             (previous_coverage_fraction < self.uav_coverage_threshold_fraction)
@@ -2635,6 +2646,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
         self.metric_reward_uav_coverage_threshold = uav_coverage_threshold_reward
         self.metric_reward_uav_frontier_alignment = uav_frontier_alignment_reward.sum(dim=1)
+        self.metric_reward_uav_confidence = uav_confidence_reward.sum(dim=1)
+        self.metric_reward_uav_confidence_by_drone = uav_confidence_reward
         self.metric_uav_frontier_alignment_by_drone = uav_frontier_alignment
         self.metric_uav_frontier_progress_fraction_by_drone = uav_frontier_progress_fraction
         self.metric_uav_frontier_uncovered_ratio_by_drone = uav_frontier_uncovered_ratio
@@ -2780,6 +2793,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + uav_coverage_reward[:, i]
                 r = r + uav_move_coverage_reward[:, i]
                 r = r + uav_frontier_alignment_reward[:, i]
+                r = r + uav_confidence_reward[:, i]
                 r = r + uav_overlap_penalty[:, i]
                 r = r + uav_inter_uav_overlap_penalty[:, i]
                 r = r + uav_outside_footprint_penalty[:, i]
@@ -2935,15 +2949,19 @@ class WildfireSearchScenario(BaseScenario):
         b_idx = torch.arange(self.world.batch_dim, device=pos.device).view(-1, 1).expand_as(gx)
         return self.fire_grid[b_idx, gy, gx]
 
-    def _update_uav_confidence_diagnostics(self, drone_pos: Tensor) -> None:
+    def _update_uav_confidence(self, drone_pos: Tensor) -> Tensor:
         """Update the optional probabilistic inspection-confidence map.
 
-        This is diagnostic-only state. It is intentionally not used by rewards
-        or observations yet, so enabling it cannot change the policy's inputs or
-        scalar learning signal.
+        When ``r_uav_confidence`` is positive, each UAV receives a reward for
+        marginal confidence gain weighted toward cells whose current inspection
+        confidence is still low. With the default zero scale this remains a
+        diagnostics-only map.
         """
-        if self.n_drones == 0 or not self.uav_confidence_diagnostics:
-            return
+        reward = drone_pos.new_zeros(drone_pos.shape[0], self.n_drones)
+        if self.n_drones == 0:
+            return reward
+        if not self.uav_confidence_diagnostics and self.r_uav_confidence <= 0.0:
+            return reward
 
         with torch.no_grad():
             B = drone_pos.shape[0]
@@ -3000,12 +3018,18 @@ class WildfireSearchScenario(BaseScenario):
             probability = torch.where(visible, probability, torch.zeros_like(probability))
 
             previous = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+            confidence_weight = (
+                float(self.uav_confidence_eps)
+                + (1.0 - previous).clamp(0.0, 1.0).pow(float(self.uav_confidence_gamma))
+            )
             miss_probability_all = (1.0 - probability).clamp(0.0, 1.0).prod(dim=1)
             updated = 1.0 - (1.0 - previous) * miss_probability_all
             updated = updated.clamp(0.0, 1.0)
             team_gain = (updated - previous).clamp(min=0.0)
+            weighted_team_gain = confidence_weight * team_gain
 
             marginal_gains = []
+            weighted_marginal_gains = []
             for drone_idx in range(self.n_drones):
                 if self.n_drones == 1:
                     miss_without = torch.ones_like(miss_probability_all)
@@ -3019,19 +3043,27 @@ class WildfireSearchScenario(BaseScenario):
                 confidence_without = 1.0 - (1.0 - previous) * miss_without
                 marginal = (updated - confidence_without).clamp(min=0.0)
                 marginal_gains.append(marginal.mean(dim=(1, 2)))
+                weighted_marginal_gains.append((confidence_weight * marginal).mean(dim=(1, 2)))
             marginal_gain_by_drone = torch.stack(marginal_gains, dim=1)
+            weighted_marginal_gain_by_drone = torch.stack(weighted_marginal_gains, dim=1)
+            reward = weighted_marginal_gain_by_drone * float(self.r_uav_confidence)
 
             visible_cells = visible.float().sum(dim=(-1, -2)).clamp_min(1.0)
             step_detection_probability_by_drone = probability.sum(dim=(-1, -2)) / visible_cells
 
             self.uav_confidence_grid.copy_(updated.to(dtype=self.uav_confidence_grid.dtype))
+            self.metric_reward_uav_confidence_by_drone = reward
+            self.metric_reward_uav_confidence = reward.sum(dim=1)
             self.metric_uav_confidence_mean = updated.mean(dim=(1, 2))
             self.metric_uav_confidence_gain = team_gain.mean(dim=(1, 2))
             self.metric_uav_confidence_gain_by_drone = marginal_gain_by_drone
+            self.metric_uav_weighted_confidence_gain = weighted_team_gain.mean(dim=(1, 2))
+            self.metric_uav_weighted_confidence_gain_by_drone = weighted_marginal_gain_by_drone
             self.metric_uav_confidence_low_fraction = (updated < 0.50).float().mean(dim=(1, 2))
             self.metric_uav_confidence_high_fraction = (updated >= 0.80).float().mean(dim=(1, 2))
             self.metric_uav_step_detection_probability_by_drone = step_detection_probability_by_drone
             self.metric_uav_step_detection_probability = step_detection_probability_by_drone.mean(dim=1)
+        return reward
 
     def _terrain_movement_multiplier(self, agents: List[Agent]) -> Tensor:
         """Return terrain travel multipliers underneath the provided agents."""
@@ -4695,6 +4727,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/uav_move_coverage": self.metric_reward_uav_move_coverage,
             "reward/uav_coverage_threshold": self.metric_reward_uav_coverage_threshold,
             "reward/uav_frontier_alignment": self.metric_reward_uav_frontier_alignment,
+            "reward/uav_confidence": self.metric_reward_uav_confidence,
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,
             "reward/uav_outside_footprint": self.metric_reward_uav_outside_footprint,
@@ -4764,6 +4797,7 @@ class WildfireSearchScenario(BaseScenario):
             ),
             "diagnostic/uav_confidence_mean": self.metric_uav_confidence_mean,
             "diagnostic/uav_confidence_gain": self.metric_uav_confidence_gain,
+            "diagnostic/uav_weighted_confidence_gain": self.metric_uav_weighted_confidence_gain,
             "diagnostic/uav_confidence_low_fraction": self.metric_uav_confidence_low_fraction,
             "diagnostic/uav_confidence_high_fraction": self.metric_uav_confidence_high_fraction,
             "diagnostic/uav_step_detection_probability": self.metric_uav_step_detection_probability,

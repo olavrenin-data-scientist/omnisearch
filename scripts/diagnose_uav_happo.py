@@ -188,6 +188,8 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     confidence_mean_values: list[float] = []
     confidence_gain_values: list[float] = []
     confidence_gain_by_drone_values: list[float] = []
+    confidence_weighted_gain_values: list[float] = []
+    confidence_weighted_gain_by_drone_values: list[float] = []
     confidence_low_fraction_values: list[float] = []
     confidence_high_fraction_values: list[float] = []
     confidence_step_detection_probability_values: list[float] = []
@@ -195,6 +197,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     reward_uav_coverage_values: list[float] = []
     reward_uav_move_coverage_values: list[float] = []
     reward_uav_frontier_values: list[float] = []
+    reward_uav_confidence_values: list[float] = []
     penalty_uav_overlap_values: list[float] = []
     penalty_uav_inter_overlap_values: list[float] = []
     penalty_uav_outside_footprint_values: list[float] = []
@@ -359,6 +362,16 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             "metric_uav_confidence_gain_by_drone",
             scenario.n_drones,
         )
+        confidence_weighted_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_weighted_confidence_gain_by_drone",
+            scenario.n_drones,
+        )
+        confidence_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_confidence_by_drone",
+            scenario.n_drones,
+        )
         confidence_step_detection_probability_by_drone = _metric_array(
             scenario,
             "metric_uav_step_detection_probability_by_drone",
@@ -366,6 +379,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         )
         confidence_mean = _metric_scalar(scenario, "metric_uav_confidence_mean")
         confidence_gain = _metric_scalar(scenario, "metric_uav_confidence_gain")
+        confidence_weighted_gain = _metric_scalar(scenario, "metric_uav_weighted_confidence_gain")
         confidence_low_fraction = _metric_scalar(scenario, "metric_uav_confidence_low_fraction")
         confidence_high_fraction = _metric_scalar(scenario, "metric_uav_confidence_high_fraction")
         confidence_step_detection_probability = _metric_scalar(
@@ -374,6 +388,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         )
         confidence_mean_values.append(confidence_mean)
         confidence_gain_values.append(confidence_gain)
+        confidence_weighted_gain_values.append(confidence_weighted_gain)
         confidence_low_fraction_values.append(confidence_low_fraction)
         confidence_high_fraction_values.append(confidence_high_fraction)
         confidence_step_detection_probability_values.append(confidence_step_detection_probability)
@@ -546,9 +561,11 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 coverage_opportunity_available_fraction[drone_idx]
             )
             confidence_gain_drone = float(confidence_gain_by_drone[drone_idx])
+            confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
             confidence_pass_probability = float(
                 confidence_step_detection_probability_by_drone[drone_idx]
             )
+            confidence_reward = float(confidence_reward_by_drone[drone_idx])
             frontier_align = float(frontier_alignment[drone_idx])
             frontier_progress_frac = float(frontier_progress[drone_idx])
             frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
@@ -607,6 +624,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 outside_footprint=float(outside_footprint_fraction[drone_idx]),
                 coverage_opportunity_fraction=opportunity_fraction,
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
+                confidence_reward=confidence_reward,
                 scout_reward=scout_reward,
             )
             reward_terms["team"] = team_reward
@@ -653,6 +671,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             coverage_opportunity_fraction_values.append(opportunity_fraction)
             coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
             confidence_gain_by_drone_values.append(confidence_gain_drone)
+            confidence_weighted_gain_by_drone_values.append(confidence_weighted_gain_drone)
             confidence_step_detection_probability_by_drone_values.append(confidence_pass_probability)
             frontier_alignment_values.append(frontier_align)
             frontier_progress_values.append(frontier_progress_frac)
@@ -680,6 +699,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             reward_uav_coverage_values.append(reward_terms["coverage"])
             reward_uav_move_coverage_values.append(reward_terms["move_coverage"])
             reward_uav_frontier_values.append(reward_terms["frontier"])
+            reward_uav_confidence_values.append(reward_terms["confidence"])
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
             penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
             penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
@@ -741,6 +761,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
             drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
             drone_stats["confidence_gain"].append(confidence_gain_drone)
+            drone_stats["confidence_weighted_gain"].append(confidence_weighted_gain_drone)
             drone_stats["confidence_pass_probability"].append(confidence_pass_probability)
             drone_stats["frontier_alignment"].append(frontier_align)
             drone_stats["frontier_progress"].append(frontier_progress_frac)
@@ -854,6 +875,8 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "frontier_progress": frontier_progress_frac,
                     "frontier_uncovered_ratio": frontier_ratio,
                     "frontier_reward": reward_terms["frontier"],
+                    "confidence_reward": reward_terms["confidence"],
+                    "confidence_weighted_gain": confidence_weighted_gain_drone,
                     "coverage_reward": reward_terms["coverage"],
                     "move_coverage_reward": reward_terms["move_coverage"],
                     "overlap_penalty": reward_terms["overlap_penalty"],
@@ -1044,6 +1067,8 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_confidence_mean": _finite_mean(confidence_mean_values),
         "avg_confidence_gain": _finite_mean(confidence_gain_values),
         "avg_confidence_gain_by_drone": _finite_mean(confidence_gain_by_drone_values),
+        "avg_confidence_weighted_gain": _finite_mean(confidence_weighted_gain_values),
+        "avg_confidence_weighted_gain_by_drone": _finite_mean(confidence_weighted_gain_by_drone_values),
         "avg_confidence_low_fraction": _finite_mean(confidence_low_fraction_values),
         "avg_confidence_high_fraction": _finite_mean(confidence_high_fraction_values),
         "avg_confidence_step_detection_probability": _finite_mean(
@@ -1071,6 +1096,7 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_reward_uav_coverage": _finite_mean(reward_uav_coverage_values),
         "avg_reward_uav_move_coverage": _finite_mean(reward_uav_move_coverage_values),
         "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
+        "avg_reward_uav_confidence": _finite_mean(reward_uav_confidence_values),
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
         "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
         "avg_penalty_uav_outside_footprint": _finite_mean(penalty_uav_outside_footprint_values),
@@ -2118,6 +2144,7 @@ def _uav_reward_terms(
     outside_footprint: float,
     coverage_opportunity_fraction: float,
     coverage_opportunity_available_fraction: float,
+    confidence_reward: float,
     scout_reward: float,
 ) -> dict[str, float]:
     grid_cells = float(max(int(getattr(scenario, "fire_grid_size", 1)) ** 2, 1))
@@ -2179,6 +2206,7 @@ def _uav_reward_terms(
         coverage
         + move_coverage
         + frontier
+        + confidence_reward
         + overlap_penalty
         + inter_penalty
         + outside_penalty
@@ -2187,6 +2215,7 @@ def _uav_reward_terms(
         abs(coverage)
         + abs(move_coverage)
         + abs(frontier)
+        + abs(confidence_reward)
         + abs(overlap_penalty)
         + abs(inter_penalty)
         + abs(outside_penalty)
@@ -2196,6 +2225,7 @@ def _uav_reward_terms(
         "coverage": float(coverage),
         "move_coverage": float(move_coverage),
         "frontier": float(frontier),
+        "confidence": float(confidence_reward),
         "overlap_penalty": float(overlap_penalty),
         "inter_uav_overlap_penalty": float(inter_penalty),
         "outside_footprint_penalty": float(outside_penalty),
@@ -2596,6 +2626,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "coverage_opportunity_fraction": [],
         "coverage_opportunity_available_fraction": [],
         "confidence_gain": [],
+        "confidence_weighted_gain": [],
         "confidence_pass_probability": [],
         "frontier_alignment": [],
         "frontier_progress": [],
@@ -2617,6 +2648,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "coverage": [],
             "move_coverage": [],
             "frontier": [],
+            "confidence": [],
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
             "outside_footprint_penalty": [],
@@ -2693,6 +2725,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     opportunity_fraction = stats["coverage_opportunity_fraction"]
     opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
     confidence_gain = stats["confidence_gain"]
+    confidence_weighted_gain = stats["confidence_weighted_gain"]
     confidence_pass_probability = stats["confidence_pass_probability"]
     frontier_alignment = stats["frontier_alignment"]
     frontier_progress = stats["frontier_progress"]
@@ -2776,6 +2809,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
         "avg_confidence_gain": _finite_mean(confidence_gain),
         "total_confidence_gain": float(np.sum(confidence_gain)) if confidence_gain else 0.0,
+        "avg_confidence_weighted_gain": _finite_mean(confidence_weighted_gain),
         "avg_confidence_pass_probability": _finite_mean(confidence_pass_probability),
         "avg_frontier_alignment": _finite_mean(frontier_alignment),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
@@ -2792,6 +2826,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_reward_uav_coverage": _finite_mean(reward_terms["coverage"]),
         "avg_reward_uav_move_coverage": _finite_mean(reward_terms["move_coverage"]),
         "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
+        "avg_reward_uav_confidence": _finite_mean(reward_terms["confidence"]),
         "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
         "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
         "avg_penalty_uav_outside_footprint": _finite_mean(reward_terms["outside_footprint_penalty"]),
@@ -3443,6 +3478,12 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_confidence_gain_by_drone": _finite_mean([
             row["avg_confidence_gain_by_drone"] for row in rows
         ]),
+        "mean_confidence_weighted_gain": _finite_mean([
+            row["avg_confidence_weighted_gain"] for row in rows
+        ]),
+        "mean_confidence_weighted_gain_by_drone": _finite_mean([
+            row["avg_confidence_weighted_gain_by_drone"] for row in rows
+        ]),
         "mean_confidence_low_fraction": _finite_mean([
             row["avg_confidence_low_fraction"] for row in rows
         ]),
@@ -3511,6 +3552,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_reward_uav_frontier": _finite_mean([
             row["avg_reward_uav_frontier"] for row in rows
+        ]),
+        "mean_reward_uav_confidence": _finite_mean([
+            row["avg_reward_uav_confidence"] for row in rows
         ]),
         "mean_penalty_uav_overlap": _finite_mean([
             row["avg_penalty_uav_overlap"] for row in rows
@@ -3844,6 +3888,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_coverage_opportunity_available_fraction",
         "avg_confidence_gain",
         "total_confidence_gain",
+        "avg_confidence_weighted_gain",
         "avg_confidence_pass_probability",
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
@@ -3860,6 +3905,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_reward_uav_coverage",
         "avg_reward_uav_move_coverage",
         "avg_reward_uav_frontier",
+        "avg_reward_uav_confidence",
         "avg_penalty_uav_overlap",
         "avg_penalty_uav_inter_overlap",
         "avg_penalty_uav_outside_footprint",
@@ -3971,6 +4017,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "confidence_final": "final_confidence_mean",
         "confidence_gain": "avg_confidence_gain",
         "confidence_drone_gain": "avg_confidence_gain_by_drone",
+        "confidence_weighted_gain": "avg_confidence_weighted_gain",
         "confidence_pass": "avg_confidence_pass_probability",
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
@@ -4403,6 +4450,7 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("coverage", "coverage_reward", "#4f7cff", False),
         ("move cov", "move_coverage_reward", "#36a269", False),
         ("frontier", "frontier_reward", "#8a5cf6", False),
+        ("conf", "confidence_reward", "#0f766e", False),
         ("coverage95", "coverage_threshold_reward", "#0f9d58", False),
         ("scout", "scout_reward", "#d4a72c", False),
         ("team", "team_reward", "#2d8cff", False),
@@ -5323,6 +5371,7 @@ def main() -> None:
         f"step_mean={summary['mean_confidence_mean']:.3f} "
         f"team_gain={summary['mean_confidence_gain']:.5f} "
         f"drone_gain={summary['mean_confidence_gain_by_drone']:.5f} "
+        f"weighted_gain={summary['mean_confidence_weighted_gain_by_drone']:.5f} "
         f"pass_p={summary['mean_confidence_pass_probability']:.3f}"
     )
     print(
@@ -5406,6 +5455,7 @@ def main() -> None:
         f"coverage={summary['mean_reward_uav_coverage']:.4f} "
         f"move_cov={summary['mean_reward_uav_move_coverage']:.4f} "
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
+        f"confidence={summary['mean_reward_uav_confidence']:.4f} "
         f"coverage95={summary['mean_reward_uav_coverage_threshold']:.4f} "
         f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
         f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
