@@ -293,11 +293,15 @@ class HappoCheckpointTests(unittest.TestCase):
             uav_local_confidence_obs_radius_m=100.0,
             uav_frontier_obs=True,
             uav_frontier_obs_radius_m=120.0,
+            uav_frontier_source="confidence",
             uav_survivor_diagnostic=True,
             uav_coverage_reward=7.5,
             uav_move_coverage_reward=0.001,
             uav_move_coverage_cap=0.2,
             uav_frontier_alignment_reward=0.04,
+            uav_confidence_reward=0.03,
+            uav_confidence_move_reward=0.07,
+            uav_confidence_opportunity_eps=1e-5,
             uav_overlap_penalty=0.05,
             uav_overlap_allowed=0.60,
             uav_inter_uav_overlap_penalty=0.03,
@@ -335,10 +339,14 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["local_confidence_obs_radius_m"], 100.0)
         self.assertTrue(scenario["uav_frontier_obs"])
         self.assertEqual(scenario["uav_frontier_obs_radius_m"], 120.0)
+        self.assertEqual(scenario["uav_frontier_source"], "confidence")
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
         self.assertEqual(scenario["uav_move_coverage_normalization"], "raw")
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.2)
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.04)
+        self.assertEqual(scenario["r_uav_confidence"], 0.03)
+        self.assertEqual(scenario["r_uav_confidence_move"], 0.07)
+        self.assertEqual(scenario["uav_confidence_opportunity_eps"], 1e-5)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
         self.assertEqual(scenario["uav_overlap_penalty_normalization"], "raw")
@@ -392,10 +400,14 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(scenario["uav_frontier_obs"])
         self.assertEqual(scenario["uav_frontier_obs_radius_m"], 150.0)
         self.assertEqual(scenario["uav_frontier_mode"], "sector_topk")
+        self.assertEqual(scenario["uav_frontier_source"], "coverage")
         self.assertEqual(scenario["uav_frontier_sectors"], 8)
         self.assertEqual(scenario["uav_frontier_top_k"], 2)
         self.assertTrue(scenario["uav_frontier_ownership"])
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.10)
+        self.assertEqual(scenario["r_uav_confidence"], 0.0)
+        self.assertEqual(scenario["r_uav_confidence_move"], 0.0)
+        self.assertEqual(scenario["uav_confidence_opportunity_eps"], 1e-6)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)

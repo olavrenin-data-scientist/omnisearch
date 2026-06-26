@@ -173,6 +173,7 @@ def build_args(
     uav_frontier_obs: bool | None = None,
     uav_frontier_obs_radius_m: float = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
     uav_frontier_mode: str = DEFAULT_UAV_FRONTIER_MODE,
+    uav_frontier_source: str = "coverage",
     uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
     uav_frontier_top_k: int = DEFAULT_UAV_FRONTIER_TOP_K,
     uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
@@ -197,8 +198,10 @@ def build_args(
     uav_coverage_opportunity_cap: float = 1.0,
     uav_frontier_alignment_reward: float | None = None,
     uav_confidence_reward: float = 0.0,
+    uav_confidence_move_reward: float = 0.0,
     uav_confidence_gamma: float = 2.0,
     uav_confidence_eps: float = 0.05,
+    uav_confidence_opportunity_eps: float = 1e-6,
     uav_overlap_penalty: float | None = None,
     uav_overlap_allowed: float | None = None,
     uav_overlap_penalty_normalization: str = "raw",
@@ -263,8 +266,12 @@ def build_args(
     uav_confidence_reward = float(uav_confidence_reward)
     if uav_confidence_reward < 0.0:
         raise ValueError("uav_confidence_reward must be nonnegative")
+    uav_confidence_move_reward = float(uav_confidence_move_reward)
+    if uav_confidence_move_reward < 0.0:
+        raise ValueError("uav_confidence_move_reward must be nonnegative")
     uav_confidence_gamma = max(float(uav_confidence_gamma), 0.0)
     uav_confidence_eps = max(float(uav_confidence_eps), 0.0)
+    uav_confidence_opportunity_eps = max(float(uav_confidence_opportunity_eps), 0.0)
     uav_coverage_normalization = str(uav_coverage_normalization).replace("-", "_").lower()
     if uav_coverage_normalization not in {"map", "opportunity"}:
         raise ValueError("uav_coverage_normalization must be one of: map, opportunity")
@@ -519,6 +526,9 @@ def build_args(
     uav_frontier_mode = str(uav_frontier_mode).replace("-", "_")
     if uav_frontier_mode not in {"centroid", "sector_topk"}:
         raise ValueError("uav_frontier_mode must be one of: centroid, sector_topk")
+    uav_frontier_source = str(uav_frontier_source).replace("-", "_").lower()
+    if uav_frontier_source not in {"coverage", "confidence"}:
+        raise ValueError("uav_frontier_source must be one of: coverage, confidence")
     uav_frontier_sectors = int(uav_frontier_sectors)
     if uav_frontier_sectors < 2:
         raise ValueError("uav_frontier_sectors must be at least 2")
@@ -532,14 +542,18 @@ def build_args(
         scenario_kwargs["uav_frontier_obs"] = bool(uav_frontier_obs)
         scenario_kwargs["uav_frontier_obs_radius_m"] = uav_frontier_obs_radius_m
         scenario_kwargs["uav_frontier_mode"] = uav_frontier_mode
+        scenario_kwargs["uav_frontier_source"] = uav_frontier_source
         scenario_kwargs["uav_frontier_sectors"] = uav_frontier_sectors
         scenario_kwargs["uav_frontier_top_k"] = uav_frontier_top_k
         scenario_kwargs["uav_frontier_ownership"] = bool(uav_frontier_ownership)
         scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
-    if uav_confidence_reward > 0.0:
+    if uav_confidence_reward > 0.0 or uav_confidence_move_reward > 0.0 or uav_frontier_source == "confidence":
+        scenario_kwargs["uav_frontier_source"] = uav_frontier_source
         scenario_kwargs["r_uav_confidence"] = uav_confidence_reward
+        scenario_kwargs["r_uav_confidence_move"] = uav_confidence_move_reward
         scenario_kwargs["uav_confidence_gamma"] = uav_confidence_gamma
         scenario_kwargs["uav_confidence_eps"] = uav_confidence_eps
+        scenario_kwargs["uav_confidence_opportunity_eps"] = uav_confidence_opportunity_eps
     if uav_start_min_separation_m is not None:
         scenario_kwargs["uav_start_min_separation_m"] = uav_start_min_separation_m
     if uav_start_edge_margin_m is not None:
@@ -686,8 +700,11 @@ def build_args(
             "uav_coverage_threshold_fraction": uav_coverage_threshold_fraction,
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_confidence": uav_confidence_reward,
+            "r_uav_confidence_move": uav_confidence_move_reward,
             "uav_confidence_gamma": uav_confidence_gamma,
             "uav_confidence_eps": uav_confidence_eps,
+            "uav_confidence_opportunity_eps": uav_confidence_opportunity_eps,
+            "uav_frontier_source": uav_frontier_source,
             "r_uav_overlap": uav_overlap_penalty,
             "uav_overlap_allowed": uav_overlap_allowed,
             "uav_overlap_penalty_normalization": uav_overlap_penalty_normalization,
@@ -844,6 +861,10 @@ def main():
                    default=DEFAULT_UAV_FRONTIER_MODE,
                    help="Frontier feature/reward mode. centroid is the legacy averaged direction; "
                         "sector_topk uses top-k uncovered sector candidates.")
+    p.add_argument("--uav-frontier-source", choices=("coverage", "confidence"),
+                   default="coverage",
+                   help="Map used to score UAV frontier candidates. coverage uses binary uncovered cells; "
+                        "confidence uses the probabilistic inspection-confidence map.")
     p.add_argument("--uav-frontier-sectors", type=int, default=DEFAULT_UAV_FRONTIER_SECTORS,
                    help="Number of angular sectors for --uav-frontier-mode sector_topk.")
     p.add_argument("--uav-frontier-top-k", type=int, default=DEFAULT_UAV_FRONTIER_TOP_K,
@@ -912,11 +933,16 @@ def main():
     p.add_argument("--uav-confidence-reward", type=float, default=0.0,
                    help="Optional per-UAV reward scale for marginal probabilistic inspection-confidence gain. "
                         "Default 0 disables this reward.")
+    p.add_argument("--uav-confidence-move-reward", type=float, default=0.0,
+                   help="Optional per-UAV reward scale for movement that captures a high fraction of the "
+                        "best one-step confidence-gain opportunity. Default 0 disables this reward.")
     p.add_argument("--uav-confidence-gamma", type=float, default=2.0,
                    help="Exponent for weighting confidence reward toward low-confidence cells. "
                         "Higher values focus more strongly on poorly inspected cells.")
     p.add_argument("--uav-confidence-eps", type=float, default=0.05,
                    help="Minimum confidence reward weight for already high-confidence cells.")
+    p.add_argument("--uav-confidence-opportunity-eps", type=float, default=1e-6,
+                   help="Small denominator floor for --uav-confidence-move-reward opportunity normalization.")
     p.add_argument("--uav-overlap-penalty", type=float, default=None,
                    help="Maximum per-UAV per-step penalty at maximum excess footprint overlap. "
                         "The expected overlap from actual movement is not penalized. "
@@ -1022,6 +1048,9 @@ def main():
     args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
     if args.uav_frontier_mode not in {"centroid", "sector_topk"}:
         p.error("--uav-frontier-mode must be one of: centroid, sector_topk")
+    args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
+    if args.uav_frontier_source not in {"coverage", "confidence"}:
+        p.error("--uav-frontier-source must be one of: coverage, confidence")
     if args.uav_frontier_sectors < 2:
         p.error("--uav-frontier-sectors must be at least 2")
     if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:
@@ -1067,10 +1096,14 @@ def main():
         p.error("--uav-frontier-alignment-reward must be nonnegative")
     if args.uav_confidence_reward < 0.0:
         p.error("--uav-confidence-reward must be nonnegative")
+    if args.uav_confidence_move_reward < 0.0:
+        p.error("--uav-confidence-move-reward must be nonnegative")
     if args.uav_confidence_gamma < 0.0:
         p.error("--uav-confidence-gamma must be nonnegative")
     if args.uav_confidence_eps < 0.0:
         p.error("--uav-confidence-eps must be nonnegative")
+    if args.uav_confidence_opportunity_eps < 0.0:
+        p.error("--uav-confidence-opportunity-eps must be nonnegative")
     if args.uav_overlap_penalty is not None and args.uav_overlap_penalty < 0.0:
         p.error("--uav-overlap-penalty must be nonnegative")
     if args.uav_overlap_allowed is not None and not 0.0 <= args.uav_overlap_allowed < 1.0:
@@ -1251,6 +1284,7 @@ def main():
     print(f" uav_frontier_obs: {args.uav_frontier_obs}")
     print(f" uav_frontier_obs_radius_m: {args.uav_frontier_obs_radius_m}")
     print(f" uav_frontier_mode: {args.uav_frontier_mode}")
+    print(f" uav_frontier_source: {args.uav_frontier_source}")
     print(f" uav_frontier_sectors: {args.uav_frontier_sectors}")
     print(f" uav_frontier_top_k: {args.uav_frontier_top_k}")
     print(f" uav_frontier_ownership: {args.uav_frontier_ownership}")
@@ -1270,8 +1304,10 @@ def main():
     print(f" uav_coverage_opportunity_cap: {args.uav_coverage_opportunity_cap}")
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_confidence_reward: {args.uav_confidence_reward}")
+    print(f" uav_confidence_move_reward: {args.uav_confidence_move_reward}")
     print(f" uav_confidence_gamma: {args.uav_confidence_gamma}")
     print(f" uav_confidence_eps: {args.uav_confidence_eps}")
+    print(f" uav_confidence_opportunity_eps: {args.uav_confidence_opportunity_eps}")
     print(f" uav_overlap_penalty: {args.uav_overlap_penalty}")
     print(f" uav_overlap_allowed: {args.uav_overlap_allowed}")
     print(f" uav_overlap_penalty_normalization: {args.uav_overlap_penalty_normalization}")
@@ -1326,6 +1362,7 @@ def main():
         uav_frontier_obs = args.uav_frontier_obs,
         uav_frontier_obs_radius_m = args.uav_frontier_obs_radius_m,
         uav_frontier_mode = args.uav_frontier_mode,
+        uav_frontier_source = args.uav_frontier_source,
         uav_frontier_sectors = args.uav_frontier_sectors,
         uav_frontier_top_k = args.uav_frontier_top_k,
         uav_frontier_ownership = args.uav_frontier_ownership,
@@ -1350,8 +1387,10 @@ def main():
         uav_coverage_opportunity_cap = args.uav_coverage_opportunity_cap,
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_confidence_reward = args.uav_confidence_reward,
+        uav_confidence_move_reward = args.uav_confidence_move_reward,
         uav_confidence_gamma = args.uav_confidence_gamma,
         uav_confidence_eps = args.uav_confidence_eps,
+        uav_confidence_opportunity_eps = args.uav_confidence_opportunity_eps,
         uav_overlap_penalty = args.uav_overlap_penalty,
         uav_overlap_allowed = args.uav_overlap_allowed,
         uav_overlap_penalty_normalization = args.uav_overlap_penalty_normalization,

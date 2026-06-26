@@ -184,9 +184,19 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_frontier_obs = False
         scenario.uav_frontier_obs_radius_m = 10.0
         scenario.uav_frontier_mode = "centroid"
+        scenario.uav_frontier_source = "coverage"
         scenario.uav_frontier_sectors = 8
         scenario.uav_frontier_top_k = 2
         scenario.uav_frontier_ownership = False
+        scenario.r_uav_confidence = 0.0
+        scenario.r_uav_confidence_move = 0.0
+        scenario.uav_confidence_gamma = 2.0
+        scenario.uav_confidence_eps = 0.05
+        scenario.uav_confidence_opportunity_eps = 1e-6
+        scenario.uav_confidence_diagnostics = False
+        scenario.uav_confidence_obs_grid = 0
+        scenario.local_confidence_obs_grid = 0
+        scenario.local_confidence_obs_radius_m = 150.0
         scenario.r_uav_overlap = 0.0
         scenario.uav_overlap_allowed = 0.10
         scenario.uav_overlap_penalty_normalization = "raw"
@@ -203,6 +213,13 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.x_semidim = 1.0
         scenario.y_semidim = 1.0
         scenario.coverage_grid = torch.zeros(1, grid_size, grid_size, dtype=torch.bool)
+        scenario.uav_confidence_grid = torch.zeros(1, grid_size, grid_size)
+        scenario.land_cover_grid = torch.zeros(1, grid_size, grid_size, dtype=torch.long)
+        scenario.drone_cover_detection_factors = torch.ones(8)
+        scenario.disable_fire = True
+        scenario.drone_edge_detection_floor = 0.4
+        scenario.drone_altitude = torch.full((1, n_drones), 0.10)
+        scenario.drone_altitude_quality = torch.ones(1, n_drones)
         scenario.drone_camera_half_angle_tan = 1.0
         scenario.drone_min_footprint_by_env = torch.zeros(1)
         scenario.terrain_sim_units_per_meter = torch.tensor([0.1])
@@ -436,6 +453,37 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         edge_patch = scenario._local_confidence_observation(agent)
 
         self.assertGreater(float(edge_patch[0, -1]), 0.5)
+
+    def test_confidence_frontier_features_point_toward_low_confidence_mass(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_source = "confidence"
+        scenario.coverage_grid[:] = True
+        scenario.uav_confidence_grid[:] = 1.0
+        scenario.uav_confidence_grid[:, :, :4] = 0.0
+
+        features = scenario._uav_frontier_features_for_positions(torch.zeros(1, 1, 2))
+
+        self.assertLess(float(features[0, 0, 0]), 0.0)
+        self.assertAlmostEqual(float(features[0, 0, 1]), 0.0, places=6)
+        self.assertGreater(float(features[0, 0, 2]), 0.0)
+        self.assertGreater(float(features[0, 0, 3]), 0.0)
+
+    def test_uav_confidence_move_reward_uses_best_one_step_opportunity(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.r_uav_confidence = 0.0
+        scenario.r_uav_confidence_move = 0.2
+        scenario.uav_confidence_grid.zero_()
+        scenario._pre_step_drone_pos = torch.zeros(1, 1, 2)
+
+        confidence_reward, move_reward = scenario._update_uav_confidence(torch.tensor([[[0.5, 0.0]]]))
+
+        self.assertEqual(float(confidence_reward[0, 0]), 0.0)
+        self.assertGreater(float(move_reward[0, 0]), 0.0)
+        self.assertLessEqual(float(move_reward[0, 0]), 0.2)
+        self.assertGreater(float(scenario.metric_uav_confidence_opportunity_best_gain[0]), 0.0)
+        self.assertGreater(float(scenario.metric_uav_confidence_opportunity_fraction[0]), 0.0)
+        self.assertLessEqual(float(scenario.metric_uav_confidence_opportunity_fraction[0]), 1.0)
 
     def test_uav_move_coverage_reward_scales_with_new_cells_and_displacement(self):
         scenario = self._coverage_scenario(grid_size=16)
