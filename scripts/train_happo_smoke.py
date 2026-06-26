@@ -167,6 +167,9 @@ def build_args(
     r_drone_confirm: float = 0.0,
     local_coverage_obs_grid: int = 0,
     local_coverage_obs_radius_m: float = 150.0,
+    uav_confidence_obs_grid: int = 0,
+    uav_local_confidence_obs_grid: int = 0,
+    uav_local_confidence_obs_radius_m: float = 150.0,
     uav_frontier_obs: bool | None = None,
     uav_frontier_obs_radius_m: float = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
     uav_frontier_mode: str = DEFAULT_UAV_FRONTIER_MODE,
@@ -494,6 +497,22 @@ def build_args(
     if local_coverage_obs_grid > 0:
         scenario_kwargs["local_coverage_obs_grid"] = local_coverage_obs_grid
         scenario_kwargs["local_coverage_obs_radius_m"] = local_coverage_obs_radius_m
+    uav_confidence_obs_grid = int(uav_confidence_obs_grid)
+    if uav_confidence_obs_grid < 0:
+        raise ValueError("uav_confidence_obs_grid must be nonnegative")
+    if uav_confidence_obs_grid > 0:
+        scenario_kwargs["uav_confidence_obs_grid"] = uav_confidence_obs_grid
+    uav_local_confidence_obs_grid = int(uav_local_confidence_obs_grid)
+    if uav_local_confidence_obs_grid < 0 or (
+        uav_local_confidence_obs_grid > 0 and uav_local_confidence_obs_grid % 2 != 1
+    ):
+        raise ValueError("uav_local_confidence_obs_grid must be 0 or a positive odd integer")
+    uav_local_confidence_obs_radius_m = float(uav_local_confidence_obs_radius_m)
+    if uav_local_confidence_obs_radius_m <= 0.0:
+        raise ValueError("uav_local_confidence_obs_radius_m must be positive")
+    if uav_local_confidence_obs_grid > 0:
+        scenario_kwargs["local_confidence_obs_grid"] = uav_local_confidence_obs_grid
+        scenario_kwargs["local_confidence_obs_radius_m"] = uav_local_confidence_obs_radius_m
     uav_frontier_obs_radius_m = float(uav_frontier_obs_radius_m)
     if uav_frontier_obs_radius_m <= 0.0:
         raise ValueError("uav_frontier_obs_radius_m must be positive")
@@ -685,6 +704,8 @@ def build_args(
         ugv_planner_hint=ugv_planner_hint,
         coverage_obs_grid=int(coverage_obs_grid),
         local_coverage_obs_grid=int(local_coverage_obs_grid),
+        uav_confidence_obs_grid=int(uav_confidence_obs_grid),
+        local_confidence_obs_grid=int(uav_local_confidence_obs_grid),
         uav_frontier_obs=bool(uav_frontier_obs),
         uav_frontier_mode=uav_frontier_mode,
         uav_frontier_top_k=uav_frontier_top_k,
@@ -803,6 +824,14 @@ def main():
     p.add_argument("--local-coverage-obs-radius-m", type=float, default=150.0,
                    help="Physical half-width/radius in meters for --local-coverage-obs-grid. "
                         "Example: 150 with K=9 gives bins about 33m wide on a 500m map.")
+    p.add_argument("--uav-confidence-obs-grid", type=int, default=0,
+                   help="Add a KxK UAV inspection-confidence map + global mean to the observation. "
+                        "0 = off.")
+    p.add_argument("--uav-local-confidence-obs-grid", type=int, default=0,
+                   help="Add a pooled KxK ego-centric UAV inspection-confidence map. "
+                        "Use an odd value such as 9. 0 = off.")
+    p.add_argument("--uav-local-confidence-obs-radius-m", type=float, default=150.0,
+                   help="Physical half-width/radius in meters for --uav-local-confidence-obs-grid.")
     p.set_defaults(uav_frontier_obs=None)
     p.add_argument("--uav-frontier-obs", dest="uav_frontier_obs", action="store_true",
                    help="Add UAV frontier features: direction, distance, and local uncovered ratio "
@@ -979,6 +1008,15 @@ def main():
         p.error("--local-coverage-obs-grid must be 0 or a positive odd integer")
     if args.local_coverage_obs_radius_m <= 0.0:
         p.error("--local-coverage-obs-radius-m must be positive")
+    if args.uav_confidence_obs_grid < 0:
+        p.error("--uav-confidence-obs-grid must be nonnegative")
+    if args.uav_local_confidence_obs_grid < 0 or (
+        args.uav_local_confidence_obs_grid > 0
+        and args.uav_local_confidence_obs_grid % 2 != 1
+    ):
+        p.error("--uav-local-confidence-obs-grid must be 0 or a positive odd integer")
+    if args.uav_local_confidence_obs_radius_m <= 0.0:
+        p.error("--uav-local-confidence-obs-radius-m must be positive")
     if args.uav_frontier_obs_radius_m <= 0.0:
         p.error("--uav-frontier-obs-radius-m must be positive")
     args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
@@ -1207,6 +1245,9 @@ def main():
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
     print(f" local_coverage_obs_radius_m: {args.local_coverage_obs_radius_m}")
+    print(f" uav_confidence_obs_grid: {args.uav_confidence_obs_grid}")
+    print(f" uav_local_confidence_obs_grid: {args.uav_local_confidence_obs_grid}")
+    print(f" uav_local_confidence_obs_radius_m: {args.uav_local_confidence_obs_radius_m}")
     print(f" uav_frontier_obs: {args.uav_frontier_obs}")
     print(f" uav_frontier_obs_radius_m: {args.uav_frontier_obs_radius_m}")
     print(f" uav_frontier_mode: {args.uav_frontier_mode}")
@@ -1279,6 +1320,9 @@ def main():
         r_drone_confirm = args.r_drone_confirm,
         local_coverage_obs_grid = args.local_coverage_obs_grid,
         local_coverage_obs_radius_m = args.local_coverage_obs_radius_m,
+        uav_confidence_obs_grid = args.uav_confidence_obs_grid,
+        uav_local_confidence_obs_grid = args.uav_local_confidence_obs_grid,
+        uav_local_confidence_obs_radius_m = args.uav_local_confidence_obs_radius_m,
         uav_frontier_obs = args.uav_frontier_obs,
         uav_frontier_obs_radius_m = args.uav_frontier_obs_radius_m,
         uav_frontier_mode = args.uav_frontier_mode,

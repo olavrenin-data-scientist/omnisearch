@@ -411,6 +411,32 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertGreater(float(edge_patch[0, -1]), 0.5)
 
+    def test_confidence_observations_pool_global_and_local_maps(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_confidence_obs_grid = 2
+        scenario.local_confidence_obs_grid = 3
+        scenario.local_confidence_obs_radius_m = 100.0
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.01])
+        scenario.uav_confidence_grid = torch.zeros(1, 8, 8)
+        scenario.uav_confidence_grid[:, 3:5, 3:5] = 0.8
+        agent = types.SimpleNamespace(
+            state=types.SimpleNamespace(pos=torch.tensor([[0.0, 0.0]], dtype=torch.float32)),
+        )
+
+        global_obs = scenario._uav_confidence_observation()
+        center_patch = scenario._local_confidence_observation(agent)
+
+        self.assertEqual(global_obs.shape[-1], 5)
+        self.assertAlmostEqual(float(global_obs[0, -1]), float(scenario.uav_confidence_grid.mean()))
+        self.assertEqual(center_patch.shape[-1], 9)
+        self.assertGreater(float(center_patch[0, 4]), 0.0)
+        self.assertLess(float(center_patch[0, 4]), 1.0)
+
+        agent.state.pos = torch.tensor([[0.95, 0.95]], dtype=torch.float32)
+        edge_patch = scenario._local_confidence_observation(agent)
+
+        self.assertGreater(float(edge_patch[0, -1]), 0.5)
+
     def test_uav_move_coverage_reward_scales_with_new_cells_and_displacement(self):
         scenario = self._coverage_scenario(grid_size=16)
         drone_pos = torch.tensor([[[1.0, 0.0]]])  # 10 meters at 0.1 sim-units/m.

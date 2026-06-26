@@ -288,6 +288,9 @@ class HappoCheckpointTests(unittest.TestCase):
             coverage_obs_grid=6,
             local_coverage_obs_grid=9,
             local_coverage_obs_radius_m=150.0,
+            uav_confidence_obs_grid=4,
+            uav_local_confidence_obs_grid=5,
+            uav_local_confidence_obs_radius_m=100.0,
             uav_frontier_obs=True,
             uav_frontier_obs_radius_m=120.0,
             uav_survivor_diagnostic=True,
@@ -327,6 +330,9 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["coverage_obs_grid"], 6)
         self.assertEqual(scenario["local_coverage_obs_grid"], 9)
         self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
+        self.assertEqual(scenario["uav_confidence_obs_grid"], 4)
+        self.assertEqual(scenario["local_confidence_obs_grid"], 5)
+        self.assertEqual(scenario["local_confidence_obs_radius_m"], 100.0)
         self.assertTrue(scenario["uav_frontier_obs"])
         self.assertEqual(scenario["uav_frontier_obs_radius_m"], 120.0)
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
@@ -371,6 +377,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["coverage_obs_grid"], 6)
         self.assertEqual(scenario["local_coverage_obs_grid"], 9)
         self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
+        self.assertNotIn("uav_confidence_obs_grid", scenario)
+        self.assertNotIn("local_confidence_obs_grid", scenario)
         self.assertEqual(scenario["r_uav_move_coverage"], 0.001)
         self.assertEqual(scenario["uav_move_coverage_normalization"], "raw")
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)

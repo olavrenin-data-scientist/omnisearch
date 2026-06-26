@@ -557,6 +557,18 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("local_coverage_obs_radius_m", 150.0)),
             1e-6,
         )
+        self.uav_confidence_obs_grid = int(kwargs.pop("uav_confidence_obs_grid", 0))
+        if self.uav_confidence_obs_grid < 0:
+            raise ValueError("uav_confidence_obs_grid must be nonnegative")
+        self.local_confidence_obs_grid = int(kwargs.pop("local_confidence_obs_grid", 0))
+        if self.local_confidence_obs_grid < 0:
+            raise ValueError("local_confidence_obs_grid must be nonnegative")
+        if self.local_confidence_obs_grid > 0 and self.local_confidence_obs_grid % 2 != 1:
+            raise ValueError("local_confidence_obs_grid must be 0 or a positive odd integer")
+        self.local_confidence_obs_radius_m = max(
+            float(kwargs.pop("local_confidence_obs_radius_m", self.local_coverage_obs_radius_m)),
+            1e-6,
+        )
         self.uav_frontier_obs = bool(kwargs.pop("uav_frontier_obs", False))
         self.uav_frontier_obs_radius_m = max(
             float(kwargs.pop("uav_frontier_obs_radius_m", self.local_coverage_obs_radius_m)),
@@ -2960,7 +2972,12 @@ class WildfireSearchScenario(BaseScenario):
         reward = drone_pos.new_zeros(drone_pos.shape[0], self.n_drones)
         if self.n_drones == 0:
             return reward
-        if not self.uav_confidence_diagnostics and self.r_uav_confidence <= 0.0:
+        if (
+            not self.uav_confidence_diagnostics
+            and self.r_uav_confidence <= 0.0
+            and self.uav_confidence_obs_grid <= 0
+            and self.local_confidence_obs_grid <= 0
+        ):
             return reward
 
         with torch.no_grad():
@@ -3948,6 +3965,10 @@ class WildfireSearchScenario(BaseScenario):
             parts.append(self._coverage_observation())       # [B, K*K + 1]
         if self.local_coverage_obs_grid > 0:
             parts.append(self._local_coverage_observation(agent))  # [B, K*K]
+        if self.uav_confidence_obs_grid > 0:
+            parts.append(self._uav_confidence_observation())       # [B, K*K + 1]
+        if self.local_confidence_obs_grid > 0:
+            parts.append(self._local_confidence_observation(agent))  # [B, K*K]
         if self.uav_frontier_obs:
             parts.append(self._uav_frontier_observation(agent))
         return torch.cat(parts, dim=-1)
@@ -3959,13 +3980,8 @@ class WildfireSearchScenario(BaseScenario):
         Same for every agent (shared team memory). Lets the policy steer toward
         not-yet-covered regions instead of re-sweeping covered ground.
         """
-        import torch.nn.functional as F
-
         K = self.coverage_obs_grid
-        cov = self.coverage_grid.float().unsqueeze(1)            # [B, 1, G, G]
-        pooled = F.adaptive_avg_pool2d(cov, (K, K)).flatten(1)   # [B, K*K]
-        global_frac = self.coverage_grid.float().mean(dim=(1, 2), keepdim=True).squeeze(1)  # [B, 1]
-        return torch.cat([pooled, global_frac], dim=-1)
+        return self._global_grid_observation(self.coverage_grid.float(), K)
 
     def _local_coverage_observation(self, agent: Agent) -> Tensor:
         """Pooled ego-centric coverage patch extracted from the coverage grid.
@@ -3975,10 +3991,56 @@ class WildfireSearchScenario(BaseScenario):
         map cells are filled as covered, then the raw patch is adaptively
         average-pooled to KxK.
         """
-        K = self.local_coverage_obs_grid
+        return self._local_grid_observation(
+            agent,
+            self.coverage_grid.float(),
+            K=self.local_coverage_obs_grid,
+            radius_m=self.local_coverage_obs_radius_m,
+            outside_value=1.0,
+        )
+
+    def _uav_confidence_observation(self) -> Tensor:
+        """Team inspection confidence: downsampled map plus global mean."""
+        K = self.uav_confidence_obs_grid
+        return self._global_grid_observation(self.uav_confidence_grid.float(), K)
+
+    def _local_confidence_observation(self, agent: Agent) -> Tensor:
+        """Pooled ego-centric inspection-confidence patch.
+
+        Outside-map cells are filled as high confidence, matching the coverage
+        observation convention that non-searchable space should not look
+        unexplored.
+        """
+        return self._local_grid_observation(
+            agent,
+            self.uav_confidence_grid.float(),
+            K=self.local_confidence_obs_grid,
+            radius_m=self.local_confidence_obs_radius_m,
+            outside_value=1.0,
+        )
+
+    def _global_grid_observation(self, grid: Tensor, K: int) -> Tensor:
+        if K <= 0:
+            return torch.zeros(self.world.batch_dim, 0, device=grid.device, dtype=grid.dtype)
+        import torch.nn.functional as F
+
+        values = grid.float().unsqueeze(1)                       # [B, 1, G, G]
+        pooled = F.adaptive_avg_pool2d(values, (K, K)).flatten(1) # [B, K*K]
+        global_mean = grid.float().mean(dim=(1, 2), keepdim=True).squeeze(1)  # [B, 1]
+        return torch.cat([pooled, global_mean], dim=-1)
+
+    def _local_grid_observation(
+        self,
+        agent: Agent,
+        grid: Tensor,
+        *,
+        K: int,
+        radius_m: float,
+        outside_value: float,
+    ) -> Tensor:
+        K = int(K)
         if K <= 0:
             return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
-
         import torch.nn.functional as F
 
         pos = agent.state.pos
@@ -3989,17 +4051,22 @@ class WildfireSearchScenario(BaseScenario):
             self.terrain_sim_units_per_meter.to(device=device, dtype=dtype).clamp_min(1e-9)
             * (float(G) / (2.0 * float(self.x_semidim)))
         )
-        radius_cells = torch.round(float(self.local_coverage_obs_radius_m) / cell_width_m).long().clamp_min(1)
+        radius_cells = torch.round(float(radius_m) / cell_width_m).long().clamp_min(1)
         max_radius = int(radius_cells.max().detach().cpu().item())
         patch_size = 2 * max_radius + 1
 
-        coverage = self.coverage_grid.to(device=device, dtype=dtype)
+        values = grid.to(device=device, dtype=dtype)
         gx, gy = self._positions_to_grid(pos)
         out = torch.empty(self.world.batch_dim, K * K, device=device, dtype=dtype)
         for env_idx in range(self.world.batch_dim):
             radius = int(radius_cells[env_idx].detach().cpu().item())
             raw_patch_size = 2 * radius + 1
-            patch = torch.ones(raw_patch_size, raw_patch_size, device=device, dtype=dtype)
+            patch = torch.full(
+                (raw_patch_size, raw_patch_size),
+                float(outside_value),
+                device=device,
+                dtype=dtype,
+            )
             x0 = int(gx[env_idx].item()) - radius
             x1 = int(gx[env_idx].item()) + radius + 1
             y0 = int(gy[env_idx].item()) - radius
@@ -4013,9 +4080,14 @@ class WildfireSearchScenario(BaseScenario):
                 px1 = px0 + (sx1 - sx0)
                 py0 = sy0 - y0
                 py1 = py0 + (sy1 - sy0)
-                patch[py0:py1, px0:px1] = coverage[env_idx, sy0:sy1, sx0:sx1]
+                patch[py0:py1, px0:px1] = values[env_idx, sy0:sy1, sx0:sx1]
             if raw_patch_size != patch_size:
-                padded = torch.ones(patch_size, patch_size, device=device, dtype=dtype)
+                padded = torch.full(
+                    (patch_size, patch_size),
+                    float(outside_value),
+                    device=device,
+                    dtype=dtype,
+                )
                 offset = max_radius - radius
                 padded[offset : offset + raw_patch_size, offset : offset + raw_patch_size] = patch
                 patch = padded

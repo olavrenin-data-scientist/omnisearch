@@ -59,6 +59,22 @@ class HARLTerrainCNNTests(unittest.TestCase):
         )
         self.assertEqual(with_local_coverage, base + 9 * 9)
 
+        with_confidence = wildfire_single_observation_dim(
+            local_map_patch_size=7,
+            n_agents=1,
+            n_survivors=1,
+            uav_confidence_obs_grid=6,
+        )
+        self.assertEqual(with_confidence, base + 6 * 6 + 1)
+
+        with_local_confidence = wildfire_single_observation_dim(
+            local_map_patch_size=7,
+            n_agents=1,
+            n_survivors=1,
+            local_confidence_obs_grid=9,
+        )
+        self.assertEqual(with_local_confidence, base + 9 * 9)
+
         with_frontier = wildfire_single_observation_dim(
             local_map_patch_size=7,
             n_agents=1,

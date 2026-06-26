@@ -38,6 +38,8 @@ def wildfire_single_observation_dim(
     ugv_planner_hint: str = "none",
     coverage_obs_grid: int = 0,
     local_coverage_obs_grid: int = 0,
+    uav_confidence_obs_grid: int = 0,
+    local_confidence_obs_grid: int = 0,
     uav_frontier_obs: bool = False,
     uav_frontier_mode: str = "centroid",
     uav_frontier_top_k: int = 2,
@@ -49,6 +51,10 @@ def wildfire_single_observation_dim(
     coverage_obs_dim = coverage_grid * coverage_grid + 1 if coverage_grid > 0 else 0
     local_coverage_grid = max(int(local_coverage_obs_grid), 0)
     local_coverage_obs_dim = local_coverage_grid * local_coverage_grid
+    confidence_grid = max(int(uav_confidence_obs_grid), 0)
+    confidence_obs_dim = confidence_grid * confidence_grid + 1 if confidence_grid > 0 else 0
+    local_confidence_grid = max(int(local_confidence_obs_grid), 0)
+    local_confidence_obs_dim = local_confidence_grid * local_confidence_grid
     uav_frontier_obs_dim = uav_frontier_observation_dim(
         uav_frontier_obs=uav_frontier_obs,
         uav_frontier_mode=uav_frontier_mode,
@@ -67,6 +73,8 @@ def wildfire_single_observation_dim(
         + max(int(n_survivors), 0) * 7  # survivor messages
         + coverage_obs_dim  # optional downsampled team coverage map + global fraction
         + local_coverage_obs_dim  # optional pooled local coverage map around this agent
+        + confidence_obs_dim  # optional downsampled UAV inspection-confidence map + global mean
+        + local_confidence_obs_dim  # optional pooled local confidence map around this agent
         + uav_frontier_obs_dim  # optional direction/distance/strength toward uncovered coverage frontier
     )
 
