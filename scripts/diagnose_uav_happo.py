@@ -73,6 +73,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "drone_can_confirm": True,
         "disable_fire": True,
         "comms_dropout": 0.0,
+        "uav_confidence_diagnostics": True,
     })
     if args.n_drones is not None:
         scenario_kwargs["n_drones"] = int(args.n_drones)
@@ -184,6 +185,13 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     coverage_opportunity_cells_values: list[float] = []
     coverage_opportunity_fraction_values: list[float] = []
     coverage_opportunity_available_fraction_values: list[float] = []
+    confidence_mean_values: list[float] = []
+    confidence_gain_values: list[float] = []
+    confidence_gain_by_drone_values: list[float] = []
+    confidence_low_fraction_values: list[float] = []
+    confidence_high_fraction_values: list[float] = []
+    confidence_step_detection_probability_values: list[float] = []
+    confidence_step_detection_probability_by_drone_values: list[float] = []
     reward_uav_coverage_values: list[float] = []
     reward_uav_move_coverage_values: list[float] = []
     reward_uav_frontier_values: list[float] = []
@@ -346,6 +354,29 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             "metric_uav_coverage_opportunity_available_fraction_by_drone",
             scenario.n_drones,
         )
+        confidence_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_gain_by_drone",
+            scenario.n_drones,
+        )
+        confidence_step_detection_probability_by_drone = _metric_array(
+            scenario,
+            "metric_uav_step_detection_probability_by_drone",
+            scenario.n_drones,
+        )
+        confidence_mean = _metric_scalar(scenario, "metric_uav_confidence_mean")
+        confidence_gain = _metric_scalar(scenario, "metric_uav_confidence_gain")
+        confidence_low_fraction = _metric_scalar(scenario, "metric_uav_confidence_low_fraction")
+        confidence_high_fraction = _metric_scalar(scenario, "metric_uav_confidence_high_fraction")
+        confidence_step_detection_probability = _metric_scalar(
+            scenario,
+            "metric_uav_step_detection_probability",
+        )
+        confidence_mean_values.append(confidence_mean)
+        confidence_gain_values.append(confidence_gain)
+        confidence_low_fraction_values.append(confidence_low_fraction)
+        confidence_high_fraction_values.append(confidence_high_fraction)
+        confidence_step_detection_probability_values.append(confidence_step_detection_probability)
         frontier_alignment = _metric_array(
             scenario,
             "metric_uav_frontier_alignment_by_drone",
@@ -514,6 +545,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             opportunity_available_fraction = float(
                 coverage_opportunity_available_fraction[drone_idx]
             )
+            confidence_gain_drone = float(confidence_gain_by_drone[drone_idx])
+            confidence_pass_probability = float(
+                confidence_step_detection_probability_by_drone[drone_idx]
+            )
             frontier_align = float(frontier_alignment[drone_idx])
             frontier_progress_frac = float(frontier_progress[drone_idx])
             frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
@@ -617,6 +652,8 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             coverage_opportunity_cells_values.append(opportunity_cells)
             coverage_opportunity_fraction_values.append(opportunity_fraction)
             coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
+            confidence_gain_by_drone_values.append(confidence_gain_drone)
+            confidence_step_detection_probability_by_drone_values.append(confidence_pass_probability)
             frontier_alignment_values.append(frontier_align)
             frontier_progress_values.append(frontier_progress_frac)
             frontier_uncovered_ratio_values.append(frontier_ratio)
@@ -703,6 +740,8 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["coverage_opportunity_cells"].append(opportunity_cells)
             drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
             drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
+            drone_stats["confidence_gain"].append(confidence_gain_drone)
+            drone_stats["confidence_pass_probability"].append(confidence_pass_probability)
             drone_stats["frontier_alignment"].append(frontier_align)
             drone_stats["frontier_progress"].append(frontier_progress_frac)
             drone_stats["frontier_uncovered_ratio"].append(frontier_ratio)
@@ -854,6 +893,13 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "coverage_opportunity_cells": opportunity_cells,
                     "coverage_opportunity_fraction": opportunity_fraction,
                     "coverage_opportunity_available_fraction": opportunity_available_fraction,
+                    "confidence_mean": confidence_mean,
+                    "confidence_gain": confidence_gain_drone,
+                    "confidence_team_gain": confidence_gain,
+                    "confidence_low_fraction": confidence_low_fraction,
+                    "confidence_high_fraction": confidence_high_fraction,
+                    "confidence_pass_probability": confidence_pass_probability,
+                    "confidence_step_detection_probability": confidence_step_detection_probability,
                     "outside_footprint": float(outside_footprint_fraction[drone_idx]),
                     "edge_step": float(is_edge_step),
                     "corner_step": float(is_corner_step),
@@ -906,6 +952,14 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         survivor_exposure_stats,
         first_scout_steps,
     )
+    final_survivor_confidence = _survivor_confidence_values(scenario)
+    for exposure in survivor_exposures:
+        survivor_idx = int(exposure.get("survivor", -1))
+        exposure["final_confidence"] = (
+            float(final_survivor_confidence[survivor_idx])
+            if 0 <= survivor_idx < len(final_survivor_confidence)
+            else math.nan
+        )
     survivor_exposure_summary = _survivor_exposure_summary(survivor_exposures)
     row = {
         "seed": int(seed),
@@ -915,6 +969,16 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "missed": missed_count,
         "recall": scouted_count / n_survivors if n_survivors else 0.0,
         "final_coverage_fraction": final_coverage_fraction,
+        "final_confidence_mean": float(
+            scenario.uav_confidence_grid[0].float().mean().detach().cpu().item()
+        ),
+        "final_confidence_low_fraction": float(
+            (scenario.uav_confidence_grid[0] < 0.50).float().mean().detach().cpu().item()
+        ),
+        "final_confidence_high_fraction": float(
+            (scenario.uav_confidence_grid[0] >= 0.80).float().mean().detach().cpu().item()
+        ),
+        "final_survivor_confidence": final_survivor_confidence,
         "full_success": float(scouted_count == n_survivors),
         "avg_scout_step": float(np.mean(scout_steps)) if scout_steps else math.nan,
         "avg_scout_time_s": float(np.mean(scout_steps) * step_seconds) if scout_steps else math.nan,
@@ -976,6 +1040,17 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_coverage_opportunity_fraction": _finite_mean(coverage_opportunity_fraction_values),
         "avg_coverage_opportunity_available_fraction": _finite_mean(
             coverage_opportunity_available_fraction_values
+        ),
+        "avg_confidence_mean": _finite_mean(confidence_mean_values),
+        "avg_confidence_gain": _finite_mean(confidence_gain_values),
+        "avg_confidence_gain_by_drone": _finite_mean(confidence_gain_by_drone_values),
+        "avg_confidence_low_fraction": _finite_mean(confidence_low_fraction_values),
+        "avg_confidence_high_fraction": _finite_mean(confidence_high_fraction_values),
+        "avg_confidence_step_detection_probability": _finite_mean(
+            confidence_step_detection_probability_values
+        ),
+        "avg_confidence_pass_probability": _finite_mean(
+            confidence_step_detection_probability_by_drone_values
         ),
         "avg_frontier_alignment": _finite_mean(frontier_alignment_values),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress_values),
@@ -1132,6 +1207,17 @@ def _metric_scalar(scenario: WildfireSearchScenario, name: str) -> float:
         return 0.0
     arr = value.detach().cpu().numpy().astype(float).reshape(-1)
     return float(arr[0]) if arr.size else 0.0
+
+
+def _survivor_confidence_values(scenario: WildfireSearchScenario) -> list[float]:
+    confidence_grid = getattr(scenario, "uav_confidence_grid", None)
+    if confidence_grid is None or int(getattr(scenario, "n_survivors", 0)) <= 0:
+        return []
+    with torch.no_grad():
+        surv_pos = torch.stack([survivor.state.pos for survivor in scenario._survivors], dim=1)
+        gx, gy = scenario._positions_to_grid(surv_pos)
+        values = confidence_grid[0, gy[0], gx[0]].detach().cpu().numpy().astype(float)
+    return [float(value) for value in values.reshape(-1)]
 
 
 def _new_survivor_exposure_stats(n_survivors: int) -> list[dict[str, Any]]:
@@ -1476,6 +1562,15 @@ def _survivor_exposure_summary(exposures: list[dict[str, Any]]) -> dict[str, flo
         ]),
         "avg_missed_cum_detection_probability": _finite_mean([
             float(entry.get("cumulative_detection_probability", math.nan)) for entry in missed
+        ]),
+        "avg_survivor_final_confidence": _finite_mean([
+            float(entry.get("final_confidence", math.nan)) for entry in exposures
+        ]),
+        "avg_scouted_survivor_final_confidence": _finite_mean([
+            float(entry.get("final_confidence", math.nan)) for entry in scouted
+        ]),
+        "avg_missed_survivor_final_confidence": _finite_mean([
+            float(entry.get("final_confidence", math.nan)) for entry in missed
         ]),
         "avg_survivor_best_detection_probability": _finite_mean([
             float(entry.get("best_detection_probability", math.nan)) for entry in exposures
@@ -2417,6 +2512,9 @@ def _summarize_survivor_exposure_outcomes(rows: list[dict[str, Any]]) -> list[di
             "mean_cumulative_detection_probability": _finite_mean([
                 float(entry.get("cumulative_detection_probability", math.nan)) for entry in entries
             ]),
+            "mean_final_confidence": _finite_mean([
+                float(entry.get("final_confidence", math.nan)) for entry in entries
+            ]),
             "mean_best_detection_probability": _finite_mean([
                 float(entry.get("best_detection_probability", math.nan)) for entry in entries
             ]),
@@ -2497,6 +2595,8 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "coverage_opportunity_cells": [],
         "coverage_opportunity_fraction": [],
         "coverage_opportunity_available_fraction": [],
+        "confidence_gain": [],
+        "confidence_pass_probability": [],
         "frontier_alignment": [],
         "frontier_progress": [],
         "frontier_uncovered_ratio": [],
@@ -2592,6 +2692,8 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     opportunity_cells = stats["coverage_opportunity_cells"]
     opportunity_fraction = stats["coverage_opportunity_fraction"]
     opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
+    confidence_gain = stats["confidence_gain"]
+    confidence_pass_probability = stats["confidence_pass_probability"]
     frontier_alignment = stats["frontier_alignment"]
     frontier_progress = stats["frontier_progress"]
     frontier_ratio = stats["frontier_uncovered_ratio"]
@@ -2672,6 +2774,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_coverage_opportunity_cells": _finite_mean(opportunity_cells),
         "avg_coverage_opportunity_fraction": _finite_mean(opportunity_fraction),
         "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
+        "avg_confidence_gain": _finite_mean(confidence_gain),
+        "total_confidence_gain": float(np.sum(confidence_gain)) if confidence_gain else 0.0,
+        "avg_confidence_pass_probability": _finite_mean(confidence_pass_probability),
         "avg_frontier_alignment": _finite_mean(frontier_alignment),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_ratio),
@@ -3106,6 +3211,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_final_coverage_fraction": (
             float(np.mean([row["final_coverage_fraction"] for row in rows])) if rows else 0.0
         ),
+        "mean_final_confidence_mean": _finite_mean([
+            row["final_confidence_mean"] for row in rows
+        ]),
+        "mean_final_confidence_low_fraction": _finite_mean([
+            row["final_confidence_low_fraction"] for row in rows
+        ]),
+        "mean_final_confidence_high_fraction": _finite_mean([
+            row["final_confidence_high_fraction"] for row in rows
+        ]),
         "full_success_rate": float(np.mean([row["full_success"] for row in rows])) if rows else 0.0,
         "mean_avg_scout_step": _finite_mean([row["avg_scout_step"] for row in rows]),
         "mean_avg_scout_time_s": _finite_mean([row["avg_scout_time_s"] for row in rows]),
@@ -3135,6 +3249,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_missed_cum_detection_probability": _finite_mean([
             row["avg_missed_cum_detection_probability"] for row in rows
+        ]),
+        "mean_survivor_final_confidence": _finite_mean([
+            row["avg_survivor_final_confidence"] for row in rows
+        ]),
+        "mean_scouted_survivor_final_confidence": _finite_mean([
+            row["avg_scouted_survivor_final_confidence"] for row in rows
+        ]),
+        "mean_missed_survivor_final_confidence": _finite_mean([
+            row["avg_missed_survivor_final_confidence"] for row in rows
         ]),
         "mean_survivor_best_detection_probability": _finite_mean([
             row["avg_survivor_best_detection_probability"] for row in rows
@@ -3310,6 +3433,27 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_coverage_opportunity_available_fraction": _finite_mean([
             row["avg_coverage_opportunity_available_fraction"] for row in rows
+        ]),
+        "mean_confidence_mean": _finite_mean([
+            row["avg_confidence_mean"] for row in rows
+        ]),
+        "mean_confidence_gain": _finite_mean([
+            row["avg_confidence_gain"] for row in rows
+        ]),
+        "mean_confidence_gain_by_drone": _finite_mean([
+            row["avg_confidence_gain_by_drone"] for row in rows
+        ]),
+        "mean_confidence_low_fraction": _finite_mean([
+            row["avg_confidence_low_fraction"] for row in rows
+        ]),
+        "mean_confidence_high_fraction": _finite_mean([
+            row["avg_confidence_high_fraction"] for row in rows
+        ]),
+        "mean_confidence_step_detection_probability": _finite_mean([
+            row["avg_confidence_step_detection_probability"] for row in rows
+        ]),
+        "mean_confidence_pass_probability": _finite_mean([
+            row["avg_confidence_pass_probability"] for row in rows
         ]),
         "mean_frontier_alignment": _finite_mean([
             row["avg_frontier_alignment"] for row in rows
@@ -3698,6 +3842,9 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_coverage_opportunity_cells",
         "avg_coverage_opportunity_fraction",
         "avg_coverage_opportunity_available_fraction",
+        "avg_confidence_gain",
+        "total_confidence_gain",
+        "avg_confidence_pass_probability",
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
         "avg_frontier_uncovered_ratio",
@@ -3821,6 +3968,10 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "coverage_opportunity_cells": "avg_coverage_opportunity_cells",
         "coverage_opportunity": "avg_coverage_opportunity_fraction",
         "coverage_opportunity_available": "avg_coverage_opportunity_available_fraction",
+        "confidence_final": "final_confidence_mean",
+        "confidence_gain": "avg_confidence_gain",
+        "confidence_drone_gain": "avg_confidence_gain_by_drone",
+        "confidence_pass": "avg_confidence_pass_probability",
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
         "frontier_ratio": "avg_frontier_uncovered_ratio",
@@ -3904,6 +4055,8 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"raw={drone['avg_raw_new_coverage_cells']:.1f} "
             f"opp={drone['avg_coverage_opportunity_fraction']:.2f} "
             f"opp_avail={drone['avg_coverage_opportunity_available_fraction']:.2f} "
+            f"conf_gain={drone['avg_confidence_gain']:.5f} "
+            f"pass_p={drone['avg_confidence_pass_probability']:.2f} "
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
             f"excess={drone['avg_excess_overlap_fraction']:.2f} "
@@ -3943,6 +4096,8 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"raw_new={drone['mean_avg_raw_new_coverage_cells']:.1f} "
             f"opp={drone['mean_avg_coverage_opportunity_fraction']:.3f} "
             f"opp_avail={drone['mean_avg_coverage_opportunity_available_fraction']:.3f} "
+            f"conf_gain={drone['mean_avg_confidence_gain']:.5f} "
+            f"pass_p={drone['mean_avg_confidence_pass_probability']:.3f} "
             f"edge={drone['mean_edge_step_frac']:.3f} "
             f"corner={drone['mean_corner_step_frac']:.3f} "
             f"outside={drone['mean_avg_outside_footprint_fraction']:.3f} "
@@ -4091,6 +4246,7 @@ def _format_survivor_exposure_outcomes(outcomes: list[dict[str, Any]]) -> list[s
             f"exp_steps={item.get('mean_exposure_steps', math.nan):.1f} "
             f"pair_exp={item.get('mean_pair_exposures', math.nan):.1f} "
             f"cum_p={item.get('mean_cumulative_detection_probability', math.nan):.3f} "
+            f"final_conf={item.get('mean_final_confidence', math.nan):.3f} "
             f"best_p={item.get('mean_best_detection_probability', math.nan):.3f} "
             f"best_pair_p={item.get('mean_best_pair_detection_probability', math.nan):.3f} "
             f"best_norm={item.get('mean_best_norm_distance', math.nan):.3f} "
@@ -4564,9 +4720,10 @@ def _plot_survivor_exposure_outcomes(ax: Any, summary: dict[str, Any]) -> None:
         return
     labels = [str(row.get("group", "?")) for row in outcomes]
     x = np.arange(len(labels))
-    width = 0.18
+    width = 0.15
     series = [
         ("cum p", "mean_cumulative_detection_probability", "#4f7cff"),
+        ("final C", "mean_final_confidence", "#20242c"),
         ("best p", "mean_best_detection_probability", "#36a269"),
         ("best norm", "mean_best_norm_distance", "#d44a3a"),
         ("edge frac", "mean_near_edge_exposure_fraction", "#8a5cf6"),
@@ -4574,7 +4731,7 @@ def _plot_survivor_exposure_outcomes(ax: Any, summary: dict[str, Any]) -> None:
     for idx, (label, key, color) in enumerate(series):
         values = [float(row.get(key, math.nan)) for row in outcomes]
         ax.bar(
-            x + (idx - 1.5) * width,
+            x + (idx - 2.0) * width,
             values,
             width=width,
             label=label,
@@ -4587,6 +4744,61 @@ def _plot_survivor_exposure_outcomes(ax: Any, summary: dict[str, Any]) -> None:
     ax.set_title("Survivor Exposure Outcomes", fontsize=10)
     ax.grid(axis="y", alpha=0.25)
     ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
+def _plot_time_bins_confidence(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Confidence", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    gain = [float(row.get("confidence_gain", math.nan)) for row in time_bins]
+    pass_probability = [
+        float(row.get("confidence_pass_probability", math.nan))
+        for row in time_bins
+    ]
+    mean_confidence = [float(row.get("confidence_mean", math.nan)) for row in time_bins]
+    low_confidence = [float(row.get("confidence_low_fraction", math.nan)) for row in time_bins]
+    high_confidence = [float(row.get("confidence_high_fraction", math.nan)) for row in time_bins]
+
+    line_gain = ax.plot(
+        centers,
+        gain,
+        marker="o",
+        linewidth=1.6,
+        label="gain",
+        color="#4f7cff",
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("confidence gain / drone-step")
+    ax.grid(alpha=0.25)
+
+    ax_frac = ax.twinx()
+    lines = line_gain
+    for label, values, color in (
+        ("pass p", pass_probability, "#36a269"),
+        ("mean C", mean_confidence, "#20242c"),
+        ("low C", low_confidence, "#d44a3a"),
+        ("high C", high_confidence, "#8a5cf6"),
+    ):
+        lines += ax_frac.plot(
+            centers,
+            values,
+            marker="o",
+            linewidth=1.2,
+            label=label,
+            color=color,
+            alpha=0.9,
+        )
+    ax_frac.set_ylim(0.0, 1.0)
+    ax_frac.set_ylabel("fraction / probability")
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=7, frameon=False, ncol=2)
+    ax.set_title("Time-Bin Confidence", fontsize=10)
 
 
 def _plot_time_bins_scouts(ax: Any, summary: dict[str, Any]) -> None:
@@ -4738,6 +4950,9 @@ def write_distribution_plots(
     panels = [
         ("Recall", "recall", (0.0, 1.0)),
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
+        ("Final Confidence", "final_confidence_mean", (0.0, 1.0)),
+        ("Confidence Gain / Step", "avg_confidence_gain", None),
+        ("Confidence Pass P", "avg_confidence_pass_probability", (0.0, 1.0)),
         ("Expected Recall From Exposure", "expected_recall_from_exposure", (0.0, 1.0)),
         ("Perception Recall Gap", "perception_recall_gap", (-1.0, 1.0)),
         ("Scout Detection Probability", "avg_scout_detection_probability", (0.0, 1.0)),
@@ -4772,7 +4987,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(19, 3, figsize=(14, 57), constrained_layout=True)
+    fig, axes = plt.subplots(20, 3, figsize=(14, 60), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -4894,8 +5109,9 @@ def write_distribution_plots(
     _plot_perception_time_bins(axes_flat[custom_start + 18], summary)
     _plot_perception_probability_bins(axes_flat[custom_start + 19], summary)
     _plot_survivor_exposure_outcomes(axes_flat[custom_start + 20], summary)
+    _plot_time_bins_confidence(axes_flat[custom_start + 21], summary)
 
-    for ax in axes_flat[custom_start + 21:]:
+    for ax in axes_flat[custom_start + 22:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -4986,6 +5202,9 @@ def main() -> None:
             f"missed={row['missed']} "
             f"recall={row['recall']:.3f} "
             f"coverage={row['final_coverage_fraction']:.3f} "
+            f"conf={row['final_confidence_mean']:.3f} "
+            f"conf_gain={row['avg_confidence_gain']:.5f} "
+            f"conf_pass={row['avg_confidence_pass_probability']:.2f} "
             f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
             f"{_fmt_optional(row['avg_scout_time_s'])}s "
             f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
@@ -5052,6 +5271,7 @@ def main() -> None:
         f"missed={summary['mean_missed']:.3f} "
         f"recall={summary['mean_recall']:.3f} "
         f"coverage={summary['mean_final_coverage_fraction']:.3f} "
+        f"confidence={summary['mean_final_confidence_mean']:.3f} "
         f"success={summary['full_success_rate']:.3f} "
         f"avg_scout={summary['mean_avg_scout_step']:.1f} steps/"
         f"{summary['mean_avg_scout_time_s']:.1f}s "
@@ -5066,6 +5286,9 @@ def main() -> None:
         f"cum_p={summary['mean_survivor_cum_detection_probability']:.3f} "
         f"scouted_cum_p={summary['mean_scouted_cum_detection_probability']:.3f} "
         f"missed_cum_p={summary['mean_missed_cum_detection_probability']:.3f} "
+        f"cell_conf={summary['mean_survivor_final_confidence']:.3f} "
+        f"scouted_cell_conf={summary['mean_scouted_survivor_final_confidence']:.3f} "
+        f"missed_cell_conf={summary['mean_missed_survivor_final_confidence']:.3f} "
         f"scout_p={summary['mean_scout_detection_probability']:.3f} "
         f"scout_norm={summary['mean_scout_detection_norm_distance']:.3f} "
         f"scout_margin={summary['mean_scout_detection_margin_m']:.1f}m "
@@ -5091,6 +5314,16 @@ def main() -> None:
         f"raw_new={summary['mean_raw_new_coverage_cells']:.1f} "
         f"new_step_frac={summary['mean_new_coverage_step_frac']:.3f} "
         f"raw_new_step_frac={summary['mean_raw_new_coverage_step_frac']:.3f}"
+    )
+    print(
+        "confidence map means: "
+        f"final={summary['mean_final_confidence_mean']:.3f} "
+        f"low<0.5={summary['mean_final_confidence_low_fraction']:.3f} "
+        f"high>=0.8={summary['mean_final_confidence_high_fraction']:.3f} "
+        f"step_mean={summary['mean_confidence_mean']:.3f} "
+        f"team_gain={summary['mean_confidence_gain']:.5f} "
+        f"drone_gain={summary['mean_confidence_gain_by_drone']:.5f} "
+        f"pass_p={summary['mean_confidence_pass_probability']:.3f}"
     )
     print(
         "frontier observation/action means: "
