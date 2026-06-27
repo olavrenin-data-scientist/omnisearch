@@ -45,6 +45,12 @@ from scripts.train_survivor_detector import (
     _synthetic_decoy_rgba,
     _generate_split,
     _procedural_background,
+    altitude_to_survivor_px,
+    altitude_to_gsd,
+    sample_altitude,
+    DRONE_FLIGHT_LEVELS_M,
+    DRONE_CAMERA_FOV_DEG,
+    SURVIVOR_BODY_WIDTH_M,
     WildfireEffectConfig,
 )
 
@@ -341,3 +347,86 @@ def test_decoy_does_not_match_survivor_ground_truth():
             f"Detector fired on the synthetic decoy at IoU={iou:.3f} (conf={conf:.2f}). "
             "Model may be learning compositing artifacts rather than human shape."
         )
+
+
+# ---------------------------------------------------------------------------
+# Altitude-aware physics tests
+# ---------------------------------------------------------------------------
+
+class TestAltitudePhysics:
+    """Verify the altitude → pixel-size model is physically consistent."""
+
+    def test_higher_altitude_produces_smaller_survivors(self):
+        """Survivor pixel width must decrease monotonically with altitude."""
+        sizes = [altitude_to_survivor_px(alt) for alt in (20.0, 35.0, 50.0)]
+        assert sizes[0] > sizes[1] > sizes[2]
+
+    def test_known_values_at_default_config(self):
+        """Sanity check pixel sizes at the three default flight levels (640px, 65° FOV).
+
+        With SURVIVOR_BODY_WIDTH_M=2.4 (full bounding box from above, matching
+        detection/simulation_adapter.py):
+          20m: footprint ≈ 25.5m → 2.4/25.5*640 ≈ 60 px
+          35m: footprint ≈ 44.6m → 2.4/44.6*640 ≈ 34 px
+          50m: footprint ≈ 63.7m → 2.4/63.7*640 ≈ 24 px
+        """
+        px_20 = altitude_to_survivor_px(20.0, image_size=640)
+        px_35 = altitude_to_survivor_px(35.0, image_size=640)
+        px_50 = altitude_to_survivor_px(50.0, image_size=640)
+        assert 45 < px_20 < 75, f"Expected ~60px at 20m, got {px_20:.1f}"
+        assert 25 < px_35 < 45, f"Expected ~34px at 35m, got {px_35:.1f}"
+        assert 18 < px_50 < 32, f"Expected ~24px at 50m, got {px_50:.1f}"
+
+    def test_gsd_increases_with_altitude(self):
+        """Ground sample distance must increase with altitude."""
+        gsd_20 = altitude_to_gsd(20.0, image_size=640)
+        gsd_50 = altitude_to_gsd(50.0, image_size=640)
+        assert gsd_50 > gsd_20
+        # At 20m: footprint ~25.5m / 640px ≈ 0.040 m/px
+        assert 0.03 < gsd_20 < 0.06
+        # At 50m: footprint ~63.7m / 640px ≈ 0.100 m/px
+        assert 0.07 < gsd_50 < 0.13
+
+    def test_sample_altitude_within_envelope(self):
+        """Sampled altitudes must be within the operational flight envelope."""
+        rng = _rng(42)
+        for _ in range(200):
+            alt = sample_altitude(rng)
+            assert DRONE_FLIGHT_LEVELS_M[0] <= alt <= DRONE_FLIGHT_LEVELS_M[-1]
+
+    def test_altitude_aware_generation_produces_metadata(self):
+        """altitude_aware=True writes per-image .json sidecar with altitude info."""
+        rng = _rng(7)
+        cfg = WildfireEffectConfig()
+        # Minimal 1-pixel "survivor" asset for fast generation.
+        asset = Image.new("RGBA", (10, 20), (200, 100, 80, 255))
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "test_alt"
+            _generate_split(
+                out, n=5, assets=[asset], size=64, rng=rng, cfg=cfg,
+                fire_frac=0.0, neg_frac=0.0, decoy_frac=0.0,
+                altitude_aware=True,
+            )
+            json_files = list((out / "labels").glob("*.json"))
+            assert len(json_files) == 5
+            import json
+            meta = json.loads(json_files[0].read_text())
+            assert "altitude_m" in meta
+            assert "gsd_m" in meta
+            assert "survivor_base_px" in meta
+            assert DRONE_FLIGHT_LEVELS_M[0] <= meta["altitude_m"] <= DRONE_FLIGHT_LEVELS_M[-1]
+
+    def test_legacy_mode_no_metadata(self):
+        """altitude_aware=False should NOT produce .json sidecars."""
+        rng = _rng(7)
+        cfg = WildfireEffectConfig()
+        asset = Image.new("RGBA", (10, 20), (200, 100, 80, 255))
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "test_noalt"
+            _generate_split(
+                out, n=3, assets=[asset], size=64, rng=rng, cfg=cfg,
+                fire_frac=0.0, neg_frac=0.0, decoy_frac=0.0,
+                altitude_aware=False,
+            )
+            json_files = list((out / "labels").glob("*.json"))
+            assert len(json_files) == 0

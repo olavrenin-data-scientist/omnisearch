@@ -57,14 +57,6 @@ DRONE_CAMERA_FOV_DEG = 65.0
 # detection/simulation_adapter.py (survivor_width_m=2.4).
 SURVIVOR_BODY_WIDTH_M = 2.4
 
-# Oblique (side-angle) drone camera parameters.
-# When oblique_frac > 0, a fraction of training images simulate a tilted camera
-# (15-45° from nadir), producing partially foreshortened survivors that appear
-# more elongated/upright than pure top-down views.
-OBLIQUE_TILT_MIN_DEG = 15.0   # Minimum tilt from nadir (shallow angle)
-OBLIQUE_TILT_MAX_DEG = 45.0   # Maximum tilt from nadir (steep side view)
-PERSON_HEIGHT_M = 1.75         # Used for oblique foreshortening calculation
-
 
 def altitude_to_survivor_px(
     altitude_m: float,
@@ -95,38 +87,6 @@ def altitude_to_gsd(
     """Ground sample distance (meters per pixel) at a given altitude."""
     footprint_m = 2.0 * altitude_m * np.tan(np.radians(fov_deg) / 2.0)
     return footprint_m / image_size
-
-
-def oblique_survivor_size(
-    altitude_m: float,
-    tilt_deg: float,
-    image_size: int = 640,
-    fov_deg: float = DRONE_CAMERA_FOV_DEG,
-    person_height_m: float = PERSON_HEIGHT_M,
-    body_width_m: float = SURVIVOR_BODY_WIDTH_M,
-) -> tuple[float, float]:
-    """Compute survivor pixel width and height for an oblique (tilted) drone camera.
-
-    At nadir (tilt=0), the person appears as a foreshortened circle/blob.
-    At oblique angles (tilt>0), the person appears more upright — the apparent
-    height increases as the camera tilts toward the horizon.
-
-    Returns (width_px, height_px).
-    """
-    footprint_m = 2.0 * altitude_m * np.tan(np.radians(fov_deg) / 2.0)
-    px_per_m = image_size / footprint_m
-
-    # Width: same as nadir (shoulder width projected horizontally)
-    width_px = body_width_m * px_per_m
-
-    # Height: person_height projected at the tilt angle.
-    # At nadir (tilt=0): see top of head, apparent height ≈ body_width (circular blob)
-    # At tilt_deg: apparent height = person_height * sin(tilt_deg)
-    tilt_rad = np.radians(tilt_deg)
-    apparent_height_m = person_height_m * np.sin(tilt_rad) + body_width_m * np.cos(tilt_rad)
-    height_px = apparent_height_m * px_per_m
-
-    return float(width_px), float(height_px)
 
 
 def sample_altitude(rng: np.random.Generator) -> float:
@@ -300,20 +260,41 @@ def _harmonize_color(
     return Image.merge("RGBA", (*result.split(), sprite.getchannel("A")))
 
 
-def _resolution_blur(sprite: Image.Image, w: int, rng: np.random.Generator) -> Image.Image:
-    """Blur the survivor to approximate NAIP's 0.6 m/px ground-sample distance.
+def _resolution_blur(
+    sprite: Image.Image,
+    w: int,
+    rng: np.random.Generator,
+    gsd_m: float | None = None,
+) -> Image.Image:
+    """Blur the survivor to approximate the effective resolution at flight altitude.
 
-    A SARD image is captured at close range and is much sharper than anything
-    in a NAIP tile at the same pixel size.  Blurring proportionally to apparent
-    size removes the sharpness discontinuity at the survivor boundary so the
-    model cannot rely on 'sharp island in a blurry tile' as a shortcut cue.
+    When ``gsd_m`` (ground sample distance in meters/pixel) is provided, the blur
+    radius is derived from the physical resolution: higher altitude → larger GSD →
+    more blur.  The relationship is:
+      - NAIP baseline GSD: 0.6 m/px (reference sharpness of the background)
+      - Drone at 20 m, 65° FOV, 640px: GSD ≈ 0.020 m/px (sharp — almost no blur)
+      - Drone at 50 m: GSD ≈ 0.050 m/px (still sharper than NAIP)
+
+    Even though the drone's own GSD is better than NAIP, the SARD source images
+    are captured at *much* closer range (~2–5 m) so they need downsampling blur.
+    The amount scales with altitude: at 50 m objects are fuzzier than at 20 m.
+
+    Falls back to the size-heuristic when altitude is not available.
     """
-    if w < 30:
-        r = rng.uniform(0.9, 1.8)
-    elif w < 80:
-        r = rng.uniform(0.4, 1.2)
+    if gsd_m is not None:
+        # Higher GSD means more blur. Scale: at GSD 0.02 (20m alt) → mild blur,
+        # at GSD 0.05 (50m alt) → moderate blur.  SARD close-range images need
+        # the most softening when placed small (high altitude).
+        # Empirical mapping: radius ≈ 25 * gsd_m + jitter
+        base_r = 25.0 * gsd_m  # ~0.5 at 20m, ~1.25 at 50m
+        r = float(rng.uniform(base_r * 0.7, base_r * 1.3))
     else:
-        r = rng.uniform(0.0, 0.7)
+        if w < 30:
+            r = rng.uniform(0.9, 1.8)
+        elif w < 80:
+            r = rng.uniform(0.4, 1.2)
+        else:
+            r = rng.uniform(0.0, 0.7)
     if r < 0.05:
         return sprite
     rgb = sprite.convert("RGB").filter(ImageFilter.GaussianBlur(radius=r))
@@ -436,6 +417,7 @@ def _generate_split(
     boundary_frac: float = 0.10,
     small_frac: float = 0.30,
     heavy_occlude_frac: float = 0.20,
+    altitude_aware: bool = True,
 ) -> None:
     """Generate *n* composite images into *out_dir*.
 
@@ -459,6 +441,12 @@ def _generate_split(
 
     heavy_occlude_frac: fraction of fire images that use heavy smoke directly on
                    survivors to train partial-occlusion robustness.
+
+    altitude_aware: when True (default), each image simulates a specific drone
+                   altitude sampled from the operational flight envelope (20–50 m).
+                   Survivor pixel size and resolution blur are derived from the
+                   altitude via the pinhole camera model, producing a physically
+                   realistic size distribution instead of a uniform random range.
     """
     img_dir = out_dir / "images"; lbl_dir = out_dir / "labels"
     img_dir.mkdir(parents=True, exist_ok=True); lbl_dir.mkdir(parents=True, exist_ok=True)
@@ -473,6 +461,20 @@ def _generate_split(
         else:
             bg = _procedural_background(size, rng)
 
+        # Sample a drone altitude for this image — drives survivor pixel size
+        # and effective resolution.
+        if altitude_aware:
+            img_altitude_m = sample_altitude(rng)
+            img_gsd = altitude_to_gsd(img_altitude_m, image_size=size)
+            # Base survivor width from the physics; add ±30% jitter for pose,
+            # body size, and orientation variation.
+            base_px = altitude_to_survivor_px(img_altitude_m, image_size=size)
+            # Clamp to the allowed range (still respect --min/max-surv-px).
+            base_px = max(lo, min(hi, base_px))
+        else:
+            img_altitude_m = None
+            img_gsd = None
+
         # Negative-only images: survivor-free backgrounds teach the model that
         # NAIP terrain does not automatically imply a person is present.
         is_negative = rng.random() < neg_frac
@@ -481,9 +483,12 @@ def _generate_split(
         if not is_negative:
             for _ in range(int(rng.integers(1, 4))):   # 1-3 survivors
                 asset = assets[int(rng.integers(0, len(assets)))]
-                # Force small survivors for a fraction of placements to improve
-                # recall at the hardest detection scale (20-50px at altitude).
-                if rng.random() < small_frac:
+                if altitude_aware:
+                    # Jitter around the physics-derived size (±30%) to simulate
+                    # variation in body pose, crouching vs standing, etc.
+                    jitter = rng.uniform(0.7, 1.3)
+                    w = int(max(lo, min(hi, base_px * jitter)))
+                elif rng.random() < small_frac:
                     w = int(rng.integers(max(lo, 20), min(50, hi)))
                 else:
                     w = int(rng.integers(lo, hi))
@@ -513,7 +518,7 @@ def _generate_split(
             bg_patch = bg.crop((px1, py1, px2, py2)) if px2 > px1 and py2 > py1 else bg.crop((0, 0, w, h))
             s = _harmonize_color(s, bg_patch, rng)   # tone match to local BG
             s = _erode_alpha_edge(s, rng)             # soften GrabCut hard edges
-            s = _resolution_blur(s, w, rng)           # match NAIP sharpness
+            s = _resolution_blur(s, w, rng, gsd_m=img_gsd)  # altitude-aware blur
             bg.paste(s, (x, y), s)
             # Use the visible (clipped) bbox for the YOLO label so that partially
             # out-of-frame survivors get correct annotations.
@@ -549,7 +554,7 @@ def _generate_split(
                 bg_patch = bg.crop((dx, dy, dx + dw, dy + dh))
                 decoy = _harmonize_color(decoy, bg_patch, rng)
                 decoy = _erode_alpha_edge(decoy, rng)
-                decoy = _resolution_blur(decoy, dw, rng)
+                decoy = _resolution_blur(decoy, dw, rng, gsd_m=img_gsd)
                 bg.paste(decoy, (dx, dy), decoy)
                 # Intentionally no label — this is the hard-negative signal.
 
@@ -557,6 +562,18 @@ def _generate_split(
         # Empty label file is the YOLO convention for a negative image.
         label_text = "\n".join(labels) + ("\n" if labels else "")
         (lbl_dir / f"{i:05d}.txt").write_text(label_text, encoding="utf-8")
+        # Altitude metadata sidecar — enables post-hoc analysis by flight level.
+        if altitude_aware and img_altitude_m is not None:
+            meta = {
+                "altitude_m": round(img_altitude_m, 1),
+                "gsd_m": round(img_gsd, 4),
+                "survivor_base_px": round(base_px, 1),
+                "n_survivors": len(placements),
+                "has_fire": has_fire,
+            }
+            (lbl_dir / f"{i:05d}.json").write_text(
+                json.dumps(meta), encoding="utf-8",
+            )
         if is_negative:
             n_neg += 1
 
@@ -621,6 +638,11 @@ def main() -> None:
              "Generate these first with extract_visdrone_decoys.py or "
              "extract_sard_rejected_decoys.py.  Falls back to procedural blobs if omitted.",
     )
+    ap.add_argument("--altitude-aware", action=argparse.BooleanOptionalAction, default=True,
+                    help="Sample drone altitude from operational envelope (20-50m) and derive "
+                         "survivor pixel size + blur from camera physics. Produces a realistic "
+                         "altitude-dependent size distribution. Disable with --no-altitude-aware "
+                         "to use the legacy uniform random size range.")
     ap.add_argument("--data-dir", default=str(ROOT / "data/cv_train/survivor"))
     ap.add_argument("--out", default=str(ROOT / "models/survivor_yolov8n.pt"))
     args = ap.parse_args()
@@ -688,15 +710,21 @@ def main() -> None:
 
     data_dir = Path(args.data_dir)
     surv_px = (args.min_surv_px, args.max_surv_px)
+    alt_info = (
+        f"altitude-aware ({DRONE_FLIGHT_LEVELS_M[0]:.0f}–{DRONE_FLIGHT_LEVELS_M[-1]:.0f}m, "
+        f"{DRONE_CAMERA_FOV_DEG:.0f}° FOV)"
+        if args.altitude_aware else "uniform random size"
+    )
     print(f"Generating {args.n_train} train / {args.n_val} val composites at {args.size}px "
           f"({int(args.fire_frac*100)}% with fire/smoke, {int(args.neg_frac*100)}% negatives, "
-          f"{int(args.decoy_frac*100)}% with hard-negative decoys) ...")
+          f"{int(args.decoy_frac*100)}% with hard-negative decoys, {alt_info}) ...")
     _generate_split(
         data_dir / "train", args.n_train, train_assets, args.size, rng, cfg,
         fire_frac=args.fire_frac, surv_px=surv_px,
         naip_tiles=naip_train_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
         decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
         small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
+        altitude_aware=args.altitude_aware,
     )
     _generate_split(
         data_dir / "val", args.n_val, val_assets, args.size, rng, cfg,
@@ -704,6 +732,7 @@ def main() -> None:
         naip_tiles=naip_val_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
         decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
         small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
+        altitude_aware=args.altitude_aware,
     )
 
     yaml = data_dir / "survivor.yaml"
