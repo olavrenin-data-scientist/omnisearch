@@ -83,6 +83,15 @@ class HARLTerrainCNNTests(unittest.TestCase):
         )
         self.assertEqual(with_frontier, base + 4)
 
+        with_local_global_frontier = wildfire_single_observation_dim(
+            local_map_patch_size=7,
+            n_agents=1,
+            n_survivors=1,
+            uav_frontier_obs=True,
+            uav_frontier_mode="local_global",
+        )
+        self.assertEqual(with_local_global_frontier, base + 8)
+
     def test_enabled_encoder_replaces_patch_with_embedding(self):
         patch_size = 7
         obs_dim = wildfire_single_observation_dim(

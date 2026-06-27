@@ -1,0 +1,451 @@
+% NeurIPS-style method draft for the OmniSearch UAV survivor-search reward system.
+% This file is intentionally standalone so it can be compiled directly, or its
+% sections can be copied into a larger NeurIPS manuscript.
+\documentclass{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\title{Confidence-Aware Multi-UAV Reinforcement Learning for Survivor Search}
+\author{OmniSearch UAV Diagnostics}
+\date{}
+
+\newcommand{\uav}{\mathrm{uav}}
+\newcommand{\conf}{C}
+\newcommand{\unc}{U}
+\newcommand{\grid}{\Omega}
+\newcommand{\foot}{F}
+\newcommand{\pos}{\mathbf{p}}
+\newcommand{\act}{\mathbf{a}}
+\newcommand{\move}{\Delta \mathbf{p}}
+\newcommand{\vect}{\mathbf{v}}
+\newcommand{\eps}{\varepsilon}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present a confidence-aware reward and observation design for multi-UAV
+reinforcement learning in probabilistic survivor search. The central observation
+from our diagnostics is that binary area coverage is not equivalent to survivor
+search quality: agents can achieve high geometric coverage while survivors are
+only weakly exposed near the edge of the camera footprint, under adverse cover,
+or during short accidental flyovers. We therefore replace binary ``visited''
+coverage as the primary learning signal with an inspection-confidence field that
+tracks the cumulative probability that a survivor at each map cell would have
+been detected. The resulting reward gives dense credit for improving detection
+confidence, permits useful revisits of low-confidence areas, suppresses wasteful
+revisits of already well-inspected areas, and assigns marginal credit in
+multi-UAV settings. We combine this objective with uncertainty-frontier
+observations, confidence-gated movement rewards, survivor scouting bonuses, and
+soft boundary penalties. The design is intended for the communication-available
+UAV diagnostic setting with three UAVs, five survivors, no UGVs, and a shared
+coverage memory.
+\end{abstract}
+
+\section{Problem Setting}
+
+We consider cooperative search over a bounded two-dimensional terrain
+\(\grid \subset \mathbb{R}^2\). At each time step \(t\), \(N\) UAVs choose
+continuous planar actions and move according to the VMAS dynamics. Survivors are
+stationary and initially unknown. A UAV can scout a survivor only if the survivor
+lies inside the UAV camera footprint, but detection is probabilistic and depends
+on footprint-relative position, terrain/cover class, smoke, and flight quality.
+The goal is to maximize survivor recall within a fixed horizon while maintaining
+efficient search coverage and avoiding boundary-stuck or redundant trajectories.
+
+The environment returns an individual scalar reward \(r_{i,t}\) for each UAV
+\(i\). HAPPO optimizes these per-agent rewards with a centralized critic and
+decentralized actors. Team terms are implemented by adding the same scalar
+quantity to each UAV reward, while individual terms remain attached to the UAV
+that produced the corresponding behavior. This preserves the current successful
+inductive bias of individual coverage/search rewards while allowing explicit
+mission-level credit assignment.
+
+\section{Diagnostic Motivation}
+
+The previous UAV diagnostic policy achieved high mean geometric coverage and
+competitive recall compared with lawnmower search, but diagnostics revealed
+three persistent failure modes. First, final binary coverage overestimated
+search quality: missed survivors were often technically covered but only at the
+edge of the footprint or with low cumulative detection probability. Second,
+historical overlap penalties were hard to tune because some overlap is physically
+unavoidable when the footprint radius is large relative to the UAV step length.
+Third, frontier alignment to binary uncovered regions became less informative
+late in an episode, when remaining useful regions were sparse and revisiting
+low-confidence cells could still be valuable.
+
+These observations imply that the correct state variable is not whether a cell
+has ever been covered, but how confidently that cell has been inspected. The
+final system therefore treats search as probabilistic belief improvement. Binary
+coverage remains a reporting metric and visualization aid, but it is no longer
+the main objective used to shape behavior.
+
+\section{Confidence Map}
+
+\subsection{Instantaneous Detection Probability}
+
+Let \(x \in \grid\) be a grid cell and let \(\foot_{i,t}\) denote the camera
+footprint of UAV \(i\) at time \(t\). The instantaneous probability that UAV
+\(i\) would detect a survivor at cell \(x\) is
+\begin{equation}
+    p_{i,t}(x)
+    =
+    \mathbb{I}[x \in \foot_{i,t}]
+    \; q_{\mathrm{range}}(d_{i,t}(x))
+    \; q_{\mathrm{cover}}(x)
+    \; q_{\mathrm{smoke}}(x,t)
+    \; q_{\mathrm{flight}}(i,t),
+    \label{eq:instant_detection}
+\end{equation}
+where \(d_{i,t}(x) \in [0,1]\) is the normalized distance from the footprint
+center to cell \(x\). We use the quadratic range model
+\begin{equation}
+    q_{\mathrm{range}}(d)
+    =
+    1 - (1 - q_{\min}) d^2,
+    \qquad q_{\min}=0.40,
+    \label{eq:range_model}
+\end{equation}
+so central passes retain high detection probability and edge passes remain
+useful but substantially weaker. The cover factors are RGB-only detection
+factors derived from the terrain cover class. In the current realistic RGB
+setting they are
+\begin{equation}
+    q_{\mathrm{cover}} \in
+    (1.00, 0.95, 0.75, 0.55, 0.45, 0.90),
+    \label{eq:cover_factors}
+\end{equation}
+for the simulator's ordered cover categories. Importantly, Eq.~\ref{eq:instant_detection}
+does not depend on true survivor positions and is therefore not a privileged
+reward.
+
+\subsection{Cumulative Inspection Confidence}
+
+We maintain a shared confidence map \(\conf_t(x) \in [0,1]\), interpreted as the
+probability that a survivor located at \(x\) would have been detected by at
+least one UAV before time \(t\). The corresponding residual uncertainty is
+\begin{equation}
+    \unc_t(x) = 1 - \conf_t(x).
+\end{equation}
+Given all UAV footprints at step \(t\), the team confidence update is
+\begin{equation}
+    \conf_{t+1}(x)
+    =
+    1
+    -
+    (1-\conf_t(x))
+    \prod_{i=1}^{N} (1 - p_{i,t}(x)).
+    \label{eq:confidence_update}
+\end{equation}
+This update naturally handles repeated passes: revisiting a poorly inspected
+cell can still increase confidence, while repeated passes over a high-confidence
+cell produce little or no gain.
+
+\section{Reward Design}
+
+The UAV reward is the sum of individual confidence-improvement terms, small
+guidance terms, mission rewards, and boundary penalties:
+\begin{equation}
+\begin{aligned}
+    r_{i,t}
+    =
+    &\; r^{\mathrm{conf}}_{i,t}
+    + \lambda_{\mathrm{team}} r^{\mathrm{team\text{-}conf}}_{t}
+    + r^{\mathrm{move}}_{i,t}
+    + r^{\mathrm{frontier}}_{i,t} \\
+    &+ r^{\mathrm{scout}}_{i,t}
+    + r^{\mathrm{team\text{-}scout}}_{t}
+    + r^{\mathrm{all\text{-}found}}_{t}
+    - c^{\mathrm{outside}}_{i,t}
+    - c^{\mathrm{outward}}_{i,t}.
+    \label{eq:total_reward}
+\end{aligned}
+\end{equation}
+All dense terms are normalized to be comparable per UAV per step. The scout and
+mission-completion terms are sparse and are intentionally kept moderate so they
+define the task objective without overwhelming the search-shaping signal.
+
+\subsection{Marginal Confidence Gain}
+
+For each UAV, we compute the counterfactual marginal contribution of that UAV's
+footprint to the team confidence update. Let
+\begin{equation}
+    \conf^{\mathrm{all}}_{t+1}(x)
+    =
+    1
+    -
+    (1-\conf_t(x))
+    \prod_{j=1}^{N} (1 - p_{j,t}(x))
+\end{equation}
+and let
+\begin{equation}
+    \conf^{-i}_{t+1}(x)
+    =
+    1
+    -
+    (1-\conf_t(x))
+    \prod_{j \ne i} (1 - p_{j,t}(x)).
+\end{equation}
+The marginal confidence gain assigned to UAV \(i\) is
+\begin{equation}
+    \Delta \conf_{i,t}(x)
+    =
+    \conf^{\mathrm{all}}_{t+1}(x)
+    -
+    \conf^{-i}_{t+1}(x).
+    \label{eq:marginal_gain}
+\end{equation}
+This counterfactual credit assignment solves two problems simultaneously. It
+avoids double counting when two UAVs inspect the same cell in the same step, and
+it avoids harsh hand-tuned inter-UAV overlap penalties for overlap that was not
+actually redundant.
+
+\subsection{Confidence-Weighted Coverage Reward}
+
+The primary dense reward is the confidence-weighted marginal gain
+\begin{equation}
+    r^{\mathrm{conf}}_{i,t}
+    =
+    k_{\mathrm{conf}}
+    \frac{1}{|\grid|}
+    \sum_{x \in \grid}
+    w(\conf_t(x)) \Delta \conf_{i,t}(x),
+    \label{eq:confidence_reward}
+\end{equation}
+where
+\begin{equation}
+    w(\conf) = \eps + (1-\conf)^\gamma.
+    \label{eq:confidence_weight}
+\end{equation}
+The weight \(w\) gives the highest value to uninspected cells, moderate value to
+low-confidence revisits, and negligible value to repeatedly inspected cells. In
+practice we use \(\eps > 0\) to avoid making late-episode cleanup entirely
+rewardless, and \(\gamma > 1\) to focus the policy on genuinely uncertain
+regions.
+
+The team confidence reward is
+\begin{equation}
+    r^{\mathrm{team\text{-}conf}}_t
+    =
+    \frac{1}{N}
+    \sum_{i=1}^{N} r^{\mathrm{conf}}_{i,t},
+    \label{eq:team_confidence_reward}
+\end{equation}
+which is added to every UAV reward with weight \(\lambda_{\mathrm{team}}\). This
+encourages cooperation without removing individual accountability for useful
+inspection.
+
+\subsection{Confidence-Gated Movement Reward}
+
+The movement reward encourages fast useful sweeping rather than speed for its
+own sake. Let \(d_{\max}\) be the maximum physical displacement in one step and
+let
+\begin{equation}
+    s_{i,t} =
+    \min \left( \frac{\|\move_{i,t}\|_2}{d_{\max}}, 1 \right)
+\end{equation}
+be normalized progress. We define a normalized confidence gain
+\begin{equation}
+    g_{i,t}
+    =
+    \frac{
+        \sum_{x \in \grid} w(\conf_t(x)) \Delta \conf_{i,t}(x)
+    }{
+        \sum_{x \in \grid} w(\conf_t(x)) p^{\max}_{i,t}(x) + \eta
+    },
+    \label{eq:normalized_conf_gain}
+\end{equation}
+where \(p^{\max}_{i,t}\) is the best confidence gain available to UAV \(i\) under
+a one-step max-speed candidate move over a fixed action stencil, and \(\eta\) is
+a small constant. The movement reward is
+\begin{equation}
+    r^{\mathrm{move}}_{i,t}
+    =
+    k_{\mathrm{move}} s_{i,t} \mathrm{clip}(g_{i,t}, 0, 1).
+    \label{eq:move_reward}
+\end{equation}
+This term rewards large steps only when they generate inspection value. It does
+not pay for spinning, boundary pushing, or repeated motion over high-confidence
+areas.
+
+\subsection{Uncertainty Frontier Reward}
+
+The frontier signal is computed from the uncertainty map \(\unc_t = 1-\conf_t\)
+rather than from binary uncovered cells. Around each UAV we divide a local disk
+into \(S=8\) angular sectors and compute a sector score
+\begin{equation}
+    \sigma_{i,t}^{(s)}
+    =
+    \frac{
+        \sum_{x \in \mathcal{S}_{i,t}^{(s)}} w(\conf_t(x)) \unc_t(x)
+    }{
+        |\mathcal{S}_{i,t}^{(s)}| + \eta
+    }.
+    \label{eq:sector_score}
+\end{equation}
+The top \(K=2\) sectors are exposed to the policy as frontier vectors
+\(\vect_{i,t}^{(1)}, \vect_{i,t}^{(2)}\), each containing a unit direction,
+normalized distance to the sector's uncertainty mass, and the normalized sector
+score. Providing two directions avoids the weak compromise produced by a single
+centroid direction and lets the policy choose between multiple useful search
+regions.
+
+The frontier reward is a small alignment bonus:
+\begin{equation}
+    r^{\mathrm{frontier}}_{i,t}
+    =
+    k_{\mathrm{frontier}}
+    \max_{k \in \{1,2\}}
+    \left[
+        \max(0, \cos(\move_{i,t}, \vect_{i,t}^{(k)}))
+        \; s_{i,t}
+        \; \sigma_{i,t}^{(k)}
+    \right].
+    \label{eq:frontier_reward}
+\end{equation}
+This term is deliberately secondary. It teaches directional preference toward
+uncertain regions, while Eq.~\ref{eq:confidence_reward} remains the dominant
+objective and determines whether the movement actually improves search.
+
+\subsection{Survivor and Mission Rewards}
+
+When UAV \(i\) scouts a previously unscouted survivor, it receives
+\begin{equation}
+    r^{\mathrm{scout}}_{i,t}
+    =
+    k_{\mathrm{scout}}
+    \cdot n^{\mathrm{new\text{-}scout}}_{i,t}.
+\end{equation}
+All UAVs receive a smaller shared scout reward
+\begin{equation}
+    r^{\mathrm{team\text{-}scout}}_t
+    =
+    k_{\mathrm{team\text{-}scout}}
+    \cdot n^{\mathrm{new\text{-}scout}}_{t}.
+\end{equation}
+Finally, when all five survivors have been scouted, all UAVs receive a one-time
+mission-completion bonus \(r^{\mathrm{all\text{-}found}}_t\). These rewards use
+actual detections, not survivor locations. We do not use progress shaping toward
+survivors, because that would leak the unknown search target into the reward.
+
+\subsection{Boundary Penalties}
+
+We avoid action-level projection hacks that hide the reason for failure from the
+policy. The simulator still enforces the physical domain for numerical validity,
+but the learning signal is explicit. Let \(o_{i,t}\) be the fraction of UAV
+\(i\)'s footprint outside the search area. We penalize outside footprint as
+\begin{equation}
+    c^{\mathrm{outside}}_{i,t}
+    =
+    k_{\mathrm{outside}} o_{i,t}^{2}.
+    \label{eq:outside_penalty}
+\end{equation}
+Near the boundary, we also penalize actions that point outward:
+\begin{equation}
+    c^{\mathrm{outward}}_{i,t}
+    =
+    k_{\mathrm{outward}}
+    o_{i,t}
+    \max(0, \act_{i,t}^{\top}\mathbf{n}_{i,t})^2,
+    \label{eq:outward_penalty}
+\end{equation}
+where \(\mathbf{n}_{i,t}\) is the outward normal of the nearest boundary. This
+preserves freedom to move along the boundary while making repeated attempts to
+leave the map consistently costly.
+
+\section{Observations}
+
+Each UAV receives a decentralized observation that includes ego state, teammate
+state summaries, terrain context, and shared search memory. The search-memory
+portion is expressed as uncertainty rather than coverage:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Global uncertainty map}: a pooled \(G \times G\) map of
+    \(\unc_t(x)\), plus the mean confidence over the full map.
+    \item \textbf{Local uncertainty patch}: a pooled \(L \times L\) patch around
+    the UAV over a fixed physical radius, e.g. 150 m, computed from the same
+    confidence grid.
+    \item \textbf{Local max-uncertainty patch}: a companion max-pooled patch
+    that preserves small high-uncertainty gaps that average pooling can wash out.
+    \item \textbf{Top-2 frontier vectors}: the two sector-top frontier
+    directions, distances, and scores from Eq.~\ref{eq:sector_score}.
+    \item \textbf{Boundary state}: normalized distances to the four map edges
+    and outside-footprint fraction.
+    \item \textbf{Motion state}: current velocity, last displacement, previous
+    action, footprint radius, and flight quality.
+    \item \textbf{Team state}: relative UAV positions and shared frontier
+    summaries in the communication-available setting.
+\end{enumerate}
+This observation design makes the reward locally interpretable: the policy sees
+the same uncertainty field that generates the confidence reward and frontier
+signal.
+
+\section{Training Protocol}
+
+We train in the UAV survivor diagnostic setting: three UAVs, zero UGVs, five
+survivors, a 500 m by 500 m terrain, 300 simulation steps, and communication
+available. Survivor and UAV start positions are sampled uniformly subject to UAV
+spawn separation and edge-margin constraints, but survivor placement is not
+conditioned on UAV placement. The actors share parameters within the UAV class,
+which improves sample efficiency and prevents one drone from specializing into a
+permanently bad role. The centralized critic observes the joint state and the
+shared uncertainty memory.
+
+The final system keeps the current empirically successful components--coverage
+memory, top-2 frontier guidance, scout reward, shared UAV actors, and diagnostic
+trajectory export--but changes the semantic unit of search from binary coverage
+to probabilistic inspection confidence. This makes revisits neither always bad
+nor always good: they are rewarded exactly when they increase the probability of
+detecting a survivor.
+
+\section{Diagnostics}
+
+Evaluation uses deterministic and stochastic rollouts over fixed seed sets. We
+report recall, final geometric coverage, final mean confidence, survivor scout
+time, all-scouted time, path length, boundary exposure, same-step inter-UAV
+overlap, and confidence-weighted revisit statistics. Survivor-level diagnostics
+separate scouted and missed survivors by cumulative exposure probability, best
+single-pass detection probability, normalized footprint distance, and central
+versus edge exposure. Time-bin diagnostics report confidence gain, new binary
+cells, frontier score, frontier reward, outside-footprint fraction, movement
+speed, and reward/penalty scale over the episode.
+
+The main success criterion is not coverage alone. A policy is considered
+improved only if it increases recall or expected recall while maintaining high
+confidence coverage and reducing avoidable high-confidence revisits. This
+prevents reward hacking by broad but low-quality edge passes.
+
+\section{Expected Advantages}
+
+The confidence-aware formulation directly addresses the failure modes observed
+in the UAV diagnostics:
+\begin{enumerate}[leftmargin=1.5em]
+    \item It aligns the dense reward with the probabilistic perception model,
+    so a central high-probability pass is more valuable than an edge skim.
+    \item It allows useful revisits of low-confidence cells, avoiding the
+    brittle behavior produced by purely binary overlap penalties.
+    \item It assigns marginal credit when UAV footprints overlap, reducing the
+    need for hand-tuned inter-UAV overlap penalties.
+    \item It makes late-episode cleanup meaningful, because sparse remaining
+    uncertainty can still produce confidence reward.
+    \item It preserves the successful frontier idea but computes frontiers over
+    uncertainty mass instead of binary uncovered area.
+\end{enumerate}
+
+\section{Limitations and Communication Dropout}
+
+This system assumes a communication-available scenario in which all UAVs update
+and observe the same confidence map. Under communication dropout, each UAV would
+continue to update a private confidence map and the team confidence update in
+Eq.~\ref{eq:confidence_update} would no longer be globally available. The same
+reward structure can be used locally, but marginal credit and frontier ownership
+must be computed from each UAV's belief state until communication is restored.
+We therefore treat dropout as a separate extension rather than mixing it into
+the communication-available diagnostic baseline.
+
+\end{document}

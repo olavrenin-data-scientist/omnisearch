@@ -25,7 +25,9 @@ def uav_frontier_observation_dim(
     if not bool(uav_frontier_obs):
         return 0
     mode = str(uav_frontier_mode).replace("-", "_")
-    if mode == "sector_topk":
+    if mode in {"sector_topk", "local_global"}:
+        if mode == "local_global":
+            return 8
         return 4 * max(int(uav_frontier_top_k), 1)
     return UAV_FRONTIER_OBS_DIM
 

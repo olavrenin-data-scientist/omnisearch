@@ -55,6 +55,17 @@ def _display_path(path: Path) -> Path:
         return path
 
 
+def _resolve_happo_checkpoint(path: str | None) -> Path | None:
+    if path is None:
+        return None
+    candidate = Path(path).expanduser()
+    if candidate.name != "models" and (candidate / "models").is_dir():
+        candidate = candidate / "models"
+    if not candidate.is_dir():
+        raise SystemExit(f"--happo-checkpoint does not exist or is not a directory: {path}")
+    return candidate.resolve()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -154,6 +165,12 @@ def main():
         action="store_true",
         help="Do NOT merge the latest HAPPO checkpoint's training scenario config. "
              "Use this to render baselines under explicit (e.g. realistic) sensor flags.",
+    )
+    p.add_argument(
+        "--happo-checkpoint",
+        default=None,
+        help="Path to a HAPPO checkpoint models/ directory, or to its parent run directory. "
+             "Defaults to the newest checkpoint under results/harl_runs.",
     )
     p.add_argument(
         "--drone-safety-clearance-m",
@@ -313,7 +330,9 @@ def main():
         from agents.happo_checkpoint import load_training_manifest, merge_training_scenario
         from agents.happo_policy import find_latest_happo_checkpoint
 
-        happo_checkpoint = find_latest_happo_checkpoint().resolve()
+        happo_checkpoint = _resolve_happo_checkpoint(args.happo_checkpoint)
+        if happo_checkpoint is None:
+            happo_checkpoint = find_latest_happo_checkpoint().resolve()
         training_manifest = load_training_manifest(happo_checkpoint)
         if args.skip_happo_manifest or args.ignore_happo_env:
             print(" HAPPO env:     manifest merge skipped (using explicit CLI sensors)")

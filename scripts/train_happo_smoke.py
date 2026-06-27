@@ -524,11 +524,13 @@ def build_args(
     if uav_frontier_obs_radius_m <= 0.0:
         raise ValueError("uav_frontier_obs_radius_m must be positive")
     uav_frontier_mode = str(uav_frontier_mode).replace("-", "_")
-    if uav_frontier_mode not in {"centroid", "sector_topk"}:
-        raise ValueError("uav_frontier_mode must be one of: centroid, sector_topk")
+    if uav_frontier_mode not in {"centroid", "sector_topk", "local_global"}:
+        raise ValueError("uav_frontier_mode must be one of: centroid, sector_topk, local_global")
     uav_frontier_source = str(uav_frontier_source).replace("-", "_").lower()
     if uav_frontier_source not in {"coverage", "confidence"}:
         raise ValueError("uav_frontier_source must be one of: coverage, confidence")
+    if uav_frontier_mode == "local_global" and uav_frontier_source != "confidence":
+        raise ValueError("uav_frontier_mode local_global requires uav_frontier_source=confidence")
     uav_frontier_sectors = int(uav_frontier_sectors)
     if uav_frontier_sectors < 2:
         raise ValueError("uav_frontier_sectors must be at least 2")
@@ -857,10 +859,11 @@ def main():
                    help="Disable UAV frontier observation, overriding UAV diagnostic defaults.")
     p.add_argument("--uav-frontier-obs-radius-m", type=float, default=DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
                    help="Physical radius in meters used for --uav-frontier-obs and frontier-alignment reward.")
-    p.add_argument("--uav-frontier-mode", choices=("centroid", "sector_topk", "sector-topk"),
+    p.add_argument("--uav-frontier-mode", choices=("centroid", "sector_topk", "sector-topk", "local_global", "local-global"),
                    default=DEFAULT_UAV_FRONTIER_MODE,
                    help="Frontier feature/reward mode. centroid is the legacy averaged direction; "
-                        "sector_topk uses top-k uncovered sector candidates.")
+                        "sector_topk uses top-k uncovered sector candidates; local_global exposes "
+                        "one local confidence candidate plus one team-diversified global confidence candidate.")
     p.add_argument("--uav-frontier-source", choices=("coverage", "confidence"),
                    default="coverage",
                    help="Map used to score UAV frontier candidates. coverage uses binary uncovered cells; "
@@ -1046,11 +1049,13 @@ def main():
     if args.uav_frontier_obs_radius_m <= 0.0:
         p.error("--uav-frontier-obs-radius-m must be positive")
     args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
-    if args.uav_frontier_mode not in {"centroid", "sector_topk"}:
-        p.error("--uav-frontier-mode must be one of: centroid, sector_topk")
+    if args.uav_frontier_mode not in {"centroid", "sector_topk", "local_global"}:
+        p.error("--uav-frontier-mode must be one of: centroid, sector_topk, local_global")
     args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
     if args.uav_frontier_source not in {"coverage", "confidence"}:
         p.error("--uav-frontier-source must be one of: coverage, confidence")
+    if args.uav_frontier_mode == "local_global" and args.uav_frontier_source != "confidence":
+        p.error("--uav-frontier-mode local_global requires --uav-frontier-source confidence")
     if args.uav_frontier_sectors < 2:
         p.error("--uav-frontier-sectors must be at least 2")
     if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:

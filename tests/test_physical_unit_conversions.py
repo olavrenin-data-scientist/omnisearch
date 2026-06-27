@@ -212,6 +212,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.fire_grid_size = grid_size
         scenario.x_semidim = 1.0
         scenario.y_semidim = 1.0
+        scenario.agent_radius = 0.05
         scenario.coverage_grid = torch.zeros(1, grid_size, grid_size, dtype=torch.bool)
         scenario.uav_confidence_grid = torch.zeros(1, grid_size, grid_size)
         scenario.land_cover_grid = torch.zeros(1, grid_size, grid_size, dtype=torch.long)
@@ -469,6 +470,32 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertGreater(float(features[0, 0, 2]), 0.0)
         self.assertGreater(float(features[0, 0, 3]), 0.0)
 
+    def test_confidence_local_global_frontier_assigns_diverse_global_candidates(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=16)
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_mode = "local_global"
+        scenario.uav_frontier_source = "confidence"
+        scenario.uav_frontier_ownership = True
+        scenario.uav_frontier_obs_radius_m = 5.0
+        scenario.uav_confidence_grid[:] = 1.0
+        scenario.uav_confidence_grid[:, :4, :4] = 0.0
+        scenario.uav_confidence_grid[:, :4, -4:] = 0.0
+        scenario.uav_confidence_grid[:, -4:, 6:10] = 0.0
+        positions = torch.tensor(
+            [[[-0.70, -0.70], [0.70, -0.70], [0.0, 0.70]]],
+            dtype=torch.float32,
+        )
+
+        features = scenario._uav_frontier_features_for_positions(positions)
+
+        self.assertEqual(features.shape, (1, 3, 8))
+        self.assertTrue(torch.all(features[0, :, 3] > 0.0))
+        self.assertTrue(torch.all(features[0, :, 7] > 0.0))
+        global_dirs = features[0, :, 4:6]
+        cosine = global_dirs @ global_dirs.T
+        off_diag = cosine[~torch.eye(3, dtype=torch.bool)]
+        self.assertLess(float(off_diag.max()), 0.95)
+
     def test_uav_confidence_move_reward_uses_best_one_step_opportunity(self):
         scenario = self._coverage_scenario(grid_size=16)
         scenario.r_uav_confidence = 0.0
@@ -484,6 +511,27 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertGreater(float(scenario.metric_uav_confidence_opportunity_best_gain[0]), 0.0)
         self.assertGreater(float(scenario.metric_uav_confidence_opportunity_fraction[0]), 0.0)
         self.assertLessEqual(float(scenario.metric_uav_confidence_opportunity_fraction[0]), 1.0)
+
+    def test_uav_confidence_best_stencil_respects_physical_center_bounds(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.agent_radius = 0.1
+        scenario._pre_step_drone_pos = torch.tensor([[[0.85, 0.0]]])
+        previous = torch.zeros(1, 1, 1)
+        confidence_weight = torch.ones_like(previous)
+        recorded = {}
+
+        def fake_detection_probability(drone_pos, *, altitude_quality=None, footprint=None):
+            recorded["pos"] = drone_pos.detach().clone()
+            x_score = drone_pos[..., 0].view(1, -1, 1, 1)
+            visible = torch.ones_like(x_score, dtype=torch.bool)
+            return x_score, visible
+
+        scenario._uav_cell_detection_probability = fake_detection_probability
+
+        best_gain = scenario._uav_confidence_best_stencil_gain(previous, confidence_weight)
+
+        self.assertLessEqual(float(recorded["pos"][..., 0].max()), 0.9 + 1e-6)
+        self.assertAlmostEqual(float(best_gain[0, 0]), 0.9, places=6)
 
     def test_uav_move_coverage_reward_scales_with_new_cells_and_displacement(self):
         scenario = self._coverage_scenario(grid_size=16)

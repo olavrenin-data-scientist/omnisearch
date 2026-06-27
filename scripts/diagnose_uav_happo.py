@@ -45,6 +45,11 @@ COUNTERFACTUAL_CANDIDATE_DIRECTIONS = np.asarray(
     ],
     dtype=float,
 )
+CONFIDENCE_REVISIT_THRESHOLD = 0.10
+CONFIDENCE_REVISIT_USEFUL_OPPORTUNITY_THRESHOLD = 0.25
+CONFIDENCE_REVISIT_WASTEFUL_OPPORTUNITY_THRESHOLD = 0.15
+CONFIDENCE_REVISIT_MIN_GAIN = 1e-9
+DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M = 60.0
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -99,7 +104,13 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     return scenario_kwargs
 
 
-def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int) -> dict[str, Any]:
+def run_rollout(
+    policy: HappoPolicy,
+    scenario_kwargs: dict[str, Any],
+    seed: int,
+    *,
+    diagnostic_confidence_frontier_radius_m: float = DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M,
+) -> dict[str, Any]:
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
@@ -166,6 +177,24 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
     candidate_action_best_alignment_values: list[float] = []
     candidate_movement_best_alignment_values: list[float] = []
     candidate_no_opportunity_values: list[float] = []
+    frontier_candidate_new_cells_values: list[float] = []
+    frontier_candidate_capture_fraction_values: list[float] = []
+    frontier_candidate_regret_values: list[float] = []
+    frontier_candidate_best_alignment_values: list[float] = []
+    frontier_candidate_rank_values: list[float] = []
+    frontier_candidate_nearest_rank_values: list[float] = []
+    frontier_candidate_is_best_values: list[float] = []
+    frontier_candidate_bad_values: list[float] = []
+    confidence_frontier_candidate_capture_fraction_values: list[float] = []
+    confidence_frontier_candidate_best_alignment_values: list[float] = []
+    confidence_frontier_candidate_rank_values: list[float] = []
+    confidence_frontier_candidate_bad_values: list[float] = []
+    confidence_lg_frontier_candidate_capture_fraction_values: list[float] = []
+    confidence_lg_frontier_candidate_best_alignment_values: list[float] = []
+    confidence_lg_frontier_candidate_rank_values: list[float] = []
+    confidence_lg_frontier_candidate_bad_values: list[float] = []
+    confidence_frontier_capture_advantage_values: list[float] = []
+    confidence_lg_frontier_capture_advantage_values: list[float] = []
     frontier_alignment_values: list[float] = []
     frontier_progress_values: list[float] = []
     frontier_uncovered_ratio_values: list[float] = []
@@ -299,11 +328,65 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 pre_team_coverage=pre_team_coverage,
                 max_step_sim=max_step_sim,
             )
+            frontier_mode = str(getattr(scenario, "uav_frontier_mode", "centroid")).replace("-", "_")
+            frontier_top_k = int(getattr(scenario, "uav_frontier_top_k", 1))
+            frontier_usefulness = _frontier_usefulness_diagnostics(
+                scenario=scenario,
+                geometry=coverage_geometry,
+                positions=pre_drone_pos_array,
+                footprint_radii_sim=pre_footprint_radius_sim,
+                pre_team_coverage=pre_team_coverage,
+                max_step_sim=max_step_sim,
+                frontier_obs=frontier_obs,
+                counterfactual=counterfactual,
+                frontier_mode=frontier_mode,
+                frontier_top_k=frontier_top_k,
+            )
+            confidence_frontier_obs = _shadow_frontier_features(
+                scenario,
+                pre_drone_pos_tensor,
+                source="confidence",
+                mode=frontier_mode,
+            )
+            confidence_frontier_usefulness = _frontier_usefulness_diagnostics(
+                scenario=scenario,
+                geometry=coverage_geometry,
+                positions=pre_drone_pos_array,
+                footprint_radii_sim=pre_footprint_radius_sim,
+                pre_team_coverage=pre_team_coverage,
+                max_step_sim=max_step_sim,
+                frontier_obs=confidence_frontier_obs,
+                counterfactual=counterfactual,
+                frontier_mode=frontier_mode,
+                frontier_top_k=frontier_top_k,
+            )
+            confidence_lg_frontier_obs = _shadow_frontier_features(
+                scenario,
+                pre_drone_pos_tensor,
+                source="confidence",
+                mode="local_global",
+                radius_m=diagnostic_confidence_frontier_radius_m,
+            )
+            confidence_lg_frontier_usefulness = _frontier_usefulness_diagnostics(
+                scenario=scenario,
+                geometry=coverage_geometry,
+                positions=pre_drone_pos_array,
+                footprint_radii_sim=pre_footprint_radius_sim,
+                pre_team_coverage=pre_team_coverage,
+                max_step_sim=max_step_sim,
+                frontier_obs=confidence_lg_frontier_obs,
+                counterfactual=counterfactual,
+                frontier_mode="local_global",
+                frontier_top_k=2,
+            )
         else:
             frontier_obs = np.zeros((0, 4), dtype=float)
             coverage_signal = _empty_coverage_signal_snapshot(0)
             frontier_expected_new_cells = np.zeros(0, dtype=float)
             counterfactual = _empty_counterfactual_move_diagnostics(0)
+            frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
+            confidence_frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
+            confidence_lg_frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
         frontier_pairwise = _pairwise_direction_metrics(frontier_obs[:, :2])
         local_pairwise = _pairwise_direction_metrics(coverage_signal["local_vec"])
         global_pairwise = _pairwise_direction_metrics(coverage_signal["global_vec"])
@@ -567,6 +650,34 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                 candidate_new_cells,
                 counterfactual["best_new_direction"][drone_idx],
             )
+            frontier_use = _frontier_usefulness_for_drone(frontier_usefulness, drone_idx)
+            confidence_frontier_use = _frontier_usefulness_for_drone(
+                confidence_frontier_usefulness,
+                drone_idx,
+            )
+            confidence_lg_frontier_use = _frontier_usefulness_for_drone(
+                confidence_lg_frontier_usefulness,
+                drone_idx,
+            )
+            frontier_candidate_capture = float(frontier_use["capture_fraction"])
+            confidence_frontier_candidate_capture = float(
+                confidence_frontier_use["capture_fraction"]
+            )
+            confidence_lg_frontier_candidate_capture = float(
+                confidence_lg_frontier_use["capture_fraction"]
+            )
+            confidence_frontier_capture_advantage = (
+                confidence_frontier_candidate_capture - frontier_candidate_capture
+                if math.isfinite(confidence_frontier_candidate_capture)
+                and math.isfinite(frontier_candidate_capture)
+                else math.nan
+            )
+            confidence_lg_frontier_capture_advantage = (
+                confidence_lg_frontier_candidate_capture - frontier_candidate_capture
+                if math.isfinite(confidence_lg_frontier_candidate_capture)
+                and math.isfinite(frontier_candidate_capture)
+                else math.nan
+            )
             candidate_avoidable_overlap = (
                 max(any_history_revisit - candidate_best_useful_overlap, 0.0)
                 if math.isfinite(candidate_best_useful_overlap)
@@ -590,6 +701,31 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             )
             confidence_opportunity_best_gain = float(
                 confidence_opportunity_best_gain_by_drone[drone_idx]
+            )
+            confidence_revisit_step = bool(avoidable_revisit >= CONFIDENCE_REVISIT_THRESHOLD)
+            confidence_revisit_has_opportunity = bool(
+                math.isfinite(confidence_gain_drone)
+                and math.isfinite(confidence_opportunity_fraction)
+                and math.isfinite(confidence_opportunity_best_gain)
+                and confidence_gain_drone > CONFIDENCE_REVISIT_MIN_GAIN
+                and confidence_opportunity_best_gain > CONFIDENCE_REVISIT_MIN_GAIN
+            )
+            confidence_useful_revisit = bool(
+                confidence_revisit_step
+                and confidence_revisit_has_opportunity
+                and confidence_opportunity_fraction >= CONFIDENCE_REVISIT_USEFUL_OPPORTUNITY_THRESHOLD
+            )
+            confidence_wasteful_revisit = bool(
+                confidence_revisit_step
+                and (
+                    not confidence_revisit_has_opportunity
+                    or confidence_opportunity_fraction < CONFIDENCE_REVISIT_WASTEFUL_OPPORTUNITY_THRESHOLD
+                )
+            )
+            confidence_ambiguous_revisit = bool(
+                confidence_revisit_step
+                and not confidence_useful_revisit
+                and not confidence_wasteful_revisit
             )
             frontier_align = float(frontier_alignment[drone_idx])
             frontier_progress_frac = float(frontier_progress[drone_idx])
@@ -693,6 +829,32 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             candidate_action_best_alignment_values.append(candidate_action["best_alignment"])
             candidate_movement_best_alignment_values.append(candidate_movement["best_alignment"])
             candidate_no_opportunity_values.append(candidate_no_opportunity)
+            frontier_candidate_new_cells_values.append(float(frontier_use["new_cells"]))
+            frontier_candidate_capture_fraction_values.append(frontier_candidate_capture)
+            frontier_candidate_regret_values.append(float(frontier_use["regret"]))
+            frontier_candidate_best_alignment_values.append(float(frontier_use["best_alignment"]))
+            frontier_candidate_rank_values.append(float(frontier_use["rank"]))
+            frontier_candidate_nearest_rank_values.append(float(frontier_use["nearest_rank"]))
+            frontier_candidate_is_best_values.append(float(frontier_use["is_best"]))
+            frontier_candidate_bad_values.append(float(frontier_use["bad"]))
+            confidence_frontier_candidate_capture_fraction_values.append(
+                confidence_frontier_candidate_capture
+            )
+            confidence_frontier_candidate_best_alignment_values.append(
+                float(confidence_frontier_use["best_alignment"])
+            )
+            confidence_frontier_candidate_rank_values.append(float(confidence_frontier_use["rank"]))
+            confidence_frontier_candidate_bad_values.append(float(confidence_frontier_use["bad"]))
+            confidence_lg_frontier_candidate_capture_fraction_values.append(
+                confidence_lg_frontier_candidate_capture
+            )
+            confidence_lg_frontier_candidate_best_alignment_values.append(
+                float(confidence_lg_frontier_use["best_alignment"])
+            )
+            confidence_lg_frontier_candidate_rank_values.append(float(confidence_lg_frontier_use["rank"]))
+            confidence_lg_frontier_candidate_bad_values.append(float(confidence_lg_frontier_use["bad"]))
+            confidence_frontier_capture_advantage_values.append(confidence_frontier_capture_advantage)
+            confidence_lg_frontier_capture_advantage_values.append(confidence_lg_frontier_capture_advantage)
             coverage_opportunity_cells_values.append(opportunity_cells)
             coverage_opportunity_fraction_values.append(opportunity_fraction)
             coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
@@ -786,6 +948,44 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
             drone_stats["candidate_action_best_alignment"].append(candidate_action["best_alignment"])
             drone_stats["candidate_movement_best_alignment"].append(candidate_movement["best_alignment"])
             drone_stats["candidate_no_opportunity"].append(candidate_no_opportunity)
+            drone_stats["frontier_candidate_new_cells"].append(float(frontier_use["new_cells"]))
+            drone_stats["frontier_candidate_capture_fraction"].append(frontier_candidate_capture)
+            drone_stats["frontier_candidate_regret"].append(float(frontier_use["regret"]))
+            drone_stats["frontier_candidate_best_alignment"].append(float(frontier_use["best_alignment"]))
+            drone_stats["frontier_candidate_rank"].append(float(frontier_use["rank"]))
+            drone_stats["frontier_candidate_nearest_rank"].append(float(frontier_use["nearest_rank"]))
+            drone_stats["frontier_candidate_is_best"].append(float(frontier_use["is_best"]))
+            drone_stats["frontier_candidate_bad"].append(float(frontier_use["bad"]))
+            drone_stats["confidence_frontier_candidate_capture_fraction"].append(
+                confidence_frontier_candidate_capture
+            )
+            drone_stats["confidence_frontier_candidate_best_alignment"].append(
+                float(confidence_frontier_use["best_alignment"])
+            )
+            drone_stats["confidence_frontier_candidate_rank"].append(
+                float(confidence_frontier_use["rank"])
+            )
+            drone_stats["confidence_frontier_candidate_bad"].append(
+                float(confidence_frontier_use["bad"])
+            )
+            drone_stats["confidence_lg_frontier_candidate_capture_fraction"].append(
+                confidence_lg_frontier_candidate_capture
+            )
+            drone_stats["confidence_lg_frontier_candidate_best_alignment"].append(
+                float(confidence_lg_frontier_use["best_alignment"])
+            )
+            drone_stats["confidence_lg_frontier_candidate_rank"].append(
+                float(confidence_lg_frontier_use["rank"])
+            )
+            drone_stats["confidence_lg_frontier_candidate_bad"].append(
+                float(confidence_lg_frontier_use["bad"])
+            )
+            drone_stats["confidence_frontier_capture_advantage"].append(
+                confidence_frontier_capture_advantage
+            )
+            drone_stats["confidence_lg_frontier_capture_advantage"].append(
+                confidence_lg_frontier_capture_advantage
+            )
             drone_stats["coverage_opportunity_cells"].append(opportunity_cells)
             drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
             drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
@@ -945,6 +1145,32 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "candidate_action_best_alignment": candidate_action["best_alignment"],
                     "candidate_movement_best_alignment": candidate_movement["best_alignment"],
                     "candidate_no_opportunity": candidate_no_opportunity,
+                    "frontier_candidate_new_cells": float(frontier_use["new_cells"]),
+                    "frontier_candidate_capture_fraction": frontier_candidate_capture,
+                    "frontier_candidate_regret": float(frontier_use["regret"]),
+                    "frontier_candidate_best_alignment": float(frontier_use["best_alignment"]),
+                    "frontier_candidate_rank": float(frontier_use["rank"]),
+                    "frontier_candidate_nearest_rank": float(frontier_use["nearest_rank"]),
+                    "frontier_candidate_is_best": float(frontier_use["is_best"]),
+                    "frontier_candidate_bad": float(frontier_use["bad"]),
+                    "confidence_frontier_candidate_capture_fraction": (
+                        confidence_frontier_candidate_capture
+                    ),
+                    "confidence_frontier_candidate_best_alignment": float(
+                        confidence_frontier_use["best_alignment"]
+                    ),
+                    "confidence_frontier_candidate_rank": float(confidence_frontier_use["rank"]),
+                    "confidence_frontier_candidate_bad": float(confidence_frontier_use["bad"]),
+                    "confidence_lg_frontier_candidate_capture_fraction": (
+                        confidence_lg_frontier_candidate_capture
+                    ),
+                    "confidence_lg_frontier_candidate_best_alignment": float(
+                        confidence_lg_frontier_use["best_alignment"]
+                    ),
+                    "confidence_lg_frontier_candidate_rank": float(confidence_lg_frontier_use["rank"]),
+                    "confidence_lg_frontier_candidate_bad": float(confidence_lg_frontier_use["bad"]),
+                    "confidence_frontier_capture_advantage": confidence_frontier_capture_advantage,
+                    "confidence_lg_frontier_capture_advantage": confidence_lg_frontier_capture_advantage,
                     "coverage_opportunity_cells": opportunity_cells,
                     "coverage_opportunity_fraction": opportunity_fraction,
                     "coverage_opportunity_available_fraction": opportunity_available_fraction,
@@ -952,6 +1178,10 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
                     "confidence_gain": confidence_gain_drone,
                     "confidence_opportunity_fraction": confidence_opportunity_fraction,
                     "confidence_opportunity_best_gain": confidence_opportunity_best_gain,
+                    "confidence_revisit": float(confidence_revisit_step),
+                    "confidence_useful_revisit": float(confidence_useful_revisit),
+                    "confidence_wasteful_revisit": float(confidence_wasteful_revisit),
+                    "confidence_ambiguous_revisit": float(confidence_ambiguous_revisit),
                     "confidence_team_gain": confidence_gain,
                     "confidence_low_fraction": confidence_low_fraction,
                     "confidence_high_fraction": confidence_high_fraction,
@@ -1093,6 +1323,58 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         "avg_candidate_action_best_alignment": _finite_mean(candidate_action_best_alignment_values),
         "avg_candidate_movement_best_alignment": _finite_mean(candidate_movement_best_alignment_values),
         "candidate_no_opportunity_frac": _finite_mean(candidate_no_opportunity_values),
+        "avg_frontier_candidate_new_cells": _finite_mean(frontier_candidate_new_cells_values),
+        "avg_frontier_candidate_capture_fraction": _finite_mean(
+            frontier_candidate_capture_fraction_values
+        ),
+        "avg_frontier_candidate_regret": _finite_mean(frontier_candidate_regret_values),
+        "avg_frontier_candidate_best_alignment": _finite_mean(
+            frontier_candidate_best_alignment_values
+        ),
+        "avg_frontier_candidate_rank": _finite_mean(frontier_candidate_rank_values),
+        "avg_frontier_candidate_nearest_rank": _finite_mean(
+            frontier_candidate_nearest_rank_values
+        ),
+        "frontier_candidate_is_best_frac": _finite_mean(frontier_candidate_is_best_values),
+        "frontier_candidate_bad_frac": _finite_mean(frontier_candidate_bad_values),
+        "avg_confidence_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_frontier_candidate_capture_fraction_values
+        ),
+        "avg_confidence_frontier_candidate_best_alignment": _finite_mean(
+            confidence_frontier_candidate_best_alignment_values
+        ),
+        "avg_confidence_frontier_candidate_rank": _finite_mean(
+            confidence_frontier_candidate_rank_values
+        ),
+        "confidence_frontier_candidate_bad_frac": _finite_mean(
+            confidence_frontier_candidate_bad_values
+        ),
+        "avg_confidence_lg_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_lg_frontier_candidate_capture_fraction_values
+        ),
+        "avg_confidence_lg_frontier_candidate_best_alignment": _finite_mean(
+            confidence_lg_frontier_candidate_best_alignment_values
+        ),
+        "avg_confidence_lg_frontier_candidate_rank": _finite_mean(
+            confidence_lg_frontier_candidate_rank_values
+        ),
+        "confidence_lg_frontier_candidate_bad_frac": _finite_mean(
+            confidence_lg_frontier_candidate_bad_values
+        ),
+        "avg_confidence_frontier_capture_advantage": _finite_mean(
+            confidence_frontier_capture_advantage_values
+        ),
+        "avg_confidence_lg_frontier_capture_advantage": _finite_mean(
+            confidence_lg_frontier_capture_advantage_values
+        ),
+        "frontier_candidate_capture_new_cells_corr": _safe_corr(
+            frontier_candidate_capture_fraction_values,
+            new_coverage_cells_values,
+        ),
+        "frontier_candidate_alignment_new_cells_corr": _safe_corr(
+            frontier_candidate_best_alignment_values,
+            new_coverage_cells_values,
+        ),
         "avg_coverage_opportunity_cells": _finite_mean(coverage_opportunity_cells_values),
         "avg_coverage_opportunity_fraction": _finite_mean(coverage_opportunity_fraction_values),
         "avg_coverage_opportunity_available_fraction": _finite_mean(
@@ -1235,6 +1517,12 @@ def run_rollout(policy: HappoPolicy, scenario_kwargs: dict[str, Any], seed: int)
         **coverage_shape_metrics,
         **survivor_exposure_summary,
     }
+    row.update(_confidence_revisit_metrics(
+        avoidable_revisit_values,
+        confidence_gain_by_drone_values,
+        confidence_opportunity_fraction_values,
+        confidence_opportunity_best_gain_values,
+    ))
     row["failure_label"] = _failure_label(row)
     close = getattr(env, "close", None)
     if close is not None:
@@ -1250,6 +1538,99 @@ def _finite_mean(values: list[float]) -> float:
 def _finite_median(values: list[float]) -> float:
     finite = [value for value in values if math.isfinite(value)]
     return float(np.median(finite)) if finite else math.nan
+
+
+def _confidence_revisit_metrics(
+    avoidable_revisit: list[float],
+    confidence_gain: list[float],
+    confidence_opportunity_fraction: list[float],
+    confidence_opportunity_best_gain: list[float],
+) -> dict[str, float]:
+    series = (
+        avoidable_revisit,
+        confidence_gain,
+        confidence_opportunity_fraction,
+        confidence_opportunity_best_gain,
+    )
+    n = min((len(values) for values in series), default=0)
+    if n <= 0:
+        return {
+            "confidence_revisit_step_frac": 0.0,
+            "confidence_useful_revisit_step_frac": 0.0,
+            "confidence_wasteful_revisit_step_frac": 0.0,
+            "confidence_ambiguous_revisit_step_frac": 0.0,
+            "confidence_revisit_useful_share": math.nan,
+            "confidence_revisit_wasteful_share": math.nan,
+            "confidence_revisit_gain_share": math.nan,
+            "confidence_gain_on_revisit": math.nan,
+            "confidence_gain_off_revisit": math.nan,
+            "confidence_opportunity_on_revisit": math.nan,
+            "confidence_opportunity_off_revisit": math.nan,
+            "confidence_best_gain_on_revisit": math.nan,
+            "confidence_best_gain_off_revisit": math.nan,
+        }
+
+    revisit = np.asarray(avoidable_revisit[:n], dtype=float)
+    gain = np.asarray(confidence_gain[:n], dtype=float)
+    opportunity = np.asarray(confidence_opportunity_fraction[:n], dtype=float)
+    best_gain = np.asarray(confidence_opportunity_best_gain[:n], dtype=float)
+
+    revisit_mask = (
+        np.isfinite(revisit)
+        & (revisit >= CONFIDENCE_REVISIT_THRESHOLD)
+    )
+    has_confidence_opportunity = (
+        np.isfinite(gain)
+        & np.isfinite(opportunity)
+        & np.isfinite(best_gain)
+        & (gain > CONFIDENCE_REVISIT_MIN_GAIN)
+        & (best_gain > CONFIDENCE_REVISIT_MIN_GAIN)
+    )
+    useful_mask = (
+        revisit_mask
+        & has_confidence_opportunity
+        & (opportunity >= CONFIDENCE_REVISIT_USEFUL_OPPORTUNITY_THRESHOLD)
+    )
+    wasteful_mask = (
+        revisit_mask
+        & (
+            ~has_confidence_opportunity
+            | (opportunity < CONFIDENCE_REVISIT_WASTEFUL_OPPORTUNITY_THRESHOLD)
+        )
+    )
+    ambiguous_mask = revisit_mask & ~useful_mask & ~wasteful_mask
+    revisit_count = int(np.count_nonzero(revisit_mask))
+
+    def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
+        selected = values[mask & np.isfinite(values)]
+        return float(np.mean(selected)) if selected.size else math.nan
+
+    positive_gain = np.where(np.isfinite(gain) & (gain > 0.0), gain, 0.0)
+    total_gain = float(np.sum(positive_gain))
+    revisit_gain = float(np.sum(positive_gain[revisit_mask]))
+    return {
+        "confidence_revisit_step_frac": float(np.mean(revisit_mask)),
+        "confidence_useful_revisit_step_frac": float(np.mean(useful_mask)),
+        "confidence_wasteful_revisit_step_frac": float(np.mean(wasteful_mask)),
+        "confidence_ambiguous_revisit_step_frac": float(np.mean(ambiguous_mask)),
+        "confidence_revisit_useful_share": (
+            float(np.count_nonzero(useful_mask) / revisit_count)
+            if revisit_count else math.nan
+        ),
+        "confidence_revisit_wasteful_share": (
+            float(np.count_nonzero(wasteful_mask) / revisit_count)
+            if revisit_count else math.nan
+        ),
+        "confidence_revisit_gain_share": (
+            float(revisit_gain / total_gain) if total_gain > 0.0 else math.nan
+        ),
+        "confidence_gain_on_revisit": _masked_mean(gain, revisit_mask),
+        "confidence_gain_off_revisit": _masked_mean(gain, ~revisit_mask),
+        "confidence_opportunity_on_revisit": _masked_mean(opportunity, revisit_mask),
+        "confidence_opportunity_off_revisit": _masked_mean(opportunity, ~revisit_mask),
+        "confidence_best_gain_on_revisit": _masked_mean(best_gain, revisit_mask),
+        "confidence_best_gain_off_revisit": _masked_mean(best_gain, ~revisit_mask),
+    }
 
 
 def _metric_array(scenario: WildfireSearchScenario, name: str, n_drones: int) -> np.ndarray:
@@ -1984,6 +2365,185 @@ def _frontier_expected_new_cells(
     return expected
 
 
+def _empty_frontier_usefulness_diagnostics(n_drones: int) -> dict[str, np.ndarray]:
+    n = max(int(n_drones), 0)
+    return {
+        "new_cells": np.full(n, math.nan, dtype=float),
+        "capture_fraction": np.full(n, math.nan, dtype=float),
+        "regret": np.full(n, math.nan, dtype=float),
+        "best_alignment": np.full(n, math.nan, dtype=float),
+        "rank": np.full(n, math.nan, dtype=float),
+        "nearest_rank": np.full(n, math.nan, dtype=float),
+        "nearest_capture_fraction": np.full(n, math.nan, dtype=float),
+        "is_best": np.zeros(n, dtype=float),
+        "bad": np.zeros(n, dtype=float),
+        "valid": np.zeros(n, dtype=float),
+    }
+
+
+def _frontier_usefulness_for_drone(metrics: dict[str, np.ndarray], drone_idx: int) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key, values in metrics.items():
+        arr = np.asarray(values, dtype=float).reshape(-1)
+        out[key] = float(arr[drone_idx]) if drone_idx < arr.size else math.nan
+    return out
+
+
+def _frontier_usefulness_diagnostics(
+    *,
+    scenario: WildfireSearchScenario,
+    geometry: dict[str, Any],
+    positions: np.ndarray,
+    footprint_radii_sim: np.ndarray,
+    pre_team_coverage: np.ndarray,
+    max_step_sim: float,
+    frontier_obs: np.ndarray,
+    counterfactual: dict[str, np.ndarray],
+    frontier_mode: str | None = None,
+    frontier_top_k: int | None = None,
+) -> dict[str, np.ndarray]:
+    positions_arr = np.asarray(positions, dtype=float).reshape(-1, 2)
+    n_drones = positions_arr.shape[0]
+    out = _empty_frontier_usefulness_diagnostics(n_drones)
+    if n_drones == 0:
+        return out
+
+    radii_arr = np.asarray(footprint_radii_sim, dtype=float).reshape(-1)
+    if radii_arr.size == 0:
+        radii_arr = np.zeros(n_drones, dtype=float)
+    elif radii_arr.size != n_drones:
+        radii_arr = np.resize(radii_arr, n_drones)
+
+    coverage = np.asarray(pre_team_coverage, dtype=bool)
+    step = max(float(max_step_sim), 0.0)
+    x_min = -float(scenario.x_semidim) + float(scenario.agent_radius)
+    x_max = float(scenario.x_semidim) - float(scenario.agent_radius)
+    y_min = -float(scenario.y_semidim) + float(scenario.agent_radius)
+    y_max = float(scenario.y_semidim) - float(scenario.agent_radius)
+    counter_new = np.asarray(counterfactual.get("new_cells", np.zeros((n_drones, 0))), dtype=float)
+    counter_dirs = np.asarray(counterfactual.get("directions", np.zeros((0, 2))), dtype=float)
+    best_new_cells = np.asarray(counterfactual.get("best_new_cells", np.zeros(n_drones)), dtype=float)
+    best_dirs = np.asarray(counterfactual.get("best_new_direction", np.zeros((n_drones, 2))), dtype=float)
+
+    candidate_positions: list[np.ndarray] = []
+    candidate_radii: list[float] = []
+    candidate_drone_indices: list[int] = []
+    candidate_directions: list[np.ndarray] = []
+    for drone_idx, pos in enumerate(positions_arr):
+        candidates = _valid_frontier_candidates(
+            _frontier_candidates_for_drone(
+                scenario,
+                frontier_obs,
+                drone_idx,
+                mode=frontier_mode,
+                top_k=frontier_top_k,
+            )
+        )
+        for candidate in candidates:
+            direction = np.asarray(candidate[:2], dtype=float)
+            norm = float(np.linalg.norm(direction))
+            if norm <= 1e-12:
+                continue
+            unit = direction / norm
+            next_pos = pos + unit * step
+            next_pos = next_pos.copy()
+            next_pos[0] = np.clip(next_pos[0], x_min, x_max)
+            next_pos[1] = np.clip(next_pos[1], y_min, y_max)
+            candidate_positions.append(next_pos)
+            candidate_radii.append(float(radii_arr[min(drone_idx, len(radii_arr) - 1)]))
+            candidate_drone_indices.append(drone_idx)
+            candidate_directions.append(unit)
+
+    if not candidate_positions:
+        return out
+
+    masks = _footprint_claims(
+        np.asarray(candidate_positions, dtype=float),
+        np.asarray(candidate_radii, dtype=float),
+        geometry,
+    )
+    new_values = (masks & ~coverage.reshape(1, *coverage.shape)).sum(axis=(1, 2)).astype(float)
+
+    by_drone: dict[int, list[tuple[float, np.ndarray]]] = {}
+    for drone_idx, new_value, direction in zip(candidate_drone_indices, new_values, candidate_directions):
+        by_drone.setdefault(int(drone_idx), []).append((float(new_value), np.asarray(direction, dtype=float)))
+
+    for drone_idx in range(n_drones):
+        entries = by_drone.get(drone_idx, [])
+        if not entries:
+            continue
+        values = np.asarray([entry[0] for entry in entries], dtype=float)
+        directions = np.asarray([entry[1] for entry in entries], dtype=float)
+        best_frontier_idx = int(np.argmax(values))
+        frontier_new = float(values[best_frontier_idx])
+        frontier_direction = directions[best_frontier_idx]
+        best_new = float(best_new_cells[drone_idx]) if drone_idx < best_new_cells.size else 0.0
+        capture = frontier_new / best_new if best_new > 1e-9 else math.nan
+        regret = max(best_new - frontier_new, 0.0) if best_new > 1e-9 else math.nan
+        counter_row = counter_new[drone_idx] if drone_idx < counter_new.shape[0] else np.zeros(0)
+        finite_counter = counter_row[np.isfinite(counter_row)]
+        rank = (
+            1.0 + float(np.count_nonzero(finite_counter > frontier_new + 1e-9))
+            if finite_counter.size else math.nan
+        )
+
+        nearest_rank = math.nan
+        nearest_capture = math.nan
+        move_dirs = counter_dirs[:-1] if counter_dirs.shape[0] > 1 else counter_dirs
+        if move_dirs.size and counter_row.size:
+            cosines = move_dirs @ frontier_direction
+            nearest_idx = int(np.argmax(cosines))
+            nearest_new = float(counter_row[nearest_idx])
+            nearest_rank = 1.0 + float(np.count_nonzero(counter_row > nearest_new + 1e-9))
+            nearest_capture = nearest_new / best_new if best_new > 1e-9 else math.nan
+
+        alignment = _cosine_or_nan(
+            frontier_direction,
+            best_dirs[drone_idx] if drone_idx < len(best_dirs) else np.zeros(2),
+        )
+        out["new_cells"][drone_idx] = frontier_new
+        out["capture_fraction"][drone_idx] = capture
+        out["regret"][drone_idx] = regret
+        out["best_alignment"][drone_idx] = alignment
+        out["rank"][drone_idx] = rank
+        out["nearest_rank"][drone_idx] = nearest_rank
+        out["nearest_capture_fraction"][drone_idx] = nearest_capture
+        out["is_best"][drone_idx] = float(math.isfinite(capture) and capture >= 0.90)
+        out["bad"][drone_idx] = float(math.isfinite(capture) and capture < 0.25)
+        out["valid"][drone_idx] = 1.0
+    return out
+
+
+def _shadow_frontier_features(
+    scenario: WildfireSearchScenario,
+    positions_tensor: torch.Tensor,
+    *,
+    source: str,
+    mode: str,
+    radius_m: float | None = None,
+) -> np.ndarray:
+    old_source = getattr(scenario, "uav_frontier_source", "coverage")
+    old_mode = getattr(scenario, "uav_frontier_mode", "centroid")
+    old_radius = getattr(scenario, "uav_frontier_obs_radius_m", None)
+    try:
+        scenario.uav_frontier_source = str(source).replace("-", "_").lower()
+        scenario.uav_frontier_mode = str(mode).replace("-", "_")
+        if radius_m is not None:
+            scenario.uav_frontier_obs_radius_m = float(radius_m)
+        return (
+            scenario._uav_frontier_features_for_positions(positions_tensor)[0]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(float)
+        )
+    finally:
+        scenario.uav_frontier_source = old_source
+        scenario.uav_frontier_mode = old_mode
+        if old_radius is not None:
+            scenario.uav_frontier_obs_radius_m = old_radius
+
+
 def _empty_coverage_signal_snapshot(n_drones: int) -> dict[str, np.ndarray]:
     n = max(int(n_drones), 0)
     return {
@@ -2342,14 +2902,29 @@ def _frontier_candidates_for_drone(
     scenario: WildfireSearchScenario,
     frontier_obs: np.ndarray,
     drone_idx: int,
+    *,
+    mode: str | None = None,
+    top_k: int | None = None,
 ) -> np.ndarray:
     if drone_idx >= len(frontier_obs):
         return np.zeros((0, 4), dtype=float)
     row = np.asarray(frontier_obs[drone_idx], dtype=float).reshape(-1)
-    mode = str(getattr(scenario, "uav_frontier_mode", "centroid")).replace("-", "_")
+    mode = (
+        str(getattr(scenario, "uav_frontier_mode", "centroid"))
+        if mode is None
+        else str(mode)
+    ).replace("-", "_")
+    if mode == "local_global":
+        usable = min(8, len(row))
+        if usable < 4:
+            return np.zeros((0, 4), dtype=float)
+        return row[:usable].reshape(-1, 4)
     if mode != "sector_topk":
         return row[:4].reshape(1, 4)
-    top_k = max(int(getattr(scenario, "uav_frontier_top_k", max(len(row) // 4, 1))), 1)
+    top_k = max(
+        int(getattr(scenario, "uav_frontier_top_k", max(len(row) // 4, 1)) if top_k is None else top_k),
+        1,
+    )
     usable = min(top_k * 4, len(row))
     if usable < 4:
         return np.zeros((0, 4), dtype=float)
@@ -2663,6 +3238,24 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "candidate_action_best_alignment": [],
         "candidate_movement_best_alignment": [],
         "candidate_no_opportunity": [],
+        "frontier_candidate_new_cells": [],
+        "frontier_candidate_capture_fraction": [],
+        "frontier_candidate_regret": [],
+        "frontier_candidate_best_alignment": [],
+        "frontier_candidate_rank": [],
+        "frontier_candidate_nearest_rank": [],
+        "frontier_candidate_is_best": [],
+        "frontier_candidate_bad": [],
+        "confidence_frontier_candidate_capture_fraction": [],
+        "confidence_frontier_candidate_best_alignment": [],
+        "confidence_frontier_candidate_rank": [],
+        "confidence_frontier_candidate_bad": [],
+        "confidence_lg_frontier_candidate_capture_fraction": [],
+        "confidence_lg_frontier_candidate_best_alignment": [],
+        "confidence_lg_frontier_candidate_rank": [],
+        "confidence_lg_frontier_candidate_bad": [],
+        "confidence_frontier_capture_advantage": [],
+        "confidence_lg_frontier_capture_advantage": [],
         "coverage_opportunity_cells": [],
         "coverage_opportunity_fraction": [],
         "coverage_opportunity_available_fraction": [],
@@ -2765,6 +3358,30 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     candidate_action_best_alignment = stats["candidate_action_best_alignment"]
     candidate_movement_best_alignment = stats["candidate_movement_best_alignment"]
     candidate_no_opportunity = stats["candidate_no_opportunity"]
+    frontier_candidate_new_cells = stats["frontier_candidate_new_cells"]
+    frontier_candidate_capture = stats["frontier_candidate_capture_fraction"]
+    frontier_candidate_regret = stats["frontier_candidate_regret"]
+    frontier_candidate_best_alignment = stats["frontier_candidate_best_alignment"]
+    frontier_candidate_rank = stats["frontier_candidate_rank"]
+    frontier_candidate_nearest_rank = stats["frontier_candidate_nearest_rank"]
+    frontier_candidate_is_best = stats["frontier_candidate_is_best"]
+    frontier_candidate_bad = stats["frontier_candidate_bad"]
+    confidence_frontier_candidate_capture = stats["confidence_frontier_candidate_capture_fraction"]
+    confidence_frontier_candidate_best_alignment = stats[
+        "confidence_frontier_candidate_best_alignment"
+    ]
+    confidence_frontier_candidate_rank = stats["confidence_frontier_candidate_rank"]
+    confidence_frontier_candidate_bad = stats["confidence_frontier_candidate_bad"]
+    confidence_lg_frontier_candidate_capture = stats[
+        "confidence_lg_frontier_candidate_capture_fraction"
+    ]
+    confidence_lg_frontier_candidate_best_alignment = stats[
+        "confidence_lg_frontier_candidate_best_alignment"
+    ]
+    confidence_lg_frontier_candidate_rank = stats["confidence_lg_frontier_candidate_rank"]
+    confidence_lg_frontier_candidate_bad = stats["confidence_lg_frontier_candidate_bad"]
+    confidence_frontier_capture_advantage = stats["confidence_frontier_capture_advantage"]
+    confidence_lg_frontier_capture_advantage = stats["confidence_lg_frontier_capture_advantage"]
     opportunity_cells = stats["coverage_opportunity_cells"]
     opportunity_fraction = stats["coverage_opportunity_fraction"]
     opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
@@ -2793,6 +3410,12 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     high_frontier = int(stats["frontier_high_progress_steps"])
     action_frontier_aligned = int(stats["action_frontier_aligned_steps"])
     reward_terms = stats["reward_terms"]
+    confidence_revisit = _confidence_revisit_metrics(
+        avoidable_revisit,
+        confidence_gain,
+        confidence_opportunity_fraction,
+        confidence_opportunity_best_gain,
+    )
     return {
         "drone": int(stats["drone"]),
         "scout_credit_count": int(stats["scout_credit_count"]),
@@ -2850,6 +3473,40 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_candidate_action_best_alignment": _finite_mean(candidate_action_best_alignment),
         "avg_candidate_movement_best_alignment": _finite_mean(candidate_movement_best_alignment),
         "candidate_no_opportunity_frac": _finite_mean(candidate_no_opportunity),
+        "avg_frontier_candidate_new_cells": _finite_mean(frontier_candidate_new_cells),
+        "avg_frontier_candidate_capture_fraction": _finite_mean(frontier_candidate_capture),
+        "avg_frontier_candidate_regret": _finite_mean(frontier_candidate_regret),
+        "avg_frontier_candidate_best_alignment": _finite_mean(frontier_candidate_best_alignment),
+        "avg_frontier_candidate_rank": _finite_mean(frontier_candidate_rank),
+        "avg_frontier_candidate_nearest_rank": _finite_mean(frontier_candidate_nearest_rank),
+        "frontier_candidate_is_best_frac": _finite_mean(frontier_candidate_is_best),
+        "frontier_candidate_bad_frac": _finite_mean(frontier_candidate_bad),
+        "avg_confidence_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_frontier_candidate_capture
+        ),
+        "avg_confidence_frontier_candidate_best_alignment": _finite_mean(
+            confidence_frontier_candidate_best_alignment
+        ),
+        "avg_confidence_frontier_candidate_rank": _finite_mean(confidence_frontier_candidate_rank),
+        "confidence_frontier_candidate_bad_frac": _finite_mean(confidence_frontier_candidate_bad),
+        "avg_confidence_lg_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_lg_frontier_candidate_capture
+        ),
+        "avg_confidence_lg_frontier_candidate_best_alignment": _finite_mean(
+            confidence_lg_frontier_candidate_best_alignment
+        ),
+        "avg_confidence_lg_frontier_candidate_rank": _finite_mean(
+            confidence_lg_frontier_candidate_rank
+        ),
+        "confidence_lg_frontier_candidate_bad_frac": _finite_mean(
+            confidence_lg_frontier_candidate_bad
+        ),
+        "avg_confidence_frontier_capture_advantage": _finite_mean(
+            confidence_frontier_capture_advantage
+        ),
+        "avg_confidence_lg_frontier_capture_advantage": _finite_mean(
+            confidence_lg_frontier_capture_advantage
+        ),
         "avg_coverage_opportunity_cells": _finite_mean(opportunity_cells),
         "avg_coverage_opportunity_fraction": _finite_mean(opportunity_fraction),
         "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
@@ -2967,6 +3624,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "moving_no_new_coverage_frac": (
             stats["moving_no_new_coverage"] / steps if steps else 0.0
         ),
+        **confidence_revisit,
         **path,
     }
 
@@ -3262,7 +3920,7 @@ def _failure_label(row: dict[str, Any]) -> str:
         return "edge_loop"
     if row["avg_outside_footprint_fraction"] > 0.15:
         return "outside_footprint_waste"
-    if (
+    binary_revisit_bad = (
         row["moving_no_new_coverage_frac"] > 0.30
         or (
             row["avg_excess_overlap_fraction"] > 0.20
@@ -3272,8 +3930,28 @@ def _failure_label(row: dict[str, Any]) -> str:
             row["excess_overlap_step_frac_20"] > 0.30
             and row["moving_no_new_coverage_frac"] > 0.15
         )
-    ):
-        return "wasteful_revisit"
+    )
+    if binary_revisit_bad:
+        confidence_reward_active = (
+            abs(float(row.get("avg_reward_uav_confidence", 0.0))) > 1e-9
+            or abs(float(row.get("avg_reward_uav_confidence_move", 0.0))) > 1e-9
+        )
+        if not confidence_reward_active:
+            return "wasteful_revisit"
+        useful_share = float(row.get("confidence_revisit_useful_share", math.nan))
+        revisit_frac = float(row.get("confidence_revisit_step_frac", 0.0))
+        wasteful_frac = float(row.get("confidence_wasteful_revisit_step_frac", 0.0))
+        useful_frac = float(row.get("confidence_useful_revisit_step_frac", 0.0))
+        if (
+            wasteful_frac > 0.20
+            or (
+                revisit_frac > 0.20
+                and (not math.isfinite(useful_share) or useful_share < 0.35)
+            )
+        ):
+            return "wasteful_revisit"
+        if useful_frac > 0.10 and math.isfinite(useful_share) and useful_share >= 0.45:
+            return "confidence_reinspection"
     if row["path_bbox_area_fraction"] < 0.10:
         return "small_search_area"
     if row["stalled_step_frac"] > 0.20 or row["longest_stall_steps"] >= 25:
@@ -3509,6 +4187,66 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_candidate_no_opportunity_frac": _finite_mean([
             row["candidate_no_opportunity_frac"] for row in rows
         ]),
+        "mean_frontier_candidate_new_cells": _finite_mean([
+            row["avg_frontier_candidate_new_cells"] for row in rows
+        ]),
+        "mean_frontier_candidate_capture_fraction": _finite_mean([
+            row["avg_frontier_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_frontier_candidate_regret": _finite_mean([
+            row["avg_frontier_candidate_regret"] for row in rows
+        ]),
+        "mean_frontier_candidate_best_alignment": _finite_mean([
+            row["avg_frontier_candidate_best_alignment"] for row in rows
+        ]),
+        "mean_frontier_candidate_rank": _finite_mean([
+            row["avg_frontier_candidate_rank"] for row in rows
+        ]),
+        "mean_frontier_candidate_nearest_rank": _finite_mean([
+            row["avg_frontier_candidate_nearest_rank"] for row in rows
+        ]),
+        "mean_frontier_candidate_is_best_frac": _finite_mean([
+            row["frontier_candidate_is_best_frac"] for row in rows
+        ]),
+        "mean_frontier_candidate_bad_frac": _finite_mean([
+            row["frontier_candidate_bad_frac"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_capture_fraction": _finite_mean([
+            row["avg_confidence_frontier_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_best_alignment": _finite_mean([
+            row["avg_confidence_frontier_candidate_best_alignment"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_rank": _finite_mean([
+            row["avg_confidence_frontier_candidate_rank"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_bad_frac": _finite_mean([
+            row["confidence_frontier_candidate_bad_frac"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_capture_fraction": _finite_mean([
+            row["avg_confidence_lg_frontier_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_best_alignment": _finite_mean([
+            row["avg_confidence_lg_frontier_candidate_best_alignment"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_rank": _finite_mean([
+            row["avg_confidence_lg_frontier_candidate_rank"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_bad_frac": _finite_mean([
+            row["confidence_lg_frontier_candidate_bad_frac"] for row in rows
+        ]),
+        "mean_confidence_frontier_capture_advantage": _finite_mean([
+            row["avg_confidence_frontier_capture_advantage"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_capture_advantage": _finite_mean([
+            row["avg_confidence_lg_frontier_capture_advantage"] for row in rows
+        ]),
+        "mean_frontier_candidate_capture_new_cells_corr": _finite_mean([
+            row["frontier_candidate_capture_new_cells_corr"] for row in rows
+        ]),
+        "mean_frontier_candidate_alignment_new_cells_corr": _finite_mean([
+            row["frontier_candidate_alignment_new_cells_corr"] for row in rows
+        ]),
         "mean_coverage_opportunity_cells": _finite_mean([
             row["avg_coverage_opportunity_cells"] for row in rows
         ]),
@@ -3538,6 +4276,45 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_confidence_opportunity_best_gain": _finite_mean([
             row["avg_confidence_opportunity_best_gain"] for row in rows
+        ]),
+        "mean_confidence_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_useful_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_useful_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_wasteful_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_wasteful_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_ambiguous_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_ambiguous_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_revisit_useful_share": _finite_mean([
+            float(row.get("confidence_revisit_useful_share", math.nan)) for row in rows
+        ]),
+        "mean_confidence_revisit_wasteful_share": _finite_mean([
+            float(row.get("confidence_revisit_wasteful_share", math.nan)) for row in rows
+        ]),
+        "mean_confidence_revisit_gain_share": _finite_mean([
+            float(row.get("confidence_revisit_gain_share", math.nan)) for row in rows
+        ]),
+        "mean_confidence_gain_on_revisit": _finite_mean([
+            float(row.get("confidence_gain_on_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_gain_off_revisit": _finite_mean([
+            float(row.get("confidence_gain_off_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_opportunity_on_revisit": _finite_mean([
+            float(row.get("confidence_opportunity_on_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_opportunity_off_revisit": _finite_mean([
+            float(row.get("confidence_opportunity_off_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_best_gain_on_revisit": _finite_mean([
+            float(row.get("confidence_best_gain_on_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_best_gain_off_revisit": _finite_mean([
+            float(row.get("confidence_best_gain_off_revisit", math.nan)) for row in rows
         ]),
         "mean_confidence_low_fraction": _finite_mean([
             row["avg_confidence_low_fraction"] for row in rows
@@ -3941,6 +4718,24 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_candidate_action_best_alignment",
         "avg_candidate_movement_best_alignment",
         "candidate_no_opportunity_frac",
+        "avg_frontier_candidate_new_cells",
+        "avg_frontier_candidate_capture_fraction",
+        "avg_frontier_candidate_regret",
+        "avg_frontier_candidate_best_alignment",
+        "avg_frontier_candidate_rank",
+        "avg_frontier_candidate_nearest_rank",
+        "frontier_candidate_is_best_frac",
+        "frontier_candidate_bad_frac",
+        "avg_confidence_frontier_candidate_capture_fraction",
+        "avg_confidence_frontier_candidate_best_alignment",
+        "avg_confidence_frontier_candidate_rank",
+        "confidence_frontier_candidate_bad_frac",
+        "avg_confidence_lg_frontier_candidate_capture_fraction",
+        "avg_confidence_lg_frontier_candidate_best_alignment",
+        "avg_confidence_lg_frontier_candidate_rank",
+        "confidence_lg_frontier_candidate_bad_frac",
+        "avg_confidence_frontier_capture_advantage",
+        "avg_confidence_lg_frontier_capture_advantage",
         "avg_coverage_opportunity_cells",
         "avg_coverage_opportunity_fraction",
         "avg_coverage_opportunity_available_fraction",
@@ -3949,6 +4744,19 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_confidence_weighted_gain",
         "avg_confidence_opportunity_fraction",
         "avg_confidence_opportunity_best_gain",
+        "confidence_revisit_step_frac",
+        "confidence_useful_revisit_step_frac",
+        "confidence_wasteful_revisit_step_frac",
+        "confidence_ambiguous_revisit_step_frac",
+        "confidence_revisit_useful_share",
+        "confidence_revisit_wasteful_share",
+        "confidence_revisit_gain_share",
+        "confidence_gain_on_revisit",
+        "confidence_gain_off_revisit",
+        "confidence_opportunity_on_revisit",
+        "confidence_opportunity_off_revisit",
+        "confidence_best_gain_on_revisit",
+        "confidence_best_gain_off_revisit",
         "avg_confidence_pass_probability",
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
@@ -4072,6 +4880,18 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "candidate_action_capture": "avg_candidate_action_capture_fraction",
         "candidate_movement_capture": "avg_candidate_movement_capture_fraction",
         "candidate_no_opportunity": "candidate_no_opportunity_frac",
+        "frontier_candidate_capture": "avg_frontier_candidate_capture_fraction",
+        "frontier_candidate_rank": "avg_frontier_candidate_rank",
+        "frontier_candidate_align": "avg_frontier_candidate_best_alignment",
+        "frontier_candidate_bad": "frontier_candidate_bad_frac",
+        "confidence_frontier_capture": "avg_confidence_frontier_candidate_capture_fraction",
+        "confidence_frontier_rank": "avg_confidence_frontier_candidate_rank",
+        "confidence_frontier_bad": "confidence_frontier_candidate_bad_frac",
+        "confidence_lg_frontier_capture": "avg_confidence_lg_frontier_candidate_capture_fraction",
+        "confidence_lg_frontier_rank": "avg_confidence_lg_frontier_candidate_rank",
+        "confidence_lg_frontier_bad": "confidence_lg_frontier_candidate_bad_frac",
+        "confidence_frontier_advantage": "avg_confidence_frontier_capture_advantage",
+        "confidence_lg_frontier_advantage": "avg_confidence_lg_frontier_capture_advantage",
         "coverage_opportunity_cells": "avg_coverage_opportunity_cells",
         "coverage_opportunity": "avg_coverage_opportunity_fraction",
         "coverage_opportunity_available": "avg_coverage_opportunity_available_fraction",
@@ -4081,6 +4901,11 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "confidence_weighted_gain": "avg_confidence_weighted_gain",
         "confidence_opportunity": "avg_confidence_opportunity_fraction",
         "confidence_best_gain": "avg_confidence_opportunity_best_gain",
+        "confidence_revisit": "confidence_revisit_step_frac",
+        "confidence_useful_revisit": "confidence_useful_revisit_step_frac",
+        "confidence_wasteful_revisit": "confidence_wasteful_revisit_step_frac",
+        "confidence_revisit_useful_share": "confidence_revisit_useful_share",
+        "confidence_revisit_gain_share": "confidence_revisit_gain_share",
         "confidence_pass": "avg_confidence_pass_probability",
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
@@ -4167,6 +4992,9 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"opp={drone['avg_coverage_opportunity_fraction']:.2f} "
             f"opp_avail={drone['avg_coverage_opportunity_available_fraction']:.2f} "
             f"conf_gain={drone['avg_confidence_gain']:.5f} "
+            f"conf_rev={drone['confidence_revisit_step_frac']:.2f}/"
+            f"{drone['confidence_useful_revisit_step_frac']:.2f}/"
+            f"{drone['confidence_wasteful_revisit_step_frac']:.2f} "
             f"pass_p={drone['avg_confidence_pass_probability']:.2f} "
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
@@ -4181,6 +5009,11 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"cand_cap={drone['avg_candidate_capture_fraction']:.2f} "
             f"cand_rank={drone['avg_candidate_action_rank']:.1f}/"
             f"{drone['avg_candidate_movement_rank']:.1f} "
+            f"front_use={drone['avg_frontier_candidate_capture_fraction']:.2f}/"
+            f"{drone['avg_frontier_candidate_rank']:.1f}/"
+            f"{drone['avg_frontier_candidate_best_alignment']:.2f} "
+            f"conf_front={drone['avg_confidence_frontier_candidate_capture_fraction']:.2f} "
+            f"conf_lg={drone['avg_confidence_lg_frontier_candidate_capture_fraction']:.2f} "
             f"cand_avoid={drone['avg_candidate_avoidable_overlap']:.2f} "
             f"front={drone['avg_frontier_alignment']:.2f}/"
             f"{drone['avg_frontier_progress_fraction']:.2f}/"
@@ -4209,6 +5042,10 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"opp_avail={drone['mean_avg_coverage_opportunity_available_fraction']:.3f} "
             f"conf_gain={drone['mean_avg_confidence_gain']:.5f} "
             f"conf_opp={drone['mean_avg_confidence_opportunity_fraction']:.3f} "
+            f"conf_rev={drone['mean_confidence_revisit_step_frac']:.3f}/"
+            f"{drone['mean_confidence_useful_revisit_step_frac']:.3f}/"
+            f"{drone['mean_confidence_wasteful_revisit_step_frac']:.3f} "
+            f"conf_rev_share={drone['mean_confidence_revisit_useful_share']:.3f} "
             f"pass_p={drone['mean_avg_confidence_pass_probability']:.3f} "
             f"edge={drone['mean_edge_step_frac']:.3f} "
             f"corner={drone['mean_corner_step_frac']:.3f} "
@@ -4225,6 +5062,11 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"cand_reg={drone['mean_avg_candidate_new_cell_regret']:.1f} "
             f"cand_rank={drone['mean_avg_candidate_action_rank']:.2f}/"
             f"{drone['mean_avg_candidate_movement_rank']:.2f} "
+            f"front_use={drone['mean_avg_frontier_candidate_capture_fraction']:.3f}/"
+            f"{drone['mean_avg_frontier_candidate_rank']:.2f}/"
+            f"{drone['mean_avg_frontier_candidate_best_alignment']:.3f} "
+            f"conf_front={drone['mean_avg_confidence_frontier_candidate_capture_fraction']:.3f} "
+            f"conf_lg={drone['mean_avg_confidence_lg_frontier_candidate_capture_fraction']:.3f} "
             f"cand_avoid={drone['mean_avg_candidate_avoidable_overlap']:.3f} "
             f"front={drone['mean_avg_frontier_alignment']:.3f}/"
             f"{drone['mean_avg_frontier_progress_fraction']:.3f}/"
@@ -4255,6 +5097,9 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"opp={item.get('coverage_opportunity_fraction', math.nan):.3f} "
             f"opp_avail={item.get('coverage_opportunity_available_fraction', math.nan):.3f} "
             f"conf_opp={item.get('confidence_opportunity_fraction', math.nan):.3f} "
+            f"conf_rev={item.get('confidence_revisit', math.nan):.3f}/"
+            f"{item.get('confidence_useful_revisit', math.nan):.3f}/"
+            f"{item.get('confidence_wasteful_revisit', math.nan):.3f} "
             f"edge={item.get('edge_step', math.nan):.3f} "
             f"overlap={item.get('overlap', math.nan):.3f} "
             f"excess={item.get('excess_overlap', math.nan):.3f} "
@@ -4269,6 +5114,11 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"cand_reg={item.get('candidate_new_cell_regret', math.nan):.1f} "
             f"cand_rank={item.get('candidate_action_rank', math.nan):.2f}/"
             f"{item.get('candidate_movement_rank', math.nan):.2f} "
+            f"front_use={item.get('frontier_candidate_capture_fraction', math.nan):.3f}/"
+            f"{item.get('frontier_candidate_rank', math.nan):.2f}/"
+            f"{item.get('frontier_candidate_best_alignment', math.nan):.3f} "
+            f"conf_front={item.get('confidence_frontier_candidate_capture_fraction', math.nan):.3f} "
+            f"conf_lg={item.get('confidence_lg_frontier_candidate_capture_fraction', math.nan):.3f} "
             f"cand_avoid={item.get('candidate_avoidable_overlap', math.nan):.3f} "
             f"moving_nonew={item.get('moving_no_new_coverage', math.nan):.3f} "
             f"obs_dist={item.get('frontier_obs_distance', math.nan):.3f} "
@@ -4678,6 +5528,65 @@ def _plot_time_bins_counterfactual(ax: Any, summary: dict[str, Any]) -> None:
     ax.set_title("Time-Bin Counterfactual Moves (mean)", fontsize=10)
 
 
+def _plot_time_bins_frontier_usefulness(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Frontier Usefulness (mean)", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("current cap", "frontier_candidate_capture_fraction", "#4f7cff"),
+        ("conf same cap", "confidence_frontier_candidate_capture_fraction", "#14b8a6"),
+        ("conf lg cap", "confidence_lg_frontier_candidate_capture_fraction", "#36a269"),
+        ("current align", "frontier_candidate_best_alignment", "#8a5cf6"),
+        ("current bad", "frontier_candidate_bad", "#d44a3a"),
+        ("rank / 9", "frontier_candidate_rank", "#20242c"),
+    ]
+    lines = []
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        if key == "frontier_candidate_rank":
+            values = [value / 9.0 if math.isfinite(value) else math.nan for value in values]
+        lines.extend(
+            ax.plot(
+                centers,
+                values,
+                marker="o",
+                linewidth=1.25,
+                label=label,
+                color=color,
+            )
+        )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(-0.05, 1.55)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction / cosine / scaled rank")
+    ax.grid(alpha=0.25)
+
+    ax_cells = ax.twinx()
+    new_cells = [float(row.get("new_coverage_cells", math.nan)) for row in time_bins]
+    line_new = ax_cells.plot(
+        centers,
+        new_cells,
+        marker="o",
+        linewidth=1.2,
+        linestyle="--",
+        label="actual new",
+        color="#f97316",
+    )
+    finite_new = [value for value in new_cells if math.isfinite(value)]
+    if finite_new:
+        ax_cells.set_ylim(0.0, max(max(finite_new), 1.0) * 1.2)
+    ax_cells.set_ylabel("new cells / drone-step")
+    lines += line_new
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=7, frameon=False, ncol=2)
+    ax.set_title("Time-Bin Frontier Usefulness (mean)", fontsize=10)
+
+
 def _plot_time_bins_revisit_sources(ax: Any, summary: dict[str, Any]) -> None:
     time_bins = summary.get("time_bins", [])
     if not time_bins:
@@ -4693,6 +5602,8 @@ def _plot_time_bins_revisit_sources(ax: Any, summary: dict[str, Any]) -> None:
         ("teammate only", "teammate_only_revisit", "#36a269"),
         ("shared old", "shared_history_revisit", "#8a5cf6"),
         ("avoidable", "avoidable_revisit", "#d44a3a"),
+        ("conf useful", "confidence_useful_revisit", "#14b8a6"),
+        ("conf wasteful", "confidence_wasteful_revisit", "#f97316"),
         ("capture", "frontier_new_cell_capture", "#20242c"),
     ]
     for label, key, color in series:
@@ -5102,6 +6013,14 @@ def write_distribution_plots(
         ("Candidate Capture", "avg_candidate_capture_fraction", (0.0, 1.0)),
         ("Candidate Regret Cells", "avg_candidate_new_cell_regret", None),
         ("Candidate Action Rank", "avg_candidate_action_rank", (1.0, 9.0)),
+        ("Frontier Candidate Capture", "avg_frontier_candidate_capture_fraction", (0.0, 1.5)),
+        ("Frontier Candidate Rank", "avg_frontier_candidate_rank", (1.0, 9.0)),
+        ("Frontier Align Best Move", "avg_frontier_candidate_best_alignment", (-1.0, 1.0)),
+        ("Frontier Bad Candidate", "frontier_candidate_bad_frac", (0.0, 1.0)),
+        ("Conf Frontier Capture", "avg_confidence_frontier_candidate_capture_fraction", (0.0, 1.5)),
+        ("Conf LG Frontier Capture", "avg_confidence_lg_frontier_candidate_capture_fraction", (0.0, 1.5)),
+        ("Conf Frontier Advantage", "avg_confidence_frontier_capture_advantage", (-1.0, 1.0)),
+        ("Conf LG Frontier Advantage", "avg_confidence_lg_frontier_capture_advantage", (-1.0, 1.0)),
         ("Outside Footprint", "avg_outside_footprint_fraction", (0.0, 1.0)),
         ("Overlap", "avg_overlap_fraction", (0.0, 1.0)),
         ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
@@ -5109,6 +6028,11 @@ def write_distribution_plots(
         ("Corner Step Fraction", "corner_step_frac", (0.0, 1.0)),
         ("Center Coverage", "coverage_center_fraction", (0.0, 1.0)),
         ("Moving No New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0)),
+        ("Confidence Revisit", "confidence_revisit_step_frac", (0.0, 1.0)),
+        ("Confidence Useful Revisit", "confidence_useful_revisit_step_frac", (0.0, 1.0)),
+        ("Confidence Wasteful Revisit", "confidence_wasteful_revisit_step_frac", (0.0, 1.0)),
+        ("Confidence Revisit Useful Share", "confidence_revisit_useful_share", (0.0, 1.0)),
+        ("Confidence Revisit Gain Share", "confidence_revisit_gain_share", (0.0, 1.0)),
         ("Start Pair Min (m)", "min_start_pair_distance_m", None),
         ("Start Edge Min (m)", "min_start_edge_distance_m", None),
         ("Action Frontier Align", "avg_action_frontier_alignment", (-1.0, 1.0)),
@@ -5121,7 +6045,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(20, 3, figsize=(14, 60), constrained_layout=True)
+    fig, axes = plt.subplots(25, 3, figsize=(14, 75), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -5244,8 +6168,9 @@ def write_distribution_plots(
     _plot_perception_probability_bins(axes_flat[custom_start + 19], summary)
     _plot_survivor_exposure_outcomes(axes_flat[custom_start + 20], summary)
     _plot_time_bins_confidence(axes_flat[custom_start + 21], summary)
+    _plot_time_bins_frontier_usefulness(axes_flat[custom_start + 22], summary)
 
-    for ax in axes_flat[custom_start + 22:]:
+    for ax in axes_flat[custom_start + 23:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -5276,6 +6201,10 @@ def main() -> None:
                         default=None,
                         help="Override overlap penalty normalization for diagnostic reward terms. "
                              "Default uses the checkpoint manifest, falling back to raw.")
+    parser.add_argument("--diagnostic-confidence-frontier-radius-m", type=float,
+                        default=DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M,
+                        help="Local radius for the shadow confidence local-global frontier usefulness "
+                             "diagnostic. This does not change the evaluated policy.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--json-output", default=None, help="Optional path to write per-seed rows and summary as JSON.")
     parser.add_argument("--plots-output", default=None, help="Optional path to write histogram diagnostics as a PNG.")
@@ -5291,6 +6220,8 @@ def main() -> None:
         parser.error("--uav-start-min-separation-m must be nonnegative")
     if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
         parser.error("--uav-start-edge-margin-m must be nonnegative")
+    if args.diagnostic_confidence_frontier_radius_m <= 0.0:
+        parser.error("--diagnostic-confidence-frontier-radius-m must be positive")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -5315,6 +6246,10 @@ def main() -> None:
         "uav overlap penalty: "
         f"normalization={scenario_kwargs.get('uav_overlap_penalty_normalization', 'raw')}"
     )
+    print(
+        "shadow confidence frontier diagnostic: "
+        f"local_global_radius={args.diagnostic_confidence_frontier_radius_m}m"
+    )
     print("-" * 88)
 
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=not args.stochastic)
@@ -5326,7 +6261,12 @@ def main() -> None:
             "a matching --n-drones override for legacy checkpoints"
         )
     rows = [
-        run_rollout(policy, scenario_kwargs, seed)
+        run_rollout(
+            policy,
+            scenario_kwargs,
+            seed,
+            diagnostic_confidence_frontier_radius_m=args.diagnostic_confidence_frontier_radius_m,
+        )
         for seed in args.seeds
     ]
     for row in rows:
@@ -5339,6 +6279,9 @@ def main() -> None:
             f"conf={row['final_confidence_mean']:.3f} "
             f"conf_gain={row['avg_confidence_gain']:.5f} "
             f"conf_pass={row['avg_confidence_pass_probability']:.2f} "
+            f"conf_rev={row['confidence_revisit_step_frac']:.2f}/"
+            f"{row['confidence_useful_revisit_step_frac']:.2f}/"
+            f"{row['confidence_wasteful_revisit_step_frac']:.2f} "
             f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
             f"{_fmt_optional(row['avg_scout_time_s'])}s "
             f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
@@ -5377,6 +6320,11 @@ def main() -> None:
             f"cand_reg={row['avg_candidate_new_cell_regret']:.1f} "
             f"cand_rank={row['avg_candidate_action_rank']:.1f}/"
             f"{row['avg_candidate_movement_rank']:.1f} "
+            f"front_use={row['avg_frontier_candidate_capture_fraction']:.2f}/"
+            f"{row['avg_frontier_candidate_rank']:.1f}/"
+            f"{row['avg_frontier_candidate_best_alignment']:.2f} "
+            f"conf_front={row['avg_confidence_frontier_candidate_capture_fraction']:.2f} "
+            f"conf_lg={row['avg_confidence_lg_frontier_candidate_capture_fraction']:.2f} "
             f"cand_avoid={row['avg_candidate_avoidable_overlap']:.2f} "
             f"front={row['avg_frontier_alignment']:.2f}/"
             f"{row['avg_frontier_progress_fraction']:.2f}/"
@@ -5460,7 +6408,13 @@ def main() -> None:
         f"weighted_gain={summary['mean_confidence_weighted_gain_by_drone']:.5f} "
         f"opp={summary['mean_confidence_opportunity_fraction']:.3f} "
         f"best_gain={summary['mean_confidence_opportunity_best_gain']:.5f} "
-        f"pass_p={summary['mean_confidence_pass_probability']:.3f}"
+        f"pass_p={summary['mean_confidence_pass_probability']:.3f} "
+        f"revisit/useful/wasteful="
+        f"{summary['mean_confidence_revisit_step_frac']:.3f}/"
+        f"{summary['mean_confidence_useful_revisit_step_frac']:.3f}/"
+        f"{summary['mean_confidence_wasteful_revisit_step_frac']:.3f} "
+        f"useful_share={summary['mean_confidence_revisit_useful_share']:.3f} "
+        f"gain_share={summary['mean_confidence_revisit_gain_share']:.3f}"
     )
     print(
         "frontier observation/action means: "
@@ -5508,6 +6462,23 @@ def main() -> None:
         f"action_best_align={summary['mean_candidate_action_best_alignment']:.3f} "
         f"move_best_align={summary['mean_candidate_movement_best_alignment']:.3f} "
         f"no_opp={summary['mean_candidate_no_opportunity_frac']:.3f}"
+    )
+    print(
+        "frontier usefulness means: "
+        f"current_cap={summary['mean_frontier_candidate_capture_fraction']:.3f} "
+        f"current_rank={summary['mean_frontier_candidate_rank']:.2f} "
+        f"current_nearest_rank={summary['mean_frontier_candidate_nearest_rank']:.2f} "
+        f"current_align_best={summary['mean_frontier_candidate_best_alignment']:.3f} "
+        f"current_bad={summary['mean_frontier_candidate_bad_frac']:.3f} "
+        f"conf_same_cap={summary['mean_confidence_frontier_candidate_capture_fraction']:.3f} "
+        f"conf_same_rank={summary['mean_confidence_frontier_candidate_rank']:.2f} "
+        f"conf_same_bad={summary['mean_confidence_frontier_candidate_bad_frac']:.3f} "
+        f"conf_lg_cap={summary['mean_confidence_lg_frontier_candidate_capture_fraction']:.3f} "
+        f"conf_lg_rank={summary['mean_confidence_lg_frontier_candidate_rank']:.2f} "
+        f"conf_lg_bad={summary['mean_confidence_lg_frontier_candidate_bad_frac']:.3f} "
+        f"conf_same_adv={summary['mean_confidence_frontier_capture_advantage']:.3f} "
+        f"conf_lg_adv={summary['mean_confidence_lg_frontier_capture_advantage']:.3f} "
+        f"corr_cap_new={summary['mean_frontier_candidate_capture_new_cells_corr']:.3f}"
     )
     print(
         "footprint/revisit means: "
