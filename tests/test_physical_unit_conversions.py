@@ -498,6 +498,39 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         off_diag = cosine[~torch.eye(3, dtype=torch.bool)]
         self.assertLess(float(off_diag.max()), 0.95)
 
+    def test_cached_frontier_observation_matches_all_drone_features(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=16)
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_mode = "local_global"
+        scenario.uav_frontier_source = "confidence"
+        scenario.uav_frontier_ownership = True
+        scenario.uav_confidence_grid[:] = 1.0
+        scenario.uav_confidence_grid[:, :4, :4] = 0.0
+        scenario.uav_confidence_grid[:, :4, -4:] = 0.0
+        scenario.uav_confidence_grid[:, -4:, 6:10] = 0.0
+        positions = torch.tensor(
+            [[[-0.70, -0.70], [0.70, -0.70], [0.0, 0.70]]],
+            dtype=torch.float32,
+        )
+        agents = [
+            types.SimpleNamespace(
+                name=f"drone_{idx}",
+                is_drone=True,
+                state=types.SimpleNamespace(pos=positions[:, idx]),
+            )
+            for idx in range(3)
+        ]
+        scenario._world.agents = agents
+
+        raw_features = scenario._uav_frontier_features_for_positions(positions)
+        observed = torch.stack(
+            [scenario._uav_frontier_observation(agent) for agent in agents],
+            dim=1,
+        )
+
+        self.assertTrue(torch.allclose(observed, raw_features))
+        self.assertEqual(len(scenario._uav_frontier_feature_cache), 1)
+
     def test_uav_confidence_move_reward_uses_best_one_step_opportunity(self):
         scenario = self._coverage_scenario(grid_size=16)
         scenario.r_uav_confidence = 0.0

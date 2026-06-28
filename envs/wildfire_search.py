@@ -866,6 +866,12 @@ class WildfireSearchScenario(BaseScenario):
         self._prev_ground_pos = torch.zeros(batch_dim, self.n_ground, 2, device=device)
         self._pre_step_ground_pos = torch.zeros_like(self._prev_ground_pos)
         self._pre_step_drone_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
+        self._uav_grid_geometry_cache = {}
+        self._uav_sector_geometry_cache = {}
+        self._uav_stencil_direction_cache = {}
+        self._uav_land_cover_factor_cache = {}
+        self._uav_frontier_feature_cache = {}
+        self._uav_terrain_cache_version = 0
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.step_ugv_proposed_path_blocked = torch.zeros(
             batch_dim, self.n_ground, dtype=torch.bool, device=device,
@@ -1202,6 +1208,7 @@ class WildfireSearchScenario(BaseScenario):
             if not self.disable_fire:
                 self._seed_initial_fire(b, H, W)
             self._initialize_known_survivors_at_reset(b)
+        self._invalidate_uav_terrain_caches()
 
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
@@ -1899,6 +1906,7 @@ class WildfireSearchScenario(BaseScenario):
             self.step_uav_boundary_projection_norm.zero_()
             self.step_uav_boundary_projection_count.zero_()
             self.step_uav_boundary_hit.zero_()
+            self._invalidate_uav_runtime_caches()
         self.step_count += 1
 
         if int(self.step_count.max().item()) % self.fire_step_interval == 0:
@@ -2263,6 +2271,7 @@ class WildfireSearchScenario(BaseScenario):
             self._clamp_agents_to_world()
             drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
             self._update_drone_altitudes(self._pre_step_drone_pos, drone_pos)
+            self._invalidate_uav_runtime_caches()
         else:
             self._clamp_agents_to_world()
 
@@ -2654,8 +2663,20 @@ class WildfireSearchScenario(BaseScenario):
             uav_coverage_opportunity_cells,
             uav_coverage_opportunity_available_fraction,
         ) = self._coverage_reward(drone_pos)  # [B, D]
-        uav_confidence_overlap_penalty = self._uav_confidence_overlap_penalty(drone_pos)
-        uav_confidence_reward, uav_confidence_move_reward = self._update_uav_confidence(drone_pos)
+        uav_confidence_probability = None
+        uav_confidence_visible = None
+        if self._uav_confidence_active():
+            with torch.no_grad():
+                uav_confidence_probability, uav_confidence_visible = self._uav_cell_detection_probability(drone_pos)
+        uav_confidence_overlap_penalty = self._uav_confidence_overlap_penalty(
+            drone_pos,
+            visible=uav_confidence_visible,
+        )
+        uav_confidence_reward, uav_confidence_move_reward = self._update_uav_confidence(
+            drone_pos,
+            probability=uav_confidence_probability,
+            visible=uav_confidence_visible,
+        )
         current_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
         coverage_threshold_crossed = (
             (previous_coverage_fraction < self.uav_coverage_threshold_fraction)
@@ -3014,20 +3035,28 @@ class WildfireSearchScenario(BaseScenario):
         b_idx = torch.arange(self.world.batch_dim, device=pos.device).view(-1, 1).expand_as(gx)
         return self.fire_grid[b_idx, gy, gx]
 
-    def _uav_cell_detection_probability(
-        self,
-        drone_pos: Tensor,
-        *,
-        altitude_quality: Tensor | None = None,
-        footprint: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        """Detection probability for every coverage-grid cell and UAV position."""
-        if drone_pos.ndim != 3:
-            raise ValueError("drone_pos must have shape [B, N, 2]")
-        B, N, _ = drone_pos.shape
+    def _device_cache_key(self, device: torch.device, dtype: torch.dtype) -> tuple:
+        return (device.type, device.index, str(dtype))
+
+    def _invalidate_uav_runtime_caches(self) -> None:
+        if hasattr(self, "_uav_frontier_feature_cache"):
+            self._uav_frontier_feature_cache.clear()
+
+    def _invalidate_uav_terrain_caches(self) -> None:
+        if hasattr(self, "_uav_land_cover_factor_cache"):
+            self._uav_land_cover_factor_cache.clear()
+        self._uav_terrain_cache_version = getattr(self, "_uav_terrain_cache_version", 0) + 1
+        self._invalidate_uav_runtime_caches()
+
+    def _uav_grid_geometry(self, device: torch.device, dtype: torch.dtype) -> tuple:
+        if not hasattr(self, "_uav_grid_geometry_cache"):
+            self._uav_grid_geometry_cache = {}
         G = int(self.fire_grid_size)
-        device = drone_pos.device
-        dtype = drone_pos.dtype
+        key = self._device_cache_key(device, dtype) + (G, float(self.x_semidim), float(self.y_semidim))
+        cached = self._uav_grid_geometry_cache.get(key)
+        if cached is not None:
+            return cached
+
         cell_width = 2.0 * self.x_semidim / G
         cell_height = 2.0 * self.y_semidim / G
         xs = torch.linspace(
@@ -3044,6 +3073,101 @@ class WildfireSearchScenario(BaseScenario):
             device=device,
             dtype=dtype,
         )
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        cell_pos = torch.stack((grid_x, grid_y), dim=-1).reshape(1, G * G, 2)
+        cached = (
+            xs,
+            ys,
+            xs.view(1, G),
+            ys.view(G, 1),
+            cell_pos,
+            float(cell_width),
+            float(cell_height),
+            max(float(cell_width * cell_height), 1e-12),
+        )
+        self._uav_grid_geometry_cache[key] = cached
+        return cached
+
+    def _uav_sector_geometry(self, sectors: int, device: torch.device, dtype: torch.dtype) -> tuple:
+        if not hasattr(self, "_uav_sector_geometry_cache"):
+            self._uav_sector_geometry_cache = {}
+        key = self._device_cache_key(device, dtype) + (int(sectors),)
+        cached = self._uav_sector_geometry_cache.get(key)
+        if cached is not None:
+            return cached
+
+        sector_width = 2.0 * math.pi / float(sectors)
+        sector_angles = (
+            -math.pi
+            + (torch.arange(sectors, device=device, dtype=dtype) + 0.5)
+            * sector_width
+        )
+        sector_unit = torch.stack((torch.cos(sector_angles), torch.sin(sector_angles)), dim=-1)
+        cached = (sector_width, sector_unit)
+        self._uav_sector_geometry_cache[key] = cached
+        return cached
+
+    def _uav_stencil_directions(self, device: torch.device, dtype: torch.dtype) -> Tensor:
+        if not hasattr(self, "_uav_stencil_direction_cache"):
+            self._uav_stencil_direction_cache = {}
+        key = self._device_cache_key(device, dtype)
+        cached = self._uav_stencil_direction_cache.get(key)
+        if cached is not None:
+            return cached
+
+        root_half = math.sqrt(0.5)
+        directions = torch.tensor(
+            [
+                [1.0, 0.0],
+                [root_half, root_half],
+                [0.0, 1.0],
+                [-root_half, root_half],
+                [-1.0, 0.0],
+                [-root_half, -root_half],
+                [0.0, -1.0],
+                [root_half, -root_half],
+            ],
+            device=device,
+            dtype=dtype,
+        )
+        self._uav_stencil_direction_cache[key] = directions
+        return directions
+
+    def _uav_land_cover_detection_factor(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        if not hasattr(self, "_uav_land_cover_factor_cache"):
+            self._uav_land_cover_factor_cache = {}
+        key = (
+            getattr(self, "_uav_terrain_cache_version", 0),
+            *self._device_cache_key(device, dtype),
+        )
+        cached = self._uav_land_cover_factor_cache.get(key)
+        if cached is not None:
+            return cached
+
+        cover_factors = self.drone_cover_detection_factors.to(device=device, dtype=dtype)
+        cover_factor = cover_factors[self.land_cover_grid.to(device=device)].unsqueeze(1)
+        self._uav_land_cover_factor_cache[key] = cover_factor
+        return cover_factor
+
+    def _uav_cell_detection_probability(
+        self,
+        drone_pos: Tensor,
+        *,
+        altitude_quality: Tensor | None = None,
+        footprint: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Detection probability for every coverage-grid cell and UAV position."""
+        if drone_pos.ndim != 3:
+            raise ValueError("drone_pos must have shape [B, N, 2]")
+        B, N, _ = drone_pos.shape
+        G = int(self.fire_grid_size)
+        device = drone_pos.device
+        dtype = drone_pos.dtype
+        xs, ys, _, _, cell_pos, _, _, _ = self._uav_grid_geometry(device, dtype)
         center_dx = xs.view(1, 1, 1, G) - drone_pos[..., X].view(B, N, 1, 1)
         center_dy = ys.view(1, 1, G, 1) - drone_pos[..., Y].view(B, N, 1, 1)
         center_dist = torch.sqrt(center_dx.square() + center_dy.square())
@@ -3056,8 +3180,7 @@ class WildfireSearchScenario(BaseScenario):
         normalized_distance = (center_dist / footprint.clamp_min(1e-6)).clamp(0.0, 1.0)
         distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
 
-        cover_factors = self.drone_cover_detection_factors.to(device=device, dtype=dtype)
-        cover_factor = cover_factors[self.land_cover_grid.to(device=device)].unsqueeze(1)
+        cover_factor = self._uav_land_cover_detection_factor(device, dtype)
         if altitude_quality is None:
             if N != self.n_drones:
                 raise ValueError("altitude_quality is required when N != n_drones")
@@ -3066,8 +3189,6 @@ class WildfireSearchScenario(BaseScenario):
         if self.disable_fire:
             fire_smoke_factor = torch.ones(B, N, G, G, device=device, dtype=dtype)
         else:
-            grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-            cell_pos = torch.stack((grid_x, grid_y), dim=-1).reshape(1, G * G, 2)
             cell_pos = cell_pos.expand(B, -1, -1).to(device=device, dtype=dtype)
             fire_smoke_factor = self._drone_fire_smoke_visibility_factor(
                 drone_pos,
@@ -3092,20 +3213,7 @@ class WildfireSearchScenario(BaseScenario):
             return previous.new_zeros(previous.shape[0], 0)
         B = previous.shape[0]
         D = self.n_drones
-        directions = torch.tensor(
-            [
-                [1.0, 0.0],
-                [math.sqrt(0.5), math.sqrt(0.5)],
-                [0.0, 1.0],
-                [-math.sqrt(0.5), math.sqrt(0.5)],
-                [-1.0, 0.0],
-                [-math.sqrt(0.5), -math.sqrt(0.5)],
-                [0.0, -1.0],
-                [math.sqrt(0.5), -math.sqrt(0.5)],
-            ],
-            device=previous.device,
-            dtype=previous.dtype,
-        )
+        directions = self._uav_stencil_directions(previous.device, previous.dtype)
         max_step_sim = (
             float(self.drone_speed_mps)
             * float(self.sim_step_seconds)
@@ -3144,7 +3252,23 @@ class WildfireSearchScenario(BaseScenario):
         weighted_gain = (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
         return weighted_gain.view(B, D, 8).max(dim=2).values
 
-    def _uav_confidence_overlap_penalty(self, drone_pos: Tensor) -> Tensor:
+    def _uav_confidence_active(self) -> bool:
+        return self.n_drones > 0 and not (
+            not self.uav_confidence_diagnostics
+            and self.r_uav_confidence <= 0.0
+            and self.r_uav_confidence_move <= 0.0
+            and self.r_uav_confidence_overlap <= 0.0
+            and self.uav_frontier_source != "confidence"
+            and self.uav_confidence_obs_grid <= 0
+            and self.local_confidence_obs_grid <= 0
+        )
+
+    def _uav_confidence_overlap_penalty(
+        self,
+        drone_pos: Tensor,
+        *,
+        visible: Tensor | None = None,
+    ) -> Tensor:
         """Penalize spending footprint area over already high-confidence cells."""
         penalty = drone_pos.new_zeros(drone_pos.shape[0], self.n_drones)
         if self.n_drones == 0 or self.r_uav_confidence_overlap <= 0.0:
@@ -3154,7 +3278,8 @@ class WildfireSearchScenario(BaseScenario):
             return penalty
 
         with torch.no_grad():
-            _, visible = self._uav_cell_detection_probability(drone_pos)
+            if visible is None:
+                _, visible = self._uav_cell_detection_probability(drone_pos)
             previous = self.uav_confidence_grid.to(device=drone_pos.device, dtype=drone_pos.dtype).clamp(0.0, 1.0)
             threshold = float(self.uav_confidence_overlap_threshold)
             saturated = ((previous - threshold) / max(1.0 - threshold, 1e-6)).clamp(0.0, 1.0)
@@ -3168,7 +3293,13 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_uav_confidence_overlap_fraction = saturated_fraction.mean(dim=1)
             return penalty
 
-    def _update_uav_confidence(self, drone_pos: Tensor) -> tuple[Tensor, Tensor]:
+    def _update_uav_confidence(
+        self,
+        drone_pos: Tensor,
+        *,
+        probability: Tensor | None = None,
+        visible: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Update the optional probabilistic inspection-confidence map.
 
         When ``r_uav_confidence`` is positive, each UAV receives a reward for
@@ -3180,48 +3311,42 @@ class WildfireSearchScenario(BaseScenario):
         move_reward = torch.zeros_like(reward)
         if self.n_drones == 0:
             return reward, move_reward
-        if (
-            not self.uav_confidence_diagnostics
-            and self.r_uav_confidence <= 0.0
-            and self.r_uav_confidence_move <= 0.0
-            and self.r_uav_confidence_overlap <= 0.0
-            and self.uav_frontier_source != "confidence"
-            and self.uav_confidence_obs_grid <= 0
-            and self.local_confidence_obs_grid <= 0
-        ):
+        if not self._uav_confidence_active():
             return reward, move_reward
 
         with torch.no_grad():
-            probability, visible = self._uav_cell_detection_probability(drone_pos)
+            if probability is None or visible is None:
+                probability, visible = self._uav_cell_detection_probability(drone_pos)
             previous = self.uav_confidence_grid.to(device=drone_pos.device, dtype=drone_pos.dtype).clamp(0.0, 1.0)
             confidence_weight = (
                 float(self.uav_confidence_eps)
                 + (1.0 - previous).clamp(0.0, 1.0).pow(float(self.uav_confidence_gamma))
             )
-            miss_probability_all = (1.0 - probability).clamp(0.0, 1.0).prod(dim=1)
+            miss_probability = (1.0 - probability).clamp(0.0, 1.0)
+            miss_probability_all = miss_probability.prod(dim=1)
             updated = 1.0 - (1.0 - previous) * miss_probability_all
             updated = updated.clamp(0.0, 1.0)
             team_gain = (updated - previous).clamp(min=0.0)
             weighted_team_gain = confidence_weight * team_gain
 
-            marginal_gains = []
-            weighted_marginal_gains = []
-            for drone_idx in range(self.n_drones):
-                if self.n_drones == 1:
-                    miss_without = torch.ones_like(miss_probability_all)
-                else:
-                    others = [
-                        (1.0 - probability[:, other_idx]).clamp(0.0, 1.0)
-                        for other_idx in range(self.n_drones)
-                        if other_idx != drone_idx
-                    ]
-                    miss_without = torch.stack(others, dim=1).prod(dim=1)
-                confidence_without = 1.0 - (1.0 - previous) * miss_without
-                marginal = (updated - confidence_without).clamp(min=0.0)
-                marginal_gains.append(marginal.mean(dim=(1, 2)))
-                weighted_marginal_gains.append((confidence_weight * marginal).mean(dim=(1, 2)))
-            marginal_gain_by_drone = torch.stack(marginal_gains, dim=1)
-            weighted_marginal_gain_by_drone = torch.stack(weighted_marginal_gains, dim=1)
+            if self.n_drones == 1:
+                miss_without = torch.ones_like(miss_probability)
+            else:
+                ones = torch.ones_like(miss_probability[:, :1])
+                prefix = torch.cumprod(miss_probability, dim=1)
+                suffix = torch.flip(
+                    torch.cumprod(torch.flip(miss_probability, dims=[1]), dim=1),
+                    dims=[1],
+                )
+                miss_before = torch.cat((ones, prefix[:, :-1]), dim=1)
+                miss_after = torch.cat((suffix[:, 1:], ones), dim=1)
+                miss_without = miss_before * miss_after
+            confidence_without = 1.0 - (1.0 - previous).unsqueeze(1) * miss_without
+            marginal = (updated.unsqueeze(1) - confidence_without).clamp(min=0.0)
+            marginal_gain_by_drone = marginal.mean(dim=(-1, -2))
+            weighted_marginal_gain_by_drone = (
+                confidence_weight.unsqueeze(1) * marginal
+            ).mean(dim=(-1, -2))
             reward = weighted_marginal_gain_by_drone * float(self.r_uav_confidence)
             best_gain = self._uav_confidence_best_stencil_gain(previous, confidence_weight)
             opportunity_fraction = torch.where(
@@ -3247,6 +3372,7 @@ class WildfireSearchScenario(BaseScenario):
             step_detection_probability_by_drone = probability.sum(dim=(-1, -2)) / visible_cells
 
             self.uav_confidence_grid.copy_(updated.to(dtype=self.uav_confidence_grid.dtype))
+            self._invalidate_uav_runtime_caches()
             self.metric_reward_uav_confidence_by_drone = reward
             self.metric_reward_uav_confidence = reward.sum(dim=1)
             self.metric_reward_uav_confidence_move_by_drone = move_reward
@@ -3541,21 +3667,9 @@ class WildfireSearchScenario(BaseScenario):
             )
 
         G = self.fire_grid_size
-        cell_width = 2.0 * self.x_semidim / G
-        cell_height = 2.0 * self.y_semidim / G
-        xs = torch.linspace(
-            -self.x_semidim + cell_width / 2.0,
-            self.x_semidim - cell_width / 2.0,
-            G,
-            device=drone_pos.device,
-            dtype=drone_pos.dtype,
-        )
-        ys = torch.linspace(
-            -self.y_semidim + cell_height / 2.0,
-            self.y_semidim - cell_height / 2.0,
-            G,
-            device=drone_pos.device,
-            dtype=drone_pos.dtype,
+        xs, ys, _, _, _, cell_width, cell_height, _ = self._uav_grid_geometry(
+            drone_pos.device,
+            drone_pos.dtype,
         )
 
         # Circle-cell intersection uses the nearest point in each cell, so even
@@ -3630,6 +3744,7 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp(0.0, 1.0)
 
         self.coverage_grid |= team_claims
+        self._invalidate_uav_runtime_caches()
         return (
             new_credit_cells / float(G * G),
             overlap_fraction,
@@ -3706,6 +3821,55 @@ class WildfireSearchScenario(BaseScenario):
             return self._uav_frontier_sector_topk_features_for_positions(positions)
         return self._uav_frontier_centroid_features_for_positions(positions)
 
+    def _uav_frontier_cache_signature(self) -> tuple:
+        coverage_version = getattr(self.coverage_grid, "_version", 0)
+        confidence_version = getattr(self.uav_confidence_grid, "_version", 0)
+        return (
+            self.uav_frontier_mode,
+            self.uav_frontier_source,
+            float(self.uav_frontier_obs_radius_m),
+            int(self.uav_frontier_sectors),
+            int(self.uav_frontier_top_k),
+            bool(self.uav_frontier_ownership),
+            coverage_version,
+            confidence_version,
+        )
+
+    def _cached_uav_frontier_features_for_positions(
+        self,
+        cache_name: str,
+        positions: Tensor,
+    ) -> Tensor:
+        if not hasattr(self, "_uav_frontier_feature_cache"):
+            self._uav_frontier_feature_cache = {}
+        key = (
+            cache_name,
+            self._uav_frontier_cache_signature(),
+            positions.device.type,
+            positions.device.index,
+            str(positions.dtype),
+            tuple(positions.shape),
+        )
+        cached = self._uav_frontier_feature_cache.get(key)
+        if cached is not None:
+            return cached
+        features = self._uav_frontier_features_for_positions(positions)
+        self._uav_frontier_feature_cache[key] = features
+        return features
+
+    def _pre_step_uav_frontier_features(self) -> Tensor:
+        return self._cached_uav_frontier_features_for_positions(
+            "pre_step",
+            self._pre_step_drone_pos,
+        )
+
+    def _current_uav_frontier_features(self) -> Tensor:
+        drone_pos = torch.stack(
+            [drone.state.pos for drone in self.world.agents[: self.n_drones]],
+            dim=1,
+        )
+        return self._cached_uav_frontier_features_for_positions("current_agents", drone_pos)
+
     def _uav_frontier_centroid_features_for_positions(self, positions: Tensor) -> Tensor:
         """Direction, distance, and strength of nearby uncovered coverage mass."""
         if positions.ndim != 3:
@@ -3716,23 +3880,10 @@ class WildfireSearchScenario(BaseScenario):
             return out
 
         G = int(self.fire_grid_size)
-        cell_width = 2.0 * self.x_semidim / G
-        cell_height = 2.0 * self.y_semidim / G
-        xs = torch.linspace(
-            -self.x_semidim + cell_width / 2.0,
-            self.x_semidim - cell_width / 2.0,
-            G,
-            device=positions.device,
-            dtype=positions.dtype,
+        xs, ys, _, _, _, _, _, cell_area = self._uav_grid_geometry(
+            positions.device,
+            positions.dtype,
         )
-        ys = torch.linspace(
-            -self.y_semidim + cell_height / 2.0,
-            self.y_semidim - cell_height / 2.0,
-            G,
-            device=positions.device,
-            dtype=positions.dtype,
-        )
-        cell_area = max(float(cell_width * cell_height), 1e-12)
         sim_units_per_meter = self.terrain_sim_units_per_meter.to(
             device=positions.device,
             dtype=positions.dtype,
@@ -3789,23 +3940,10 @@ class WildfireSearchScenario(BaseScenario):
             return out
 
         G = int(self.fire_grid_size)
-        cell_width = 2.0 * self.x_semidim / G
-        cell_height = 2.0 * self.y_semidim / G
-        xs = torch.linspace(
-            -self.x_semidim + cell_width / 2.0,
-            self.x_semidim - cell_width / 2.0,
-            G,
-            device=positions.device,
-            dtype=positions.dtype,
+        _, _, x_grid, y_grid, _, _, _, cell_area = self._uav_grid_geometry(
+            positions.device,
+            positions.dtype,
         )
-        ys = torch.linspace(
-            -self.y_semidim + cell_height / 2.0,
-            self.y_semidim - cell_height / 2.0,
-            G,
-            device=positions.device,
-            dtype=positions.dtype,
-        )
-        cell_area = max(float(cell_width * cell_height), 1e-12)
         sim_units_per_meter = self.terrain_sim_units_per_meter.to(
             device=positions.device,
             dtype=positions.dtype,
@@ -3816,15 +3954,7 @@ class WildfireSearchScenario(BaseScenario):
             dtype=positions.dtype,
         )
 
-        sector_width = 2.0 * math.pi / float(sectors)
-        sector_angles = (
-            -math.pi
-            + (torch.arange(sectors, device=positions.device, dtype=positions.dtype) + 0.5)
-            * sector_width
-        )
-        sector_unit = torch.stack((torch.cos(sector_angles), torch.sin(sector_angles)), dim=-1)
-        x_grid = xs.view(1, G)
-        y_grid = ys.view(G, 1)
+        sector_width, sector_unit = self._uav_sector_geometry(sectors, positions.device, positions.dtype)
 
         for env_idx in range(B):
             radius = radius_sim[env_idx]
@@ -3905,27 +4035,12 @@ class WildfireSearchScenario(BaseScenario):
         if B == 0 or N == 0:
             return out
 
-        G = int(self.fire_grid_size)
         sectors = int(self.uav_frontier_sectors)
-        cell_width = 2.0 * self.x_semidim / G
-        cell_height = 2.0 * self.y_semidim / G
-        xs = torch.linspace(
-            -self.x_semidim + cell_width / 2.0,
-            self.x_semidim - cell_width / 2.0,
-            G,
-            device=positions.device,
-            dtype=positions.dtype,
+        G = int(self.fire_grid_size)
+        _, _, x_grid, y_grid, _, _, _, cell_area = self._uav_grid_geometry(
+            positions.device,
+            positions.dtype,
         )
-        ys = torch.linspace(
-            -self.y_semidim + cell_height / 2.0,
-            self.y_semidim - cell_height / 2.0,
-            G,
-            device=positions.device,
-            dtype=positions.dtype,
-        )
-        x_grid = xs.view(1, G)
-        y_grid = ys.view(G, 1)
-        cell_area = max(float(cell_width * cell_height), 1e-12)
         sim_units_per_meter = self.terrain_sim_units_per_meter.to(
             device=positions.device,
             dtype=positions.dtype,
@@ -3936,7 +4051,7 @@ class WildfireSearchScenario(BaseScenario):
             device=positions.device,
             dtype=positions.dtype,
         )
-        sector_width = 2.0 * math.pi / float(sectors)
+        sector_width, _ = self._uav_sector_geometry(sectors, positions.device, positions.dtype)
         local_ideal_cells = (
             math.pi * local_radius_sim.square() / cell_area / float(sectors)
         ).clamp_min(1.0)
@@ -3963,28 +4078,36 @@ class WildfireSearchScenario(BaseScenario):
             else:
                 useful_any = (dist_sq <= radius.square()) & (useful_scores > 1e-9)
             feature = torch.zeros(4, device=positions.device, dtype=positions.dtype)
-            if float(useful_any.float().sum().detach().cpu().item()) <= 0.0:
-                return feature, None
 
             angles = torch.atan2(dy, dx)
             sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
-            sector_scores = torch.zeros(sectors, device=positions.device, dtype=positions.dtype)
-            sector_distances = torch.zeros_like(sector_scores)
-            sector_dirs = torch.zeros(sectors, 2, device=positions.device, dtype=positions.dtype)
+            weighted = useful_any.to(dtype=positions.dtype) * useful_scores
+            flat_index = sector_index.reshape(-1)
+            flat_weight = weighted.reshape(-1)
+            sector_weight = torch.zeros(sectors, device=positions.device, dtype=positions.dtype)
+            sector_vec_x = torch.zeros_like(sector_weight)
+            sector_vec_y = torch.zeros_like(sector_weight)
+            sector_weight.scatter_add_(0, flat_index, flat_weight)
+            sector_vec_x.scatter_add_(0, flat_index, (dx * weighted).reshape(-1))
+            sector_vec_y.scatter_add_(0, flat_index, (dy * weighted).reshape(-1))
 
-            for sector_idx in range(sectors):
-                sector_mask = useful_any & (sector_index == sector_idx)
-                weighted = sector_mask.to(dtype=positions.dtype) * useful_scores
-                weighted_count = weighted.sum()
-                if float(weighted_count.detach().cpu().item()) <= 0.0:
-                    continue
-                vec_x = (dx * weighted).sum() / weighted_count
-                vec_y = (dy * weighted).sum() / weighted_count
-                vec_norm = torch.sqrt(vec_x.square() + vec_y.square()).clamp_min(1e-9)
-                sector_dirs[sector_idx, 0] = vec_x / vec_norm
-                sector_dirs[sector_idx, 1] = vec_y / vec_norm
-                sector_distances[sector_idx] = (vec_norm / distance_scale).clamp(0.0, 1.0)
-                sector_scores[sector_idx] = (weighted_count / ideal_cells).clamp(0.0, 1.0)
+            nonzero = sector_weight > 0.0
+            safe_weight = sector_weight.clamp_min(1e-9)
+            vec_x = sector_vec_x / safe_weight
+            vec_y = sector_vec_y / safe_weight
+            vec_norm = torch.sqrt(vec_x.square() + vec_y.square()).clamp_min(1e-9)
+            sector_dirs = torch.stack((vec_x / vec_norm, vec_y / vec_norm), dim=-1)
+            sector_dirs = torch.where(nonzero.unsqueeze(-1), sector_dirs, torch.zeros_like(sector_dirs))
+            sector_distances = torch.where(
+                nonzero,
+                (vec_norm / distance_scale).clamp(0.0, 1.0),
+                torch.zeros_like(sector_weight),
+            )
+            sector_scores = torch.where(
+                nonzero,
+                (sector_weight / ideal_cells).clamp(0.0, 1.0),
+                torch.zeros_like(sector_weight),
+            )
 
             score, sector_idx_t = sector_scores.max(dim=0)
             if float(score.detach().cpu().item()) <= 1e-9:
@@ -4066,7 +4189,7 @@ class WildfireSearchScenario(BaseScenario):
         if self.uav_frontier_mode == "local_global":
             return self._uav_frontier_local_global_alignment_reward(drone_pos)
 
-        features = self._uav_frontier_features_for_positions(self._pre_step_drone_pos)
+        features = self._pre_step_uav_frontier_features()
         frontier_vec = features[..., :2]
         uncovered_ratio = features[..., 3]
         displacement = drone_pos - self._pre_step_drone_pos
@@ -4103,7 +4226,7 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Reward progress toward whichever top-k sector candidate was followed."""
-        features = self._uav_frontier_features_for_positions(self._pre_step_drone_pos)
+        features = self._pre_step_uav_frontier_features()
         B, D, _ = features.shape
         top_k = int(self.uav_frontier_top_k)
         candidates = features.view(B, D, top_k, 4)
@@ -4144,7 +4267,7 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Reward local confidence search, or gated global relocation if local opportunity is weak."""
-        features = self._uav_frontier_features_for_positions(self._pre_step_drone_pos)
+        features = self._pre_step_uav_frontier_features()
         B, D, _ = features.shape
         candidates = features.view(B, D, 2, 4)
         candidate_vec = candidates[..., :2]
@@ -4525,18 +4648,12 @@ class WildfireSearchScenario(BaseScenario):
         dim = self._uav_frontier_obs_dim()
         if not agent.is_drone or self.n_drones <= 0:
             return torch.zeros(self.world.batch_dim, dim, device=agent.state.pos.device, dtype=agent.state.pos.dtype)
-        if self.uav_frontier_mode in {"sector_topk", "local_global"}:
-            try:
-                drone_idx = int(agent.name.rsplit("_", 1)[1])
-            except (IndexError, ValueError):
-                drone_idx = 0
-            drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
-            drone_pos = torch.stack(
-                [drone.state.pos for drone in self.world.agents[: self.n_drones]],
-                dim=1,
-            )
-            return self._uav_frontier_features_for_positions(drone_pos)[:, drone_idx]
-        return self._uav_frontier_features_for_positions(agent.state.pos.unsqueeze(1)).squeeze(1)
+        try:
+            drone_idx = int(agent.name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            drone_idx = 0
+        drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
+        return self._current_uav_frontier_features()[:, drone_idx]
 
     def _boundary_observation(self, agent: Agent) -> Tensor:
         """Distances to left, right, bottom, top bounds, normalized by footprint."""
