@@ -263,7 +263,36 @@ The front camera achieves strong mAP50 (0.94) with the larger yolov8s architectu
 
 ---
 
-## 11. CV Pipeline Improvements (Post-Training)
+## 11. Perception Evaluation Results
+
+Evaluated on synthetic test scenes (10 trials per scenario, 640×640 px). Full details in `docs/cv_perception_eval.md`.
+
+| Metric | Value |
+|--------|-------|
+| **Overall recall** | 0.935 |
+| **Overall precision** | 0.773 |
+| **mAP50** | 0.907 |
+| **FP rate (empty backgrounds)** | 0.05 / frame |
+| **Mean spatial error** | 3.6 px |
+| **Temporal stability** | 100% (deterministic across repeated runs) |
+| **Inference time (CPU)** | ~480 ms / frame |
+
+### Performance by Condition
+
+| Condition | Recall | Precision |
+|-----------|:------:|:---------:|
+| Clean (no occlusion) | 1.00 | 0.66 |
+| Light smoke | 1.00 | 0.80 |
+| Heavy smoke | 1.00 | 0.83 |
+| Fire + smoke | 0.83 | 0.89 |
+| Small targets (30 px) | 0.83 | 0.94 |
+| Large targets (120 px) | 1.00 | 0.63 |
+
+Fire/smoke occlusion at small sizes (30 px) is the hardest condition (recall drops to 0.60–0.70). This matches the deployment challenge — small survivors partially hidden by smoke at high altitude.
+
+---
+
+## 12. CV Pipeline Improvements (Post-Training)
 
 Beyond training data improvements, the CV pipeline includes runtime enhancements for improved detection quality during deployment:
 
@@ -337,7 +366,7 @@ These regions are used for **cross-terrain generalization testing** — evaluati
 
 ---
 
-## 12. Recommendations for Zenodo Publication
+## 13. Recommendations for Zenodo Publication
 
 The dataset upload should include:
 - All drone images + labels + altitude metadata JSONs (train/val) — 2,400 images
