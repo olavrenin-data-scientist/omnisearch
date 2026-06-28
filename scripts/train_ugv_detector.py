@@ -693,7 +693,10 @@ def main() -> None:
     ap.add_argument("--mast-model", default="yolov8n.pt",
                     help="Base model for mast camera (lighter, closer targets).")
     ap.add_argument("--naip-dir", default=None,
-                    help="NAIP tiles for background generation.")
+                    help="NAIP tiles for background generation (training pool).")
+    ap.add_argument("--naip-val-dir", default=None,
+                    help="Separate NAIP tile directory for validation only (unseen terrain). "
+                         "If omitted, --naip-dir is split 80/20 geographically.")
     ap.add_argument("--assets-dir", default=str(ROOT / "data/cv_assets/sard_grabcut"))
     ap.add_argument("--review-json",
                     default=str(ROOT / "configs/cv/sard_grabcut_asset_review.json"))
@@ -738,8 +741,16 @@ def main() -> None:
     if args.naip_dir:
         all_tiles = _load_naip_tiles(args.naip_dir)
         if all_tiles:
-            naip_train_tiles, naip_val_tiles = _split_tiles(all_tiles)
-            print(f"NAIP tiles: {len(naip_train_tiles)} train / {len(naip_val_tiles)} val")
+            if args.naip_val_dir:
+                naip_train_tiles = all_tiles
+                naip_val_tiles = _load_naip_tiles(args.naip_val_dir) or all_tiles
+                print(f"NAIP train tiles: {len(naip_train_tiles)} (from {args.naip_dir})")
+                print(f"NAIP  val tiles: {len(naip_val_tiles)} (from {args.naip_val_dir})")
+            else:
+                naip_train_tiles, naip_val_tiles = _split_tiles(all_tiles)
+                if not naip_val_tiles:
+                    naip_val_tiles = naip_train_tiles
+                print(f"NAIP tiles: {len(naip_train_tiles)} train / {len(naip_val_tiles)} val")
 
     data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir)

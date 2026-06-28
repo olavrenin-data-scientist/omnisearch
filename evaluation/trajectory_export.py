@@ -415,11 +415,15 @@ def export_trajectory(
         cv_image_dir = cv_output_dir / "images"
         if cv_save_images_every > 0:
             cv_image_dir.mkdir(parents=True, exist_ok=True)
+        cv_enable_tracking = bool(cv_options.pop("enable_tracking", False))
+        cv_tracking_min_hits = int(cv_options.pop("tracking_min_hits", 2))
         cv_adapter = SimulationCvAdapter(
             terrain_cache_path=sc.terrain_cache_path or scenario_kwargs.get("terrain_cache_path"),
             fov_deg=float(sc.drone_camera_fov_deg),
             **cv_options,
         )
+        if cv_enable_tracking:
+            cv_adapter.enable_tracking(min_hits=cv_tracking_min_hits)
         cv_survivor_previews = _cv_survivor_previews(
             sc,
             env_index,

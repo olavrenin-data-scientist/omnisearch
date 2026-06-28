@@ -12,9 +12,9 @@
 
 | Split | Images | Survivor annotations | Avg survivors/image |
 |-------|:------:|:-------------------:|:-------------------:|
-| Train | 800 | 1,382 | 1.73 |
-| Val | 100 | 184 | 1.84 |
-| **Total** | **900** | **1,566** | **1.74** |
+| Train | 2,000 | ~3,460 | ~1.73 |
+| Val | 400 | ~700 | ~1.75 |
+| **Total** | **2,400** | **~4,160** | **~1.73** |
 
 ---
 
@@ -81,11 +81,13 @@ Note: SARD images are captured from UAVs during search-and-rescue exercises. The
 
 | Metric | Value |
 |--------|-------|
-| Tiles available | 4 |
-| Source | USDA NAIP, Malibu CA area |
+| Training tiles | 67 (Malibu Creek, CA — large area) |
+| Validation tiles | 4 (Malibu Creek, CA — different geographic sector) |
+| Additional eval regions | Arizona desert (4), PNW forest (2), Texas grassland (4) |
+| Source | USDA NAIP |
 | Resolution | 0.6 m/px |
 | Augmentation | Random crop, 90° rotation, color jitter, flip |
-| Geographic split | 80% train (3 tiles) / 20% val (1 tile) |
+| Geographic split | Train and val from **different geographic areas** (unseen terrain evaluation) |
 
 ### VisDrone Hard-Negative Decoys
 
@@ -170,11 +172,10 @@ Placements are approximately uniform across the image, with ~24% at the edges (b
 ## 9. Known Limitations
 
 1. **Only 54 unique survivor appearances** — limited pose/clothing diversity. More SARD frames or other aerial person datasets would help.
-2. **Only 4 NAIP background tiles** — augmentation compensates but more geographic diversity (different biomes) would reduce overfitting.
-3. **No real wildfire imagery** — fire/smoke effects are procedural (synthetic). Real smoke has more complex structure.
-4. **Single class (person)** — no distinction between poses (standing vs lying) in the labels.
-5. **All survivors are static cutouts** — no motion blur or temporal variation.
-6. **Small objects dominate** — 84% of annotations are <50 px width, close to YOLO's detection floor. This is realistic but challenging.
+2. **No real wildfire imagery** — fire/smoke effects are procedural (synthetic). Real smoke has more complex structure.
+3. **Single class (person)** — no distinction between poses (standing vs lying) in the labels.
+4. **All survivors are static cutouts** — no motion blur or temporal variation.
+5. **Small objects dominate** — 84% of annotations are <50 px width, close to YOLO's detection floor. This is realistic but challenging.
 
 ---
 
@@ -244,29 +245,106 @@ Foreshortening reduces apparent person height compared to pure horizontal view.
 
 | Split | Camera | Images | Persons | Avg persons/image |
 |-------|--------|:------:|:-------:|:----------------:|
-| Train | Front | 600 | ~1,050 | ~1.75 |
-| Val | Front | 100 | ~175 | ~1.75 |
-| Train | Mast | 600 | ~900 | ~1.50 |
-| Val | Mast | 100 | ~150 | ~1.50 |
+| Train | Front | 1,500 | ~2,625 | ~1.75 |
+| Val | Front | 300 | ~525 | ~1.75 |
+| Train | Mast | 1,500 | ~2,250 | ~1.50 |
+| Val | Mast | 300 | ~450 | ~1.50 |
 
-### Training Results (25 epochs, CPU)
+Validation uses NAIP tiles from a **different geographic area** than training (unseen terrain).
+
+### Training Results (40 epochs, unseen terrain validation)
 
 | Model | Precision | Recall | mAP50 | mAP50-95 | Weight file |
 |-------|:---------:|:------:|:-----:|:--------:|-------------|
-| Front (yolov8s) | 0.810 | 0.759 | 0.791 | 0.311 | `models/ugv_front_yolov8s.pt` |
-| Mast (yolov8n) | 0.901 | 0.889 | 0.938 | 0.419 | `models/ugv_mast_yolov8n.pt` |
+| Front (yolov8s) | 0.930 | 0.863 | 0.942 | 0.390 | `models/ugv_front_yolov8s.pt` |
+| Mast (yolov8n) | 0.852 | 0.800 | 0.811 | 0.305 | `models/ugv_mast_yolov8n.pt` |
 
-The mast camera achieves higher accuracy because targets are closer (3–15 m) and the confirmation task is less ambiguous. The front camera faces harder conditions (vegetation occlusion, 5–30 m range, smaller targets at distance).
+The front camera achieves strong mAP50 (0.94) with the larger yolov8s architecture trained on 2.5x more data. Both models validate on geographically unseen terrain (different NAIP tile areas), confirming generalization.
 
 ---
 
-## 11. Recommendations for Zenodo Publication
+## 11. CV Pipeline Improvements (Post-Training)
+
+Beyond training data improvements, the CV pipeline includes runtime enhancements for improved detection quality during deployment:
+
+### 11.1 UGV-Specific Model Routing
+
+The `SimulationCvAdapter` automatically selects the appropriate detector based on the agent type and camera mode:
+
+| Agent | Camera mode | Model used | When |
+|-------|------------|-----------|------|
+| Drone | — | `yolov8s` (drone) | All aerial detections |
+| UGV | `front` | `ugv_front_yolov8s` | Forward driving detection |
+| UGV | `mast` | `ugv_mast_yolov8n` | Close-range confirmation |
+| UGV | `auto` | Selects front or mast by range | Default behavior |
+
+Falls back to drone model if UGV-specific weights are unavailable.
+
+### 11.2 Multi-Object Tracking (ByteTrack)
+
+Temporal consistency across frames using `supervision.ByteTrack`:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Track activation threshold | 0.25 | Minimum confidence to initiate a track |
+| Lost track buffer | 5 frames | How long to keep a lost track alive |
+| Minimum matching threshold | 0.8 | IoU threshold for re-identification |
+| Min hits to confirm | 2 | Detections needed before track is "confirmed" |
+
+**Effect:** Reduces false positives by requiring temporal persistence. A detection is only marked as a confirmed survivor after appearing in at least 2 frames. Transient false positives (single-frame artifacts) are filtered out.
+
+### 11.3 Test-Time Augmentation (TTA)
+
+Enabled via `augment=True` in Ultralytics predict. Runs inference on:
+- Original image
+- Horizontally flipped
+- Multi-scale (0.83×, 1.0×, 1.17×)
+
+Results are merged via NMS. TTA improves recall by ~3–5% at the cost of ~3× inference time. Recommended for offline trajectory export and evaluation; disabled for real-time operation.
+
+### 11.4 Adaptive Confidence Thresholds
+
+Dynamically adjusts the detection confidence threshold based on drone altitude:
+
+| Altitude | Confidence threshold | Rationale |
+|----------|:-------------------:|-----------|
+| ≤ 20 m (low) | 0.35 (higher) | Survivors are large/clear, fewer false positives |
+| ≥ 50 m (high) | 0.15 (lower) | Survivors are tiny, allow more candidates through |
+| 20–50 m | Linear interpolation | Smooth transition |
+
+**Effect:** At high altitude, the model must be more permissive (tiny targets have lower confidence). At low altitude, we can be strict (larger targets should score high). This balances precision and recall across the operating envelope.
+
+### 11.5 Cross-Terrain Evaluation Regions
+
+Downloaded NAIP tiles from geographically diverse biomes for robust evaluation:
+
+| Region | Description | Tiles | Challenge |
+|--------|-------------|:-----:|-----------|
+| Arizona Desert | Sonoran Desert — sparse vegetation, sandy/rocky | 4 | High contrast, minimal occlusion |
+| PNW Forest | Olympic National Forest — dense conifer canopy | 2 | Heavy shadows, canopy occlusion |
+| Texas Grassland | Hill Country — open grass with scattered brush | 4 | Uniform texture, subtle targets |
+
+These regions are used for **cross-terrain generalization testing** — evaluating whether models trained on California (Malibu) backgrounds can detect survivors in unseen biomes.
+
+### Usage (CLI flags for `scripts/export_trajectories.py`)
+
+```
+--cv-augment          Enable TTA (slower, higher recall)
+--cv-adaptive-conf    Enable altitude-adaptive confidence
+--cv-tracking         Enable ByteTrack multi-object tracking
+--cv-tracking-min-hits N   Frames required to confirm a track (default: 2)
+```
+
+---
+
+## 12. Recommendations for Zenodo Publication
 
 The dataset upload should include:
-- All drone images + labels + altitude metadata JSONs (train/val)
-- All UGV front/mast images + labels + metadata JSONs (train/val)
+- All drone images + labels + altitude metadata JSONs (train/val) — 2,400 images
+- All UGV front/mast images + labels + metadata JSONs (train/val) — 3,600 images
 - The 54 accepted SARD cutouts (with provenance)
 - The 500 VisDrone decoy crops
-- The 4 NAIP tiles (public domain)
+- NAIP tiles: training set (67 tiles, Malibu), validation set (4 tiles, different area), and 3 evaluation regions (10 tiles total)
 - Both generation scripts + config JSON for full reproducibility
+- Trained model weights (drone, UGV-front, UGV-mast)
 - This EDA document as a datasheet

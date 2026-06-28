@@ -266,6 +266,16 @@ def main():
                    help="Disable tiled small-object inference for the yolo backend.")
     p.add_argument("--cv-person-tile-grid", type=int, default=2,
                    help="Tile grid (NxN) for tiled yolo inference.")
+    p.add_argument("--cv-augment", action="store_true",
+                   help="Enable test-time augmentation (TTA) for YOLO inference. "
+                        "Improves recall +2-5%% at ~3x inference cost.")
+    p.add_argument("--cv-adaptive-conf", action="store_true",
+                   help="Enable per-altitude adaptive confidence thresholds. "
+                        "Lower threshold at high altitude (small targets), higher at low altitude.")
+    p.add_argument("--cv-tracking", action="store_true",
+                   help="Enable ByteTrack multi-object tracking for temporal FP suppression.")
+    p.add_argument("--cv-tracking-min-hits", type=int, default=2,
+                   help="Minimum consecutive detections before a track is confirmed.")
     args = p.parse_args()
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
@@ -371,6 +381,10 @@ def main():
             "person_imgsz": args.cv_person_imgsz,
             "person_tiled": not args.cv_person_no_tiling,
             "person_tile_grid": args.cv_person_tile_grid,
+            "person_augment": args.cv_augment,
+            "adaptive_conf": args.cv_adaptive_conf,
+            "enable_tracking": args.cv_tracking,
+            "tracking_min_hits": args.cv_tracking_min_hits,
         }
 
     for name in _selected_baselines(args.approach):

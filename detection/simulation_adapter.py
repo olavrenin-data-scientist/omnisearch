@@ -100,6 +100,12 @@ class SimulationCvAdapter:
         person_tile_overlap: float = 0.2,
         person_match_iou: float = 0.15,
         person_device: str | None = None,
+        person_augment: bool = False,
+        adaptive_conf: bool = False,
+        adaptive_conf_high_alt_m: float = 50.0,
+        adaptive_conf_low_alt_m: float = 20.0,
+        adaptive_conf_high_alt_threshold: float = 0.20,
+        adaptive_conf_low_alt_threshold: float = 0.45,
         render_wildfire_effects: bool = True,
         wildfire_effect_seed: int | None = None,
         seed: int = 7,
@@ -161,14 +167,32 @@ class SimulationCvAdapter:
         self.person_tile_overlap = min(max(float(person_tile_overlap), 0.0), 0.9)
         self.person_match_iou = float(person_match_iou)
         self.person_device = person_device
+        self.person_augment = bool(person_augment)
+        self.adaptive_conf = bool(adaptive_conf)
+        self.adaptive_conf_high_alt_m = float(adaptive_conf_high_alt_m)
+        self.adaptive_conf_low_alt_m = float(adaptive_conf_low_alt_m)
+        self.adaptive_conf_high_alt_threshold = float(adaptive_conf_high_alt_threshold)
+        self.adaptive_conf_low_alt_threshold = float(adaptive_conf_low_alt_threshold)
         self._person_detector = None  # lazily built on first yolo detection
-        # Ground-robot confirmation reuses the main detector. Empirically the
-        # stronger drone model (yolov8s) beats a dedicated nano model trained on
-        # large survivors — model capacity matters more than size-specialization,
-        # and the drone model's training already overlaps the close-range scale.
-        # A separate close-range model can still be supplied via person_model.
+
+        # UGV-specific detectors for ground confirmation. When trained weights
+        # exist (from scripts/train_ugv_detector.py), use them for the appropriate
+        # camera mode instead of the drone aerial model.
+        self.ugv_front_model_name = self._resolve_ugv_model("front")
+        self.ugv_mast_model_name = self._resolve_ugv_model("mast")
+        self._ugv_front_detector = None
+        self._ugv_mast_detector = None
+
+        # Legacy fallback: if no UGV-specific models exist, ground confirmation
+        # uses the drone model (previous behavior).
         self.ground_person_model_name = self.person_model_name
         self._ground_detector = None
+
+        # Multi-object tracker for temporal consistency across frames.
+        # Requires min_hits consecutive detections before confirming a track,
+        # which suppresses transient false positives.
+        self._tracker = None
+        self._tracker_enabled = False
 
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
@@ -220,6 +244,70 @@ class SimulationCvAdapter:
         self._asset_order = list(range(len(self.human_assets)))
         self.rng.shuffle(self._asset_order)
 
+    def enable_tracking(
+        self,
+        *,
+        min_hits: int = 2,
+        lost_track_buffer: int = 5,
+        track_activation_threshold: float = 0.25,
+    ):
+        """Enable multi-object tracking for temporal FP suppression.
+
+        When enabled, detections from `render_and_detect` are passed through
+        ByteTrack. Only tracks with `min_hits` consecutive detections are
+        reported as confirmed, filtering out transient false positives.
+        """
+        from .tracker import SurvivorTracker
+        self._tracker = SurvivorTracker(
+            min_hits=min_hits,
+            lost_track_buffer=lost_track_buffer,
+            track_activation_threshold=track_activation_threshold,
+        )
+        self._tracker_enabled = True
+
+    def disable_tracking(self):
+        """Disable tracking and reset tracker state."""
+        self._tracker_enabled = False
+        if self._tracker is not None:
+            self._tracker.reset()
+
+    def reset_tracker(self):
+        """Reset tracker state (call between episodes)."""
+        if self._tracker is not None:
+            self._tracker.reset()
+
+    def _altitude_adjusted_conf(self, altitude_m: float) -> float:
+        """Compute confidence threshold interpolated by altitude.
+
+        At high altitude (small survivors, low YOLO confidence), use a lower
+        threshold to maintain recall. At low altitude (large, high-confidence
+        detections), use a higher threshold to suppress false positives.
+        """
+        if not self.adaptive_conf:
+            return self.person_conf
+        low_alt = self.adaptive_conf_low_alt_m
+        high_alt = self.adaptive_conf_high_alt_m
+        low_thresh = self.adaptive_conf_low_alt_threshold
+        high_thresh = self.adaptive_conf_high_alt_threshold
+        if altitude_m <= low_alt:
+            return low_thresh
+        if altitude_m >= high_alt:
+            return high_thresh
+        t = (altitude_m - low_alt) / (high_alt - low_alt)
+        return low_thresh + t * (high_thresh - low_thresh)
+
+    def _resolve_ugv_model(self, camera: str) -> str | None:
+        """Find trained UGV model weights for the given camera mode."""
+        candidates = {
+            "front": ["ugv_front_yolov8s.pt", "ugv_front_yolov8n.pt"],
+            "mast": ["ugv_mast_yolov8n.pt", "ugv_mast_yolov8s.pt"],
+        }
+        for name in candidates.get(camera, []):
+            path = self.root / "models" / name
+            if path.exists():
+                return str(path)
+        return None
+
     def _get_person_detector(self):
         """Lazily construct the YOLOv8 person detector on first use."""
         if self._person_detector is None:
@@ -229,8 +317,33 @@ class SimulationCvAdapter:
                 conf=self.person_conf,
                 iou=self.person_iou,
                 device=self.person_device,
+                augment=self.person_augment,
             )
         return self._person_detector
+
+    def _get_ugv_detector(self, camera: str):
+        """Lazily construct UGV-specific detector for front or mast camera."""
+        from .person_detector import PersonDetector
+        if camera == "front":
+            if self._ugv_front_detector is None and self.ugv_front_model_name:
+                self._ugv_front_detector = PersonDetector(
+                    model_name=self.ugv_front_model_name,
+                    conf=self.person_conf,
+                    iou=self.person_iou,
+                    device=self.person_device,
+                    augment=self.person_augment,
+                )
+            return self._ugv_front_detector
+        else:
+            if self._ugv_mast_detector is None and self.ugv_mast_model_name:
+                self._ugv_mast_detector = PersonDetector(
+                    model_name=self.ugv_mast_model_name,
+                    conf=self.person_conf,
+                    iou=self.person_iou,
+                    device=self.person_device,
+                    augment=self.person_augment,
+                )
+            return self._ugv_mast_detector
 
     @staticmethod
     def _iou(a, b) -> float:
@@ -274,7 +387,8 @@ class SimulationCvAdapter:
         if not self.person_tiled or self.person_tile_grid <= 1:
             res = detector.model.predict(
                 source=view, classes=[0], conf=self.person_conf, iou=self.person_iou,
-                imgsz=self.person_imgsz, device=self.person_device, verbose=False,
+                imgsz=self.person_imgsz, device=self.person_device,
+                augment=self.person_augment, verbose=False,
             )
             r = res[0] if res else None
             if r is not None and r.boxes is not None and len(r.boxes):
@@ -292,7 +406,8 @@ class SimulationCvAdapter:
                     tile = view.crop((x0, y0, x1, y1))
                     res = detector.model.predict(
                         source=tile, classes=[0], conf=self.person_conf, iou=self.person_iou,
-                        imgsz=self.person_imgsz, device=self.person_device, verbose=False,
+                        imgsz=self.person_imgsz, device=self.person_device,
+                        augment=self.person_augment, verbose=False,
                     )
                     r = res[0] if res else None
                     if r is None or r.boxes is None or not len(r.boxes):
@@ -421,7 +536,11 @@ class SimulationCvAdapter:
         # Build detections either from the renderer ground truth (preliminary
         # stub) or by running real computer vision over the rendered crop.
         if self.detector_backend == "yolo":
+            # Apply adaptive confidence threshold based on drone altitude.
+            prev_conf = self.person_conf
+            self.person_conf = self._altitude_adjusted_conf(altitude_m)
             cv_boxes = self._detect_people_cv(view)
+            self.person_conf = prev_conf
             detection_records = []
             for box, conf in cv_boxes:
                 cx = (box[0] + box[2]) * 0.5
@@ -471,24 +590,54 @@ class SimulationCvAdapter:
                     }
                 )
 
+        # Apply multi-object tracking if enabled. Tracks accumulate hits over
+        # consecutive frames; only tracks exceeding min_hits are "confirmed",
+        # filtering transient false positives.
+        tracking_info = None
+        if self._tracker_enabled and self._tracker is not None:
+            tracked = self._tracker.update(detection_records)
+            confirmed_tracks = self._tracker.get_confirmed_tracks(tracked)
+            tracking_info = {
+                "active_tracks": len(tracked),
+                "confirmed_tracks": len(confirmed_tracks),
+                "frame": self._tracker.frame_count,
+                "tracks": [
+                    {
+                        "track_id": t.track_id,
+                        "bbox_xyxy": list(t.bbox_xyxy),
+                        "confidence": round(t.confidence, 4),
+                        "hit_count": t.hit_count,
+                        "confirmed": t.confirmed,
+                    }
+                    for t in tracked
+                ],
+            }
+            # Annotate detection records with track IDs
+            for det, trk in zip(detection_records, tracked):
+                det["track_id"] = trk.track_id
+                det["track_confirmed"] = trk.confirmed
+                det["track_hits"] = trk.hit_count
+
         saved_path = None
         if image_path is not None:
             out = Path(image_path)
             out.parent.mkdir(parents=True, exist_ok=True)
-            # Draw the detector's boxes + confidence onto the saved image so the
-            # CV is visible in the viewer's camera panel (green = detection).
             annotated = view.copy()
             if detection_records:
                 from PIL import ImageDraw
                 draw = ImageDraw.Draw(annotated)
                 for d in detection_records:
                     x1, y1, x2, y2 = d["bbox_xyxy"]
-                    draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=3)
-                    draw.text((x1, max(0, y1 - 12)), f"{d['confidence']:.2f}", fill=(0, 255, 0))
+                    color = (0, 255, 0) if d.get("track_confirmed", True) else (255, 165, 0)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                    label = f"{d['confidence']:.2f}"
+                    if "track_id" in d:
+                        label = f"T{d['track_id']} {label}"
+                    draw.text((x1, max(0, y1 - 12)), label, fill=color)
             annotated.save(out)
             saved_path = str(out)
 
-        return {
+        result = {
             "name": drone.name,
             "drone_index": drone.index,
             "x": round(float(drone.world_xy[0]), 6),
@@ -509,6 +658,9 @@ class SimulationCvAdapter:
             "truth": truth,
             "detections": detection_records,
         }
+        if tracking_info is not None:
+            result["tracking"] = tracking_info
+        return result
 
     def render_survivor_preview(
         self,
@@ -552,6 +704,7 @@ class SimulationCvAdapter:
         survivor: SimEntity,
         wildfire_state: SimWildfireState | None = None,
         view_radius_m: float = 4.0,
+        camera_mode: str = "auto",
         image_path: str | Path | None = None,
     ) -> dict:
         """Render a ground robot's close-range confirmation view and detect.
@@ -564,12 +717,34 @@ class SimulationCvAdapter:
         high-confidence. (The sim is top-down, so this is a close-range
         approximation of an eye-level confirmation, not a true perspective view.)
 
+        Parameters
+        ----------
+        camera_mode : str
+            Which UGV camera model to use for detection:
+            - "auto": use mast model if distance <= 15m, front model otherwise
+            - "front": UGV forward-looking camera (5-30m range)
+            - "mast": UGV elevated mast camera (3-15m range)
+            - "drone": legacy behavior using the drone aerial model
+
         Returns the per-frame detection record plus a ``confirmed`` flag and the
         robot-survivor distance in metres.
         """
+        dx_m = (robot.world_xy[0] - survivor.world_xy[0]) / self.sim_units_per_meter
+        dy_m = (robot.world_xy[1] - survivor.world_xy[1]) / self.sim_units_per_meter
+        distance_m = math.hypot(dx_m, dy_m)
+
+        # Resolve camera mode
+        if camera_mode == "auto":
+            if distance_m <= 15.0 and self.ugv_mast_model_name:
+                resolved_camera = "mast"
+            elif self.ugv_front_model_name:
+                resolved_camera = "front"
+            else:
+                resolved_camera = "drone"
+        else:
+            resolved_camera = camera_mode
+
         footprint_m = max(2.0 * float(view_radius_m), 1.0)
-        # Invert footprint_m = 2 * altitude_m * tan(fov/2) to get the pseudo
-        # camera "height" that yields this close-range footprint.
         altitude_m = footprint_m / (2.0 * math.tan(math.radians(self.fov_deg) / 2.0))
         pseudo_drone = SimDrone(
             index=-1,
@@ -577,15 +752,29 @@ class SimulationCvAdapter:
             world_xy=survivor.world_xy,
             altitude_agl=float(altitude_m) * self.sim_units_per_meter,
         )
-        # The close-range survivor is large in frame, so single-pass inference
-        # is correct here — tiling would up-scale an already-large survivor past
-        # the detector's training scale and *lower* confidence. Also swap in the
-        # dedicated ground (large-survivor) detector when available.
+        # Close-range: disable tiling and swap in the appropriate detector.
         prev_tiled = self.person_tiled
         prev_detector = self._person_detector
         prev_model = self.person_model_name
         self.person_tiled = False
-        if self.ground_person_model_name != self.person_model_name:
+
+        if resolved_camera in ("front", "mast"):
+            ugv_det = self._get_ugv_detector(resolved_camera)
+            if ugv_det is not None:
+                self._person_detector = ugv_det
+                model_name = (self.ugv_front_model_name if resolved_camera == "front"
+                              else self.ugv_mast_model_name)
+                self.person_model_name = model_name or self.person_model_name
+            elif self.ground_person_model_name != self.person_model_name:
+                if self._ground_detector is None:
+                    from .person_detector import PersonDetector
+                    self._ground_detector = PersonDetector(
+                        model_name=self.ground_person_model_name, conf=self.person_conf,
+                        iou=self.person_iou, device=self.person_device,
+                    )
+                self._person_detector = self._ground_detector
+                self.person_model_name = self.ground_person_model_name
+        elif self.ground_person_model_name != self.person_model_name:
             if self._ground_detector is None:
                 from .person_detector import PersonDetector
                 self._ground_detector = PersonDetector(
@@ -594,6 +783,7 @@ class SimulationCvAdapter:
                 )
             self._person_detector = self._ground_detector
             self.person_model_name = self.ground_person_model_name
+
         try:
             record = self.render_and_detect(
                 drone=pseudo_drone, survivors=[survivor],
@@ -603,9 +793,7 @@ class SimulationCvAdapter:
             self.person_tiled = prev_tiled
             self._person_detector = prev_detector
             self.person_model_name = prev_model
-        dx_m = (robot.world_xy[0] - survivor.world_xy[0]) / self.sim_units_per_meter
-        dy_m = (robot.world_xy[1] - survivor.world_xy[1]) / self.sim_units_per_meter
-        distance_m = math.hypot(dx_m, dy_m)
+
         confirmed = any(
             d.get("matched_survivor_index") == survivor.index for d in record.get("detections", [])
         )
@@ -622,6 +810,7 @@ class SimulationCvAdapter:
             "confidence": round(float(confidence), 4),
             "distance_m": round(float(distance_m), 3),
             "view_radius_m": round(float(view_radius_m), 3),
+            "camera_mode": resolved_camera,
             "image_path": record.get("image_path"),
             "detections": record.get("detections", []),
             "truth": record.get("truth", []),
