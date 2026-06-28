@@ -330,6 +330,7 @@ def test_decoy_does_not_match_survivor_ground_truth():
     det.person_tile_overlap = 0.25
     det.person_match_iou = 0.15
     det.person_device = None
+    det.person_augment = False
     det._person_detector = None
     det.image_size = SZ
 

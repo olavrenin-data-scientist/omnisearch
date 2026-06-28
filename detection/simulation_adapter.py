@@ -206,34 +206,6 @@ class SimulationCvAdapter:
         self._tracker = None
         self._tracker_enabled = False
 
-        # Detection mode: "cv" (pure CV, default), "thermal" (simulated TIR only),
-        # "cv+thermal" (sensor fusion), "motion" (frame differencing only),
-        # "cv+motion" (CV with motion confirmation/boost).
-        self.detection_mode = str(detection_mode).lower()
-        _valid_modes = ("cv", "thermal", "cv+thermal", "motion", "cv+motion")
-        if self.detection_mode not in _valid_modes:
-            raise ValueError(f"detection_mode must be one of {_valid_modes}, got {detection_mode!r}")
-        self._thermal_model = None
-        self._thermal_seed = int(thermal_seed if thermal_seed is not None else seed)
-        self._motion_detector = None
-
-        # Thermal detector backend: "physics" (closed-form probability model,
-        # default) or "yolo" (render a simulated TIR frame and run the trained
-        # thermal YOLOv8 from scripts/generate_thermal_dataset.py on it).
-        self.thermal_detector = str(thermal_detector).lower()
-        if self.thermal_detector not in ("physics", "yolo"):
-            raise ValueError(f"thermal_detector must be 'physics' or 'yolo', got {thermal_detector!r}")
-        self._thermal_yolo = None
-        self.thermal_model_name = None
-        if self.thermal_detector == "yolo":
-            path = self.root / "models" / "thermal_yolov8n.pt"
-            if not path.exists():
-                raise FileNotFoundError(
-                    f"thermal_detector='yolo' requires trained weights at {path}. "
-                    "Generate the dataset (scripts/generate_thermal_dataset.py) and train first."
-                )
-            self.thermal_model_name = str(path)
-
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
             if "bbox" not in terrain:
@@ -315,153 +287,6 @@ class SimulationCvAdapter:
         """Reset tracker state (call between episodes)."""
         if self._tracker is not None:
             self._tracker.reset()
-
-    def _get_thermal_model(self):
-        """Lazily initialize the thermal sensor model."""
-        if self._thermal_model is None:
-            from .thermal_model import ThermalSensorModel, ThermalSensorConfig
-            self._thermal_model = ThermalSensorModel(
-                ThermalSensorConfig(seed=self._thermal_seed)
-            )
-        return self._thermal_model
-
-    def _run_thermal_detection(
-        self,
-        *,
-        drone: "SimDrone",
-        survivors: list,
-        wildfire_state: "SimWildfireState | None",
-        altitude_m: float,
-    ) -> list[dict]:
-        """Run simulated thermal detection on the current frame.
-
-        Two backends:
-          - "physics" (default): closed-form probability model on sim state.
-          - "yolo": render a simulated TIR frame and run the trained thermal
-            YOLOv8 (models/thermal_yolov8n.pt) over it.
-        """
-        if self.thermal_detector == "yolo":
-            return self._run_thermal_yolo_detection(
-                drone=drone,
-                survivors=survivors,
-                wildfire_state=wildfire_state,
-                altitude_m=altitude_m,
-            )
-        thermal = self._get_thermal_model()
-        survivor_dicts = [
-            {"index": s.index, "world_xy": s.world_xy} for s in survivors
-        ]
-        return thermal.detect_survivors(
-            drone_xy=drone.world_xy,
-            drone_altitude_m=altitude_m,
-            fov_deg=self.fov_deg,
-            survivors=survivor_dicts,
-            fire_grid=wildfire_state.fire_grid if wildfire_state else None,
-            fire_intensity_grid=wildfire_state.fire_intensity_grid if wildfire_state else None,
-            burned_grid=wildfire_state.burned_grid if wildfire_state else None,
-            smoke_grid=wildfire_state.smoke_grid if wildfire_state else None,
-            sim_units_per_meter=self.sim_units_per_meter,
-            grid_size=self.grid_size,
-        )
-
-    def _get_thermal_yolo(self):
-        """Lazily construct the thermal-image YOLOv8 detector."""
-        if self._thermal_yolo is None:
-            from .person_detector import PersonDetector
-            self._thermal_yolo = PersonDetector(
-                model_name=self.thermal_model_name,
-                conf=self.person_conf,
-                iou=self.person_iou,
-                device=self.person_device,
-            )
-        return self._thermal_yolo
-
-    def _run_thermal_yolo_detection(
-        self,
-        *,
-        drone: "SimDrone",
-        survivors: list,
-        wildfire_state: "SimWildfireState | None",
-        altitude_m: float,
-    ) -> list[dict]:
-        """Render a simulated TIR frame and run the trained thermal YOLO on it."""
-        from .thermal_renderer import render_thermal_frame
-
-        footprint_m = 2.0 * altitude_m * math.tan(math.radians(self.fov_deg) / 2.0)
-        footprint_world = footprint_m * self.sim_units_per_meter
-        body_radius_px = max(4, int(12 * (20.0 / max(altitude_m, 1.0))))
-
-        frame = render_thermal_frame(
-            image_size=self.image_size,
-            drone_xy=drone.world_xy,
-            footprint_world=footprint_world,
-            survivors=[{"world_xy": s.world_xy} for s in survivors],
-            fire_intensity_grid=wildfire_state.fire_intensity_grid if wildfire_state else None,
-            burned_grid=wildfire_state.burned_grid if wildfire_state else None,
-            grid_size=self.grid_size,
-            body_radius_px=body_radius_px,
-            seed=self._thermal_seed,
-        ).convert("RGB")
-
-        result = self._get_thermal_yolo().detect(frame)
-
-        # Convert YOLO boxes into thermal detection records (same schema as
-        # the physics model, so fusion and export work unchanged).
-        records = []
-        matched_indices: set[int] = set()
-        match_radius_world = footprint_world * 0.08
-        for det in result.detections:
-            box = det.box
-            cx = (box[0] + box[2]) * 0.5
-            cy = (box[1] + box[3]) * 0.5
-            rel = self._pixel_center_to_relative_world((cx, cy), footprint_world=footprint_world)
-            est_world = (drone.world_xy[0] + rel[0], drone.world_xy[1] + rel[1])
-            # Match to the nearest ground-truth survivor within radius.
-            best_idx, best_dist = None, match_radius_world
-            for s in survivors:
-                d = math.hypot(s.world_xy[0] - est_world[0], s.world_xy[1] - est_world[1])
-                if d < best_dist:
-                    best_idx, best_dist = s.index, d
-            if best_idx is not None:
-                matched_indices.add(best_idx)
-            records.append({
-                "survivor_index": best_idx,
-                "detected": True,
-                "confidence": round(float(det.confidence), 4),
-                "estimated_world_xy": [round(est_world[0], 6), round(est_world[1], 6)],
-                "bbox_xyxy": [int(v) for v in box],
-                "is_false_positive": best_idx is None,
-                "sensor_backend": "thermal_yolo",
-            })
-        # Survivors the thermal YOLO missed: emit non-detections so downstream
-        # consumers see the full ground-truth accounting like the physics model.
-        for s in survivors:
-            if s.index not in matched_indices:
-                records.append({
-                    "survivor_index": s.index,
-                    "detected": False,
-                    "confidence": 0.0,
-                    "sensor_backend": "thermal_yolo",
-                })
-        return records
-
-    def _get_motion_detector(self):
-        """Lazily initialize the motion detector."""
-        if self._motion_detector is None:
-            from .motion_detector import MotionDetector
-            self._motion_detector = MotionDetector()
-        return self._motion_detector
-
-    def _run_motion_detection(self, view: "Image.Image", drone_xy, footprint_world, smoke_load: float = 0.0) -> list[dict]:
-        """Run motion detection on the current rendered frame."""
-        motion = self._get_motion_detector()
-        return motion.detect(
-            view,
-            drone_xy=drone_xy,
-            footprint_world=footprint_world,
-            image_size=self.image_size,
-            smoke_load=smoke_load,
-        )
 
     def _altitude_adjusted_conf(self, altitude_m: float) -> float:
         """Compute confidence threshold interpolated by altitude.
@@ -778,87 +603,6 @@ class SimulationCvAdapter:
                     }
                 )
 
-        # Thermal / fusion detection modes.
-        # In "thermal" mode, CV detections are replaced by thermal results.
-        # In "cv+thermal" mode, both run and results are fused.
-        thermal_detections = None
-        if self.detection_mode in ("thermal", "cv+thermal"):
-            thermal_detections = self._run_thermal_detection(
-                drone=drone,
-                survivors=list(survivors_list),
-                wildfire_state=wildfire_state,
-                altitude_m=altitude_m,
-            )
-
-        if self.detection_mode == "thermal":
-            # Replace CV detections entirely with thermal results
-            detection_records = []
-            for td in thermal_detections:
-                if td.get("detected", False):
-                    detection_records.append({
-                        "class_name": "person",
-                        "confidence": td.get("confidence", 0.5),
-                        "bbox_xyxy": [0, 0, 0, 0],  # No pixel box for thermal
-                        "center_px": [self.image_size / 2, self.image_size / 2],
-                        "estimated_world_xy": td.get("estimated_world_xy", td.get("true_world_xy")),
-                        "matched_survivor_index": td.get("survivor_index"),
-                        "sensor": "thermal",
-                        "delta_t_k": td.get("delta_t_k"),
-                        "thermal_crossover": td.get("thermal_crossover", False),
-                        "detection_probability": td.get("detection_probability"),
-                    })
-        elif self.detection_mode == "cv+thermal":
-            from .thermal_model import fuse_cv_thermal
-            fused = fuse_cv_thermal(
-                cv_detections=detection_records,
-                thermal_detections=thermal_detections,
-                fusion_mode="union",
-            )
-            detection_records = fused
-
-        # Motion detection modes
-        motion_detections = None
-        if self.detection_mode in ("motion", "cv+motion"):
-            smoke_load = 0.0
-            if wildfire_state is not None and wildfire_state.smoke_grid is not None:
-                grid_h, grid_w = wildfire_state.smoke_grid.shape
-                half = footprint_world * 0.5
-                cx, cy = drone.world_xy
-                c0 = max(0, int(np.floor((cx - half + 1.0) * 0.5 * grid_w)))
-                c1 = min(grid_w, int(np.ceil((cx + half + 1.0) * 0.5 * grid_w)))
-                r0 = max(0, int(np.floor((cy - half + 1.0) * 0.5 * grid_h)))
-                r1 = min(grid_h, int(np.ceil((cy + half + 1.0) * 0.5 * grid_h)))
-                smoke_patch = wildfire_state.smoke_grid[r0:r1, c0:c1]
-                if smoke_patch.size > 0:
-                    smoke_load = float(smoke_patch.mean())
-
-            motion_detections = self._run_motion_detection(
-                view, drone.world_xy, footprint_world, smoke_load=smoke_load
-            )
-
-        if self.detection_mode == "motion":
-            # Replace CV detections with motion-only results
-            detection_records = []
-            for md in (motion_detections or []):
-                detection_records.append({
-                    "class_name": "person",
-                    "confidence": md["confidence"],
-                    "bbox_xyxy": md["bbox_xyxy"],
-                    "center_px": md["center_px"],
-                    "matched_survivor_index": None,
-                    "sensor": "motion",
-                    "area_px": md.get("area_px"),
-                    "detection_probability": md.get("detection_probability"),
-                })
-        elif self.detection_mode == "cv+motion":
-            from .motion_detector import fuse_cv_motion
-            fused = fuse_cv_motion(
-                cv_detections=detection_records,
-                motion_detections=motion_detections or [],
-                fusion_mode="boost",
-            )
-            detection_records = fused
-
         # Apply multi-object tracking if enabled. Tracks accumulate hits over
         # consecutive frames; only tracks exceeding min_hits are "confirmed",
         # filtering transient false positives.
@@ -896,19 +640,13 @@ class SimulationCvAdapter:
                 from PIL import ImageDraw
                 draw = ImageDraw.Draw(annotated)
                 for d in detection_records:
-                    box = d.get("bbox_xyxy", [0, 0, 0, 0])
-                    if box != [0, 0, 0, 0]:
-                        x1, y1, x2, y2 = box
-                        color = (0, 255, 0) if d.get("track_confirmed", True) else (255, 165, 0)
-                        if d.get("sensor") == "thermal" or d.get("fusion_source") == "thermal_only":
-                            color = (255, 0, 255)  # Magenta for thermal-only
-                        elif d.get("fusion_source") == "both":
-                            color = (0, 255, 255)  # Cyan for fused
-                        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-                        label = f"{d['confidence']:.2f}"
-                        if "track_id" in d:
-                            label = f"T{d['track_id']} {label}"
-                        draw.text((x1, max(0, y1 - 12)), label, fill=color)
+                    x1, y1, x2, y2 = d["bbox_xyxy"]
+                    color = (0, 255, 0) if d.get("track_confirmed", True) else (255, 165, 0)
+                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                    label = f"{d['confidence']:.2f}"
+                    if "track_id" in d:
+                        label = f"T{d['track_id']} {label}"
+                    draw.text((x1, max(0, y1 - 12)), label, fill=color)
             annotated.save(out)
             saved_path = str(out)
 
@@ -934,8 +672,6 @@ class SimulationCvAdapter:
             "truth": truth,
             "detections": detection_records,
         }
-        if thermal_detections is not None:
-            result["thermal_raw"] = thermal_detections
         if tracking_info is not None:
             result["tracking"] = tracking_info
         return result
