@@ -302,6 +302,8 @@ class HappoCheckpointTests(unittest.TestCase):
             uav_frontier_alignment_reward=0.04,
             uav_confidence_reward=0.03,
             uav_confidence_move_reward=0.07,
+            uav_confidence_overlap_penalty=0.04,
+            uav_confidence_overlap_threshold=0.70,
             uav_confidence_opportunity_eps=1e-5,
             uav_overlap_penalty=0.05,
             uav_overlap_allowed=0.60,
@@ -348,6 +350,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.04)
         self.assertEqual(scenario["r_uav_confidence"], 0.03)
         self.assertEqual(scenario["r_uav_confidence_move"], 0.07)
+        self.assertEqual(scenario["r_uav_confidence_overlap"], 0.04)
+        self.assertEqual(scenario["uav_confidence_overlap_threshold"], 0.70)
         self.assertEqual(scenario["uav_confidence_opportunity_eps"], 1e-5)
         self.assertEqual(scenario["r_uav_overlap"], 0.05)
         self.assertEqual(scenario["uav_overlap_allowed"], 0.60)
@@ -409,6 +413,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.10)
         self.assertEqual(scenario["r_uav_confidence"], 0.0)
         self.assertEqual(scenario["r_uav_confidence_move"], 0.0)
+        self.assertEqual(scenario["r_uav_confidence_overlap"], 0.0)
+        self.assertEqual(scenario["uav_confidence_overlap_threshold"], 0.65)
         self.assertEqual(scenario["uav_confidence_opportunity_eps"], 1e-6)
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)

@@ -190,6 +190,8 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_frontier_ownership = False
         scenario.r_uav_confidence = 0.0
         scenario.r_uav_confidence_move = 0.0
+        scenario.r_uav_confidence_overlap = 0.0
+        scenario.uav_confidence_overlap_threshold = 0.65
         scenario.uav_confidence_gamma = 2.0
         scenario.uav_confidence_eps = 0.05
         scenario.uav_confidence_opportunity_eps = 1e-6
@@ -511,6 +513,39 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertGreater(float(scenario.metric_uav_confidence_opportunity_best_gain[0]), 0.0)
         self.assertGreater(float(scenario.metric_uav_confidence_opportunity_fraction[0]), 0.0)
         self.assertLessEqual(float(scenario.metric_uav_confidence_opportunity_fraction[0]), 1.0)
+
+    def test_uav_confidence_overlap_penalty_uses_saturated_confidence(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.r_uav_confidence_overlap = 0.2
+        scenario.uav_confidence_overlap_threshold = 0.5
+        drone_pos = torch.zeros(1, 1, 2)
+
+        scenario.uav_confidence_grid.zero_()
+        penalty = scenario._uav_confidence_overlap_penalty(drone_pos)
+        self.assertAlmostEqual(float(penalty[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
+            0.0,
+            places=6,
+        )
+
+        scenario.uav_confidence_grid.fill_(0.75)
+        penalty = scenario._uav_confidence_overlap_penalty(drone_pos)
+        self.assertAlmostEqual(float(penalty[0, 0]), -0.1, places=6)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
+            0.5,
+            places=6,
+        )
+
+        scenario.uav_confidence_grid.fill_(1.0)
+        penalty = scenario._uav_confidence_overlap_penalty(drone_pos)
+        self.assertAlmostEqual(float(penalty[0, 0]), -0.2, places=6)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
+            1.0,
+            places=6,
+        )
 
     def test_uav_confidence_best_stencil_respects_physical_center_bounds(self):
         scenario = self._coverage_scenario(grid_size=16)

@@ -274,44 +274,94 @@ This term rewards large steps only when they generate inspection value. It does
 not pay for spinning, boundary pushing, or repeated motion over high-confidence
 areas.
 
-\subsection{Uncertainty Frontier Reward}
+\subsection{Local/Global Confidence Frontier Reward}
 
-The frontier signal is computed from the uncertainty map \(\unc_t = 1-\conf_t\)
-rather than from binary uncovered cells. Around each UAV we divide a local disk
-into \(S=8\) angular sectors and compute a sector score
+The frontier signal is computed from the confidence-derived uncertainty mass
+rather than from binary uncovered cells. For every map cell we define
 \begin{equation}
-    \sigma_{i,t}^{(s)}
+    m_t(x)
     =
-    \frac{
-        \sum_{x \in \mathcal{S}_{i,t}^{(s)}} w(\conf_t(x)) \unc_t(x)
-    }{
-        |\mathcal{S}_{i,t}^{(s)}| + \eta
-    }.
-    \label{eq:sector_score}
+    w(\conf_t(x)) \unc_t(x),
+    \qquad
+    \unc_t(x)=1-\conf_t(x),
+    \label{eq:frontier_mass}
 \end{equation}
-The top \(K=2\) sectors are exposed to the policy as frontier vectors
-\(\vect_{i,t}^{(1)}, \vect_{i,t}^{(2)}\), each containing a unit direction,
-normalized distance to the sector's uncertainty mass, and the normalized sector
-score. Providing two directions avoids the weak compromise produced by a single
-centroid direction and lets the policy choose between multiple useful search
-regions.
+so that completely uninspected cells have high frontier mass, low-confidence
+revisits can still be attractive, and high-confidence cells contribute little.
+The current confidence-frontier policy uses a local/global representation with
+two candidates per UAV. The first candidate is tactical: within a local radius
+\(R_{\mathrm{local}}\) around UAV \(i\), currently \(60\,\mathrm{m}\), we divide
+the disk into \(S=8\) angular sectors and select the sector with the largest
+normalized frontier mass. Its direction is the unit vector from the UAV to the
+mass-weighted centroid of that sector; its distance is the centroid distance
+normalized by \(R_{\mathrm{local}}\); and its score is the sector mass divided by
+the ideal sector area. This local candidate answers the question: ``where is the
+best nearby low-confidence inspection opportunity?''
 
-The frontier reward is a small alignment bonus:
+The second candidate is strategic. It is computed over the full map, again using
+the same sector mass \(m_t(x)\), but with distance normalized by the terrain
+diagonal. To avoid assigning all UAVs to the same large uncertainty region, the
+global candidate uses a lightweight team-diversification rule in the
+communication-available setting. Candidate cells are ownership-weighted by
+relative proximity to the current UAV versus the closest teammate, so cells that
+are clearly closer to another UAV contribute less. Global sectors are then
+assigned greedily across UAVs: UAVs with weaker local opportunity are considered
+first, and once a global sector is assigned, its cells are suppressed for the
+remaining UAVs in that environment. This produces different strategic directions
+when multiple good regions exist, while still allowing all UAVs to select the
+same broad area if the map only contains one meaningful remaining frontier.
+
+Each UAV observes the resulting frontier vector
+\begin{equation}
+    f_{i,t}
+    =
+    [
+    \hat{\vect}^{\mathrm{local}}_{i,t},
+    d^{\mathrm{local}}_{i,t},
+    \sigma^{\mathrm{local}}_{i,t},
+    \hat{\vect}^{\mathrm{global}}_{i,t},
+    d^{\mathrm{global}}_{i,t},
+    \sigma^{\mathrm{global}}_{i,t}
+    ],
+    \label{eq:local_global_frontier_obs}
+\end{equation}
+where each direction \(\hat{\vect}\) has two components, giving eight scalar
+frontier features in total. The local score is used directly. The global score is
+gated by the absence of local opportunity,
+\begin{equation}
+    \tilde{\sigma}^{\mathrm{local}}_{i,t}
+    =
+    \sigma^{\mathrm{local}}_{i,t},
+    \qquad
+    \tilde{\sigma}^{\mathrm{global}}_{i,t}
+    =
+    \sigma^{\mathrm{global}}_{i,t}
+    \left(1-\sigma^{\mathrm{local}}_{i,t}\right),
+    \label{eq:local_global_frontier_gate}
+\end{equation}
+so the reward first encourages useful nearby cleanup and only strongly rewards
+global relocation when local confidence opportunity is weak. The frontier reward
+is the best clamped projected progress toward either candidate:
 \begin{equation}
     r^{\mathrm{frontier}}_{i,t}
     =
     k_{\mathrm{frontier}}
-    \max_{k \in \{1,2\}}
+    \max_{c \in \{\mathrm{local},\mathrm{global}\}}
     \left[
-        \max(0, \cos(\move_{i,t}, \vect_{i,t}^{(k)}))
-        \; s_{i,t}
-        \; \sigma_{i,t}^{(k)}
+        \mathrm{clip}
+        \left(
+            \frac{\move_{i,t}^{\top}\hat{\vect}^{c}_{i,t}}{d_{\max}},
+            0,
+            1
+        \right)
+        \tilde{\sigma}^{c}_{i,t}
     \right].
     \label{eq:frontier_reward}
 \end{equation}
-This term is deliberately secondary. It teaches directional preference toward
-uncertain regions, while Eq.~\ref{eq:confidence_reward} remains the dominant
-objective and determines whether the movement actually improves search.
+This term is deliberately secondary. It gives directional feedback toward
+confidence-relevant search opportunities, while Eq.~\ref{eq:confidence_reward}
+and Eq.~\ref{eq:move_reward} determine whether the movement actually improves
+inspection quality.
 
 \subsection{Survivor and Mission Rewards}
 
@@ -359,31 +409,40 @@ where \(\mathbf{n}_{i,t}\) is the outward normal of the nearest boundary. This
 preserves freedom to move along the boundary while making repeated attempts to
 leave the map consistently costly.
 
-\section{Observations}
+\section{Observation Design Used in the Confidence-Frontier Runs}
 
-Each UAV receives a decentralized observation that includes ego state, teammate
-state summaries, terrain context, and shared search memory. The search-memory
-portion is expressed as uncertainty rather than coverage:
+Each UAV acts from a decentralized observation, while the training critic remains
+centralized through HAPPO. The base observation contains ego position and
+velocity, a UAV range-sensor placeholder, local fire and terrain context, flight
+state, normalized distances to the four map boundaries, relative teammate
+positions in the communication-available setting, and survivor messages for
+survivors that have actually been scouted. No observation contains the hidden
+locations of unscouted survivors.
+
+The confidence-frontier experiments intentionally keep the empirically useful
+binary coverage memory and add confidence memory on top of it. In the current
+three-UAV diagnostic setting, the search-memory observation is:
 \begin{enumerate}[leftmargin=1.5em]
-    \item \textbf{Global uncertainty map}: a pooled \(G \times G\) map of
-    \(\unc_t(x)\), plus the mean confidence over the full map.
-    \item \textbf{Local uncertainty patch}: a pooled \(L \times L\) patch around
-    the UAV over a fixed physical radius, e.g. 150 m, computed from the same
-    confidence grid.
-    \item \textbf{Local max-uncertainty patch}: a companion max-pooled patch
-    that preserves small high-uncertainty gaps that average pooling can wash out.
-    \item \textbf{Top-2 frontier vectors}: the two sector-top frontier
-    directions, distances, and scores from Eq.~\ref{eq:sector_score}.
-    \item \textbf{Boundary state}: normalized distances to the four map edges
-    and outside-footprint fraction.
-    \item \textbf{Motion state}: current velocity, last displacement, previous
-    action, footprint radius, and flight quality.
-    \item \textbf{Team state}: relative UAV positions and shared frontier
-    summaries in the communication-available setting.
+    \item \textbf{Global binary coverage map}: a \(6 \times 6\) average-pooled map
+    of the shared binary coverage grid, plus the global covered fraction. A value
+    of one means the cell has been geometrically covered by a UAV footprint at
+    least once.
+    \item \textbf{Local binary coverage patch}: a \(9 \times 9\) ego-centric,
+    average-pooled patch over a \(150\,\mathrm{m}\) physical radius. Cells outside
+    the search area are filled as covered, so the boundary does not look like
+    attractive unexplored space.
+    \item \textbf{Global confidence map}: a \(6 \times 6\) average-pooled map of
+    \(\conf_t(x)\), plus the global mean confidence. The network receives
+    confidence values directly, not \(1-\conf_t(x)\); the frontier module uses
+    the corresponding uncertainty internally.
+    \item \textbf{Local/global confidence frontier}: the eight scalar features in
+    Eq.~\ref{eq:local_global_frontier_obs}: local direction, local distance,
+    local score, global direction, global distance, and global score.
 \end{enumerate}
-This observation design makes the reward locally interpretable: the policy sees
-the same uncertainty field that generates the confidence reward and frontier
-signal.
+The local confidence patch and max-pooled uncertainty patch are not part of this
+specific run. They remain natural ablation candidates, but the results discussed
+here should be interpreted as using global confidence observations plus binary
+coverage memory and the local/global confidence frontier signal.
 
 \section{Training Protocol}
 
@@ -397,11 +456,11 @@ permanently bad role. The centralized critic observes the joint state and the
 shared uncertainty memory.
 
 The final system keeps the current empirically successful components--coverage
-memory, top-2 frontier guidance, scout reward, shared UAV actors, and diagnostic
-trajectory export--but changes the semantic unit of search from binary coverage
-to probabilistic inspection confidence. This makes revisits neither always bad
-nor always good: they are rewarded exactly when they increase the probability of
-detecting a survivor.
+memory, local/global confidence-frontier guidance, scout reward, shared UAV
+actors, and diagnostic trajectory export--but changes the semantic unit of the
+dense search reward from binary coverage to probabilistic inspection confidence.
+This makes revisits neither always bad nor always good: they are rewarded
+exactly when they increase the probability of detecting a survivor.
 
 \section{Diagnostics}
 

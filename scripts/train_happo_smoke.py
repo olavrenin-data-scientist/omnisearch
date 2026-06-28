@@ -199,6 +199,8 @@ def build_args(
     uav_frontier_alignment_reward: float | None = None,
     uav_confidence_reward: float = 0.0,
     uav_confidence_move_reward: float = 0.0,
+    uav_confidence_overlap_penalty: float = 0.0,
+    uav_confidence_overlap_threshold: float = 0.65,
     uav_confidence_gamma: float = 2.0,
     uav_confidence_eps: float = 0.05,
     uav_confidence_opportunity_eps: float = 1e-6,
@@ -269,6 +271,12 @@ def build_args(
     uav_confidence_move_reward = float(uav_confidence_move_reward)
     if uav_confidence_move_reward < 0.0:
         raise ValueError("uav_confidence_move_reward must be nonnegative")
+    uav_confidence_overlap_penalty = float(uav_confidence_overlap_penalty)
+    if uav_confidence_overlap_penalty < 0.0:
+        raise ValueError("uav_confidence_overlap_penalty must be nonnegative")
+    uav_confidence_overlap_threshold = float(uav_confidence_overlap_threshold)
+    if not 0.0 <= uav_confidence_overlap_threshold < 1.0:
+        raise ValueError("uav_confidence_overlap_threshold must be in [0, 1)")
     uav_confidence_gamma = max(float(uav_confidence_gamma), 0.0)
     uav_confidence_eps = max(float(uav_confidence_eps), 0.0)
     uav_confidence_opportunity_eps = max(float(uav_confidence_opportunity_eps), 0.0)
@@ -549,10 +557,17 @@ def build_args(
         scenario_kwargs["uav_frontier_top_k"] = uav_frontier_top_k
         scenario_kwargs["uav_frontier_ownership"] = bool(uav_frontier_ownership)
         scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
-    if uav_confidence_reward > 0.0 or uav_confidence_move_reward > 0.0 or uav_frontier_source == "confidence":
+    if (
+        uav_confidence_reward > 0.0
+        or uav_confidence_move_reward > 0.0
+        or uav_confidence_overlap_penalty > 0.0
+        or uav_frontier_source == "confidence"
+    ):
         scenario_kwargs["uav_frontier_source"] = uav_frontier_source
         scenario_kwargs["r_uav_confidence"] = uav_confidence_reward
         scenario_kwargs["r_uav_confidence_move"] = uav_confidence_move_reward
+        scenario_kwargs["r_uav_confidence_overlap"] = uav_confidence_overlap_penalty
+        scenario_kwargs["uav_confidence_overlap_threshold"] = uav_confidence_overlap_threshold
         scenario_kwargs["uav_confidence_gamma"] = uav_confidence_gamma
         scenario_kwargs["uav_confidence_eps"] = uav_confidence_eps
         scenario_kwargs["uav_confidence_opportunity_eps"] = uav_confidence_opportunity_eps
@@ -703,6 +718,8 @@ def build_args(
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_confidence": uav_confidence_reward,
             "r_uav_confidence_move": uav_confidence_move_reward,
+            "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
+            "uav_confidence_overlap_threshold": uav_confidence_overlap_threshold,
             "uav_confidence_gamma": uav_confidence_gamma,
             "uav_confidence_eps": uav_confidence_eps,
             "uav_confidence_opportunity_eps": uav_confidence_opportunity_eps,
@@ -939,6 +956,12 @@ def main():
     p.add_argument("--uav-confidence-move-reward", type=float, default=0.0,
                    help="Optional per-UAV reward scale for movement that captures a high fraction of the "
                         "best one-step confidence-gain opportunity. Default 0 disables this reward.")
+    p.add_argument("--uav-confidence-overlap-penalty", type=float, default=0.0,
+                   help="Optional per-UAV penalty scale for flying over medium/high confidence cells. "
+                        "Default 0 disables this penalty.")
+    p.add_argument("--uav-confidence-overlap-threshold", type=float, default=0.65,
+                   help="Confidence value where --uav-confidence-overlap-penalty starts. "
+                        "Cells below this threshold are free; cells at 1.0 receive full penalty.")
     p.add_argument("--uav-confidence-gamma", type=float, default=2.0,
                    help="Exponent for weighting confidence reward toward low-confidence cells. "
                         "Higher values focus more strongly on poorly inspected cells.")
@@ -1103,6 +1126,10 @@ def main():
         p.error("--uav-confidence-reward must be nonnegative")
     if args.uav_confidence_move_reward < 0.0:
         p.error("--uav-confidence-move-reward must be nonnegative")
+    if args.uav_confidence_overlap_penalty < 0.0:
+        p.error("--uav-confidence-overlap-penalty must be nonnegative")
+    if not 0.0 <= args.uav_confidence_overlap_threshold < 1.0:
+        p.error("--uav-confidence-overlap-threshold must be in [0, 1)")
     if args.uav_confidence_gamma < 0.0:
         p.error("--uav-confidence-gamma must be nonnegative")
     if args.uav_confidence_eps < 0.0:
@@ -1310,6 +1337,8 @@ def main():
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_confidence_reward: {args.uav_confidence_reward}")
     print(f" uav_confidence_move_reward: {args.uav_confidence_move_reward}")
+    print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
+    print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
     print(f" uav_confidence_gamma: {args.uav_confidence_gamma}")
     print(f" uav_confidence_eps: {args.uav_confidence_eps}")
     print(f" uav_confidence_opportunity_eps: {args.uav_confidence_opportunity_eps}")
@@ -1393,6 +1422,8 @@ def main():
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_confidence_reward = args.uav_confidence_reward,
         uav_confidence_move_reward = args.uav_confidence_move_reward,
+        uav_confidence_overlap_penalty = args.uav_confidence_overlap_penalty,
+        uav_confidence_overlap_threshold = args.uav_confidence_overlap_threshold,
         uav_confidence_gamma = args.uav_confidence_gamma,
         uav_confidence_eps = args.uav_confidence_eps,
         uav_confidence_opportunity_eps = args.uav_confidence_opportunity_eps,

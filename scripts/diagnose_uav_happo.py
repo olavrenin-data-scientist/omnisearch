@@ -225,11 +225,13 @@ def run_rollout(
     confidence_high_fraction_values: list[float] = []
     confidence_step_detection_probability_values: list[float] = []
     confidence_step_detection_probability_by_drone_values: list[float] = []
+    confidence_overlap_fraction_values: list[float] = []
     reward_uav_coverage_values: list[float] = []
     reward_uav_move_coverage_values: list[float] = []
     reward_uav_frontier_values: list[float] = []
     reward_uav_confidence_values: list[float] = []
     reward_uav_confidence_move_values: list[float] = []
+    penalty_uav_confidence_overlap_values: list[float] = []
     penalty_uav_overlap_values: list[float] = []
     penalty_uav_inter_overlap_values: list[float] = []
     penalty_uav_outside_footprint_values: list[float] = []
@@ -387,6 +389,7 @@ def run_rollout(
             frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
             confidence_frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
             confidence_lg_frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
+        pre_survivor_confidence = _survivor_confidence_values(scenario)
         frontier_pairwise = _pairwise_direction_metrics(frontier_obs[:, :2])
         local_pairwise = _pairwise_direction_metrics(coverage_signal["local_vec"])
         global_pairwise = _pairwise_direction_metrics(coverage_signal["global_vec"])
@@ -461,6 +464,16 @@ def run_rollout(
         confidence_move_reward_by_drone = _metric_array(
             scenario,
             "metric_reward_uav_confidence_move_by_drone",
+            scenario.n_drones,
+        )
+        confidence_overlap_penalty_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_confidence_overlap_by_drone",
+            scenario.n_drones,
+        )
+        confidence_overlap_fraction_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_overlap_fraction_by_drone",
             scenario.n_drones,
         )
         confidence_opportunity_fraction_by_drone = _metric_array(
@@ -570,6 +583,7 @@ def run_rollout(
             if scenario.n_drones > 0 and n_survivors > 0
             else np.zeros((scenario.n_drones, n_survivors), dtype=bool)
         )
+        post_survivor_confidence = _survivor_confidence_values(scenario)
         scout_credit = drone_detections & newly_scouted.reshape(1, -1)
         perception = _drone_perception_snapshot(scenario, meters_per_sim)
         perception_step = _update_survivor_exposure_stats(
@@ -578,6 +592,8 @@ def run_rollout(
             drone_detections=drone_detections,
             prev_scouted=prev_scouted,
             post_scouted=post_scouted,
+            survivor_confidence_pre=pre_survivor_confidence,
+            survivor_confidence_post=post_survivor_confidence,
             step=step + 1,
             n_survivors=n_survivors,
         )
@@ -696,6 +712,8 @@ def run_rollout(
             )
             confidence_reward = float(confidence_reward_by_drone[drone_idx])
             confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
+            confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
+            confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
             confidence_opportunity_fraction = float(
                 confidence_opportunity_fraction_by_drone[drone_idx]
             )
@@ -787,6 +805,7 @@ def run_rollout(
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
                 confidence_reward=confidence_reward,
                 confidence_move_reward=confidence_move_reward,
+                confidence_overlap_penalty=confidence_overlap_penalty,
                 scout_reward=scout_reward,
             )
             reward_terms["team"] = team_reward
@@ -863,6 +882,7 @@ def run_rollout(
             confidence_opportunity_fraction_values.append(confidence_opportunity_fraction)
             confidence_opportunity_best_gain_values.append(confidence_opportunity_best_gain)
             confidence_step_detection_probability_by_drone_values.append(confidence_pass_probability)
+            confidence_overlap_fraction_values.append(confidence_overlap_fraction)
             frontier_alignment_values.append(frontier_align)
             frontier_progress_values.append(frontier_progress_frac)
             frontier_uncovered_ratio_values.append(frontier_ratio)
@@ -891,6 +911,7 @@ def run_rollout(
             reward_uav_frontier_values.append(reward_terms["frontier"])
             reward_uav_confidence_values.append(reward_terms["confidence"])
             reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
+            penalty_uav_confidence_overlap_values.append(reward_terms["confidence_overlap_penalty"])
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
             penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
             penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
@@ -994,6 +1015,7 @@ def run_rollout(
             drone_stats["confidence_opportunity_fraction"].append(confidence_opportunity_fraction)
             drone_stats["confidence_opportunity_best_gain"].append(confidence_opportunity_best_gain)
             drone_stats["confidence_pass_probability"].append(confidence_pass_probability)
+            drone_stats["confidence_overlap_fraction"].append(confidence_overlap_fraction)
             drone_stats["frontier_alignment"].append(frontier_align)
             drone_stats["frontier_progress"].append(frontier_progress_frac)
             drone_stats["frontier_uncovered_ratio"].append(frontier_ratio)
@@ -1108,6 +1130,7 @@ def run_rollout(
                     "frontier_reward": reward_terms["frontier"],
                     "confidence_reward": reward_terms["confidence"],
                     "confidence_move_reward": reward_terms["confidence_move"],
+                    "confidence_overlap_penalty": reward_terms["confidence_overlap_penalty"],
                     "confidence_weighted_gain": confidence_weighted_gain_drone,
                     "coverage_reward": reward_terms["coverage"],
                     "move_coverage_reward": reward_terms["move_coverage"],
@@ -1186,6 +1209,7 @@ def run_rollout(
                     "confidence_low_fraction": confidence_low_fraction,
                     "confidence_high_fraction": confidence_high_fraction,
                     "confidence_pass_probability": confidence_pass_probability,
+                    "confidence_overlap_fraction": confidence_overlap_fraction,
                     "confidence_step_detection_probability": confidence_step_detection_probability,
                     "outside_footprint": float(outside_footprint_fraction[drone_idx]),
                     "edge_step": float(is_edge_step),
@@ -1395,6 +1419,7 @@ def run_rollout(
         "avg_confidence_pass_probability": _finite_mean(
             confidence_step_detection_probability_by_drone_values
         ),
+        "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction_values),
         "avg_frontier_alignment": _finite_mean(frontier_alignment_values),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress_values),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_uncovered_ratio_values),
@@ -1416,6 +1441,7 @@ def run_rollout(
         "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
         "avg_reward_uav_confidence": _finite_mean(reward_uav_confidence_values),
         "avg_reward_uav_confidence_move": _finite_mean(reward_uav_confidence_move_values),
+        "avg_penalty_uav_confidence_overlap": _finite_mean(penalty_uav_confidence_overlap_values),
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
         "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
         "avg_penalty_uav_outside_footprint": _finite_mean(penalty_uav_outside_footprint_values),
@@ -1699,6 +1725,8 @@ def _new_survivor_exposure_stats(n_survivors: int) -> list[dict[str, Any]]:
             "scout_cover_factor": math.nan,
             "scout_fire_smoke_factor": math.nan,
             "scout_altitude_quality": math.nan,
+            "scout_confidence_pre": math.nan,
+            "scout_confidence_post": math.nan,
             "land_cover": None,
         })
     return stats
@@ -1766,6 +1794,8 @@ def _update_survivor_exposure_stats(
     drone_detections: np.ndarray,
     prev_scouted: np.ndarray,
     post_scouted: np.ndarray,
+    survivor_confidence_pre: list[float],
+    survivor_confidence_post: list[float],
     step: int,
     n_survivors: int,
 ) -> dict[str, float]:
@@ -1878,6 +1908,10 @@ def _update_survivor_exposure_stats(
             stat["scout_cover_factor"] = float(perception["cover_factor"][detected_choice, survivor_idx])
             stat["scout_fire_smoke_factor"] = float(perception["fire_smoke_factor"][detected_choice, survivor_idx])
             stat["scout_altitude_quality"] = float(perception["altitude_quality"][detected_choice, survivor_idx])
+            if survivor_idx < len(survivor_confidence_pre):
+                stat["scout_confidence_pre"] = float(survivor_confidence_pre[survivor_idx])
+            if survivor_idx < len(survivor_confidence_post):
+                stat["scout_confidence_post"] = float(survivor_confidence_post[survivor_idx])
 
     return {
         "unscouted_survivors": float(unscouted_count),
@@ -1958,6 +1992,8 @@ def _finalize_survivor_exposure_stats(
             "scout_cover_factor": float(stat["scout_cover_factor"]),
             "scout_fire_smoke_factor": float(stat["scout_fire_smoke_factor"]),
             "scout_altitude_quality": float(stat["scout_altitude_quality"]),
+            "scout_confidence_pre": float(stat["scout_confidence_pre"]),
+            "scout_confidence_post": float(stat["scout_confidence_post"]),
             "land_cover": stat.get("land_cover"),
         })
     return finalized
@@ -2030,6 +2066,12 @@ def _survivor_exposure_summary(exposures: list[dict[str, Any]]) -> dict[str, flo
         ]),
         "avg_scout_detection_margin_m": _finite_mean([
             float(entry.get("scout_margin_m", math.nan)) for entry in scouted
+        ]),
+        "avg_scout_confidence_pre": _finite_mean([
+            float(entry.get("scout_confidence_pre", math.nan)) for entry in scouted
+        ]),
+        "avg_scout_confidence_post": _finite_mean([
+            float(entry.get("scout_confidence_post", math.nan)) for entry in scouted
         ]),
         "avg_missed_best_norm_distance": _finite_mean([
             float(entry.get("best_norm_distance", math.nan)) for entry in missed
@@ -2743,6 +2785,7 @@ def _uav_reward_terms(
     coverage_opportunity_available_fraction: float,
     confidence_reward: float,
     confidence_move_reward: float,
+    confidence_overlap_penalty: float,
     scout_reward: float,
 ) -> dict[str, float]:
     grid_cells = float(max(int(getattr(scenario, "fire_grid_size", 1)) ** 2, 1))
@@ -2806,6 +2849,7 @@ def _uav_reward_terms(
         + frontier
         + confidence_reward
         + confidence_move_reward
+        + confidence_overlap_penalty
         + overlap_penalty
         + inter_penalty
         + outside_penalty
@@ -2816,6 +2860,7 @@ def _uav_reward_terms(
         + abs(frontier)
         + abs(confidence_reward)
         + abs(confidence_move_reward)
+        + abs(confidence_overlap_penalty)
         + abs(overlap_penalty)
         + abs(inter_penalty)
         + abs(outside_penalty)
@@ -2827,6 +2872,7 @@ def _uav_reward_terms(
         "frontier": float(frontier),
         "confidence": float(confidence_reward),
         "confidence_move": float(confidence_move_reward),
+        "confidence_overlap_penalty": float(confidence_overlap_penalty),
         "overlap_penalty": float(overlap_penalty),
         "inter_uav_overlap_penalty": float(inter_penalty),
         "outside_footprint_penalty": float(outside_penalty),
@@ -3194,6 +3240,12 @@ def _summarize_survivor_exposure_outcomes(rows: list[dict[str, Any]]) -> list[di
             "mean_scout_margin_m": _finite_mean([
                 float(entry.get("scout_margin_m", math.nan)) for entry in entries
             ]),
+            "mean_scout_confidence_pre": _finite_mean([
+                float(entry.get("scout_confidence_pre", math.nan)) for entry in entries
+            ]),
+            "mean_scout_confidence_post": _finite_mean([
+                float(entry.get("scout_confidence_post", math.nan)) for entry in entries
+            ]),
         })
     return summaries
 
@@ -3264,6 +3316,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "confidence_opportunity_fraction": [],
         "confidence_opportunity_best_gain": [],
         "confidence_pass_probability": [],
+        "confidence_overlap_fraction": [],
         "frontier_alignment": [],
         "frontier_progress": [],
         "frontier_uncovered_ratio": [],
@@ -3286,6 +3339,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "frontier": [],
             "confidence": [],
             "confidence_move": [],
+            "confidence_overlap_penalty": [],
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
             "outside_footprint_penalty": [],
@@ -3390,6 +3444,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     confidence_opportunity_fraction = stats["confidence_opportunity_fraction"]
     confidence_opportunity_best_gain = stats["confidence_opportunity_best_gain"]
     confidence_pass_probability = stats["confidence_pass_probability"]
+    confidence_overlap_fraction = stats["confidence_overlap_fraction"]
     frontier_alignment = stats["frontier_alignment"]
     frontier_progress = stats["frontier_progress"]
     frontier_ratio = stats["frontier_uncovered_ratio"]
@@ -3516,6 +3571,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_confidence_opportunity_fraction": _finite_mean(confidence_opportunity_fraction),
         "avg_confidence_opportunity_best_gain": _finite_mean(confidence_opportunity_best_gain),
         "avg_confidence_pass_probability": _finite_mean(confidence_pass_probability),
+        "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction),
         "avg_frontier_alignment": _finite_mean(frontier_alignment),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_ratio),
@@ -3533,6 +3589,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
         "avg_reward_uav_confidence": _finite_mean(reward_terms["confidence"]),
         "avg_reward_uav_confidence_move": _finite_mean(reward_terms["confidence_move"]),
+        "avg_penalty_uav_confidence_overlap": _finite_mean(
+            reward_terms["confidence_overlap_penalty"]
+        ),
         "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
         "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
         "avg_penalty_uav_outside_footprint": _finite_mean(reward_terms["outside_footprint_penalty"]),
@@ -4036,6 +4095,12 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_scout_detection_margin_m": _finite_mean([
             row["avg_scout_detection_margin_m"] for row in rows
         ]),
+        "mean_scout_confidence_pre": _finite_mean([
+            row["avg_scout_confidence_pre"] for row in rows
+        ]),
+        "mean_scout_confidence_post": _finite_mean([
+            row["avg_scout_confidence_post"] for row in rows
+        ]),
         "mean_missed_best_norm_distance": _finite_mean([
             row["avg_missed_best_norm_distance"] for row in rows
         ]),
@@ -4328,6 +4393,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_confidence_pass_probability": _finite_mean([
             row["avg_confidence_pass_probability"] for row in rows
         ]),
+        "mean_confidence_overlap_fraction": _finite_mean([
+            row["avg_confidence_overlap_fraction"] for row in rows
+        ]),
         "mean_frontier_alignment": _finite_mean([
             row["avg_frontier_alignment"] for row in rows
         ]),
@@ -4390,6 +4458,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_reward_uav_confidence_move": _finite_mean([
             row["avg_reward_uav_confidence_move"] for row in rows
+        ]),
+        "mean_penalty_uav_confidence_overlap": _finite_mean([
+            row["avg_penalty_uav_confidence_overlap"] for row in rows
         ]),
         "mean_penalty_uav_overlap": _finite_mean([
             row["avg_penalty_uav_overlap"] for row in rows
@@ -4758,6 +4829,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "confidence_best_gain_on_revisit",
         "confidence_best_gain_off_revisit",
         "avg_confidence_pass_probability",
+        "avg_confidence_overlap_fraction",
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
         "avg_frontier_uncovered_ratio",
@@ -4775,6 +4847,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_reward_uav_frontier",
         "avg_reward_uav_confidence",
         "avg_reward_uav_confidence_move",
+        "avg_penalty_uav_confidence_overlap",
         "avg_penalty_uav_overlap",
         "avg_penalty_uav_inter_overlap",
         "avg_penalty_uav_outside_footprint",
@@ -4844,6 +4917,8 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "perception_gap": "perception_recall_gap",
         "scout_detect_prob": "avg_scout_detection_probability",
         "scout_norm": "avg_scout_detection_norm_distance",
+        "scout_conf_pre": "avg_scout_confidence_pre",
+        "scout_conf_post": "avg_scout_confidence_post",
         "missed_cum_prob": "avg_missed_cum_detection_probability",
         "missed_best_prob": "avg_missed_best_detection_probability",
         "missed_best_norm": "avg_missed_best_norm_distance",
@@ -4907,6 +4982,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "confidence_revisit_useful_share": "confidence_revisit_useful_share",
         "confidence_revisit_gain_share": "confidence_revisit_gain_share",
         "confidence_pass": "avg_confidence_pass_probability",
+        "confidence_overlap": "avg_confidence_overlap_fraction",
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
         "frontier_ratio": "avg_frontier_uncovered_ratio",
@@ -4927,6 +5003,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "action_frontier_no_new": "action_frontier_aligned_no_new_frac",
         "frontier_reward": "avg_reward_uav_frontier",
         "confidence_move_reward": "avg_reward_uav_confidence_move",
+        "confidence_overlap_penalty": "avg_penalty_uav_confidence_overlap",
         "frontier_share": "avg_frontier_abs_reward_share",
         "frontier_high": "frontier_high_progress_step_frac",
         "frontier_high_no_new": "frontier_high_progress_no_new_frac",
@@ -4995,6 +5072,7 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"conf_rev={drone['confidence_revisit_step_frac']:.2f}/"
             f"{drone['confidence_useful_revisit_step_frac']:.2f}/"
             f"{drone['confidence_wasteful_revisit_step_frac']:.2f} "
+            f"conf_ov={drone['avg_confidence_overlap_fraction']:.2f} "
             f"pass_p={drone['avg_confidence_pass_probability']:.2f} "
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
@@ -5046,6 +5124,7 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"{drone['mean_confidence_useful_revisit_step_frac']:.3f}/"
             f"{drone['mean_confidence_wasteful_revisit_step_frac']:.3f} "
             f"conf_rev_share={drone['mean_confidence_revisit_useful_share']:.3f} "
+            f"conf_ov={drone['mean_avg_confidence_overlap_fraction']:.3f} "
             f"pass_p={drone['mean_avg_confidence_pass_probability']:.3f} "
             f"edge={drone['mean_edge_step_frac']:.3f} "
             f"corner={drone['mean_corner_step_frac']:.3f} "
@@ -5132,7 +5211,9 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"front_prog={item.get('frontier_progress', math.nan):.3f} "
             f"front_score={item.get('frontier_uncovered_ratio', math.nan):.3f} "
             f"front_rew={item.get('frontier_reward', math.nan):.4f} "
-            f"conf_move={item.get('confidence_move_reward', math.nan):.4f}"
+            f"conf_move={item.get('confidence_move_reward', math.nan):.4f} "
+            f"conf_ov={item.get('confidence_overlap_fraction', math.nan):.3f} "
+            f"conf_ov_pen={item.get('confidence_overlap_penalty', math.nan):.4f}"
         )
     return lines
 
@@ -5220,6 +5301,8 @@ def _format_survivor_exposure_outcomes(outcomes: list[dict[str, Any]]) -> list[s
             f"edge_frac={item.get('mean_near_edge_exposure_fraction', math.nan):.3f} "
             f"central_frac={item.get('mean_central_exposure_fraction', math.nan):.3f} "
             f"scout_p={item.get('mean_scout_probability', math.nan):.3f} "
+            f"scout_C={item.get('mean_scout_confidence_pre', math.nan):.3f}/"
+            f"{item.get('mean_scout_confidence_post', math.nan):.3f} "
             f"scout_norm={item.get('mean_scout_norm_distance', math.nan):.3f}"
         )
     return lines
@@ -5331,6 +5414,7 @@ def _plot_time_bins_search_efficiency(ax: Any, summary: dict[str, Any]) -> None:
         ("excess", "excess_overlap", "#d44a3a"),
         ("edge", "edge_step", "#20242c"),
         ("moving no new", "moving_no_new_coverage", "#8a5cf6"),
+        ("conf sat", "confidence_overlap_fraction", "#be185d"),
     ]
     frac_lines = []
     for label, key, color in frac_series:
@@ -5370,6 +5454,7 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("frontier", "frontier_reward", "#8a5cf6", False),
         ("conf", "confidence_reward", "#0f766e", False),
         ("conf move", "confidence_move_reward", "#14b8a6", False),
+        ("conf ov pen", "confidence_overlap_penalty", "#be185d", True),
         ("coverage95", "coverage_threshold_reward", "#0f9d58", False),
         ("scout", "scout_reward", "#d4a72c", False),
         ("team", "team_reward", "#2d8cff", False),
@@ -5748,18 +5833,21 @@ def _plot_survivor_exposure_outcomes(ax: Any, summary: dict[str, Any]) -> None:
         return
     labels = [str(row.get("group", "?")) for row in outcomes]
     x = np.arange(len(labels))
-    width = 0.15
     series = [
         ("cum p", "mean_cumulative_detection_probability", "#4f7cff"),
         ("final C", "mean_final_confidence", "#20242c"),
+        ("scout C pre", "mean_scout_confidence_pre", "#0f766e"),
+        ("scout C post", "mean_scout_confidence_post", "#14b8a6"),
         ("best p", "mean_best_detection_probability", "#36a269"),
         ("best norm", "mean_best_norm_distance", "#d44a3a"),
         ("edge frac", "mean_near_edge_exposure_fraction", "#8a5cf6"),
     ]
+    width = min(0.15, 0.8 / max(len(series), 1))
+    center_offset = 0.5 * (len(series) - 1)
     for idx, (label, key, color) in enumerate(series):
         values = [float(row.get(key, math.nan)) for row in outcomes]
         ax.bar(
-            x + (idx - 2.0) * width,
+            x + (idx - center_offset) * width,
             values,
             width=width,
             label=label,
@@ -6002,6 +6090,8 @@ def write_distribution_plots(
         ("Perception Recall Gap", "perception_recall_gap", (-1.0, 1.0)),
         ("Scout Detection Probability", "avg_scout_detection_probability", (0.0, 1.0)),
         ("Scout Norm Distance", "avg_scout_detection_norm_distance", (0.0, 1.0)),
+        ("Scout Confidence Pre", "avg_scout_confidence_pre", (0.0, 1.0)),
+        ("Scout Confidence Post", "avg_scout_confidence_post", (0.0, 1.0)),
         ("Missed Cum Detection P", "avg_missed_cum_detection_probability", (0.0, 1.0)),
         ("Missed Best Detection P", "avg_missed_best_detection_probability", (0.0, 1.0)),
         ("Missed Best Norm Distance", "avg_missed_best_norm_distance", (0.0, 1.0)),
@@ -6031,6 +6121,7 @@ def write_distribution_plots(
         ("Confidence Revisit", "confidence_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Useful Revisit", "confidence_useful_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Wasteful Revisit", "confidence_wasteful_revisit_step_frac", (0.0, 1.0)),
+        ("Confidence Saturated Footprint", "avg_confidence_overlap_fraction", (0.0, 1.0)),
         ("Confidence Revisit Useful Share", "confidence_revisit_useful_share", (0.0, 1.0)),
         ("Confidence Revisit Gain Share", "confidence_revisit_gain_share", (0.0, 1.0)),
         ("Start Pair Min (m)", "min_start_pair_distance_m", None),
@@ -6039,13 +6130,14 @@ def write_distribution_plots(
         ("Action Frontier Aligned", "action_frontier_aligned_step_frac", (0.0, 1.0)),
         ("Action Frontier No New", "action_frontier_aligned_no_new_frac", (0.0, 1.0)),
         ("Frontier Reward", "avg_reward_uav_frontier", None),
+        ("Confidence Overlap Penalty", "avg_penalty_uav_confidence_overlap", None),
         ("Frontier Reward Share", "avg_frontier_abs_reward_share", (0.0, 1.0)),
         ("High Frontier No New", "frontier_high_progress_no_new_frac", (0.0, 1.0)),
         ("High Frontier Edge", "frontier_high_progress_edge_frac", (0.0, 1.0)),
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(25, 3, figsize=(14, 75), constrained_layout=True)
+    fig, axes = plt.subplots(26, 3, figsize=(14, 78), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -6282,12 +6374,15 @@ def main() -> None:
             f"conf_rev={row['confidence_revisit_step_frac']:.2f}/"
             f"{row['confidence_useful_revisit_step_frac']:.2f}/"
             f"{row['confidence_wasteful_revisit_step_frac']:.2f} "
+            f"conf_ov={row['avg_confidence_overlap_fraction']:.2f} "
             f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
             f"{_fmt_optional(row['avg_scout_time_s'])}s "
             f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
             f"{_fmt_optional(row['all_scouted_time_s'])}s "
             f"exp_recall={row['expected_recall_from_exposure']:.2f} "
             f"scout_p={row['avg_scout_detection_probability']:.2f} "
+            f"scout_C={row['avg_scout_confidence_pre']:.2f}/"
+            f"{row['avg_scout_confidence_post']:.2f} "
             f"scout_norm={row['avg_scout_detection_norm_distance']:.2f} "
             f"miss_cum_p={row['avg_missed_cum_detection_probability']:.2f} "
             f"miss_never/high/edge="
@@ -6372,6 +6467,8 @@ def main() -> None:
         f"scouted_cell_conf={summary['mean_scouted_survivor_final_confidence']:.3f} "
         f"missed_cell_conf={summary['mean_missed_survivor_final_confidence']:.3f} "
         f"scout_p={summary['mean_scout_detection_probability']:.3f} "
+        f"scout_C={summary['mean_scout_confidence_pre']:.3f}/"
+        f"{summary['mean_scout_confidence_post']:.3f} "
         f"scout_norm={summary['mean_scout_detection_norm_distance']:.3f} "
         f"scout_margin={summary['mean_scout_detection_margin_m']:.1f}m "
         f"miss_best_p={summary['mean_missed_best_detection_probability']:.3f} "
@@ -6413,6 +6510,7 @@ def main() -> None:
         f"{summary['mean_confidence_revisit_step_frac']:.3f}/"
         f"{summary['mean_confidence_useful_revisit_step_frac']:.3f}/"
         f"{summary['mean_confidence_wasteful_revisit_step_frac']:.3f} "
+        f"sat_footprint={summary['mean_confidence_overlap_fraction']:.3f} "
         f"useful_share={summary['mean_confidence_revisit_useful_share']:.3f} "
         f"gain_share={summary['mean_confidence_revisit_gain_share']:.3f}"
     )
@@ -6516,6 +6614,7 @@ def main() -> None:
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
         f"confidence={summary['mean_reward_uav_confidence']:.4f} "
         f"conf_move={summary['mean_reward_uav_confidence_move']:.4f} "
+        f"conf_ov_pen={summary['mean_penalty_uav_confidence_overlap']:.4f} "
         f"coverage95={summary['mean_reward_uav_coverage_threshold']:.4f} "
         f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
         f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
