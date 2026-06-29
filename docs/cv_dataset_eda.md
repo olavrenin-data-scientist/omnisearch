@@ -410,27 +410,47 @@ The critical physics issue: near active fire or on recently burned ground, ambie
 | `cv` | `--detection-mode cv` | YOLOv8 on rendered RGB image | Clear daytime, default |
 | `thermal` | `--detection-mode thermal` | Simulated TIR sensor only | Smoke/night scenarios |
 | `cv+thermal` | `--detection-mode cv+thermal` | Both → union fusion | Maximum recall |
+| `motion` | `--detection-mode motion` | Temporal frame differencing | Moving targets only |
+| `cv+motion` | `--detection-mode cv+motion` | CV + motion confirmation boost | Reduce FP confidence |
 
-### 13.4 Fusion Strategies
+### 13.4 Motion Detection (`detection/motion_detector.py`)
 
-| Strategy | Rule | Effect |
-|----------|------|--------|
-| **Union** (default) | Either sensor detects → candidate | Higher recall, more FPs |
-| **Intersection** | Both must detect → confirmed | Highest precision, lower recall |
-| **Weighted** | 0.6×CV_conf + 0.4×TH_conf | Balanced confidence score |
+Frame differencing detects new objects appearing between consecutive rendered drone frames:
 
-### 13.5 Measured Performance Comparison
+1. Convert frames to grayscale
+2. Compute absolute pixel difference from previous frame
+3. Threshold to binary change mask
+4. Find connected components (blobs)
+5. Filter by survivor-plausible size (100–15,000 px)
+
+**Limitations specific to wildfire SAR:**
+- Survivors are mostly **static** (injured/unconscious) — no movement to detect
+- Fire/smoke **movement creates false positives** (flickering, drifting smoke)
+- Requires drone to be **moving** (static hover = no frame difference)
+- First frame always returns empty (no previous to compare)
+
+### 13.5 Fusion Strategies
+
+| Strategy | Mode | Rule | Effect |
+|----------|------|------|--------|
+| **CV+Thermal Union** | `cv+thermal` | Either sensor detects → candidate | Higher recall |
+| **CV+Thermal Intersection** | configurable | Both must detect → confirmed | Highest precision |
+| **CV+Thermal Weighted** | configurable | 0.6×CV_conf + 0.4×TH_conf | Balanced |
+| **CV+Motion Boost** | `cv+motion` | Motion confirms CV → confidence +0.15 | Fewer weak FPs |
+| **CV+Motion Confirm** | configurable | Only motion-confirmed CV passes | Very high precision |
+
+### 13.6 Measured Performance Comparison
 
 Results from `scripts/compare_detection_modes.py` (100 trials per scenario, 3 survivors):
 
-| Scenario | CV Recall | Thermal Recall | CV+Thermal Recall | Winner |
-|----------|:---------:|:--------------:|:-----------------:|--------|
-| Clear | **95.3%** | 75.0% | **98.8%** | Fusion |
-| Light smoke | 56.7% | **62.0%** | **83.5%** | Fusion |
-| Heavy smoke | 56.7% | 54.3% | **80.2%** | Fusion |
-| Active fire | 53.0% | 54.3% | **78.5%** | Fusion |
-| Burned ground (crossover) | **64.7%** | 3.0% | **65.8%** | Fusion (CV rescues) |
-| Mixed | **54.7%** | 4.3% | **56.6%** | Fusion |
+| Scenario | CV | Thermal | Motion | CV+Thermal | CV+Motion | Best |
+|----------|:--:|:-------:|:------:|:----------:|:---------:|------|
+| Clear | **95.3%** | 75.0% | 33.3% | **98.8%** | 95.3% | CV+Th |
+| Light smoke | 56.7% | 62.0% | 33.3% | **83.5%** | 56.7% | CV+Th |
+| Heavy smoke | 56.7% | 54.3% | 33.3% | **80.2%** | 56.7% | CV+Th |
+| Active fire | 53.0% | 54.3% | 33.3% | **78.5%** | 53.0% | CV+Th |
+| Burned ground | **64.7%** | 3.0% | 33.3% | **65.8%** | 64.7% | CV+Th |
+| Mixed | 54.7% | 4.3% | 33.3% | **56.6%** | 54.7% | CV+Th |
 
 **Precision** remains >99% across all modes (false positive rate ≤0.02/frame).
 
@@ -439,9 +459,11 @@ Results from `scripts/compare_detection_modes.py` (100 trials per scenario, 3 su
 1. **CV+Thermal fusion wins every scenario** — complementary failure modes
 2. **Thermal crossover confirmed** — on burned ground (ΔT≈0), thermal collapses to 3% recall; CV maintains 65% and rescues the fusion
 3. **In smoke**, both sensors individually degrade to ~55%, but fusion lifts to 80% (independent failures)
-4. **No training data needed for thermal** — entirely physics-based (closed-form equations from temperature contrast, Beer-Lambert smoke attenuation, altitude quality)
+4. **Motion is the weakest modality** (33.3% recall) — survivors in wildfire are mostly static, and frame differencing requires visible appearance change between consecutive drone frames
+5. **CV+Motion (boost mode)**: same recall as CV alone, but confirmed detections get higher confidence scores — useful for downstream prioritization, not for recall improvement
+6. **No training data needed for thermal or motion** — both are physics/signal-processing based
 
-The fusion approach (cv+thermal) compensates for each sensor's weakness: CV fails in smoke but works on burned ground; thermal fails at crossover but penetrates smoke. Together they cover more scenarios.
+**Conclusion:** CV+Thermal is the recommended fusion for wildfire SAR. Motion detection adds negligible value because survivors are immobile. CV alone remains the strongest single modality for daytime operations.
 
 ---
 

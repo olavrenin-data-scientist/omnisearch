@@ -277,10 +277,12 @@ def main():
     p.add_argument("--cv-tracking-min-hits", type=int, default=2,
                    help="Minimum consecutive detections before a track is confirmed.")
     p.add_argument("--detection-mode", type=str, default="cv",
-                   choices=["cv", "thermal", "cv+thermal"],
+                   choices=["cv", "thermal", "cv+thermal", "motion", "cv+motion"],
                    help="Detection modality: 'cv' (pure computer vision, default), "
                         "'thermal' (simulated thermal IR only), "
-                        "'cv+thermal' (sensor fusion — both run, results merged).")
+                        "'cv+thermal' (sensor fusion — both run, results merged), "
+                        "'motion' (frame differencing only), "
+                        "'cv+motion' (CV with motion confirmation boost).")
     args = p.parse_args()
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
