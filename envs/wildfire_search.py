@@ -3203,14 +3203,7 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp(0.0, 1.0)
         return torch.where(visible, probability, torch.zeros_like(probability)), visible
 
-    def _uav_confidence_best_stencil_gain(
-        self,
-        previous: Tensor,
-        confidence_weight: Tensor,
-    ) -> Tensor:
-        """Best weighted confidence gain from an 8-way max-speed move stencil."""
-        if self.n_drones == 0:
-            return previous.new_zeros(previous.shape[0], 0)
+    def _uav_confidence_stencil_candidates(self, previous: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         B = previous.shape[0]
         D = self.n_drones
         directions = self._uav_stencil_directions(previous.device, previous.dtype)
@@ -3243,13 +3236,112 @@ class WildfireSearchScenario(BaseScenario):
             .expand(B, D, 8)
             .reshape(B, D * 8)
         )
+        return flat_pos, altitude_quality, footprint
+
+    def _uav_confidence_full_grid_stencil_gain(
+        self,
+        previous: Tensor,
+        confidence_weight: Tensor,
+        flat_pos: Tensor,
+        altitude_quality: Tensor,
+        footprint: Tensor,
+    ) -> Tensor:
         probability, _ = self._uav_cell_detection_probability(
             flat_pos,
             altitude_quality=altitude_quality,
             footprint=footprint,
         )
         candidate_gain = (1.0 - previous).clamp(0.0, 1.0).unsqueeze(1) * probability
-        weighted_gain = (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
+        return (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
+
+    def _uav_confidence_patch_stencil_gain(
+        self,
+        previous: Tensor,
+        confidence_weight: Tensor,
+        flat_pos: Tensor,
+        altitude_quality: Tensor,
+        footprint: Tensor,
+    ) -> Tensor:
+        B, C, _ = flat_pos.shape
+        G = int(self.fire_grid_size)
+        device = previous.device
+        dtype = previous.dtype
+        xs, ys, _, _, _, cell_width, cell_height, _ = self._uav_grid_geometry(device, dtype)
+        max_footprint = float(footprint.detach().max().cpu().item()) if footprint.numel() > 0 else 0.0
+        rx = min(G - 1, int(math.ceil(max_footprint / max(float(cell_width), 1e-12))) + 1)
+        ry = min(G - 1, int(math.ceil(max_footprint / max(float(cell_height), 1e-12))) + 1)
+
+        offset_x = torch.arange(-rx, rx + 1, device=device).view(1, 1, 1, -1)
+        offset_y = torch.arange(-ry, ry + 1, device=device).view(1, 1, -1, 1)
+        center_gx, center_gy = self._positions_to_grid(flat_pos)
+        gx_raw = center_gx.view(B, C, 1, 1) + offset_x
+        gy_raw = center_gy.view(B, C, 1, 1) + offset_y
+        valid = (gx_raw >= 0) & (gx_raw < G) & (gy_raw >= 0) & (gy_raw < G)
+        gx = gx_raw.clamp(0, G - 1)
+        gy = gy_raw.clamp(0, G - 1)
+        batch_idx = torch.arange(B, device=device).view(B, 1, 1, 1).expand_as(gx)
+
+        previous_patch = previous[batch_idx, gy, gx]
+        confidence_weight_patch = confidence_weight[batch_idx, gy, gx]
+        cover_factor = self._uav_land_cover_detection_factor(device, dtype)[:, 0]
+        cover_patch = cover_factor[batch_idx, gy, gx]
+
+        center_dx = xs[gx] - flat_pos[..., X].view(B, C, 1, 1)
+        center_dy = ys[gy] - flat_pos[..., Y].view(B, C, 1, 1)
+        center_dist = torch.sqrt(center_dx.square() + center_dy.square())
+        footprint_patch = footprint.to(device=device, dtype=dtype).view(B, C, 1, 1)
+        visible = valid & (center_dist <= footprint_patch)
+        normalized_distance = (center_dist / footprint_patch.clamp_min(1e-6)).clamp(0.0, 1.0)
+        distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
+        probability = (
+            altitude_quality.to(device=device, dtype=dtype).view(B, C, 1, 1)
+            * distance_factor
+            * cover_patch
+        ).clamp(0.0, 1.0)
+        probability = torch.where(visible, probability, torch.zeros_like(probability))
+        weighted_gain = (
+            confidence_weight_patch
+            * (1.0 - previous_patch).clamp(0.0, 1.0)
+            * probability
+        )
+        return weighted_gain.sum(dim=(-1, -2)) / float(G * G)
+
+    def _uav_confidence_best_stencil_gain(
+        self,
+        previous: Tensor,
+        confidence_weight: Tensor,
+    ) -> Tensor:
+        """Best weighted confidence gain from an 8-way max-speed move stencil."""
+        if self.n_drones == 0:
+            return previous.new_zeros(previous.shape[0], 0)
+        B = previous.shape[0]
+        D = self.n_drones
+        flat_pos, altitude_quality, footprint = self._uav_confidence_stencil_candidates(previous)
+        G = int(self.fire_grid_size)
+        _, _, _, _, _, cell_width, cell_height, _ = self._uav_grid_geometry(
+            previous.device,
+            previous.dtype,
+        )
+        max_footprint = float(footprint.detach().max().cpu().item()) if footprint.numel() > 0 else 0.0
+        rx = min(G - 1, int(math.ceil(max_footprint / max(float(cell_width), 1e-12))) + 1)
+        ry = min(G - 1, int(math.ceil(max_footprint / max(float(cell_height), 1e-12))) + 1)
+        patch_area = (2 * rx + 1) * (2 * ry + 1)
+        if self.disable_fire and patch_area < G * G:
+            weighted_gain = self._uav_confidence_patch_stencil_gain(
+                previous,
+                confidence_weight,
+                flat_pos,
+                altitude_quality,
+                footprint,
+            )
+        else:
+            weighted_gain = self._uav_confidence_full_grid_stencil_gain(
+                previous,
+                confidence_weight,
+                flat_pos,
+                altitude_quality,
+                footprint,
+            )
         return weighted_gain.view(B, D, 8).max(dim=2).values
 
     def _uav_confidence_active(self) -> bool:
@@ -4016,6 +4108,144 @@ class WildfireSearchScenario(BaseScenario):
                     out[env_idx, item_idx, base + 3] = score
         return out
 
+    def _uav_frontier_best_sector_features(
+        self,
+        positions: Tensor,
+        scores: Tensor,
+        *,
+        x_grid: Tensor,
+        y_grid: Tensor,
+        sector_width: float,
+        sectors: int,
+        radius: Tensor | None,
+        distance_scale: Tensor | float,
+        ideal_cells: Tensor | float,
+        ownership: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Batched best-sector aggregation for confidence frontier candidates."""
+        B, N, _ = positions.shape
+        G = int(scores.shape[-1])
+        device = positions.device
+        dtype = positions.dtype
+
+        def broadcast_candidate_value(value: Tensor | float) -> Tensor:
+            if torch.is_tensor(value):
+                value_tensor = value.to(device=device, dtype=dtype)
+            else:
+                value_tensor = torch.as_tensor(value, device=device, dtype=dtype)
+            if value_tensor.ndim == 0:
+                return value_tensor.view(1, 1, 1)
+            if value_tensor.ndim == 1:
+                return value_tensor.view(B, 1, 1)
+            if value_tensor.ndim == 2:
+                return value_tensor.view(B, N, 1)
+            return value_tensor.view(B, N, 1)
+
+        dx = x_grid.view(1, 1, 1, G) - positions[..., X].view(B, N, 1, 1)
+        dy = y_grid.view(1, 1, G, 1) - positions[..., Y].view(B, N, 1, 1)
+        dist_sq = dx.square() + dy.square()
+
+        useful_scores = scores.unsqueeze(1).to(device=device, dtype=dtype)
+        if ownership is not None:
+            useful_scores = useful_scores * ownership.to(device=device, dtype=dtype)
+        if radius is None:
+            useful_any = useful_scores > 1e-9
+        else:
+            if torch.is_tensor(radius):
+                radius_tensor = radius.to(device=device, dtype=dtype)
+            else:
+                radius_tensor = torch.as_tensor(radius, device=device, dtype=dtype)
+            if radius_tensor.ndim == 0:
+                radius_sq = radius_tensor.square().view(1, 1, 1, 1)
+            elif radius_tensor.ndim == 1:
+                radius_sq = radius_tensor.square().view(B, 1, 1, 1)
+            else:
+                radius_sq = radius_tensor.square().view(B, N, 1, 1)
+            useful_any = (dist_sq <= radius_sq) & (useful_scores > 1e-9)
+
+        angles = torch.atan2(dy, dx)
+        sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
+        weighted = useful_any.to(dtype=dtype) * useful_scores
+
+        flat_index = sector_index.reshape(B * N, G * G)
+        flat_weight = weighted.reshape(B * N, G * G)
+        sector_weight = torch.zeros(B * N, sectors, device=device, dtype=dtype)
+        sector_vec_x = torch.zeros_like(sector_weight)
+        sector_vec_y = torch.zeros_like(sector_weight)
+        sector_weight.scatter_add_(1, flat_index, flat_weight)
+        sector_vec_x.scatter_add_(1, flat_index, (dx * weighted).reshape(B * N, G * G))
+        sector_vec_y.scatter_add_(1, flat_index, (dy * weighted).reshape(B * N, G * G))
+
+        sector_weight = sector_weight.view(B, N, sectors)
+        sector_vec_x = sector_vec_x.view(B, N, sectors)
+        sector_vec_y = sector_vec_y.view(B, N, sectors)
+        nonzero = sector_weight > 0.0
+        safe_weight = sector_weight.clamp_min(1e-9)
+        vec_x = sector_vec_x / safe_weight
+        vec_y = sector_vec_y / safe_weight
+        vec_norm = torch.sqrt(vec_x.square() + vec_y.square()).clamp_min(1e-9)
+        sector_dirs = torch.stack((vec_x / vec_norm, vec_y / vec_norm), dim=-1)
+        sector_dirs = torch.where(nonzero.unsqueeze(-1), sector_dirs, torch.zeros_like(sector_dirs))
+        sector_distances = torch.where(
+            nonzero,
+            (vec_norm / broadcast_candidate_value(distance_scale).clamp_min(1e-9)).clamp(0.0, 1.0),
+            torch.zeros_like(sector_weight),
+        )
+        sector_scores = torch.where(
+            nonzero,
+            (sector_weight / broadcast_candidate_value(ideal_cells).clamp_min(1e-9)).clamp(0.0, 1.0),
+            torch.zeros_like(sector_weight),
+        )
+
+        best_score, best_sector = sector_scores.max(dim=-1)
+        has_score = best_score > 1e-9
+        gather_idx = best_sector.unsqueeze(-1)
+        best_dirs = torch.gather(
+            sector_dirs,
+            2,
+            best_sector.view(B, N, 1, 1).expand(B, N, 1, 2),
+        ).squeeze(2)
+        best_dist = torch.gather(sector_distances, 2, gather_idx).squeeze(-1)
+        features = torch.cat(
+            (best_dirs, best_dist.unsqueeze(-1), best_score.unsqueeze(-1)),
+            dim=-1,
+        )
+        features = torch.where(has_score.unsqueeze(-1), features, torch.zeros_like(features))
+        selected_mask = (
+            useful_any
+            & (sector_index == best_sector.view(B, N, 1, 1))
+            & has_score.view(B, N, 1, 1)
+        )
+        return features, selected_mask
+
+    def _uav_frontier_nearest_other_ownership(
+        self,
+        positions: Tensor,
+        selected_indices: Tensor,
+        *,
+        x_grid: Tensor,
+        y_grid: Tensor,
+    ) -> Tensor:
+        """Ownership weight for selected UAVs against their nearest teammate."""
+        B, N, _ = positions.shape
+        G = int(x_grid.shape[-1])
+        device = positions.device
+        dtype = positions.dtype
+        batch_idx = torch.arange(B, device=device)
+        selected_pos = positions[batch_idx, selected_indices]
+
+        self_dx = x_grid.view(1, 1, G) - selected_pos[:, X].view(B, 1, 1)
+        self_dy = y_grid.view(1, G, 1) - selected_pos[:, Y].view(B, 1, 1)
+        self_dist = (self_dx.square() + self_dy.square()).sqrt()
+
+        other_mask = torch.ones(B, N, device=device, dtype=torch.bool)
+        other_mask[batch_idx, selected_indices] = False
+        other_positions = positions[other_mask].view(B, N - 1, 2)
+        other_dx = x_grid.view(1, 1, 1, G) - other_positions[..., X].view(B, N - 1, 1, 1)
+        other_dy = y_grid.view(1, 1, G, 1) - other_positions[..., Y].view(B, N - 1, 1, 1)
+        other_dist = (other_dx.square() + other_dy.square()).sqrt().amin(dim=1)
+        return (other_dist / (self_dist + other_dist + 1e-9)).unsqueeze(1).to(dtype=dtype)
+
     def _uav_frontier_local_global_features_for_positions(self, positions: Tensor) -> Tensor:
         """Confidence frontier with one tactical local and one diversified global candidate.
 
@@ -4045,8 +4275,13 @@ class WildfireSearchScenario(BaseScenario):
             device=positions.device,
             dtype=positions.dtype,
         ).clamp_min(1e-9)
-        local_radius_sim = (float(self.uav_frontier_obs_radius_m) * sim_units_per_meter).clamp_min(1e-9)
-        global_distance_scale = max(float(math.hypot(2.0 * self.x_semidim, 2.0 * self.y_semidim)), 1e-9)
+        local_radius_sim = (
+            float(self.uav_frontier_obs_radius_m) * sim_units_per_meter
+        ).clamp_min(1e-9)
+        global_distance_scale = max(
+            float(math.hypot(2.0 * self.x_semidim, 2.0 * self.y_semidim)),
+            1e-9,
+        )
         frontier_scores = self._uav_frontier_cell_scores(
             device=positions.device,
             dtype=positions.dtype,
@@ -4057,122 +4292,52 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp_min(1.0)
         global_ideal_cells = max(float(G * G) / float(sectors), 1.0)
 
-        def best_sector_feature(
-            *,
-            pos: Tensor,
-            scores: Tensor,
-            radius: Tensor | None,
-            distance_scale: Tensor | float,
-            ideal_cells: Tensor | float,
-            ownership: Tensor | None = None,
-        ) -> tuple[Tensor, Tensor | None]:
-            dx = x_grid - pos[X]
-            dy = y_grid - pos[Y]
-            dist_sq = dx.square() + dy.square()
-            dist = dist_sq.sqrt()
-            useful_scores = scores
-            if ownership is not None:
-                useful_scores = useful_scores * ownership
-            if radius is None:
-                useful_any = useful_scores > 1e-9
-            else:
-                useful_any = (dist_sq <= radius.square()) & (useful_scores > 1e-9)
-            feature = torch.zeros(4, device=positions.device, dtype=positions.dtype)
+        local_features, _ = self._uav_frontier_best_sector_features(
+            positions,
+            frontier_scores,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            sector_width=sector_width,
+            sectors=sectors,
+            radius=local_radius_sim,
+            distance_scale=local_radius_sim,
+            ideal_cells=local_ideal_cells,
+        )
+        out[:, :, :4] = local_features
 
-            angles = torch.atan2(dy, dx)
-            sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
-            weighted = useful_any.to(dtype=positions.dtype) * useful_scores
-            flat_index = sector_index.reshape(-1)
-            flat_weight = weighted.reshape(-1)
-            sector_weight = torch.zeros(sectors, device=positions.device, dtype=positions.dtype)
-            sector_vec_x = torch.zeros_like(sector_weight)
-            sector_vec_y = torch.zeros_like(sector_weight)
-            sector_weight.scatter_add_(0, flat_index, flat_weight)
-            sector_vec_x.scatter_add_(0, flat_index, (dx * weighted).reshape(-1))
-            sector_vec_y.scatter_add_(0, flat_index, (dy * weighted).reshape(-1))
-
-            nonzero = sector_weight > 0.0
-            safe_weight = sector_weight.clamp_min(1e-9)
-            vec_x = sector_vec_x / safe_weight
-            vec_y = sector_vec_y / safe_weight
-            vec_norm = torch.sqrt(vec_x.square() + vec_y.square()).clamp_min(1e-9)
-            sector_dirs = torch.stack((vec_x / vec_norm, vec_y / vec_norm), dim=-1)
-            sector_dirs = torch.where(nonzero.unsqueeze(-1), sector_dirs, torch.zeros_like(sector_dirs))
-            sector_distances = torch.where(
-                nonzero,
-                (vec_norm / distance_scale).clamp(0.0, 1.0),
-                torch.zeros_like(sector_weight),
-            )
-            sector_scores = torch.where(
-                nonzero,
-                (sector_weight / ideal_cells).clamp(0.0, 1.0),
-                torch.zeros_like(sector_weight),
-            )
-
-            score, sector_idx_t = sector_scores.max(dim=0)
-            if float(score.detach().cpu().item()) <= 1e-9:
-                return feature, None
-            sector_idx = int(sector_idx_t.detach().cpu().item())
-            feature[:2] = sector_dirs[sector_idx]
-            feature[2] = sector_distances[sector_idx]
-            feature[3] = score
-            selected_mask = useful_any & (sector_index == sector_idx)
-            return feature, selected_mask
-
-        for env_idx in range(B):
-            env_scores = frontier_scores[env_idx]
-            env_positions = positions[env_idx]
-            local_radius = local_radius_sim[env_idx]
-            local_scale = local_radius.clamp_min(1e-9)
-            local_ideal = local_ideal_cells[env_idx]
-
-            for drone_idx in range(N):
-                local_feature, _ = best_sector_feature(
-                    pos=env_positions[drone_idx],
-                    scores=env_scores,
-                    radius=local_radius,
-                    distance_scale=local_scale,
-                    ideal_cells=local_ideal,
+        remaining_scores = frontier_scores.clone()
+        assignment_order = torch.argsort(out[:, :, 3], dim=1, stable=True)
+        batch_idx = torch.arange(B, device=positions.device)
+        for rank_idx in range(N):
+            drone_idx = assignment_order[:, rank_idx]
+            selected_positions = positions[batch_idx, drone_idx].unsqueeze(1)
+            ownership = None
+            if self.uav_frontier_ownership and N > 1:
+                ownership = self._uav_frontier_nearest_other_ownership(
+                    positions,
+                    drone_idx,
+                    x_grid=x_grid,
+                    y_grid=y_grid,
                 )
-                out[env_idx, drone_idx, :4] = local_feature
 
-            remaining_scores = env_scores.clone()
-            local_scores = out[env_idx, :, 3]
-            assignment_order = sorted(
-                range(N),
-                key=lambda idx: float(local_scores[idx].detach().cpu().item()),
+            global_feature, selected_mask = self._uav_frontier_best_sector_features(
+                selected_positions,
+                remaining_scores,
+                x_grid=x_grid,
+                y_grid=y_grid,
+                sector_width=sector_width,
+                sectors=sectors,
+                radius=None,
+                distance_scale=global_distance_scale,
+                ideal_cells=global_ideal_cells,
+                ownership=ownership,
             )
-
-            for drone_idx in assignment_order:
-                pos = env_positions[drone_idx]
-                dx = x_grid - pos[X]
-                dy = y_grid - pos[Y]
-                dist = (dx.square() + dy.square()).sqrt()
-                ownership = None
-                if self.uav_frontier_ownership and N > 1:
-                    other_mask = torch.ones(N, device=positions.device, dtype=torch.bool)
-                    other_mask[drone_idx] = False
-                    other_positions = env_positions[other_mask]
-                    other_dx = x_grid.view(1, 1, G) - other_positions[:, X].view(-1, 1, 1)
-                    other_dy = y_grid.view(1, G, 1) - other_positions[:, Y].view(-1, 1, 1)
-                    other_dist = (other_dx.square() + other_dy.square()).sqrt().amin(dim=0)
-                    ownership = other_dist / (dist + other_dist + 1e-9)
-
-                global_feature, selected_mask = best_sector_feature(
-                    pos=pos,
-                    scores=remaining_scores,
-                    radius=None,
-                    distance_scale=global_distance_scale,
-                    ideal_cells=global_ideal_cells,
-                    ownership=ownership,
-                )
-                out[env_idx, drone_idx, 4:8] = global_feature
-                if selected_mask is not None:
-                    remaining_scores = torch.where(
-                        selected_mask,
-                        torch.zeros_like(remaining_scores),
-                        remaining_scores,
-                    )
+            out[batch_idx, drone_idx, 4:8] = global_feature[:, 0]
+            remaining_scores = torch.where(
+                selected_mask[:, 0],
+                torch.zeros_like(remaining_scores),
+                remaining_scores,
+            )
         return out
 
     def _uav_frontier_alignment_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:

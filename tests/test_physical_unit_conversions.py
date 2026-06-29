@@ -229,6 +229,166 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario._pre_step_drone_pos = torch.zeros(1, n_drones, 2)
         return scenario
 
+    def _reference_confidence_local_global_frontier_features(self, scenario, positions):
+        if positions.ndim != 3:
+            raise ValueError("positions must have shape [B, N, 2]")
+        B, N, _ = positions.shape
+        out = torch.zeros(B, N, 8, device=positions.device, dtype=positions.dtype)
+        if B == 0 or N == 0:
+            return out
+
+        sectors = int(scenario.uav_frontier_sectors)
+        G = int(scenario.fire_grid_size)
+        _, _, x_grid, y_grid, _, _, _, cell_area = scenario._uav_grid_geometry(
+            positions.device,
+            positions.dtype,
+        )
+        sim_units_per_meter = scenario.terrain_sim_units_per_meter.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).clamp_min(1e-9)
+        local_radius_sim = (
+            float(scenario.uav_frontier_obs_radius_m) * sim_units_per_meter
+        ).clamp_min(1e-9)
+        global_distance_scale = max(
+            float(math.hypot(2.0 * scenario.x_semidim, 2.0 * scenario.y_semidim)),
+            1e-9,
+        )
+        frontier_scores = scenario._uav_frontier_cell_scores(
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        sector_width, _ = scenario._uav_sector_geometry(sectors, positions.device, positions.dtype)
+        local_ideal_cells = (
+            math.pi * local_radius_sim.square() / cell_area / float(sectors)
+        ).clamp_min(1.0)
+        global_ideal_cells = max(float(G * G) / float(sectors), 1.0)
+
+        def best_sector_feature(pos, scores, radius, distance_scale, ideal_cells, ownership=None):
+            dx = x_grid - pos[0]
+            dy = y_grid - pos[1]
+            dist_sq = dx.square() + dy.square()
+            dist = dist_sq.sqrt()
+            useful_scores = scores
+            if ownership is not None:
+                useful_scores = useful_scores * ownership
+            if radius is None:
+                useful_any = useful_scores > 1e-9
+            else:
+                useful_any = (dist_sq <= radius.square()) & (useful_scores > 1e-9)
+            feature = torch.zeros(4, device=positions.device, dtype=positions.dtype)
+
+            angles = torch.atan2(dy, dx)
+            sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
+            weighted = useful_any.to(dtype=positions.dtype) * useful_scores
+            flat_index = sector_index.reshape(-1)
+            flat_weight = weighted.reshape(-1)
+            sector_weight = torch.zeros(sectors, device=positions.device, dtype=positions.dtype)
+            sector_vec_x = torch.zeros_like(sector_weight)
+            sector_vec_y = torch.zeros_like(sector_weight)
+            sector_weight.scatter_add_(0, flat_index, flat_weight)
+            sector_vec_x.scatter_add_(0, flat_index, (dx * weighted).reshape(-1))
+            sector_vec_y.scatter_add_(0, flat_index, (dy * weighted).reshape(-1))
+
+            nonzero = sector_weight > 0.0
+            safe_weight = sector_weight.clamp_min(1e-9)
+            vec_x = sector_vec_x / safe_weight
+            vec_y = sector_vec_y / safe_weight
+            vec_norm = torch.sqrt(vec_x.square() + vec_y.square()).clamp_min(1e-9)
+            sector_dirs = torch.stack((vec_x / vec_norm, vec_y / vec_norm), dim=-1)
+            sector_dirs = torch.where(nonzero.unsqueeze(-1), sector_dirs, torch.zeros_like(sector_dirs))
+            sector_distances = torch.where(
+                nonzero,
+                (vec_norm / distance_scale).clamp(0.0, 1.0),
+                torch.zeros_like(sector_weight),
+            )
+            sector_scores = torch.where(
+                nonzero,
+                (sector_weight / ideal_cells).clamp(0.0, 1.0),
+                torch.zeros_like(sector_weight),
+            )
+
+            score, sector_idx_t = sector_scores.max(dim=0)
+            if float(score.detach().cpu().item()) <= 1e-9:
+                return feature, None
+            sector_idx = int(sector_idx_t.detach().cpu().item())
+            feature[:2] = sector_dirs[sector_idx]
+            feature[2] = sector_distances[sector_idx]
+            feature[3] = score
+            selected_mask = useful_any & (sector_index == sector_idx)
+            return feature, selected_mask
+
+        for env_idx in range(B):
+            env_scores = frontier_scores[env_idx]
+            env_positions = positions[env_idx]
+            local_radius = local_radius_sim[env_idx]
+            local_scale = local_radius.clamp_min(1e-9)
+            local_ideal = local_ideal_cells[env_idx]
+
+            for drone_idx in range(N):
+                local_feature, _ = best_sector_feature(
+                    env_positions[drone_idx],
+                    env_scores,
+                    local_radius,
+                    local_scale,
+                    local_ideal,
+                )
+                out[env_idx, drone_idx, :4] = local_feature
+
+            remaining_scores = env_scores.clone()
+            local_scores = out[env_idx, :, 3]
+            assignment_order = sorted(
+                range(N),
+                key=lambda idx: float(local_scores[idx].detach().cpu().item()),
+            )
+
+            for drone_idx in assignment_order:
+                pos = env_positions[drone_idx]
+                dx = x_grid - pos[0]
+                dy = y_grid - pos[1]
+                dist = (dx.square() + dy.square()).sqrt()
+                ownership = None
+                if scenario.uav_frontier_ownership and N > 1:
+                    other_mask = torch.ones(N, device=positions.device, dtype=torch.bool)
+                    other_mask[drone_idx] = False
+                    other_positions = env_positions[other_mask]
+                    other_dx = x_grid.view(1, 1, G) - other_positions[:, 0].view(-1, 1, 1)
+                    other_dy = y_grid.view(1, G, 1) - other_positions[:, 1].view(-1, 1, 1)
+                    other_dist = (other_dx.square() + other_dy.square()).sqrt().amin(dim=0)
+                    ownership = other_dist / (dist + other_dist + 1e-9)
+
+                global_feature, selected_mask = best_sector_feature(
+                    pos,
+                    remaining_scores,
+                    None,
+                    global_distance_scale,
+                    global_ideal_cells,
+                    ownership=ownership,
+                )
+                out[env_idx, drone_idx, 4:8] = global_feature
+                if selected_mask is not None:
+                    remaining_scores = torch.where(
+                        selected_mask,
+                        torch.zeros_like(remaining_scores),
+                        remaining_scores,
+                    )
+        return out
+
+    def _reference_uav_confidence_best_stencil_gain(self, scenario, previous, confidence_weight):
+        if scenario.n_drones == 0:
+            return previous.new_zeros(previous.shape[0], 0)
+        B = previous.shape[0]
+        D = scenario.n_drones
+        flat_pos, altitude_quality, footprint = scenario._uav_confidence_stencil_candidates(previous)
+        probability, _ = scenario._uav_cell_detection_probability(
+            flat_pos,
+            altitude_quality=altitude_quality,
+            footprint=footprint,
+        )
+        candidate_gain = (1.0 - previous).clamp(0.0, 1.0).unsqueeze(1) * probability
+        weighted_gain = (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
+        return weighted_gain.view(B, D, 8).max(dim=2).values
+
     def test_coverage_uses_camera_footprint(self):
         scenario = self._coverage_scenario()
         positions = torch.zeros(1, 1, 2)
@@ -498,6 +658,46 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         off_diag = cosine[~torch.eye(3, dtype=torch.bool)]
         self.assertLess(float(off_diag.max()), 0.95)
 
+    def test_confidence_local_global_frontier_matches_loop_reference(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=16)
+        scenario._world.batch_dim = 2
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_mode = "local_global"
+        scenario.uav_frontier_source = "confidence"
+        scenario.uav_frontier_obs_radius_m = 5.0
+        scenario.coverage_grid = torch.zeros(2, 16, 16, dtype=torch.bool)
+        scenario.uav_confidence_grid = torch.ones(2, 16, 16)
+        scenario.land_cover_grid = torch.zeros(2, 16, 16, dtype=torch.long)
+        scenario.drone_altitude = torch.full((2, 3), 0.10)
+        scenario.drone_altitude_quality = torch.ones(2, 3)
+        scenario.drone_min_footprint_by_env = torch.zeros(2)
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.1, 0.1])
+        scenario._pre_step_drone_pos = torch.zeros(2, 3, 2)
+        scenario.uav_confidence_grid[0, :4, :4] = 0.0
+        scenario.uav_confidence_grid[0, :4, -4:] = 0.10
+        scenario.uav_confidence_grid[0, -4:, 6:10] = 0.20
+        scenario.uav_confidence_grid[0, 7:10, 7:10] = 0.30
+        positions = torch.tensor(
+            [
+                [[-0.70, -0.70], [0.70, -0.70], [0.0, 0.70]],
+                [[-0.60, 0.40], [0.10, -0.50], [0.65, 0.45]],
+            ],
+            dtype=torch.float32,
+        )
+
+        for ownership in (False, True):
+            scenario.uav_frontier_ownership = ownership
+            actual = scenario._uav_frontier_local_global_features_for_positions(positions)
+            expected = self._reference_confidence_local_global_frontier_features(
+                scenario,
+                positions,
+            )
+            self.assertTrue(
+                torch.allclose(actual, expected, atol=1e-6, rtol=1e-6),
+                msg=f"ownership={ownership} max diff={(actual - expected).abs().max()}",
+            )
+            self.assertTrue(torch.all(actual[1] == 0.0))
+
     def test_cached_frontier_observation_matches_all_drone_features(self):
         scenario = self._coverage_scenario(n_drones=3, grid_size=16)
         scenario.uav_frontier_obs = True
@@ -585,6 +785,83 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.agent_radius = 0.1
         scenario._pre_step_drone_pos = torch.tensor([[[0.85, 0.0]]])
         previous = torch.zeros(1, 1, 1)
+
+        flat_pos, _, _ = scenario._uav_confidence_stencil_candidates(previous)
+        candidate_pos = flat_pos.view(1, 1, 8, 2)
+
+        self.assertLessEqual(float(candidate_pos[..., 0].max()), 0.9 + 1e-6)
+        self.assertGreaterEqual(float(candidate_pos[..., 0].min()), -0.9 - 1e-6)
+        self.assertLessEqual(float(candidate_pos[..., 1].max()), 0.9 + 1e-6)
+        self.assertGreaterEqual(float(candidate_pos[..., 1].min()), -0.9 - 1e-6)
+        self.assertAlmostEqual(float(candidate_pos[0, 0, 0, 0]), 0.9, places=6)
+
+    def test_uav_confidence_best_stencil_patch_matches_full_grid_reference(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=32)
+        scenario._world.batch_dim = 2
+        scenario.disable_fire = True
+        scenario.drone_cover_detection_factors = torch.tensor(
+            [1.0, 0.75, 0.5, 0.35, 0.9, 0.65, 0.45, 0.25],
+            dtype=torch.float32,
+        )
+        yy, xx = torch.meshgrid(torch.arange(32), torch.arange(32), indexing="ij")
+        scenario.land_cover_grid = torch.stack(
+            [
+                (xx + yy).remainder(8),
+                (2 * xx + yy).remainder(8),
+            ],
+            dim=0,
+        ).long()
+        scenario.drone_altitude = torch.tensor(
+            [[0.08, 0.10, 0.12], [0.09, 0.07, 0.11]],
+            dtype=torch.float32,
+        )
+        scenario.drone_altitude_quality = torch.tensor(
+            [[1.0, 0.8, 0.6], [0.9, 0.7, 0.5]],
+            dtype=torch.float32,
+        )
+        scenario.drone_min_footprint_by_env = torch.zeros(2)
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.1, 0.1], dtype=torch.float32)
+        scenario._pre_step_drone_pos = torch.tensor(
+            [
+                [[-0.88, -0.82], [0.0, 0.0], [0.82, 0.84]],
+                [[0.86, -0.86], [-0.40, 0.55], [0.40, -0.55]],
+            ],
+            dtype=torch.float32,
+        )
+        scenario._invalidate_uav_terrain_caches()
+
+        grid = torch.linspace(0.05, 0.95, 32 * 32, dtype=torch.float32).view(32, 32)
+        previous = torch.stack((grid, torch.flip(grid, dims=[0, 1])), dim=0)
+        confidence_weight = 0.05 + (1.0 - previous).pow(2.0)
+
+        actual = scenario._uav_confidence_best_stencil_gain(previous, confidence_weight)
+        expected = self._reference_uav_confidence_best_stencil_gain(
+            scenario,
+            previous,
+            confidence_weight,
+        )
+
+        self.assertTrue(
+            torch.allclose(actual, expected, atol=1e-6, rtol=1e-6),
+            msg=f"max diff={(actual - expected).abs().max()}",
+        )
+
+        no_gain_previous = torch.ones_like(previous)
+        no_gain_weight = torch.ones_like(previous)
+        actual_zero = scenario._uav_confidence_best_stencil_gain(no_gain_previous, no_gain_weight)
+        expected_zero = self._reference_uav_confidence_best_stencil_gain(
+            scenario,
+            no_gain_previous,
+            no_gain_weight,
+        )
+        self.assertTrue(torch.allclose(actual_zero, expected_zero, atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.all(actual_zero == 0.0))
+
+    def test_uav_confidence_best_stencil_uses_full_grid_when_fire_enabled(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.disable_fire = False
+        scenario._pre_step_drone_pos = torch.zeros(1, 1, 2)
+        previous = torch.zeros(1, 1, 1)
         confidence_weight = torch.ones_like(previous)
         recorded = {}
 
@@ -598,8 +875,9 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         best_gain = scenario._uav_confidence_best_stencil_gain(previous, confidence_weight)
 
-        self.assertLessEqual(float(recorded["pos"][..., 0].max()), 0.9 + 1e-6)
-        self.assertAlmostEqual(float(best_gain[0, 0]), 0.9, places=6)
+        self.assertIn("pos", recorded)
+        self.assertEqual(recorded["pos"].shape, (1, 8, 2))
+        self.assertAlmostEqual(float(best_gain[0, 0]), 0.95, places=6)
 
     def test_uav_move_coverage_reward_scales_with_new_cells_and_displacement(self):
         scenario = self._coverage_scenario(grid_size=16)
