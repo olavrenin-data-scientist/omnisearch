@@ -204,12 +204,15 @@ class SimulationCvAdapter:
         self._tracker_enabled = False
 
         # Detection mode: "cv" (pure CV, default), "thermal" (simulated TIR only),
-        # "cv+thermal" (sensor fusion — both sensors run, results merged).
+        # "cv+thermal" (sensor fusion), "motion" (frame differencing only),
+        # "cv+motion" (CV with motion confirmation/boost).
         self.detection_mode = str(detection_mode).lower()
-        if self.detection_mode not in ("cv", "thermal", "cv+thermal"):
-            raise ValueError(f"detection_mode must be 'cv', 'thermal', or 'cv+thermal', got {detection_mode!r}")
+        _valid_modes = ("cv", "thermal", "cv+thermal", "motion", "cv+motion")
+        if self.detection_mode not in _valid_modes:
+            raise ValueError(f"detection_mode must be one of {_valid_modes}, got {detection_mode!r}")
         self._thermal_model = None
         self._thermal_seed = int(thermal_seed if thermal_seed is not None else seed)
+        self._motion_detector = None
 
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
@@ -326,6 +329,24 @@ class SimulationCvAdapter:
             smoke_grid=wildfire_state.smoke_grid if wildfire_state else None,
             sim_units_per_meter=self.sim_units_per_meter,
             grid_size=self.grid_size,
+        )
+
+    def _get_motion_detector(self):
+        """Lazily initialize the motion detector."""
+        if self._motion_detector is None:
+            from .motion_detector import MotionDetector
+            self._motion_detector = MotionDetector()
+        return self._motion_detector
+
+    def _run_motion_detection(self, view: "Image.Image", drone_xy, footprint_world, smoke_load: float = 0.0) -> list[dict]:
+        """Run motion detection on the current rendered frame."""
+        motion = self._get_motion_detector()
+        return motion.detect(
+            view,
+            drone_xy=drone_xy,
+            footprint_world=footprint_world,
+            image_size=self.image_size,
+            smoke_load=smoke_load,
         )
 
     def _altitude_adjusted_conf(self, altitude_m: float) -> float:
@@ -678,6 +699,49 @@ class SimulationCvAdapter:
                 cv_detections=detection_records,
                 thermal_detections=thermal_detections,
                 fusion_mode="union",
+            )
+            detection_records = fused
+
+        # Motion detection modes
+        motion_detections = None
+        if self.detection_mode in ("motion", "cv+motion"):
+            smoke_load = 0.0
+            if wildfire_state is not None and wildfire_state.smoke_grid is not None:
+                grid_h, grid_w = wildfire_state.smoke_grid.shape
+                half = footprint_world * 0.5
+                cx, cy = drone.world_xy
+                c0 = max(0, int(np.floor((cx - half + 1.0) * 0.5 * grid_w)))
+                c1 = min(grid_w, int(np.ceil((cx + half + 1.0) * 0.5 * grid_w)))
+                r0 = max(0, int(np.floor((cy - half + 1.0) * 0.5 * grid_h)))
+                r1 = min(grid_h, int(np.ceil((cy + half + 1.0) * 0.5 * grid_h)))
+                smoke_patch = wildfire_state.smoke_grid[r0:r1, c0:c1]
+                if smoke_patch.size > 0:
+                    smoke_load = float(smoke_patch.mean())
+
+            motion_detections = self._run_motion_detection(
+                view, drone.world_xy, footprint_world, smoke_load=smoke_load
+            )
+
+        if self.detection_mode == "motion":
+            # Replace CV detections with motion-only results
+            detection_records = []
+            for md in (motion_detections or []):
+                detection_records.append({
+                    "class_name": "person",
+                    "confidence": md["confidence"],
+                    "bbox_xyxy": md["bbox_xyxy"],
+                    "center_px": md["center_px"],
+                    "matched_survivor_index": None,
+                    "sensor": "motion",
+                    "area_px": md.get("area_px"),
+                    "detection_probability": md.get("detection_probability"),
+                })
+        elif self.detection_mode == "cv+motion":
+            from .motion_detector import fuse_cv_motion
+            fused = fuse_cv_motion(
+                cv_detections=detection_records,
+                motion_detections=motion_detections or [],
+                fusion_mode="boost",
             )
             detection_records = fused
 
