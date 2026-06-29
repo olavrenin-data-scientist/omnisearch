@@ -284,13 +284,11 @@ def run_rollout(
                 [agent.state.pos for agent in scenario.world.agents[:scenario.n_drones]],
                 dim=1,
             )
-            frontier_obs = (
-                scenario._uav_frontier_features_for_positions(pre_drone_pos_tensor)[0]
-                .detach()
-                .cpu()
-                .numpy()
-                .astype(float)
+            frontier_tensor = scenario._cached_uav_frontier_features_for_positions(
+                "diagnostic_current",
+                pre_drone_pos_tensor,
             )
+            frontier_obs = frontier_tensor[0].detach().cpu().numpy().astype(float)
             coverage_signal = _coverage_signal_snapshot(scenario, pre_drone_pos_tensor, frontier_obs)
             pre_footprint_radius_sim = (
                 scenario._drone_camera_ranges()[0]
@@ -332,6 +330,7 @@ def run_rollout(
             )
             frontier_mode = str(getattr(scenario, "uav_frontier_mode", "centroid")).replace("-", "_")
             frontier_top_k = int(getattr(scenario, "uav_frontier_top_k", 1))
+            current_frontier_config = _current_frontier_config(scenario)
             frontier_usefulness = _frontier_usefulness_diagnostics(
                 scenario=scenario,
                 geometry=coverage_geometry,
@@ -344,43 +343,66 @@ def run_rollout(
                 frontier_mode=frontier_mode,
                 frontier_top_k=frontier_top_k,
             )
-            confidence_frontier_obs = _shadow_frontier_features(
+            confidence_frontier_config = _frontier_config_for(
                 scenario,
-                pre_drone_pos_tensor,
                 source="confidence",
                 mode=frontier_mode,
             )
-            confidence_frontier_usefulness = _frontier_usefulness_diagnostics(
-                scenario=scenario,
-                geometry=coverage_geometry,
-                positions=pre_drone_pos_array,
-                footprint_radii_sim=pre_footprint_radius_sim,
-                pre_team_coverage=pre_team_coverage,
-                max_step_sim=max_step_sim,
-                frontier_obs=confidence_frontier_obs,
-                counterfactual=counterfactual,
-                frontier_mode=frontier_mode,
-                frontier_top_k=frontier_top_k,
-            )
-            confidence_lg_frontier_obs = _shadow_frontier_features(
+            if _frontier_configs_match(confidence_frontier_config, current_frontier_config):
+                confidence_frontier_obs = frontier_obs
+                confidence_frontier_usefulness = frontier_usefulness
+            else:
+                confidence_frontier_obs = _shadow_frontier_features(
+                    scenario,
+                    pre_drone_pos_tensor,
+                    source=confidence_frontier_config["source"],
+                    mode=confidence_frontier_config["mode"],
+                    radius_m=confidence_frontier_config["radius_m"],
+                )
+                confidence_frontier_usefulness = _frontier_usefulness_diagnostics(
+                    scenario=scenario,
+                    geometry=coverage_geometry,
+                    positions=pre_drone_pos_array,
+                    footprint_radii_sim=pre_footprint_radius_sim,
+                    pre_team_coverage=pre_team_coverage,
+                    max_step_sim=max_step_sim,
+                    frontier_obs=confidence_frontier_obs,
+                    counterfactual=counterfactual,
+                    frontier_mode=frontier_mode,
+                    frontier_top_k=frontier_top_k,
+                )
+            confidence_lg_frontier_config = _frontier_config_for(
                 scenario,
-                pre_drone_pos_tensor,
                 source="confidence",
                 mode="local_global",
                 radius_m=diagnostic_confidence_frontier_radius_m,
             )
-            confidence_lg_frontier_usefulness = _frontier_usefulness_diagnostics(
-                scenario=scenario,
-                geometry=coverage_geometry,
-                positions=pre_drone_pos_array,
-                footprint_radii_sim=pre_footprint_radius_sim,
-                pre_team_coverage=pre_team_coverage,
-                max_step_sim=max_step_sim,
-                frontier_obs=confidence_lg_frontier_obs,
-                counterfactual=counterfactual,
-                frontier_mode="local_global",
-                frontier_top_k=2,
-            )
+            if _frontier_configs_match(confidence_lg_frontier_config, current_frontier_config):
+                confidence_lg_frontier_obs = frontier_obs
+                confidence_lg_frontier_usefulness = frontier_usefulness
+            elif _frontier_configs_match(confidence_lg_frontier_config, confidence_frontier_config):
+                confidence_lg_frontier_obs = confidence_frontier_obs
+                confidence_lg_frontier_usefulness = confidence_frontier_usefulness
+            else:
+                confidence_lg_frontier_obs = _shadow_frontier_features(
+                    scenario,
+                    pre_drone_pos_tensor,
+                    source=confidence_lg_frontier_config["source"],
+                    mode=confidence_lg_frontier_config["mode"],
+                    radius_m=confidence_lg_frontier_config["radius_m"],
+                )
+                confidence_lg_frontier_usefulness = _frontier_usefulness_diagnostics(
+                    scenario=scenario,
+                    geometry=coverage_geometry,
+                    positions=pre_drone_pos_array,
+                    footprint_radii_sim=pre_footprint_radius_sim,
+                    pre_team_coverage=pre_team_coverage,
+                    max_step_sim=max_step_sim,
+                    frontier_obs=confidence_lg_frontier_obs,
+                    counterfactual=counterfactual,
+                    frontier_mode="local_global",
+                    frontier_top_k=2,
+                )
         else:
             frontier_obs = np.zeros((0, 4), dtype=float)
             coverage_signal = _empty_coverage_signal_snapshot(0)
@@ -2556,6 +2578,59 @@ def _frontier_usefulness_diagnostics(
     return out
 
 
+def _normalize_frontier_source(source: Any) -> str:
+    return str(source).replace("-", "_").lower()
+
+
+def _normalize_frontier_mode(mode: Any) -> str:
+    return str(mode).replace("-", "_")
+
+
+def _frontier_config_for(
+    scenario: WildfireSearchScenario,
+    *,
+    source: Any,
+    mode: Any,
+    radius_m: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "source": _normalize_frontier_source(source),
+        "mode": _normalize_frontier_mode(mode),
+        "radius_m": (
+            float(getattr(scenario, "uav_frontier_obs_radius_m", 0.0))
+            if radius_m is None else float(radius_m)
+        ),
+    }
+
+
+def _current_frontier_config(scenario: WildfireSearchScenario) -> dict[str, Any]:
+    return _frontier_config_for(
+        scenario,
+        source=getattr(scenario, "uav_frontier_source", "coverage"),
+        mode=getattr(scenario, "uav_frontier_mode", "centroid"),
+        radius_m=getattr(scenario, "uav_frontier_obs_radius_m", 0.0),
+    )
+
+
+def _frontier_configs_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return (
+        str(left.get("source")) == str(right.get("source"))
+        and str(left.get("mode")) == str(right.get("mode"))
+        and math.isclose(
+            float(left.get("radius_m", 0.0)),
+            float(right.get("radius_m", 0.0)),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    )
+
+
+def _frontier_cache_name(config: dict[str, Any]) -> str:
+    radius = float(config.get("radius_m", 0.0))
+    radius_label = f"{radius:.9g}".replace("-", "m").replace(".", "p")
+    return f"diagnostic_{config.get('source')}_{config.get('mode')}_{radius_label}"
+
+
 def _shadow_frontier_features(
     scenario: WildfireSearchScenario,
     positions_tensor: torch.Tensor,
@@ -2567,13 +2642,21 @@ def _shadow_frontier_features(
     old_source = getattr(scenario, "uav_frontier_source", "coverage")
     old_mode = getattr(scenario, "uav_frontier_mode", "centroid")
     old_radius = getattr(scenario, "uav_frontier_obs_radius_m", None)
+    config = _frontier_config_for(
+        scenario,
+        source=source,
+        mode=mode,
+        radius_m=radius_m,
+    )
     try:
-        scenario.uav_frontier_source = str(source).replace("-", "_").lower()
-        scenario.uav_frontier_mode = str(mode).replace("-", "_")
-        if radius_m is not None:
-            scenario.uav_frontier_obs_radius_m = float(radius_m)
+        scenario.uav_frontier_source = config["source"]
+        scenario.uav_frontier_mode = config["mode"]
+        scenario.uav_frontier_obs_radius_m = float(config["radius_m"])
         return (
-            scenario._uav_frontier_features_for_positions(positions_tensor)[0]
+            scenario._cached_uav_frontier_features_for_positions(
+                _frontier_cache_name(config),
+                positions_tensor,
+            )[0]
             .detach()
             .cpu()
             .numpy()
