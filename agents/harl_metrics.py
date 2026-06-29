@@ -13,6 +13,7 @@ ADDITIVE_ENV_METRICS = (
     "reward/team",
     "reward/drone_scout",
     "reward/drone_progress",
+    "reward/uav_inefficient_move",
     "reward/ugv_progress",
     "reward/ugv_approach",
     "reward/ugv_movement_alignment",

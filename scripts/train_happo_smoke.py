@@ -199,6 +199,8 @@ def build_args(
     uav_frontier_alignment_reward: float | None = None,
     uav_confidence_reward: float = 0.0,
     uav_confidence_move_reward: float = 0.0,
+    uav_inefficient_move_penalty: float = 0.0,
+    uav_inefficient_move_source: str = "confidence",
     uav_confidence_overlap_penalty: float = 0.0,
     uav_confidence_overlap_threshold: float = 0.65,
     uav_confidence_gamma: float = 2.0,
@@ -718,6 +720,8 @@ def build_args(
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_confidence": uav_confidence_reward,
             "r_uav_confidence_move": uav_confidence_move_reward,
+            "r_uav_inefficient_move": uav_inefficient_move_penalty,
+            "uav_inefficient_move_source": uav_inefficient_move_source,
             "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
             "uav_confidence_overlap_threshold": uav_confidence_overlap_threshold,
             "uav_confidence_gamma": uav_confidence_gamma,
@@ -956,6 +960,13 @@ def main():
     p.add_argument("--uav-confidence-move-reward", type=float, default=0.0,
                    help="Optional per-UAV reward scale for movement that captures a high fraction of the "
                         "best one-step confidence-gain opportunity. Default 0 disables this reward.")
+    p.add_argument("--uav-inefficient-move-penalty", type=float, default=0.0,
+                   help="Optional per-UAV penalty scale for movement that captures little search opportunity. "
+                        "Default 0 disables this penalty.")
+    p.add_argument("--uav-inefficient-move-source", choices=("coverage", "confidence"),
+                   default="confidence",
+                   help="Opportunity signal used by --uav-inefficient-move-penalty. "
+                        "confidence uses actual/best confidence gain; coverage uses actual/reachable new cells.")
     p.add_argument("--uav-confidence-overlap-penalty", type=float, default=0.0,
                    help="Optional per-UAV penalty scale for flying over medium/high confidence cells. "
                         "Default 0 disables this penalty.")
@@ -1126,6 +1137,8 @@ def main():
         p.error("--uav-confidence-reward must be nonnegative")
     if args.uav_confidence_move_reward < 0.0:
         p.error("--uav-confidence-move-reward must be nonnegative")
+    if args.uav_inefficient_move_penalty < 0.0:
+        p.error("--uav-inefficient-move-penalty must be nonnegative")
     if args.uav_confidence_overlap_penalty < 0.0:
         p.error("--uav-confidence-overlap-penalty must be nonnegative")
     if not 0.0 <= args.uav_confidence_overlap_threshold < 1.0:
@@ -1337,6 +1350,8 @@ def main():
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_confidence_reward: {args.uav_confidence_reward}")
     print(f" uav_confidence_move_reward: {args.uav_confidence_move_reward}")
+    print(f" uav_inefficient_move_penalty: {args.uav_inefficient_move_penalty}")
+    print(f" uav_inefficient_move_source: {args.uav_inefficient_move_source}")
     print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
     print(f" uav_confidence_gamma: {args.uav_confidence_gamma}")
@@ -1422,6 +1437,8 @@ def main():
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_confidence_reward = args.uav_confidence_reward,
         uav_confidence_move_reward = args.uav_confidence_move_reward,
+        uav_inefficient_move_penalty = args.uav_inefficient_move_penalty,
+        uav_inefficient_move_source = args.uav_inefficient_move_source,
         uav_confidence_overlap_penalty = args.uav_confidence_overlap_penalty,
         uav_confidence_overlap_threshold = args.uav_confidence_overlap_threshold,
         uav_confidence_gamma = args.uav_confidence_gamma,

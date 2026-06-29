@@ -523,6 +523,15 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("uav_overlap_penalty_normalization must be one of: raw, opportunity")
         self.r_uav_confidence = max(float(kwargs.pop("r_uav_confidence", 0.0)), 0.0)
         self.r_uav_confidence_move = max(float(kwargs.pop("r_uav_confidence_move", 0.0)), 0.0)
+        self.r_uav_inefficient_move = max(
+            float(kwargs.pop("r_uav_inefficient_move", 0.0)),
+            0.0,
+        )
+        self.uav_inefficient_move_source = str(
+            kwargs.pop("uav_inefficient_move_source", "confidence")
+        ).replace("-", "_").lower()
+        if self.uav_inefficient_move_source not in {"coverage", "confidence"}:
+            raise ValueError("uav_inefficient_move_source must be one of: coverage, confidence")
         self.r_uav_confidence_overlap = max(
             float(kwargs.pop("r_uav_confidence_overlap", 0.0)),
             0.0,
@@ -909,6 +918,12 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_move_coverage = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_inefficient_move = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_inefficient_move_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
         self.metric_reward_uav_coverage_threshold = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
         self.metric_uav_frontier_alignment = torch.zeros(batch_dim, device=device)
@@ -1015,6 +1030,8 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_drone_scout,
             self.metric_reward_drone_progress,
             self.metric_reward_uav_move_coverage,
+            self.metric_reward_uav_inefficient_move,
+            self.metric_reward_uav_inefficient_move_by_drone,
             self.metric_reward_uav_coverage_threshold,
             self.metric_reward_uav_frontier_alignment,
             self.metric_uav_frontier_alignment,
@@ -2696,6 +2713,11 @@ class WildfireSearchScenario(BaseScenario):
             coverage_new,
             uav_coverage_opportunity_fraction,
         )
+        uav_inefficient_move_penalty = self._uav_inefficient_move_penalty(
+            drone_displacement_m,
+            uav_coverage_opportunity_fraction,
+            self.metric_uav_confidence_opportunity_fraction_by_drone,
+        )
         uav_coverage_reward = self._uav_coverage_reward(
             coverage_new,
             uav_coverage_opportunity_fraction,
@@ -2725,6 +2747,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_drone_scout = (scout_per_drone * self.r_drone_scout).sum(dim=1)
         self.metric_reward_drone_progress = drone_shaping.sum(dim=1)
         self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
+        self.metric_reward_uav_inefficient_move = uav_inefficient_move_penalty.sum(dim=1)
+        self.metric_reward_uav_inefficient_move_by_drone = uav_inefficient_move_penalty
         self.metric_reward_uav_coverage_threshold = uav_coverage_threshold_reward
         self.metric_reward_uav_frontier_alignment = uav_frontier_alignment_reward.sum(dim=1)
         self.metric_reward_uav_confidence = uav_confidence_reward.sum(dim=1)
@@ -2877,6 +2901,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + drone_shaping[:, i]
                 r = r + uav_coverage_reward[:, i]
                 r = r + uav_move_coverage_reward[:, i]
+                r = r + uav_inefficient_move_penalty[:, i]
                 r = r + uav_frontier_alignment_reward[:, i]
                 r = r + uav_confidence_reward[:, i]
                 r = r + uav_confidence_move_reward[:, i]
@@ -3350,6 +3375,10 @@ class WildfireSearchScenario(BaseScenario):
             not self.uav_confidence_diagnostics
             and self.r_uav_confidence <= 0.0
             and self.r_uav_confidence_move <= 0.0
+            and not (
+                self.r_uav_inefficient_move > 0.0
+                and self.uav_inefficient_move_source == "confidence"
+            )
             and self.r_uav_confidence_overlap <= 0.0
             and self.uav_frontier_source != "confidence"
             and self.uav_confidence_obs_grid <= 0
@@ -3741,6 +3770,10 @@ class WildfireSearchScenario(BaseScenario):
         if (
             self.r_coverage <= 0.0
             and self.r_uav_move_coverage <= 0.0
+            and not (
+                self.r_uav_inefficient_move > 0.0
+                and self.uav_inefficient_move_source == "coverage"
+            )
             and self.r_uav_coverage_threshold <= 0.0
             and self.coverage_obs_grid <= 0
             and not self.uav_frontier_obs
@@ -3886,6 +3919,31 @@ class WildfireSearchScenario(BaseScenario):
             reward_base = displacement_m * coverage_new_cells
         reward = (reward_base * self.r_uav_move_coverage).clamp(max=self.r_uav_move_coverage_cap)
         return reward, displacement_m, coverage_new_cells
+
+    def _uav_inefficient_move_penalty(
+        self,
+        displacement_m: Tensor,
+        coverage_opportunity_fraction: Tensor,
+        confidence_opportunity_fraction: Tensor,
+    ) -> Tensor:
+        """Penalize motion that captures little available search opportunity."""
+        if self.n_drones == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=displacement_m.device)
+        if self.r_uav_inefficient_move <= 0.0:
+            return torch.zeros_like(displacement_m)
+
+        if self.uav_inefficient_move_source == "confidence":
+            opportunity = confidence_opportunity_fraction
+        else:
+            opportunity = coverage_opportunity_fraction
+        opportunity = opportunity.to(
+            device=displacement_m.device,
+            dtype=displacement_m.dtype,
+        ).clamp(0.0, 1.0)
+        max_step_m = max(float(self.drone_speed_mps) * float(self.sim_step_seconds), 1e-6)
+        movement_fraction = (displacement_m / max_step_m).clamp(0.0, 1.0)
+        inefficiency = movement_fraction * (1.0 - opportunity)
+        return -float(self.r_uav_inefficient_move) * inefficiency
 
     def _uav_frontier_obs_dim(self) -> int:
         if self.uav_frontier_mode == "local_global":
@@ -5505,6 +5563,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/drone_scout": self.metric_reward_drone_scout,
             "reward/drone_progress": self.metric_reward_drone_progress,
             "reward/uav_move_coverage": self.metric_reward_uav_move_coverage,
+            "reward/uav_inefficient_move": self.metric_reward_uav_inefficient_move,
             "reward/uav_coverage_threshold": self.metric_reward_uav_coverage_threshold,
             "reward/uav_frontier_alignment": self.metric_reward_uav_frontier_alignment,
             "reward/uav_confidence": self.metric_reward_uav_confidence,

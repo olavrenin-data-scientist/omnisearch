@@ -231,6 +231,7 @@ def run_rollout(
     reward_uav_frontier_values: list[float] = []
     reward_uav_confidence_values: list[float] = []
     reward_uav_confidence_move_values: list[float] = []
+    penalty_uav_inefficient_move_values: list[float] = []
     penalty_uav_confidence_overlap_values: list[float] = []
     penalty_uav_overlap_values: list[float] = []
     penalty_uav_inter_overlap_values: list[float] = []
@@ -827,6 +828,7 @@ def run_rollout(
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
                 confidence_reward=confidence_reward,
                 confidence_move_reward=confidence_move_reward,
+                confidence_opportunity_fraction=confidence_opportunity_fraction,
                 confidence_overlap_penalty=confidence_overlap_penalty,
                 scout_reward=scout_reward,
             )
@@ -933,6 +935,7 @@ def run_rollout(
             reward_uav_frontier_values.append(reward_terms["frontier"])
             reward_uav_confidence_values.append(reward_terms["confidence"])
             reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
+            penalty_uav_inefficient_move_values.append(reward_terms["inefficient_move_penalty"])
             penalty_uav_confidence_overlap_values.append(reward_terms["confidence_overlap_penalty"])
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
             penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
@@ -1152,6 +1155,7 @@ def run_rollout(
                     "frontier_reward": reward_terms["frontier"],
                     "confidence_reward": reward_terms["confidence"],
                     "confidence_move_reward": reward_terms["confidence_move"],
+                    "inefficient_move_penalty": reward_terms["inefficient_move_penalty"],
                     "confidence_overlap_penalty": reward_terms["confidence_overlap_penalty"],
                     "confidence_weighted_gain": confidence_weighted_gain_drone,
                     "coverage_reward": reward_terms["coverage"],
@@ -1463,6 +1467,7 @@ def run_rollout(
         "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
         "avg_reward_uav_confidence": _finite_mean(reward_uav_confidence_values),
         "avg_reward_uav_confidence_move": _finite_mean(reward_uav_confidence_move_values),
+        "avg_penalty_uav_inefficient_move": _finite_mean(penalty_uav_inefficient_move_values),
         "avg_penalty_uav_confidence_overlap": _finite_mean(penalty_uav_confidence_overlap_values),
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
         "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
@@ -2868,6 +2873,7 @@ def _uav_reward_terms(
     coverage_opportunity_available_fraction: float,
     confidence_reward: float,
     confidence_move_reward: float,
+    confidence_opportunity_fraction: float,
     confidence_overlap_penalty: float,
     scout_reward: float,
 ) -> dict[str, float]:
@@ -2907,6 +2913,23 @@ def _uav_reward_terms(
         * min(max(frontier_progress, 0.0), 1.0)
         * min(max(frontier_ratio, 0.0), 1.0)
     )
+    inefficient_scale = float(getattr(scenario, "r_uav_inefficient_move", 0.0))
+    inefficient_source = str(
+        getattr(scenario, "uav_inefficient_move_source", "confidence")
+    ).replace("-", "_").lower()
+    if inefficient_source == "coverage":
+        inefficient_opportunity = coverage_opportunity_fraction
+    else:
+        inefficient_opportunity = confidence_opportunity_fraction
+    max_step_m = max(
+        float(getattr(scenario, "drone_speed_mps", 0.0))
+        * float(getattr(scenario, "sim_step_seconds", 1.0)),
+        1e-6,
+    )
+    movement_fraction = min(max(displacement_m / max_step_m, 0.0), 1.0)
+    inefficient_move_penalty = -inefficient_scale * movement_fraction * (
+        1.0 - min(max(inefficient_opportunity, 0.0), 1.0)
+    )
 
     overlap_penalty = _overlap_penalty_value(
         overlap=overlap,
@@ -2932,6 +2955,7 @@ def _uav_reward_terms(
         + frontier
         + confidence_reward
         + confidence_move_reward
+        + inefficient_move_penalty
         + confidence_overlap_penalty
         + overlap_penalty
         + inter_penalty
@@ -2943,6 +2967,7 @@ def _uav_reward_terms(
         + abs(frontier)
         + abs(confidence_reward)
         + abs(confidence_move_reward)
+        + abs(inefficient_move_penalty)
         + abs(confidence_overlap_penalty)
         + abs(overlap_penalty)
         + abs(inter_penalty)
@@ -2955,6 +2980,7 @@ def _uav_reward_terms(
         "frontier": float(frontier),
         "confidence": float(confidence_reward),
         "confidence_move": float(confidence_move_reward),
+        "inefficient_move_penalty": float(inefficient_move_penalty),
         "confidence_overlap_penalty": float(confidence_overlap_penalty),
         "overlap_penalty": float(overlap_penalty),
         "inter_uav_overlap_penalty": float(inter_penalty),
@@ -3422,6 +3448,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "frontier": [],
             "confidence": [],
             "confidence_move": [],
+            "inefficient_move_penalty": [],
             "confidence_overlap_penalty": [],
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
@@ -3672,6 +3699,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
         "avg_reward_uav_confidence": _finite_mean(reward_terms["confidence"]),
         "avg_reward_uav_confidence_move": _finite_mean(reward_terms["confidence_move"]),
+        "avg_penalty_uav_inefficient_move": _finite_mean(
+            reward_terms["inefficient_move_penalty"]
+        ),
         "avg_penalty_uav_confidence_overlap": _finite_mean(
             reward_terms["confidence_overlap_penalty"]
         ),
@@ -4542,6 +4572,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_reward_uav_confidence_move": _finite_mean([
             row["avg_reward_uav_confidence_move"] for row in rows
         ]),
+        "mean_penalty_uav_inefficient_move": _finite_mean([
+            row["avg_penalty_uav_inefficient_move"] for row in rows
+        ]),
         "mean_penalty_uav_confidence_overlap": _finite_mean([
             row["avg_penalty_uav_confidence_overlap"] for row in rows
         ]),
@@ -4930,6 +4963,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_reward_uav_frontier",
         "avg_reward_uav_confidence",
         "avg_reward_uav_confidence_move",
+        "avg_penalty_uav_inefficient_move",
         "avg_penalty_uav_confidence_overlap",
         "avg_penalty_uav_overlap",
         "avg_penalty_uav_inter_overlap",
@@ -5295,6 +5329,7 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"front_score={item.get('frontier_uncovered_ratio', math.nan):.3f} "
             f"front_rew={item.get('frontier_reward', math.nan):.4f} "
             f"conf_move={item.get('confidence_move_reward', math.nan):.4f} "
+            f"move_pen={item.get('inefficient_move_penalty', math.nan):.4f} "
             f"conf_ov={item.get('confidence_overlap_fraction', math.nan):.3f} "
             f"conf_ov_pen={item.get('confidence_overlap_penalty', math.nan):.4f}"
         )
@@ -5537,6 +5572,7 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("frontier", "frontier_reward", "#8a5cf6", False),
         ("conf", "confidence_reward", "#0f766e", False),
         ("conf move", "confidence_move_reward", "#14b8a6", False),
+        ("move pen", "inefficient_move_penalty", "#7c3aed", True),
         ("conf ov pen", "confidence_overlap_penalty", "#be185d", True),
         ("coverage95", "coverage_threshold_reward", "#0f9d58", False),
         ("scout", "scout_reward", "#d4a72c", False),
@@ -6697,6 +6733,7 @@ def main() -> None:
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
         f"confidence={summary['mean_reward_uav_confidence']:.4f} "
         f"conf_move={summary['mean_reward_uav_confidence_move']:.4f} "
+        f"move_pen={summary['mean_penalty_uav_inefficient_move']:.4f} "
         f"conf_ov_pen={summary['mean_penalty_uav_confidence_overlap']:.4f} "
         f"coverage95={summary['mean_reward_uav_coverage_threshold']:.4f} "
         f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
