@@ -1909,9 +1909,10 @@ class WildfireSearchScenario(BaseScenario):
             self._invalidate_uav_runtime_caches()
         self.step_count += 1
 
-        if int(self.step_count.max().item()) % self.fire_step_interval == 0:
-            self._spread_fire()
-        self._update_smoke()
+        if not self.disable_fire:
+            if int(self.step_count.max().item()) % self.fire_step_interval == 0:
+                self._spread_fire()
+            self._update_smoke()
 
     def _spread_fire(self) -> None:
         exposure = self._directional_fire_exposure()
