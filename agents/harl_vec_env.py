@@ -40,8 +40,12 @@ from gymnasium.spaces import Box
 import vmas
 
 from agents.action_transform import transform_continuous_action
+from agents.harl_metrics import ENV_METRICS
 from envs.wildfire_search import WildfireSearchScenario
 from harl.envs.env_wrappers import ShareVecEnv
+
+
+_TRAINING_INFO_KEYS = frozenset(ENV_METRICS)
 
 
 class BatchedVMASVecEnv(ShareVecEnv):
@@ -162,14 +166,16 @@ class BatchedVMASVecEnv(ShareVecEnv):
         done_per_env = natural | truncated                           # (N,)
         dones = np.broadcast_to(done_per_env[:, None], (self._num_envs, self.n_agents)).copy()
 
-        # Per-env, per-agent infos. infos[i][0] holds episode-terminal payload.
+        # Per-env, per-agent infos. HARL needs bad_transition for every
+        # agent, while our logger reads episode metrics from infos[i][0].
         infos = np.empty((self._num_envs, self.n_agents), dtype=object)
         for i in range(self._num_envs):
             bad = bool(truncated[i] and not natural[i])
-            for j in range(self.n_agents):
-                info = self._info_for_env_agent(raw_infos, i, j)
-                info["bad_transition"] = bad
-                infos[i, j] = info
+            metric_info = self._info_for_env_agent(raw_infos, i, 0, keys=_TRAINING_INFO_KEYS)
+            metric_info["bad_transition"] = bad
+            infos[i, 0] = metric_info
+            for j in range(1, self.n_agents):
+                infos[i, j] = {"bad_transition": bad}
 
         # Auto-reset any done envs and re-collect their observations
         done_idx = np.where(done_per_env)[0]
@@ -191,12 +197,21 @@ class BatchedVMASVecEnv(ShareVecEnv):
     def close_extras(self):
         pass
 
-    def _info_for_env_agent(self, raw_infos: Any, env_index: int, agent_id: int) -> Dict[str, Any]:
+    def _info_for_env_agent(
+        self,
+        raw_infos: Any,
+        env_index: int,
+        agent_id: int,
+        *,
+        keys: frozenset[str] | None = None,
+    ) -> Dict[str, Any]:
         if not raw_infos:
             return {}
         raw = raw_infos[agent_id] if isinstance(raw_infos, list) else raw_infos
         info: Dict[str, Any] = {}
         for key, value in raw.items():
+            if keys is not None and key not in keys:
+                continue
             if isinstance(value, torch.Tensor):
                 value = value.detach().cpu()
                 if value.ndim == 0:
