@@ -362,11 +362,90 @@ These regions are used for **cross-terrain generalization testing** — evaluati
 --cv-adaptive-conf    Enable altitude-adaptive confidence
 --cv-tracking         Enable ByteTrack multi-object tracking
 --cv-tracking-min-hits N   Frames required to confirm a track (default: 2)
+--detection-mode MODE     cv | thermal | cv+thermal (default: cv)
 ```
 
 ---
 
-## 13. Recommendations for Zenodo Publication
+## 13. Simulated Thermal Infrared (TIR) Sensor & Fusion
+
+**Module:** `detection/thermal_model.py`  
+**Tests:** `tests/test_thermal_model.py` (15 tests)
+
+A physics-based simulated thermal sensor allows comparison of detection modalities without real thermal hardware. The thermal model operates on simulator state directly (no image generation).
+
+### 13.1 Thermal Detection Physics
+
+| Parameter | Value | Physical meaning |
+|-----------|-------|-----------------|
+| Body temperature | 310 K (37°C) | Human thermal signature |
+| Ambient (no fire) | 293 K (20°C) | Normal ground background |
+| Active fire ground | 450 K (177°C) | Near flame front |
+| Burned/cooling ground | 330 K (57°C) | Post-fire, approaching body temp |
+| NETD (sensitivity) | 0.05 K | Minimum detectable ΔT |
+| Crossover threshold | 2.0 K | Below this, detection fails |
+| Smoke attenuation | 0.4 (vs 1.4 for visible) | TIR penetrates smoke better |
+| Smoke transmittance floor | 0.70 | Even in heavy smoke |
+| Base detection probability | 0.92 | At optimal ΔT and close range |
+| False positive rate | 0.08 / frame | Warm animals, embers, heated rocks |
+
+### 13.2 Thermal Crossover Problem in Wildfire
+
+The critical physics issue: near active fire or on recently burned ground, ambient temperature approaches body temperature (37°C), causing ΔT → 0:
+
+| Condition | Ground temp | ΔT from body | Detection probability |
+|-----------|:-----------:|:------------:|:--------------------:|
+| Normal (clear) | 20°C | **17°C** | ~0.74 (high) |
+| Light smoke | 20°C | **17°C** | ~0.60 (smoke attenuation only) |
+| Burned ground (cooling) | 57°C | 20°C | ~0.74 (still OK, body is cooler) |
+| Burned ground (warm) | ~37°C | **≈0°C** | **<0.05** (crossover!) |
+| Active fire | 177°C+ | 140°C+ | ~0.74 (inverted contrast — body is cold spot) |
+
+**Key insight:** Thermal works *between* fire zones (smoke-only areas) but **fails** on recently-burned ground where temperatures equal body temp (the exact area where survivors are most likely found after fire passes).
+
+### 13.3 Detection Modes
+
+| Mode | Command | What runs | Best for |
+|------|---------|-----------|----------|
+| `cv` | `--detection-mode cv` | YOLOv8 on rendered RGB image | Clear daytime, default |
+| `thermal` | `--detection-mode thermal` | Simulated TIR sensor only | Smoke/night scenarios |
+| `cv+thermal` | `--detection-mode cv+thermal` | Both → union fusion | Maximum recall |
+
+### 13.4 Fusion Strategies
+
+| Strategy | Rule | Effect |
+|----------|------|--------|
+| **Union** (default) | Either sensor detects → candidate | Higher recall, more FPs |
+| **Intersection** | Both must detect → confirmed | Highest precision, lower recall |
+| **Weighted** | 0.6×CV_conf + 0.4×TH_conf | Balanced confidence score |
+
+### 13.5 Measured Performance Comparison
+
+Results from `scripts/compare_detection_modes.py` (100 trials per scenario, 3 survivors):
+
+| Scenario | CV Recall | Thermal Recall | CV+Thermal Recall | Winner |
+|----------|:---------:|:--------------:|:-----------------:|--------|
+| Clear | **95.3%** | 75.0% | **98.8%** | Fusion |
+| Light smoke | 56.7% | **62.0%** | **83.5%** | Fusion |
+| Heavy smoke | 56.7% | 54.3% | **80.2%** | Fusion |
+| Active fire | 53.0% | 54.3% | **78.5%** | Fusion |
+| Burned ground (crossover) | **64.7%** | 3.0% | **65.8%** | Fusion (CV rescues) |
+| Mixed | **54.7%** | 4.3% | **56.6%** | Fusion |
+
+**Precision** remains >99% across all modes (false positive rate ≤0.02/frame).
+
+**Key findings:**
+
+1. **CV+Thermal fusion wins every scenario** — complementary failure modes
+2. **Thermal crossover confirmed** — on burned ground (ΔT≈0), thermal collapses to 3% recall; CV maintains 65% and rescues the fusion
+3. **In smoke**, both sensors individually degrade to ~55%, but fusion lifts to 80% (independent failures)
+4. **No training data needed for thermal** — entirely physics-based (closed-form equations from temperature contrast, Beer-Lambert smoke attenuation, altitude quality)
+
+The fusion approach (cv+thermal) compensates for each sensor's weakness: CV fails in smoke but works on burned ground; thermal fails at crossover but penetrates smoke. Together they cover more scenarios.
+
+---
+
+## 14. Recommendations for Zenodo Publication
 
 The dataset upload should include:
 - All drone images + labels + altitude metadata JSONs (train/val) — 2,400 images

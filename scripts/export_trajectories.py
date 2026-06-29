@@ -339,6 +339,11 @@ def main():
                    help="Enable ByteTrack multi-object tracking for temporal FP suppression.")
     p.add_argument("--cv-tracking-min-hits", type=int, default=2,
                    help="Minimum consecutive detections before a track is confirmed.")
+    p.add_argument("--detection-mode", type=str, default="cv",
+                   choices=["cv", "thermal", "cv+thermal"],
+                   help="Detection modality: 'cv' (pure computer vision, default), "
+                        "'thermal' (simulated thermal IR only), "
+                        "'cv+thermal' (sensor fusion — both run, results merged).")
     args = p.parse_args()
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
@@ -553,6 +558,7 @@ def main():
             "adaptive_conf": args.cv_adaptive_conf,
             "enable_tracking": args.cv_tracking,
             "tracking_min_hits": args.cv_tracking_min_hits,
+            "detection_mode": args.detection_mode,
         }
 
     for name in _selected_baselines(args.approach):

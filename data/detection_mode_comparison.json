@@ -18,27 +18,12 @@
       "true_positives": 225,
       "false_positives": 0
     },
-    "motion": {
-      "recall": 0.333,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "detections": 100,
-      "true_positives": 100,
-      "false_positives": 0
-    },
-    "cv+thermal": {
+    "fusion": {
       "recall": 0.988,
       "precision": 1.0,
       "fp_rate": 0.0,
       "cv_recall_contribution": 0.953,
       "thermal_recall_contribution": 0.75
-    },
-    "cv+motion": {
-      "recall": 0.953,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "motion_recall": 0.333,
-      "note": "boost mode \u2014 motion confirms CV, does not add new detections"
     }
   },
   "light_smoke": {
@@ -60,27 +45,12 @@
       "true_positives": 186,
       "false_positives": 1
     },
-    "motion": {
-      "recall": 0.333,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "detections": 100,
-      "true_positives": 100,
-      "false_positives": 0
-    },
-    "cv+thermal": {
+    "fusion": {
       "recall": 0.835,
       "precision": 0.996,
       "fp_rate": 0.01,
       "cv_recall_contribution": 0.567,
       "thermal_recall_contribution": 0.62
-    },
-    "cv+motion": {
-      "recall": 0.567,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "motion_recall": 0.333,
-      "note": "boost mode \u2014 motion confirms CV, does not add new detections"
     }
   },
   "heavy_smoke": {
@@ -102,27 +72,12 @@
       "true_positives": 163,
       "false_positives": 1
     },
-    "motion": {
-      "recall": 0.333,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "detections": 100,
-      "true_positives": 100,
-      "false_positives": 0
-    },
-    "cv+thermal": {
+    "fusion": {
       "recall": 0.802,
       "precision": 0.996,
       "fp_rate": 0.01,
       "cv_recall_contribution": 0.567,
       "thermal_recall_contribution": 0.543
-    },
-    "cv+motion": {
-      "recall": 0.567,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "motion_recall": 0.333,
-      "note": "boost mode \u2014 motion confirms CV, does not add new detections"
     }
   },
   "active_fire": {
@@ -144,27 +99,12 @@
       "true_positives": 163,
       "false_positives": 2
     },
-    "motion": {
-      "recall": 0.333,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "detections": 100,
-      "true_positives": 100,
-      "false_positives": 0
-    },
-    "cv+thermal": {
+    "fusion": {
       "recall": 0.785,
       "precision": 0.992,
       "fp_rate": 0.02,
       "cv_recall_contribution": 0.53,
       "thermal_recall_contribution": 0.543
-    },
-    "cv+motion": {
-      "recall": 0.53,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "motion_recall": 0.333,
-      "note": "boost mode \u2014 motion confirms CV, does not add new detections"
     }
   },
   "burned_ground": {
@@ -186,27 +126,12 @@
       "true_positives": 9,
       "false_positives": 1
     },
-    "motion": {
-      "recall": 0.333,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "detections": 100,
-      "true_positives": 100,
-      "false_positives": 0
-    },
-    "cv+thermal": {
+    "fusion": {
       "recall": 0.658,
       "precision": 0.995,
       "fp_rate": 0.01,
       "cv_recall_contribution": 0.647,
       "thermal_recall_contribution": 0.03
-    },
-    "cv+motion": {
-      "recall": 0.647,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "motion_recall": 0.333,
-      "note": "boost mode \u2014 motion confirms CV, does not add new detections"
     }
   },
   "mixed": {
@@ -228,27 +153,12 @@
       "true_positives": 13,
       "false_positives": 1
     },
-    "motion": {
-      "recall": 0.333,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "detections": 100,
-      "true_positives": 100,
-      "false_positives": 0
-    },
-    "cv+thermal": {
+    "fusion": {
       "recall": 0.566,
       "precision": 0.994,
       "fp_rate": 0.01,
       "cv_recall_contribution": 0.547,
       "thermal_recall_contribution": 0.043
-    },
-    "cv+motion": {
-      "recall": 0.547,
-      "precision": 1.0,
-      "fp_rate": 0.0,
-      "motion_recall": 0.333,
-      "note": "boost mode \u2014 motion confirms CV, does not add new detections"
     }
   }
 }

@@ -110,9 +110,6 @@ class SimulationCvAdapter:
         wildfire_effect_seed: int | None = None,
         detection_mode: str = "cv",
         thermal_seed: int | None = None,
-        thermal_detector: str = "physics",
-        camera_tilt_deg: float = 0.0,
-        person_height_m: float = 1.75,
         seed: int = 7,
         root: str | Path | None = None,
     ):
@@ -206,6 +203,14 @@ class SimulationCvAdapter:
         self._tracker = None
         self._tracker_enabled = False
 
+        # Detection mode: "cv" (pure CV, default), "thermal" (simulated TIR only),
+        # "cv+thermal" (sensor fusion — both sensors run, results merged).
+        self.detection_mode = str(detection_mode).lower()
+        if self.detection_mode not in ("cv", "thermal", "cv+thermal"):
+            raise ValueError(f"detection_mode must be 'cv', 'thermal', or 'cv+thermal', got {detection_mode!r}")
+        self._thermal_model = None
+        self._thermal_seed = int(thermal_seed if thermal_seed is not None else seed)
+
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
             if "bbox" not in terrain:
@@ -287,6 +292,41 @@ class SimulationCvAdapter:
         """Reset tracker state (call between episodes)."""
         if self._tracker is not None:
             self._tracker.reset()
+
+    def _get_thermal_model(self):
+        """Lazily initialize the thermal sensor model."""
+        if self._thermal_model is None:
+            from .thermal_model import ThermalSensorModel, ThermalSensorConfig
+            self._thermal_model = ThermalSensorModel(
+                ThermalSensorConfig(seed=self._thermal_seed)
+            )
+        return self._thermal_model
+
+    def _run_thermal_detection(
+        self,
+        *,
+        drone: "SimDrone",
+        survivors: list,
+        wildfire_state: "SimWildfireState | None",
+        altitude_m: float,
+    ) -> list[dict]:
+        """Run simulated thermal detection on the current frame."""
+        thermal = self._get_thermal_model()
+        survivor_dicts = [
+            {"index": s.index, "world_xy": s.world_xy} for s in survivors
+        ]
+        return thermal.detect_survivors(
+            drone_xy=drone.world_xy,
+            drone_altitude_m=altitude_m,
+            fov_deg=self.fov_deg,
+            survivors=survivor_dicts,
+            fire_grid=wildfire_state.fire_grid if wildfire_state else None,
+            fire_intensity_grid=wildfire_state.fire_intensity_grid if wildfire_state else None,
+            burned_grid=wildfire_state.burned_grid if wildfire_state else None,
+            smoke_grid=wildfire_state.smoke_grid if wildfire_state else None,
+            sim_units_per_meter=self.sim_units_per_meter,
+            grid_size=self.grid_size,
+        )
 
     def _altitude_adjusted_conf(self, altitude_m: float) -> float:
         """Compute confidence threshold interpolated by altitude.
@@ -603,6 +643,44 @@ class SimulationCvAdapter:
                     }
                 )
 
+        # Thermal / fusion detection modes.
+        # In "thermal" mode, CV detections are replaced by thermal results.
+        # In "cv+thermal" mode, both run and results are fused.
+        thermal_detections = None
+        if self.detection_mode in ("thermal", "cv+thermal"):
+            thermal_detections = self._run_thermal_detection(
+                drone=drone,
+                survivors=list(survivors_list),
+                wildfire_state=wildfire_state,
+                altitude_m=altitude_m,
+            )
+
+        if self.detection_mode == "thermal":
+            # Replace CV detections entirely with thermal results
+            detection_records = []
+            for td in thermal_detections:
+                if td.get("detected", False):
+                    detection_records.append({
+                        "class_name": "person",
+                        "confidence": td.get("confidence", 0.5),
+                        "bbox_xyxy": [0, 0, 0, 0],  # No pixel box for thermal
+                        "center_px": [self.image_size / 2, self.image_size / 2],
+                        "estimated_world_xy": td.get("estimated_world_xy", td.get("true_world_xy")),
+                        "matched_survivor_index": td.get("survivor_index"),
+                        "sensor": "thermal",
+                        "delta_t_k": td.get("delta_t_k"),
+                        "thermal_crossover": td.get("thermal_crossover", False),
+                        "detection_probability": td.get("detection_probability"),
+                    })
+        elif self.detection_mode == "cv+thermal":
+            from .thermal_model import fuse_cv_thermal
+            fused = fuse_cv_thermal(
+                cv_detections=detection_records,
+                thermal_detections=thermal_detections,
+                fusion_mode="union",
+            )
+            detection_records = fused
+
         # Apply multi-object tracking if enabled. Tracks accumulate hits over
         # consecutive frames; only tracks exceeding min_hits are "confirmed",
         # filtering transient false positives.
@@ -640,13 +718,19 @@ class SimulationCvAdapter:
                 from PIL import ImageDraw
                 draw = ImageDraw.Draw(annotated)
                 for d in detection_records:
-                    x1, y1, x2, y2 = d["bbox_xyxy"]
-                    color = (0, 255, 0) if d.get("track_confirmed", True) else (255, 165, 0)
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-                    label = f"{d['confidence']:.2f}"
-                    if "track_id" in d:
-                        label = f"T{d['track_id']} {label}"
-                    draw.text((x1, max(0, y1 - 12)), label, fill=color)
+                    box = d.get("bbox_xyxy", [0, 0, 0, 0])
+                    if box != [0, 0, 0, 0]:
+                        x1, y1, x2, y2 = box
+                        color = (0, 255, 0) if d.get("track_confirmed", True) else (255, 165, 0)
+                        if d.get("sensor") == "thermal" or d.get("fusion_source") == "thermal_only":
+                            color = (255, 0, 255)  # Magenta for thermal-only
+                        elif d.get("fusion_source") == "both":
+                            color = (0, 255, 255)  # Cyan for fused
+                        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                        label = f"{d['confidence']:.2f}"
+                        if "track_id" in d:
+                            label = f"T{d['track_id']} {label}"
+                        draw.text((x1, max(0, y1 - 12)), label, fill=color)
             annotated.save(out)
             saved_path = str(out)
 
@@ -672,6 +756,8 @@ class SimulationCvAdapter:
             "truth": truth,
             "detections": detection_records,
         }
+        if thermal_detections is not None:
+            result["thermal_raw"] = thermal_detections
         if tracking_info is not None:
             result["tracking"] = tracking_info
         return result
