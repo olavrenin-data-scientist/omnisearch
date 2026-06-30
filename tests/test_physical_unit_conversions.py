@@ -206,6 +206,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_cleanup_target_confidence_threshold = 0.80
         scenario.uav_cleanup_target_min_value = 0.05
         scenario.uav_cleanup_target_assignment_distance_scale_m = 250.0
+        scenario.uav_cleanup_target_refresh_mode = "exact"
         scenario.r_uav_cleanup_target_progress = 0.0
         scenario.r_uav_overlap = 0.0
         scenario.uav_overlap_allowed = 0.10
@@ -897,6 +898,63 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         torch.testing.assert_close(scenario.uav_cleanup_target_pos[0, 0], expected["centroid"])
         torch.testing.assert_close(scenario.uav_cleanup_target_value[0, 0], expected["value"])
         self.assertEqual(int(scenario.uav_cleanup_target_age[0, 0]), 1)
+
+    def test_uav_cleanup_target_fixed_hold_keeps_state_without_component_refresh(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_cleanup_target_diagnostics = True
+        scenario.uav_cleanup_target_refresh_mode = "fixed_hold"
+        scenario.uav_cleanup_target_hold_steps = 15
+        scenario.uav_confidence_grid.fill_(1.0)
+        scenario.uav_confidence_grid[:, 1:2, 1:2] = 0.0
+        _, positions = self._set_drone_agents(scenario, [[-0.75, -0.75]])
+        scenario._refresh_uav_cleanup_target_assignments(positions)
+        first_id = int(scenario.uav_cleanup_target_id[0, 0])
+        first_pos = scenario.uav_cleanup_target_pos[0, 0].clone()
+        first_value = scenario.uav_cleanup_target_value[0, 0].clone()
+
+        def fail_components(*args, **kwargs):
+            raise AssertionError("fixed-hold target should not rebuild components while held")
+
+        original_components = scenario._uav_cleanup_target_components
+        original_component_for_id = scenario._uav_cleanup_target_component_for_id
+        scenario._uav_cleanup_target_components = fail_components
+        scenario._uav_cleanup_target_component_for_id = fail_components
+        try:
+            scenario.uav_confidence_grid[:, 1:2, 1:2] = 1.0
+            scenario.uav_confidence_grid[:, 6:7, 6:7] = 0.0
+            scenario.step_count += 1
+            scenario._refresh_uav_cleanup_target_assignments(positions)
+        finally:
+            scenario._uav_cleanup_target_components = original_components
+            scenario._uav_cleanup_target_component_for_id = original_component_for_id
+
+        self.assertEqual(int(scenario.uav_cleanup_target_id[0, 0]), first_id)
+        torch.testing.assert_close(scenario.uav_cleanup_target_pos[0, 0], first_pos)
+        torch.testing.assert_close(scenario.uav_cleanup_target_value[0, 0], first_value)
+        self.assertEqual(int(scenario.uav_cleanup_target_age[0, 0]), 1)
+        self.assertEqual(float(scenario.metric_uav_cleanup_target_switch_by_drone[0, 0]), 0.0)
+
+    def test_uav_cleanup_target_fixed_hold_refreshes_after_hold_expires(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_cleanup_target_diagnostics = True
+        scenario.uav_cleanup_target_refresh_mode = "fixed_hold"
+        scenario.uav_cleanup_target_hold_steps = 1
+        scenario.uav_confidence_grid.fill_(1.0)
+        scenario.uav_confidence_grid[:, 1:2, 1:2] = 0.0
+        scenario.uav_confidence_grid[:, 6:7, 6:7] = 0.0
+        _, positions = self._set_drone_agents(scenario, [[-0.75, -0.75]])
+        scenario._refresh_uav_cleanup_target_assignments(positions)
+        first_id = int(scenario.uav_cleanup_target_id[0, 0])
+
+        scenario.uav_confidence_grid[:, 1:2, 1:2] = 1.0
+        scenario.step_count += 1
+        scenario._refresh_uav_cleanup_target_assignments(positions)
+        self.assertEqual(int(scenario.uav_cleanup_target_id[0, 0]), first_id)
+
+        scenario.step_count += 1
+        scenario._refresh_uav_cleanup_target_assignments(positions)
+        self.assertNotEqual(int(scenario.uav_cleanup_target_id[0, 0]), first_id)
+        self.assertEqual(float(scenario.metric_uav_cleanup_target_switch_by_drone[0, 0]), 1.0)
 
     def test_uav_cleanup_target_progress_reward_uses_frontier_gate(self):
         scenario = self._coverage_scenario(grid_size=8)

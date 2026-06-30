@@ -177,6 +177,13 @@ def build_args(
     uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
     uav_frontier_top_k: int = DEFAULT_UAV_FRONTIER_TOP_K,
     uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
+    uav_cleanup_target_obs: bool = False,
+    uav_cleanup_target_grid: int = 16,
+    uav_cleanup_target_hold_steps: int = 15,
+    uav_cleanup_target_confidence_threshold: float = 0.80,
+    uav_cleanup_target_min_value: float = 0.05,
+    uav_cleanup_target_assignment_distance_scale_m: float = 250.0,
+    uav_cleanup_target_refresh_mode: str = "exact",
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
@@ -202,6 +209,7 @@ def build_args(
     uav_inefficient_move_penalty: float = 0.0,
     uav_inefficient_move_source: str = "confidence",
     uav_confidence_overlap_penalty: float = 0.0,
+    uav_cleanup_target_progress_reward: float = 0.0,
     uav_confidence_overlap_threshold: float = 0.65,
     uav_confidence_gamma: float = 2.0,
     uav_confidence_eps: float = 0.05,
@@ -276,6 +284,9 @@ def build_args(
     uav_confidence_overlap_penalty = float(uav_confidence_overlap_penalty)
     if uav_confidence_overlap_penalty < 0.0:
         raise ValueError("uav_confidence_overlap_penalty must be nonnegative")
+    uav_cleanup_target_progress_reward = float(uav_cleanup_target_progress_reward)
+    if uav_cleanup_target_progress_reward < 0.0:
+        raise ValueError("uav_cleanup_target_progress_reward must be nonnegative")
     uav_confidence_overlap_threshold = float(uav_confidence_overlap_threshold)
     if not 0.0 <= uav_confidence_overlap_threshold < 1.0:
         raise ValueError("uav_confidence_overlap_threshold must be in [0, 1)")
@@ -539,8 +550,6 @@ def build_args(
     uav_frontier_source = str(uav_frontier_source).replace("-", "_").lower()
     if uav_frontier_source not in {"coverage", "confidence"}:
         raise ValueError("uav_frontier_source must be one of: coverage, confidence")
-    if uav_frontier_mode == "local_global" and uav_frontier_source != "confidence":
-        raise ValueError("uav_frontier_mode local_global requires uav_frontier_source=confidence")
     uav_frontier_sectors = int(uav_frontier_sectors)
     if uav_frontier_sectors < 2:
         raise ValueError("uav_frontier_sectors must be at least 2")
@@ -550,6 +559,21 @@ def build_args(
     uav_frontier_alignment_reward = float(uav_frontier_alignment_reward)
     if uav_frontier_alignment_reward < 0.0:
         raise ValueError("uav_frontier_alignment_reward must be nonnegative")
+    uav_cleanup_target_grid = int(uav_cleanup_target_grid)
+    if uav_cleanup_target_grid < 2:
+        raise ValueError("uav_cleanup_target_grid must be at least 2")
+    uav_cleanup_target_hold_steps = int(uav_cleanup_target_hold_steps)
+    if uav_cleanup_target_hold_steps < 1:
+        raise ValueError("uav_cleanup_target_hold_steps must be positive")
+    if not 0.0 <= float(uav_cleanup_target_confidence_threshold) <= 1.0:
+        raise ValueError("uav_cleanup_target_confidence_threshold must be in [0, 1]")
+    if float(uav_cleanup_target_min_value) < 0.0:
+        raise ValueError("uav_cleanup_target_min_value must be nonnegative")
+    if float(uav_cleanup_target_assignment_distance_scale_m) <= 0.0:
+        raise ValueError("uav_cleanup_target_assignment_distance_scale_m must be positive")
+    uav_cleanup_target_refresh_mode = str(uav_cleanup_target_refresh_mode).replace("-", "_").lower()
+    if uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
+        raise ValueError("uav_cleanup_target_refresh_mode must be one of: exact, fixed_hold")
     if uav_frontier_obs or uav_frontier_alignment_reward > 0.0:
         scenario_kwargs["uav_frontier_obs"] = bool(uav_frontier_obs)
         scenario_kwargs["uav_frontier_obs_radius_m"] = uav_frontier_obs_radius_m
@@ -559,10 +583,25 @@ def build_args(
         scenario_kwargs["uav_frontier_top_k"] = uav_frontier_top_k
         scenario_kwargs["uav_frontier_ownership"] = bool(uav_frontier_ownership)
         scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
+    if uav_cleanup_target_obs or uav_cleanup_target_progress_reward > 0.0:
+        if uav_cleanup_target_obs:
+            scenario_kwargs["uav_cleanup_target_obs"] = True
+        scenario_kwargs["uav_cleanup_target_grid"] = uav_cleanup_target_grid
+        scenario_kwargs["uav_cleanup_target_hold_steps"] = uav_cleanup_target_hold_steps
+        scenario_kwargs["uav_cleanup_target_confidence_threshold"] = float(
+            uav_cleanup_target_confidence_threshold
+        )
+        scenario_kwargs["uav_cleanup_target_min_value"] = float(uav_cleanup_target_min_value)
+        scenario_kwargs["uav_cleanup_target_assignment_distance_scale_m"] = float(
+            uav_cleanup_target_assignment_distance_scale_m
+        )
+        scenario_kwargs["uav_cleanup_target_refresh_mode"] = uav_cleanup_target_refresh_mode
+        scenario_kwargs["r_uav_cleanup_target_progress"] = uav_cleanup_target_progress_reward
     if (
         uav_confidence_reward > 0.0
         or uav_confidence_move_reward > 0.0
         or uav_confidence_overlap_penalty > 0.0
+        or uav_cleanup_target_progress_reward > 0.0
         or uav_frontier_source == "confidence"
     ):
         scenario_kwargs["uav_frontier_source"] = uav_frontier_source
@@ -723,6 +762,8 @@ def build_args(
             "r_uav_inefficient_move": uav_inefficient_move_penalty,
             "uav_inefficient_move_source": uav_inefficient_move_source,
             "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
+            "r_uav_cleanup_target_progress": uav_cleanup_target_progress_reward,
+            "uav_cleanup_target_refresh_mode": uav_cleanup_target_refresh_mode,
             "uav_confidence_overlap_threshold": uav_confidence_overlap_threshold,
             "uav_confidence_gamma": uav_confidence_gamma,
             "uav_confidence_eps": uav_confidence_eps,
@@ -898,6 +939,23 @@ def main():
                    help="Ownership-weight sector scores by which UAV is closest to uncovered cells.")
     p.add_argument("--uav-frontier-no-ownership", dest="uav_frontier_ownership", action="store_false",
                    help="Disable ownership weighting for sector-top-k frontier scoring.")
+    p.add_argument("--uav-cleanup-target-obs", action="store_true",
+                   help="Append a persistent low-confidence cleanup target observation to each UAV.")
+    p.add_argument("--uav-cleanup-target-grid", type=int, default=16,
+                   help="Coarse grid size used for persistent UAV cleanup targets.")
+    p.add_argument("--uav-cleanup-target-hold-steps", type=int, default=15,
+                   help="Number of steps to persist a valid UAV cleanup target before refresh.")
+    p.add_argument("--uav-cleanup-target-confidence-threshold", type=float, default=0.80,
+                   help="Pooled confidence below which a cleanup cell is targetable.")
+    p.add_argument("--uav-cleanup-target-min-value", type=float, default=0.05,
+                   help="Minimum pooled cleanup mass for targetable cleanup cells.")
+    p.add_argument("--uav-cleanup-target-assignment-distance-scale-m", type=float, default=250.0,
+                   help="Distance scale for greedy cleanup target assignment in meters.")
+    p.add_argument("--uav-cleanup-target-refresh-mode", default="exact",
+                   choices=("exact", "fixed-hold", "fixed_hold"),
+                   help="How held cleanup targets are refreshed. 'exact' recomputes the assigned "
+                        "component each step; 'fixed-hold' keeps centroid/value fixed until expiry, "
+                        "reach, or reassignment.")
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
@@ -970,6 +1028,10 @@ def main():
     p.add_argument("--uav-confidence-overlap-penalty", type=float, default=0.0,
                    help="Optional per-UAV penalty scale for flying over medium/high confidence cells. "
                         "Default 0 disables this penalty.")
+    p.add_argument("--uav-cleanup-target-progress-reward", type=float, default=0.0,
+                   help="Optional per-UAV reward scale for positive progress toward the persistent "
+                        "cleanup target, gated off when local frontier opportunity is strong. "
+                        "Default 0 disables this reward.")
     p.add_argument("--uav-confidence-overlap-threshold", type=float, default=0.65,
                    help="Confidence value where --uav-confidence-overlap-penalty starts. "
                         "Cells below this threshold are free; cells at 1.0 receive full penalty.")
@@ -1088,12 +1150,23 @@ def main():
     args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
     if args.uav_frontier_source not in {"coverage", "confidence"}:
         p.error("--uav-frontier-source must be one of: coverage, confidence")
-    if args.uav_frontier_mode == "local_global" and args.uav_frontier_source != "confidence":
-        p.error("--uav-frontier-mode local_global requires --uav-frontier-source confidence")
     if args.uav_frontier_sectors < 2:
         p.error("--uav-frontier-sectors must be at least 2")
     if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:
         p.error("--uav-frontier-top-k must be in [1, --uav-frontier-sectors]")
+    if args.uav_cleanup_target_grid < 2:
+        p.error("--uav-cleanup-target-grid must be at least 2")
+    if args.uav_cleanup_target_hold_steps < 1:
+        p.error("--uav-cleanup-target-hold-steps must be positive")
+    if not 0.0 <= args.uav_cleanup_target_confidence_threshold <= 1.0:
+        p.error("--uav-cleanup-target-confidence-threshold must be in [0, 1]")
+    if args.uav_cleanup_target_min_value < 0.0:
+        p.error("--uav-cleanup-target-min-value must be nonnegative")
+    if args.uav_cleanup_target_assignment_distance_scale_m <= 0.0:
+        p.error("--uav-cleanup-target-assignment-distance-scale-m must be positive")
+    args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
+    if args.uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
+        p.error("--uav-cleanup-target-refresh-mode must be one of: exact, fixed-hold")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
@@ -1141,6 +1214,8 @@ def main():
         p.error("--uav-inefficient-move-penalty must be nonnegative")
     if args.uav_confidence_overlap_penalty < 0.0:
         p.error("--uav-confidence-overlap-penalty must be nonnegative")
+    if args.uav_cleanup_target_progress_reward < 0.0:
+        p.error("--uav-cleanup-target-progress-reward must be nonnegative")
     if not 0.0 <= args.uav_confidence_overlap_threshold < 1.0:
         p.error("--uav-confidence-overlap-threshold must be in [0, 1)")
     if args.uav_confidence_gamma < 0.0:
@@ -1333,6 +1408,10 @@ def main():
     print(f" uav_frontier_sectors: {args.uav_frontier_sectors}")
     print(f" uav_frontier_top_k: {args.uav_frontier_top_k}")
     print(f" uav_frontier_ownership: {args.uav_frontier_ownership}")
+    print(f" uav_cleanup_target_obs: {args.uav_cleanup_target_obs}")
+    print(f" uav_cleanup_target_grid: {args.uav_cleanup_target_grid}")
+    print(f" uav_cleanup_target_hold_steps: {args.uav_cleanup_target_hold_steps}")
+    print(f" uav_cleanup_target_refresh_mode: {args.uav_cleanup_target_refresh_mode}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
@@ -1353,6 +1432,7 @@ def main():
     print(f" uav_inefficient_move_penalty: {args.uav_inefficient_move_penalty}")
     print(f" uav_inefficient_move_source: {args.uav_inefficient_move_source}")
     print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
+    print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
     print(f" uav_confidence_gamma: {args.uav_confidence_gamma}")
     print(f" uav_confidence_eps: {args.uav_confidence_eps}")
@@ -1415,6 +1495,13 @@ def main():
         uav_frontier_sectors = args.uav_frontier_sectors,
         uav_frontier_top_k = args.uav_frontier_top_k,
         uav_frontier_ownership = args.uav_frontier_ownership,
+        uav_cleanup_target_obs = args.uav_cleanup_target_obs,
+        uav_cleanup_target_grid = args.uav_cleanup_target_grid,
+        uav_cleanup_target_hold_steps = args.uav_cleanup_target_hold_steps,
+        uav_cleanup_target_confidence_threshold = args.uav_cleanup_target_confidence_threshold,
+        uav_cleanup_target_min_value = args.uav_cleanup_target_min_value,
+        uav_cleanup_target_assignment_distance_scale_m = args.uav_cleanup_target_assignment_distance_scale_m,
+        uav_cleanup_target_refresh_mode = args.uav_cleanup_target_refresh_mode,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
@@ -1440,6 +1527,7 @@ def main():
         uav_inefficient_move_penalty = args.uav_inefficient_move_penalty,
         uav_inefficient_move_source = args.uav_inefficient_move_source,
         uav_confidence_overlap_penalty = args.uav_confidence_overlap_penalty,
+        uav_cleanup_target_progress_reward = args.uav_cleanup_target_progress_reward,
         uav_confidence_overlap_threshold = args.uav_confidence_overlap_threshold,
         uav_confidence_gamma = args.uav_confidence_gamma,
         uav_confidence_eps = args.uav_confidence_eps,

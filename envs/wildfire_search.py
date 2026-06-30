@@ -636,6 +636,11 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("uav_cleanup_target_assignment_distance_scale_m", 250.0)),
             1e-6,
         )
+        self.uav_cleanup_target_refresh_mode = str(
+            kwargs.pop("uav_cleanup_target_refresh_mode", "exact")
+        ).replace("-", "_").lower()
+        if self.uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
+            raise ValueError("uav_cleanup_target_refresh_mode must be one of: exact, fixed_hold")
         # One-time directed-approach milestones for ground robots. The scalar
         # is the final/inner milestone reward; default fractions make 0.05 map
         # to rewards [0.02, 0.025, 0.03, 0.04, 0.05] for 75/50/40/30/20m.
@@ -3777,6 +3782,42 @@ class WildfireSearchScenario(BaseScenario):
             if not bool(stale.any().detach().cpu().item()):
                 return
 
+            hold_steps = int(self.uav_cleanup_target_hold_steps)
+
+            self.metric_uav_cleanup_target_switch_by_drone[stale] = 0.0
+            previous_reached = self.metric_uav_cleanup_target_reached_by_drone.to(
+                device=device,
+            ) > 0.5
+            fixed_hold_mode = self.uav_cleanup_target_refresh_mode == "fixed_hold"
+            fixed_keep_mask = torch.zeros_like(self.uav_cleanup_target_valid, dtype=torch.bool)
+            refresh_env_mask = stale.clone()
+            if fixed_hold_mode:
+                valid = self.uav_cleanup_target_valid.to(device=device)
+                target_id = self.uav_cleanup_target_id.to(device=device)
+                age = self.uav_cleanup_target_age.to(device=device)
+                fixed_keep_mask = (
+                    stale.view(-1, 1)
+                    & valid
+                    & (target_id >= 0)
+                    & (age < hold_steps)
+                    & ~previous_reached
+                )
+                needs_refresh = stale.view(-1, 1) & ~fixed_keep_mask
+                refresh_env_mask = stale & needs_refresh.any(dim=1)
+                if bool(fixed_keep_mask.any().detach().cpu().item()):
+                    self.uav_cleanup_target_age = torch.where(
+                        fixed_keep_mask,
+                        self.uav_cleanup_target_age + 1,
+                        self.uav_cleanup_target_age,
+                    )
+                no_refresh_env_mask = stale & ~refresh_env_mask
+                if bool(no_refresh_env_mask.any().detach().cpu().item()):
+                    self._uav_cleanup_target_last_assignment_step[no_refresh_env_mask] = current_step[
+                        no_refresh_env_mask
+                    ].to(device=self._uav_cleanup_target_last_assignment_step.device)
+                if not bool(refresh_env_mask.any().detach().cpu().item()):
+                    return
+
             pooled_confidence, pooled_mass = self._uav_cleanup_target_pooled_maps(
                 device=device,
                 dtype=dtype,
@@ -3790,13 +3831,10 @@ class WildfireSearchScenario(BaseScenario):
                 dtype=dtype,
             ).clamp_min(1e-9)
             distance_scale_m = float(self.uav_cleanup_target_assignment_distance_scale_m)
-            hold_steps = int(self.uav_cleanup_target_hold_steps)
-
-            self.metric_uav_cleanup_target_switch_by_drone[stale] = 0.0
-            previous_reached = self.metric_uav_cleanup_target_reached_by_drone.to(
-                device=device,
-            ) > 0.5
-            stale_env_indices = [int(value) for value in stale.nonzero(as_tuple=False).flatten().detach().cpu().tolist()]
+            stale_env_indices = [
+                int(value)
+                for value in refresh_env_mask.nonzero(as_tuple=False).flatten().detach().cpu().tolist()
+            ]
             for env_idx in stale_env_indices:
                 self.metric_uav_cleanup_target_switch_by_drone[env_idx] = 0.0
                 used_ids: set[int] = set()
@@ -3807,7 +3845,10 @@ class WildfireSearchScenario(BaseScenario):
                     age = int(self.uav_cleanup_target_age[env_idx, drone_idx].detach().cpu().item())
                     reached = bool(previous_reached[env_idx, drone_idx].detach().cpu().item())
                     comp = None
-                    if (
+                    if fixed_hold_mode and bool(fixed_keep_mask[env_idx, drone_idx].detach().cpu().item()):
+                        used_ids.add(old_id)
+                        continue
+                    elif (
                         old_valid
                         and age < hold_steps
                         and not reached
