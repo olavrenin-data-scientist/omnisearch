@@ -536,6 +536,10 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("r_uav_confidence_overlap", 0.0)),
             0.0,
         )
+        self.r_uav_cleanup_target_progress = max(
+            float(kwargs.pop("r_uav_cleanup_target_progress", 0.0)),
+            0.0,
+        )
         self.uav_confidence_overlap_threshold = min(
             max(float(kwargs.pop("uav_confidence_overlap_threshold", 0.65)), 0.0),
             0.999,
@@ -602,8 +606,6 @@ class WildfireSearchScenario(BaseScenario):
         self.uav_frontier_source = str(kwargs.pop("uav_frontier_source", "coverage")).replace("-", "_").lower()
         if self.uav_frontier_source not in {"coverage", "confidence"}:
             raise ValueError("uav_frontier_source must be one of: coverage, confidence")
-        if self.uav_frontier_mode == "local_global" and self.uav_frontier_source != "confidence":
-            raise ValueError("uav_frontier_mode local_global requires uav_frontier_source=confidence")
         self.uav_frontier_sectors = int(kwargs.pop("uav_frontier_sectors", 8))
         if self.uav_frontier_sectors < 2:
             raise ValueError("uav_frontier_sectors must be at least 2")
@@ -613,6 +615,27 @@ class WildfireSearchScenario(BaseScenario):
         if self.uav_frontier_top_k > self.uav_frontier_sectors:
             raise ValueError("uav_frontier_top_k must be <= uav_frontier_sectors")
         self.uav_frontier_ownership = bool(kwargs.pop("uav_frontier_ownership", False))
+        self.uav_cleanup_target_obs = bool(kwargs.pop("uav_cleanup_target_obs", False))
+        self.uav_cleanup_target_diagnostics = bool(kwargs.pop("uav_cleanup_target_diagnostics", False))
+        self.uav_cleanup_target_grid = int(kwargs.pop("uav_cleanup_target_grid", 16))
+        if self.uav_cleanup_target_grid < 2:
+            raise ValueError("uav_cleanup_target_grid must be at least 2")
+        self.uav_cleanup_target_hold_steps = max(
+            int(kwargs.pop("uav_cleanup_target_hold_steps", 15)),
+            1,
+        )
+        self.uav_cleanup_target_confidence_threshold = min(
+            max(float(kwargs.pop("uav_cleanup_target_confidence_threshold", 0.80)), 0.0),
+            1.0,
+        )
+        self.uav_cleanup_target_min_value = max(
+            float(kwargs.pop("uav_cleanup_target_min_value", 0.05)),
+            0.0,
+        )
+        self.uav_cleanup_target_assignment_distance_scale_m = max(
+            float(kwargs.pop("uav_cleanup_target_assignment_distance_scale_m", 250.0)),
+            1e-6,
+        )
         # One-time directed-approach milestones for ground robots. The scalar
         # is the final/inner milestone reward; default fractions make 0.05 map
         # to rewards [0.02, 0.025, 0.03, 0.04, 0.05] for 75/50/40/30/20m.
@@ -872,6 +895,38 @@ class WildfireSearchScenario(BaseScenario):
         self.step_uav_boundary_projection_count = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_uav_boundary_hit = torch.zeros(batch_dim, self.n_drones, device=device)
         self.step_count = torch.zeros(batch_dim, dtype=torch.long, device=device)
+        self.uav_cleanup_target_valid = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            dtype=torch.bool,
+            device=device,
+        )
+        self.uav_cleanup_target_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
+        self.uav_cleanup_target_value = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.uav_cleanup_target_initial_value = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.uav_cleanup_target_age = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            dtype=torch.long,
+            device=device,
+        )
+        self.uav_cleanup_target_id = torch.full(
+            (batch_dim, self.n_drones),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.uav_cleanup_target_prev_distance_m = torch.full(
+            (batch_dim, self.n_drones),
+            float("inf"),
+            device=device,
+        )
+        self._uav_cleanup_target_last_assignment_step = torch.full(
+            (batch_dim,),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
         self._prev_ground_pos = torch.zeros(batch_dim, self.n_ground, 2, device=device)
         self._pre_step_ground_pos = torch.zeros_like(self._prev_ground_pos)
         self._pre_step_drone_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
@@ -880,6 +935,7 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_stencil_direction_cache = {}
         self._uav_land_cover_factor_cache = {}
         self._uav_frontier_feature_cache = {}
+        self._uav_cleanup_target_geometry_cache = {}
         self._uav_terrain_cache_version = 0
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.step_ugv_proposed_path_blocked = torch.zeros(
@@ -966,6 +1022,18 @@ class WildfireSearchScenario(BaseScenario):
             self.n_drones,
             device=device,
         )
+        self.metric_reward_uav_cleanup_target_progress = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_cleanup_target_progress_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_cleanup_target_frontier_gate = torch.zeros(batch_dim, device=device)
+        self.metric_uav_cleanup_target_frontier_gate_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
         self.metric_uav_confidence_overlap_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_confidence_overlap_fraction_by_drone = torch.zeros(
             batch_dim,
@@ -985,6 +1053,31 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_confidence_high_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_step_detection_probability = torch.zeros(batch_dim, device=device)
         self.metric_uav_step_detection_probability_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_cleanup_target_valid_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_cleanup_target_distance_m_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_cleanup_target_value_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_cleanup_target_progress_m_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_cleanup_target_progress_fraction_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_cleanup_target_switch_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_cleanup_target_reached_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_uav_cleanup_target_value_decay_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_cleanup_target_age_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_target_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_footprint_radius_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_footprint_radius_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
@@ -1070,6 +1163,10 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_uav_confidence_move_by_drone,
             self.metric_reward_uav_confidence_overlap,
             self.metric_reward_uav_confidence_overlap_by_drone,
+            self.metric_reward_uav_cleanup_target_progress,
+            self.metric_reward_uav_cleanup_target_progress_by_drone,
+            self.metric_uav_cleanup_target_frontier_gate,
+            self.metric_uav_cleanup_target_frontier_gate_by_drone,
             self.metric_uav_confidence_overlap_fraction,
             self.metric_uav_confidence_overlap_fraction_by_drone,
             self.metric_uav_confidence_mean,
@@ -1085,6 +1182,15 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_uav_confidence_high_fraction,
             self.metric_uav_step_detection_probability,
             self.metric_uav_step_detection_probability_by_drone,
+            self.metric_uav_cleanup_target_valid_by_drone,
+            self.metric_uav_cleanup_target_distance_m_by_drone,
+            self.metric_uav_cleanup_target_value_by_drone,
+            self.metric_uav_cleanup_target_progress_m_by_drone,
+            self.metric_uav_cleanup_target_progress_fraction_by_drone,
+            self.metric_uav_cleanup_target_switch_by_drone,
+            self.metric_uav_cleanup_target_reached_by_drone,
+            self.metric_uav_cleanup_target_value_decay_by_drone,
+            self.metric_uav_cleanup_target_age_by_drone,
             self.metric_uav_target_distance_m,
             self.metric_uav_footprint_radius_m,
             self.metric_uav_footprint_radius_m_by_drone,
@@ -1150,6 +1256,28 @@ class WildfireSearchScenario(BaseScenario):
             else:
                 buffer[env_index] = 1.0
 
+    def _reset_uav_cleanup_targets(self, env_index: int | None = None) -> None:
+        if not hasattr(self, "uav_cleanup_target_valid"):
+            return
+        if env_index is None:
+            self.uav_cleanup_target_valid.zero_()
+            self.uav_cleanup_target_pos.zero_()
+            self.uav_cleanup_target_value.zero_()
+            self.uav_cleanup_target_initial_value.zero_()
+            self.uav_cleanup_target_age.zero_()
+            self.uav_cleanup_target_id.fill_(-1)
+            self.uav_cleanup_target_prev_distance_m.fill_(float("inf"))
+            self._uav_cleanup_target_last_assignment_step.fill_(-1)
+        else:
+            self.uav_cleanup_target_valid[env_index] = False
+            self.uav_cleanup_target_pos[env_index] = 0.0
+            self.uav_cleanup_target_value[env_index] = 0.0
+            self.uav_cleanup_target_initial_value[env_index] = 0.0
+            self.uav_cleanup_target_age[env_index] = 0
+            self.uav_cleanup_target_id[env_index] = -1
+            self.uav_cleanup_target_prev_distance_m[env_index] = float("inf")
+            self._uav_cleanup_target_last_assignment_step[env_index] = -1
+
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
@@ -1190,6 +1318,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ground_approach_milestones_reached.zero_()
             self._reset_step_metric_buffers()
             self._reset_ground_motion_diagnostics()
+            self._reset_uav_cleanup_targets()
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
@@ -1215,6 +1344,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ground_approach_milestones_reached[env_index] = False
             self._reset_step_metric_buffers(env_index)
             self._reset_ground_motion_diagnostics(env_index)
+            self._reset_uav_cleanup_targets(env_index)
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
@@ -2695,6 +2825,11 @@ class WildfireSearchScenario(BaseScenario):
             probability=uav_confidence_probability,
             visible=uav_confidence_visible,
         )
+        self._update_uav_cleanup_target_step_metrics(drone_pos)
+        (
+            uav_cleanup_target_progress_reward,
+            uav_cleanup_target_frontier_gate,
+        ) = self._uav_cleanup_target_progress_reward(drone_pos)
         current_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
         coverage_threshold_crossed = (
             (previous_coverage_fraction < self.uav_coverage_threshold_fraction)
@@ -2757,6 +2892,14 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_confidence_move_by_drone = uav_confidence_move_reward
         self.metric_reward_uav_confidence_overlap = uav_confidence_overlap_penalty.sum(dim=1)
         self.metric_reward_uav_confidence_overlap_by_drone = uav_confidence_overlap_penalty
+        self.metric_reward_uav_cleanup_target_progress = uav_cleanup_target_progress_reward.sum(dim=1)
+        self.metric_reward_uav_cleanup_target_progress_by_drone = uav_cleanup_target_progress_reward
+        self.metric_uav_cleanup_target_frontier_gate_by_drone = uav_cleanup_target_frontier_gate
+        self.metric_uav_cleanup_target_frontier_gate = (
+            uav_cleanup_target_frontier_gate.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
         self.metric_uav_frontier_alignment_by_drone = uav_frontier_alignment
         self.metric_uav_frontier_progress_fraction_by_drone = uav_frontier_progress_fraction
         self.metric_uav_frontier_uncovered_ratio_by_drone = uav_frontier_uncovered_ratio
@@ -2906,6 +3049,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + uav_confidence_reward[:, i]
                 r = r + uav_confidence_move_reward[:, i]
                 r = r + uav_confidence_overlap_penalty[:, i]
+                r = r + uav_cleanup_target_progress_reward[:, i]
                 r = r + uav_overlap_penalty[:, i]
                 r = r + uav_inter_uav_overlap_penalty[:, i]
                 r = r + uav_outside_footprint_penalty[:, i]
@@ -3383,7 +3527,522 @@ class WildfireSearchScenario(BaseScenario):
             and self.uav_frontier_source != "confidence"
             and self.uav_confidence_obs_grid <= 0
             and self.local_confidence_obs_grid <= 0
+            and not self.uav_cleanup_target_obs
+            and not self.uav_cleanup_target_diagnostics
+            and self.r_uav_cleanup_target_progress <= 0.0
         )
+
+    def _uav_cleanup_target_active(self) -> bool:
+        return self.n_drones > 0 and (
+            bool(self.uav_cleanup_target_obs)
+            or bool(self.uav_cleanup_target_diagnostics)
+            or self.r_uav_cleanup_target_progress > 0.0
+        )
+
+    def _uav_cleanup_target_obs_dim(self) -> int:
+        return 4
+
+    def _uav_cleanup_target_mass_map(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        uncertainty = (1.0 - confidence).clamp(0.0, 1.0)
+        confidence_weight = (
+            float(self.uav_confidence_eps)
+            + uncertainty.pow(float(self.uav_confidence_gamma))
+        )
+        return (confidence_weight * uncertainty).clamp(min=0.0)
+
+    def _uav_cleanup_target_pooled_maps(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, Tensor]:
+        import torch.nn.functional as F
+
+        K = int(self.uav_cleanup_target_grid)
+        confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        mass = self._uav_cleanup_target_mass_map(device=device, dtype=dtype)
+        pooled_confidence = F.adaptive_avg_pool2d(confidence.unsqueeze(1), (K, K)).squeeze(1)
+        pooled_mass = F.adaptive_avg_pool2d(mass.unsqueeze(1), (K, K)).squeeze(1)
+        return pooled_confidence, pooled_mass
+
+    def _uav_cleanup_target_coarse_geometry(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, Tensor, float, float]:
+        if not hasattr(self, "_uav_cleanup_target_geometry_cache"):
+            self._uav_cleanup_target_geometry_cache = {}
+        K = int(self.uav_cleanup_target_grid)
+        key = self._device_cache_key(device, dtype) + (
+            K,
+            float(self.x_semidim),
+            float(self.y_semidim),
+        )
+        cached = self._uav_cleanup_target_geometry_cache.get(key)
+        if cached is not None:
+            return cached
+
+        cell_width = 2.0 * float(self.x_semidim) / float(K)
+        cell_height = 2.0 * float(self.y_semidim) / float(K)
+        coarse_x = torch.linspace(
+            -float(self.x_semidim) + cell_width / 2.0,
+            float(self.x_semidim) - cell_width / 2.0,
+            K,
+            device=device,
+            dtype=dtype,
+        )
+        coarse_y = torch.linspace(
+            -float(self.y_semidim) + cell_height / 2.0,
+            float(self.y_semidim) - cell_height / 2.0,
+            K,
+            device=device,
+            dtype=dtype,
+        )
+        cached = (coarse_x, coarse_y, cell_width, cell_height)
+        self._uav_cleanup_target_geometry_cache[key] = cached
+        return cached
+
+    def _uav_cleanup_target_cell_values(
+        self,
+        pooled_confidence: Tensor,
+        pooled_mass: Tensor,
+        target_pos: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        B, D, _ = target_pos.shape
+        K = int(self.uav_cleanup_target_grid)
+        x_idx = torch.floor(
+            (target_pos[..., 0] + float(self.x_semidim))
+            / max(2.0 * float(self.x_semidim), 1e-12)
+            * float(K)
+        ).to(dtype=torch.long)
+        y_idx = torch.floor(
+            (target_pos[..., 1] + float(self.y_semidim))
+            / max(2.0 * float(self.y_semidim), 1e-12)
+            * float(K)
+        ).to(dtype=torch.long)
+        x_idx = x_idx.clamp(0, K - 1)
+        y_idx = y_idx.clamp(0, K - 1)
+        batch_idx = torch.arange(B, device=target_pos.device).view(B, 1).expand(B, D)
+        return pooled_confidence[batch_idx, y_idx, x_idx], pooled_mass[batch_idx, y_idx, x_idx]
+
+    def _uav_cleanup_target_cell_values_from_grid(
+        self,
+        target_pos: Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, Tensor]:
+        B, D, _ = target_pos.shape
+        K = int(self.uav_cleanup_target_grid)
+        G = int(self.fire_grid_size)
+        confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        target_confidence = torch.zeros(B, D, device=device, dtype=dtype)
+        target_mass = torch.zeros(B, D, device=device, dtype=dtype)
+        x_idx = torch.floor(
+            (target_pos[..., 0] + float(self.x_semidim))
+            / max(2.0 * float(self.x_semidim), 1e-12)
+            * float(K)
+        ).to(dtype=torch.long).clamp(0, K - 1)
+        y_idx = torch.floor(
+            (target_pos[..., 1] + float(self.y_semidim))
+            / max(2.0 * float(self.y_semidim), 1e-12)
+            * float(K)
+        ).to(dtype=torch.long).clamp(0, K - 1)
+        confidence_eps = float(self.uav_confidence_eps)
+        confidence_gamma = float(self.uav_confidence_gamma)
+        for env_idx in range(B):
+            for drone_idx in range(D):
+                x_cell = int(x_idx[env_idx, drone_idx].detach().cpu().item())
+                y_cell = int(y_idx[env_idx, drone_idx].detach().cpu().item())
+                x0 = int(math.floor(float(x_cell) * float(G) / float(K)))
+                x1 = int(math.ceil(float(x_cell + 1) * float(G) / float(K)))
+                y0 = int(math.floor(float(y_cell) * float(G) / float(K)))
+                y1 = int(math.ceil(float(y_cell + 1) * float(G) / float(K)))
+                patch_confidence = confidence[env_idx, y0:y1, x0:x1]
+                if patch_confidence.numel() == 0:
+                    continue
+                uncertainty = (1.0 - patch_confidence).clamp(0.0, 1.0)
+                patch_mass = (
+                    confidence_eps
+                    + uncertainty.pow(confidence_gamma)
+                ) * uncertainty
+                target_confidence[env_idx, drone_idx] = patch_confidence.mean()
+                target_mass[env_idx, drone_idx] = patch_mass.clamp_min(0.0).mean()
+        return target_confidence, target_mass
+
+    def _uav_cleanup_target_components(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        pooled_confidence: Tensor | None = None,
+        pooled_mass: Tensor | None = None,
+        env_indices: Tensor | list[int] | None = None,
+    ) -> list[list[dict[str, Tensor | int]]]:
+        K = int(self.uav_cleanup_target_grid)
+        if pooled_confidence is None or pooled_mass is None:
+            pooled_confidence, pooled_mass = self._uav_cleanup_target_pooled_maps(
+                device=device,
+                dtype=dtype,
+            )
+        coarse_x, coarse_y, _, _ = self._uav_cleanup_target_coarse_geometry(
+            device=device,
+            dtype=dtype,
+        )
+
+        batch_dim = int(self.world.batch_dim)
+        all_components: list[list[dict[str, Tensor | int]]] = [[] for _ in range(batch_dim)]
+        if env_indices is None:
+            env_iter = range(batch_dim)
+        elif isinstance(env_indices, Tensor):
+            env_iter = [int(value) for value in env_indices.detach().cpu().tolist()]
+        else:
+            env_iter = [int(value) for value in env_indices]
+        threshold = float(self.uav_cleanup_target_confidence_threshold)
+        min_value = float(self.uav_cleanup_target_min_value)
+        for env_idx in env_iter:
+            targetable = (
+                (pooled_confidence[env_idx] < threshold)
+                & (pooled_mass[env_idx] > min_value)
+            )
+            targetable_rows = targetable.detach().cpu().tolist()
+            visited = [[False for _ in range(K)] for _ in range(K)]
+            env_components: list[dict[str, Tensor | int]] = []
+            for y in range(K):
+                for x in range(K):
+                    if visited[y][x] or not bool(targetable_rows[y][x]):
+                        continue
+                    stack = [(y, x)]
+                    visited[y][x] = True
+                    cells: list[tuple[int, int]] = []
+                    while stack:
+                        cy, cx = stack.pop()
+                        cells.append((cy, cx))
+                        for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                            if (
+                                0 <= ny < K
+                                and 0 <= nx < K
+                                and not visited[ny][nx]
+                                and bool(targetable_rows[ny][nx])
+                            ):
+                                visited[ny][nx] = True
+                                stack.append((ny, nx))
+                    ys = torch.tensor([cell[0] for cell in cells], device=device, dtype=torch.long)
+                    xs = torch.tensor([cell[1] for cell in cells], device=device, dtype=torch.long)
+                    weights = pooled_mass[env_idx, ys, xs].clamp_min(0.0)
+                    total = weights.sum()
+                    if float(total.detach().cpu().item()) <= 1e-12:
+                        continue
+                    centroid_x = (coarse_x[xs] * weights).sum() / total
+                    centroid_y = (coarse_y[ys] * weights).sum() / total
+                    mean_value = weights.mean().clamp(0.0, 1.0)
+                    current_confidence = (
+                        pooled_confidence[env_idx, ys, xs] * weights
+                    ).sum() / total
+                    component_id = min(int(cell[0]) * K + int(cell[1]) for cell in cells)
+                    env_components.append({
+                        "id": component_id,
+                        "centroid": torch.stack((centroid_x, centroid_y)),
+                        "value": mean_value,
+                        "confidence": current_confidence.clamp(0.0, 1.0),
+                    })
+            all_components[env_idx] = env_components
+        return all_components
+
+    def _refresh_uav_cleanup_target_assignments(self, drone_pos: Tensor) -> None:
+        if not self._uav_cleanup_target_active() or self.n_drones <= 0:
+            return
+        if not hasattr(self, "uav_cleanup_target_valid"):
+            return
+        with torch.no_grad():
+            device = drone_pos.device
+            dtype = drone_pos.dtype
+            current_step = self.step_count.to(device=device)
+            stale = self._uav_cleanup_target_last_assignment_step.to(device=device) != current_step
+            if not bool(stale.any().detach().cpu().item()):
+                return
+
+            meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
+                device=device,
+                dtype=dtype,
+            ).clamp_min(1e-9)
+            distance_scale_m = float(self.uav_cleanup_target_assignment_distance_scale_m)
+            hold_steps = int(self.uav_cleanup_target_hold_steps)
+
+            self.metric_uav_cleanup_target_switch_by_drone[stale] = 0.0
+            valid = self.uav_cleanup_target_valid.to(device=device)
+            age = self.uav_cleanup_target_age.to(device=device)
+            target_pos = self.uav_cleanup_target_pos.to(device=device, dtype=dtype)
+            target_confidence, target_value = self._uav_cleanup_target_cell_values_from_grid(
+                target_pos,
+                device=device,
+                dtype=dtype,
+            )
+            targetable = (
+                valid
+                & (target_confidence < float(self.uav_cleanup_target_confidence_threshold))
+                & (target_value > float(self.uav_cleanup_target_min_value))
+            )
+            previous_reached = self.metric_uav_cleanup_target_reached_by_drone.to(
+                device=device,
+            ) > 0.5
+            within_hold = age < hold_steps
+            needs_drone_refresh = (
+                stale.view(-1, 1)
+                & (~valid | ~targetable | ~within_hold | previous_reached)
+            )
+            refresh_env_mask = stale & needs_drone_refresh.any(dim=1)
+            keep_env_mask = stale & ~refresh_env_mask
+
+            if bool(keep_env_mask.any().detach().cpu().item()):
+                keep_drone_mask = keep_env_mask.view(-1, 1) & valid
+                self.uav_cleanup_target_age = torch.where(
+                    keep_drone_mask,
+                    self.uav_cleanup_target_age + 1,
+                    self.uav_cleanup_target_age,
+                )
+                # Refresh the held target value cheaply from the coarse cell containing the target.
+                self.uav_cleanup_target_value = torch.where(
+                    keep_drone_mask,
+                    target_value.to(
+                        device=self.uav_cleanup_target_value.device,
+                        dtype=self.uav_cleanup_target_value.dtype,
+                    ),
+                    self.uav_cleanup_target_value,
+                )
+                self._uav_cleanup_target_last_assignment_step[keep_env_mask] = current_step[
+                    keep_env_mask
+                ].to(device=self._uav_cleanup_target_last_assignment_step.device)
+
+            if not bool(refresh_env_mask.any().detach().cpu().item()):
+                return
+
+            refresh_env_indices = refresh_env_mask.nonzero(as_tuple=False).flatten()
+            pooled_confidence, pooled_mass = self._uav_cleanup_target_pooled_maps(
+                device=device,
+                dtype=dtype,
+            )
+            components_by_env = self._uav_cleanup_target_components(
+                device=device,
+                dtype=dtype,
+                pooled_confidence=pooled_confidence,
+                pooled_mass=pooled_mass,
+                env_indices=refresh_env_indices,
+            )
+            for env_idx in [int(value) for value in refresh_env_indices.detach().cpu().tolist()]:
+                components = components_by_env[env_idx]
+                self.metric_uav_cleanup_target_switch_by_drone[env_idx] = 0.0
+                comp_by_id = {int(comp["id"]): comp for comp in components}
+                used_ids: set[int] = set()
+                needing_assignment: list[int] = []
+                for drone_idx in range(self.n_drones):
+                    old_valid = bool(self.uav_cleanup_target_valid[env_idx, drone_idx].detach().cpu().item())
+                    old_id = int(self.uav_cleanup_target_id[env_idx, drone_idx].detach().cpu().item())
+                    age = int(self.uav_cleanup_target_age[env_idx, drone_idx].detach().cpu().item())
+                    force_refresh = bool(
+                        needs_drone_refresh[env_idx, drone_idx].detach().cpu().item()
+                    )
+                    keep = (
+                        old_valid
+                        and not force_refresh
+                        and old_id in comp_by_id
+                        and age < hold_steps
+                    )
+                    if keep:
+                        comp = comp_by_id[old_id]
+                        self.uav_cleanup_target_pos[env_idx, drone_idx] = comp["centroid"]
+                        self.uav_cleanup_target_value[env_idx, drone_idx] = comp["value"]
+                        self.uav_cleanup_target_age[env_idx, drone_idx] += 1
+                        used_ids.add(old_id)
+                    else:
+                        needing_assignment.append(drone_idx)
+
+                if components:
+                    comp_ids = [int(comp["id"]) for comp in components]
+                    comp_pos = torch.stack([comp["centroid"].to(device=device, dtype=dtype) for comp in components])
+                    comp_value = torch.stack([comp["value"].to(device=device, dtype=dtype) for comp in components])
+                    drone_indices = needing_assignment
+                    if drone_indices:
+                        drone_positions = drone_pos[env_idx, drone_indices]
+                        dists_m = (drone_positions.unsqueeze(1) - comp_pos.unsqueeze(0)).norm(dim=-1) * meters_per_sim[env_idx]
+                        scores = comp_value.unsqueeze(0) / (1.0 + dists_m / distance_scale_m)
+                        order = sorted(
+                            range(len(drone_indices)),
+                            key=lambda idx: float(scores[idx].max().detach().cpu().item()),
+                            reverse=True,
+                        )
+                        for local_idx in order:
+                            drone_idx = drone_indices[local_idx]
+                            available = [
+                                comp_i
+                                for comp_i, comp_id in enumerate(comp_ids)
+                                if comp_id not in used_ids
+                            ]
+                            if not available:
+                                available = list(range(len(components)))
+                            best_comp_i = max(
+                                available,
+                                key=lambda comp_i: float(scores[local_idx, comp_i].detach().cpu().item()),
+                            )
+                            comp = components[best_comp_i]
+                            new_id = int(comp["id"])
+                            old_valid = bool(self.uav_cleanup_target_valid[env_idx, drone_idx].detach().cpu().item())
+                            old_id = int(self.uav_cleanup_target_id[env_idx, drone_idx].detach().cpu().item())
+                            self.uav_cleanup_target_valid[env_idx, drone_idx] = True
+                            self.uav_cleanup_target_pos[env_idx, drone_idx] = comp["centroid"]
+                            self.uav_cleanup_target_value[env_idx, drone_idx] = comp["value"]
+                            self.uav_cleanup_target_initial_value[env_idx, drone_idx] = comp["value"]
+                            self.uav_cleanup_target_age[env_idx, drone_idx] = 0
+                            self.uav_cleanup_target_id[env_idx, drone_idx] = new_id
+                            current_distance_m = (
+                                drone_pos[env_idx, drone_idx] - comp["centroid"].to(device=device, dtype=dtype)
+                            ).norm() * meters_per_sim[env_idx]
+                            self.uav_cleanup_target_prev_distance_m[env_idx, drone_idx] = current_distance_m
+                            if old_valid and old_id != new_id:
+                                self.metric_uav_cleanup_target_switch_by_drone[env_idx, drone_idx] = 1.0
+                            used_ids.add(new_id)
+
+                for drone_idx in needing_assignment:
+                    if bool(self.uav_cleanup_target_valid[env_idx, drone_idx].detach().cpu().item()):
+                        continue
+                    self.uav_cleanup_target_pos[env_idx, drone_idx] = 0.0
+                    self.uav_cleanup_target_value[env_idx, drone_idx] = 0.0
+                    self.uav_cleanup_target_initial_value[env_idx, drone_idx] = 0.0
+                    self.uav_cleanup_target_age[env_idx, drone_idx] = 0
+                    self.uav_cleanup_target_id[env_idx, drone_idx] = -1
+                    self.uav_cleanup_target_prev_distance_m[env_idx, drone_idx] = float("inf")
+
+                if not components:
+                    previous_valid = self.uav_cleanup_target_valid[env_idx].clone()
+                    self.uav_cleanup_target_valid[env_idx] = False
+                    self.uav_cleanup_target_pos[env_idx] = 0.0
+                    self.uav_cleanup_target_value[env_idx] = 0.0
+                    self.uav_cleanup_target_initial_value[env_idx] = 0.0
+                    self.uav_cleanup_target_age[env_idx] = 0
+                    self.uav_cleanup_target_id[env_idx] = -1
+                    self.uav_cleanup_target_prev_distance_m[env_idx] = float("inf")
+                    self.metric_uav_cleanup_target_switch_by_drone[env_idx] = previous_valid.to(
+                        dtype=self.metric_uav_cleanup_target_switch_by_drone.dtype
+                    )
+                self._uav_cleanup_target_last_assignment_step[env_idx] = current_step[env_idx]
+
+    def _update_uav_cleanup_target_step_metrics(self, drone_pos: Tensor) -> None:
+        if not self._uav_cleanup_target_active() or self.n_drones <= 0:
+            return
+        with torch.no_grad():
+            self._refresh_uav_cleanup_target_assignments(drone_pos)
+            valid = self.uav_cleanup_target_valid.to(device=drone_pos.device)
+            meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
+                device=drone_pos.device,
+                dtype=drone_pos.dtype,
+            ).clamp_min(1e-9)
+            target_vec = self.uav_cleanup_target_pos.to(device=drone_pos.device, dtype=drone_pos.dtype) - drone_pos
+            distance_m = target_vec.norm(dim=-1) * meters_per_sim.view(-1, 1)
+            previous_distance = self.uav_cleanup_target_prev_distance_m.to(
+                device=drone_pos.device,
+                dtype=drone_pos.dtype,
+            )
+            progress_m = torch.where(
+                valid & torch.isfinite(previous_distance),
+                previous_distance - distance_m,
+                torch.zeros_like(distance_m),
+            )
+            max_step_m = max(float(self.drone_speed_mps) * float(self.sim_step_seconds), 1e-6)
+            progress_fraction = (progress_m / max_step_m).clamp(-1.0, 1.0)
+            footprint_m = self._drone_camera_ranges().to(
+                device=drone_pos.device,
+                dtype=drone_pos.dtype,
+            ) * meters_per_sim.view(-1, 1)
+            reached = valid & (distance_m <= footprint_m)
+            value = self.uav_cleanup_target_value.to(device=drone_pos.device, dtype=drone_pos.dtype)
+            initial_value = self.uav_cleanup_target_initial_value.to(device=drone_pos.device, dtype=drone_pos.dtype)
+            value_decay = (initial_value - value).clamp_min(0.0)
+            valid_f = valid.to(dtype=drone_pos.dtype)
+            self.metric_uav_cleanup_target_valid_by_drone = valid_f
+            self.metric_uav_cleanup_target_distance_m_by_drone = torch.where(
+                valid,
+                distance_m,
+                torch.zeros_like(distance_m),
+            )
+            self.metric_uav_cleanup_target_value_by_drone = torch.where(
+                valid,
+                value,
+                torch.zeros_like(value),
+            )
+            self.metric_uav_cleanup_target_progress_m_by_drone = torch.where(
+                valid,
+                progress_m,
+                torch.zeros_like(progress_m),
+            )
+            self.metric_uav_cleanup_target_progress_fraction_by_drone = torch.where(
+                valid,
+                progress_fraction,
+                torch.zeros_like(progress_fraction),
+            )
+            self.metric_uav_cleanup_target_reached_by_drone = reached.to(dtype=drone_pos.dtype)
+            self.metric_uav_cleanup_target_value_decay_by_drone = torch.where(
+                valid,
+                value_decay,
+                torch.zeros_like(value_decay),
+            )
+            self.metric_uav_cleanup_target_age_by_drone = torch.where(
+                valid,
+                self.uav_cleanup_target_age.to(device=drone_pos.device, dtype=drone_pos.dtype),
+                torch.zeros_like(value),
+            )
+            self.uav_cleanup_target_prev_distance_m = torch.where(
+                valid,
+                distance_m,
+                torch.full_like(distance_m, float("inf")),
+            )
+
+    def _uav_local_frontier_score(self, device: torch.device, dtype: torch.dtype) -> Tensor:
+        """Configured local frontier strength per UAV, used to gate cleanup progress."""
+        if self.n_drones == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=device, dtype=dtype)
+        features = self._pre_step_uav_frontier_features().to(device=device, dtype=dtype)
+        if self.uav_frontier_mode == "sector_topk":
+            B, D, _ = features.shape
+            top_k = max(int(self.uav_frontier_top_k), 1)
+            return features.view(B, D, top_k, 4)[..., 3].clamp(0.0, 1.0).max(dim=-1).values
+        if self.uav_frontier_mode == "local_global":
+            B, D, _ = features.shape
+            return features.view(B, D, 2, 4)[..., 0, 3].clamp(0.0, 1.0)
+        return features[..., 3].clamp(0.0, 1.0)
+
+    def _uav_cleanup_target_progress_reward(self, drone_pos: Tensor) -> tuple[Tensor, Tensor]:
+        """Reward progress toward cleanup targets when the local frontier is weak."""
+        reward = drone_pos.new_zeros(drone_pos.shape[0], self.n_drones)
+        gate = torch.zeros_like(reward)
+        if self.n_drones == 0 or self.r_uav_cleanup_target_progress <= 0.0:
+            return reward, gate
+
+        valid = self.metric_uav_cleanup_target_valid_by_drone.to(
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        ).clamp(0.0, 1.0)
+        progress = self.metric_uav_cleanup_target_progress_fraction_by_drone.to(
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        ).clamp(0.0, 1.0)
+        target_value = self.metric_uav_cleanup_target_value_by_drone.to(
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        ).clamp(0.0, 1.0)
+        local_frontier_score = self._uav_local_frontier_score(
+            drone_pos.device,
+            drone_pos.dtype,
+        )
+        gate = (1.0 - local_frontier_score).clamp(0.0, 1.0) * valid
+        reward = (
+            float(self.r_uav_cleanup_target_progress)
+            * progress
+            * target_value
+            * gate
+        )
+        return reward, gate
 
     def _uav_confidence_overlap_penalty(
         self,
@@ -4107,65 +4766,58 @@ class WildfireSearchScenario(BaseScenario):
 
         sector_width, sector_unit = self._uav_sector_geometry(sectors, positions.device, positions.dtype)
 
-        for env_idx in range(B):
-            radius = radius_sim[env_idx]
-            radius_value = float(radius.detach().cpu().item())
-            ideal_sector_cells = max(
-                math.pi * radius_value * radius_value / cell_area / float(sectors),
-                1.0,
-            )
-            env_scores = frontier_scores[env_idx]
-            env_positions = positions[env_idx]
+        dx = x_grid.view(1, 1, 1, G) - positions[..., X].view(B, N, 1, 1)
+        dy = y_grid.view(1, 1, G, 1) - positions[..., Y].view(B, N, 1, 1)
+        dist_sq = dx.square() + dy.square()
+        dist = dist_sq.sqrt()
+        radius = radius_sim.view(B, 1, 1, 1)
+        useful_any = (dist_sq <= radius.square()) & (frontier_scores.unsqueeze(1) > 1e-9)
 
-            for item_idx in range(N):
-                pos = env_positions[item_idx]
-                dx = x_grid - pos[X]
-                dy = y_grid - pos[Y]
-                dist_sq = dx.square() + dy.square()
-                dist = dist_sq.sqrt()
-                in_radius = dist_sq <= radius.square()
-                useful_any = in_radius & (env_scores > 1e-9)
-                if float(useful_any.float().sum().detach().cpu().item()) <= 0.0:
-                    continue
+        if self.uav_frontier_ownership and N > 1:
+            own_mask = torch.eye(N, device=positions.device, dtype=torch.bool).view(1, N, N, 1, 1)
+            inf = torch.full((), float("inf"), device=positions.device, dtype=positions.dtype)
+            other_dist = dist.unsqueeze(1).masked_fill(own_mask, inf).amin(dim=2)
+            ownership = other_dist / (dist + other_dist + 1e-9)
+        else:
+            ownership = torch.ones_like(dist)
 
-                if self.uav_frontier_ownership and N > 1:
-                    other_mask = torch.ones(N, device=positions.device, dtype=torch.bool)
-                    other_mask[item_idx] = False
-                    other_positions = env_positions[other_mask]
-                    other_dx = x_grid.view(1, 1, G) - other_positions[:, X].view(-1, 1, 1)
-                    other_dy = y_grid.view(1, G, 1) - other_positions[:, Y].view(-1, 1, 1)
-                    other_dist = (other_dx.square() + other_dy.square()).sqrt().amin(dim=0)
-                    ownership = other_dist / (dist + other_dist + 1e-9)
-                else:
-                    ownership = torch.ones(G, G, device=positions.device, dtype=positions.dtype)
+        angles = torch.atan2(dy, dx)
+        sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
+        weighted = useful_any.to(dtype=positions.dtype) * frontier_scores.unsqueeze(1) * ownership
 
-                angles = torch.atan2(dy, dx)
-                sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
-                sector_scores = torch.zeros(sectors, device=positions.device, dtype=positions.dtype)
-                sector_distances = torch.zeros_like(sector_scores)
+        sector_ids = torch.arange(sectors, device=positions.device).view(1, 1, sectors, 1, 1)
+        sector_mask = sector_index.unsqueeze(2) == sector_ids
+        sector_weight = (weighted.unsqueeze(2) * sector_mask).sum(dim=(-2, -1))
+        sector_dist_sum = ((dist * weighted).unsqueeze(2) * sector_mask).sum(dim=(-2, -1))
+        nonzero = sector_weight > 0.0
+        safe_weight = sector_weight.clamp_min(1e-9)
+        sector_distances = torch.where(
+            nonzero,
+            (sector_dist_sum / safe_weight / radius_sim.view(B, 1, 1)).clamp(0.0, 1.0),
+            torch.zeros_like(sector_weight),
+        )
+        ideal_sector_cells = (
+            math.pi * radius_sim.square() / cell_area / float(sectors)
+        ).clamp_min(1.0).view(B, 1, 1)
+        sector_scores = torch.where(
+            nonzero,
+            (sector_weight / ideal_sector_cells).clamp(0.0, 1.0),
+            torch.zeros_like(sector_weight),
+        )
 
-                for sector_idx in range(sectors):
-                    sector_mask = useful_any & (sector_index == sector_idx)
-                    weighted_uncovered = sector_mask.to(dtype=positions.dtype) * env_scores * ownership
-                    weighted_count = weighted_uncovered.sum()
-                    if float(weighted_count.detach().cpu().item()) <= 0.0:
-                        continue
-                    sector_scores[sector_idx] = (weighted_count / ideal_sector_cells).clamp(0.0, 1.0)
-                    sector_distances[sector_idx] = (
-                        (dist * weighted_uncovered).sum() / weighted_count / radius
-                    ).clamp(0.0, 1.0)
-
-                top_scores, top_indices = torch.topk(sector_scores, k=top_k, largest=True, sorted=True)
-                for rank_idx in range(top_k):
-                    score = top_scores[rank_idx]
-                    if float(score.detach().cpu().item()) <= 1e-9:
-                        continue
-                    sector_idx = int(top_indices[rank_idx].detach().cpu().item())
-                    base = rank_idx * 4
-                    out[env_idx, item_idx, base : base + 2] = sector_unit[sector_idx]
-                    out[env_idx, item_idx, base + 2] = sector_distances[sector_idx]
-                    out[env_idx, item_idx, base + 3] = score
-        return out
+        top_scores, top_indices = torch.topk(sector_scores, k=top_k, largest=True, sorted=True)
+        top_distances = torch.gather(sector_distances, 2, top_indices)
+        top_dirs = sector_unit[top_indices]
+        features = torch.cat(
+            (
+                top_dirs,
+                top_distances.unsqueeze(-1),
+                top_scores.unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        features = torch.where(top_scores.unsqueeze(-1) > 1e-9, features, torch.zeros_like(features))
+        return features.reshape(B, N, top_k * 4)
 
     def _uav_frontier_best_sector_features(
         self,
@@ -4306,19 +4958,17 @@ class WildfireSearchScenario(BaseScenario):
         return (other_dist / (self_dist + other_dist + 1e-9)).unsqueeze(1).to(dtype=dtype)
 
     def _uav_frontier_local_global_features_for_positions(self, positions: Tensor) -> Tensor:
-        """Confidence frontier with one tactical local and one diversified global candidate.
+        """Frontier with one tactical local and one diversified global candidate.
 
         Encodes ``[local_dx, local_dy, local_dist, local_score,
         global_dx, global_dy, global_dist, global_score]`` per UAV. The local
         candidate uses ``uav_frontier_obs_radius_m``. The global candidate uses
-        the full confidence frontier map and greedily suppresses already
+        the full configured frontier map and greedily suppresses already
         assigned sectors so drones receive different strategic directions when
         alternatives exist.
         """
         if positions.ndim != 3:
             raise ValueError("positions must have shape [B, N, 2]")
-        if self.uav_frontier_source != "confidence":
-            raise ValueError("local_global frontier mode requires uav_frontier_source=confidence")
         B, N, _ = positions.shape
         out = torch.zeros(B, N, 8, device=positions.device, dtype=positions.dtype)
         if B == 0 or N == 0:
@@ -4743,6 +5393,8 @@ class WildfireSearchScenario(BaseScenario):
             parts.append(self._local_confidence_observation(agent))  # [B, K*K]
         if self.uav_frontier_obs:
             parts.append(self._uav_frontier_observation(agent))
+        if self.uav_cleanup_target_obs:
+            parts.append(self._uav_cleanup_target_observation(agent))
         return torch.cat(parts, dim=-1)
 
     def _coverage_observation(self) -> Tensor:
@@ -4878,6 +5530,44 @@ class WildfireSearchScenario(BaseScenario):
             drone_idx = 0
         drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
         return self._current_uav_frontier_features()[:, drone_idx]
+
+    def _uav_cleanup_target_observation(self, agent: Agent) -> Tensor:
+        dim = self._uav_cleanup_target_obs_dim()
+        if not agent.is_drone or self.n_drones <= 0:
+            return torch.zeros(self.world.batch_dim, dim, device=agent.state.pos.device, dtype=agent.state.pos.dtype)
+        try:
+            drone_idx = int(agent.name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            drone_idx = 0
+        drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
+        drone_pos = torch.stack(
+            [drone.state.pos for drone in self.world.agents[: self.n_drones]],
+            dim=1,
+        )
+        self._refresh_uav_cleanup_target_assignments(drone_pos)
+        valid = self.uav_cleanup_target_valid[:, drone_idx].to(device=agent.state.pos.device)
+        target_vec = (
+            self.uav_cleanup_target_pos[:, drone_idx].to(device=agent.state.pos.device, dtype=agent.state.pos.dtype)
+            - agent.state.pos
+        )
+        distance_sim = target_vec.norm(dim=-1)
+        unit = target_vec / distance_sim.clamp_min(1e-9).unsqueeze(-1)
+        meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
+            device=agent.state.pos.device,
+            dtype=agent.state.pos.dtype,
+        ).clamp_min(1e-9)
+        distance_m = distance_sim * meters_per_sim
+        map_diag_m = (
+            math.hypot(2.0 * float(self.x_semidim), 2.0 * float(self.y_semidim))
+            * meters_per_sim
+        ).clamp_min(1e-9)
+        distance_norm = (distance_m / map_diag_m).clamp(0.0, 1.0)
+        value = self.uav_cleanup_target_value[:, drone_idx].to(
+            device=agent.state.pos.device,
+            dtype=agent.state.pos.dtype,
+        ).clamp(0.0, 1.0)
+        out = torch.cat((unit, distance_norm.unsqueeze(-1), value.unsqueeze(-1)), dim=-1)
+        return torch.where(valid.unsqueeze(-1), out, torch.zeros_like(out))
 
     def _boundary_observation(self, agent: Agent) -> Tensor:
         """Distances to left, right, bottom, top bounds, normalized by footprint."""
@@ -5569,6 +6259,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/uav_confidence": self.metric_reward_uav_confidence,
             "reward/uav_confidence_move": self.metric_reward_uav_confidence_move,
             "reward/uav_confidence_overlap": self.metric_reward_uav_confidence_overlap,
+            "reward/uav_cleanup_target_progress": self.metric_reward_uav_cleanup_target_progress,
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,
             "reward/uav_outside_footprint": self.metric_reward_uav_outside_footprint,
@@ -5647,6 +6338,31 @@ class WildfireSearchScenario(BaseScenario):
             ),
             "diagnostic/uav_confidence_overlap_fraction": (
                 self.metric_uav_confidence_overlap_fraction
+            ),
+            "diagnostic/uav_cleanup_target_valid_fraction": (
+                self.metric_uav_cleanup_target_valid_by_drone.mean(dim=1)
+                if self.n_drones > 0
+                else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
+            ),
+            "diagnostic/uav_cleanup_target_distance_m": (
+                self.metric_uav_cleanup_target_distance_m_by_drone.mean(dim=1)
+                if self.n_drones > 0
+                else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
+            ),
+            "diagnostic/uav_cleanup_target_value": (
+                self.metric_uav_cleanup_target_value_by_drone.mean(dim=1)
+                if self.n_drones > 0
+                else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
+            ),
+            "diagnostic/uav_cleanup_target_progress_m": (
+                self.metric_uav_cleanup_target_progress_m_by_drone.mean(dim=1)
+                if self.n_drones > 0
+                else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
+            ),
+            "diagnostic/uav_cleanup_target_frontier_gate": (
+                self.metric_uav_cleanup_target_frontier_gate_by_drone.mean(dim=1)
+                if self.n_drones > 0
+                else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
             ),
             "diagnostic/uav_confidence_low_fraction": self.metric_uav_confidence_low_fraction,
             "diagnostic/uav_confidence_high_fraction": self.metric_uav_confidence_high_fraction,
