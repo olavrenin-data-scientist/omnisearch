@@ -3604,73 +3604,93 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_cleanup_target_geometry_cache[key] = cached
         return cached
 
-    def _uav_cleanup_target_cell_values(
+    def _uav_cleanup_target_component_from_cells(
         self,
+        *,
+        env_idx: int,
+        cells: list[tuple[int, int]],
         pooled_confidence: Tensor,
         pooled_mass: Tensor,
-        target_pos: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        B, D, _ = target_pos.shape
-        K = int(self.uav_cleanup_target_grid)
-        x_idx = torch.floor(
-            (target_pos[..., 0] + float(self.x_semidim))
-            / max(2.0 * float(self.x_semidim), 1e-12)
-            * float(K)
-        ).to(dtype=torch.long)
-        y_idx = torch.floor(
-            (target_pos[..., 1] + float(self.y_semidim))
-            / max(2.0 * float(self.y_semidim), 1e-12)
-            * float(K)
-        ).to(dtype=torch.long)
-        x_idx = x_idx.clamp(0, K - 1)
-        y_idx = y_idx.clamp(0, K - 1)
-        batch_idx = torch.arange(B, device=target_pos.device).view(B, 1).expand(B, D)
-        return pooled_confidence[batch_idx, y_idx, x_idx], pooled_mass[batch_idx, y_idx, x_idx]
-
-    def _uav_cleanup_target_cell_values_from_grid(
-        self,
-        target_pos: Tensor,
-        *,
+        coarse_x: Tensor,
+        coarse_y: Tensor,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> tuple[Tensor, Tensor]:
-        B, D, _ = target_pos.shape
+    ) -> dict[str, Tensor | int] | None:
+        if not cells:
+            return None
         K = int(self.uav_cleanup_target_grid)
-        G = int(self.fire_grid_size)
-        confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
-        target_confidence = torch.zeros(B, D, device=device, dtype=dtype)
-        target_mass = torch.zeros(B, D, device=device, dtype=dtype)
-        x_idx = torch.floor(
-            (target_pos[..., 0] + float(self.x_semidim))
-            / max(2.0 * float(self.x_semidim), 1e-12)
-            * float(K)
-        ).to(dtype=torch.long).clamp(0, K - 1)
-        y_idx = torch.floor(
-            (target_pos[..., 1] + float(self.y_semidim))
-            / max(2.0 * float(self.y_semidim), 1e-12)
-            * float(K)
-        ).to(dtype=torch.long).clamp(0, K - 1)
-        confidence_eps = float(self.uav_confidence_eps)
-        confidence_gamma = float(self.uav_confidence_gamma)
-        for env_idx in range(B):
-            for drone_idx in range(D):
-                x_cell = int(x_idx[env_idx, drone_idx].detach().cpu().item())
-                y_cell = int(y_idx[env_idx, drone_idx].detach().cpu().item())
-                x0 = int(math.floor(float(x_cell) * float(G) / float(K)))
-                x1 = int(math.ceil(float(x_cell + 1) * float(G) / float(K)))
-                y0 = int(math.floor(float(y_cell) * float(G) / float(K)))
-                y1 = int(math.ceil(float(y_cell + 1) * float(G) / float(K)))
-                patch_confidence = confidence[env_idx, y0:y1, x0:x1]
-                if patch_confidence.numel() == 0:
-                    continue
-                uncertainty = (1.0 - patch_confidence).clamp(0.0, 1.0)
-                patch_mass = (
-                    confidence_eps
-                    + uncertainty.pow(confidence_gamma)
-                ) * uncertainty
-                target_confidence[env_idx, drone_idx] = patch_confidence.mean()
-                target_mass[env_idx, drone_idx] = patch_mass.clamp_min(0.0).mean()
-        return target_confidence, target_mass
+        ys = torch.tensor([cell[0] for cell in cells], device=device, dtype=torch.long)
+        xs = torch.tensor([cell[1] for cell in cells], device=device, dtype=torch.long)
+        weights = pooled_mass[env_idx, ys, xs].clamp_min(0.0)
+        total = weights.sum()
+        if float(total.detach().cpu().item()) <= 1e-12:
+            return None
+        centroid_x = (coarse_x[xs] * weights).sum() / total
+        centroid_y = (coarse_y[ys] * weights).sum() / total
+        mean_value = weights.mean().clamp(0.0, 1.0)
+        current_confidence = (pooled_confidence[env_idx, ys, xs] * weights).sum() / total
+        component_id = min(int(cell[0]) * K + int(cell[1]) for cell in cells)
+        return {
+            "id": component_id,
+            "centroid": torch.stack((centroid_x, centroid_y)).to(device=device, dtype=dtype),
+            "value": mean_value.to(device=device, dtype=dtype),
+            "confidence": current_confidence.clamp(0.0, 1.0).to(device=device, dtype=dtype),
+        }
+
+    def _uav_cleanup_target_component_for_id(
+        self,
+        *,
+        env_idx: int,
+        component_id: int,
+        pooled_confidence: Tensor,
+        pooled_mass: Tensor,
+        coarse_x: Tensor,
+        coarse_y: Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, Tensor | int] | None:
+        K = int(self.uav_cleanup_target_grid)
+        if component_id < 0 or component_id >= K * K:
+            return None
+        start_y = int(component_id) // K
+        start_x = int(component_id) % K
+        targetable = (
+            (pooled_confidence[env_idx] < float(self.uav_cleanup_target_confidence_threshold))
+            & (pooled_mass[env_idx] > float(self.uav_cleanup_target_min_value))
+        )
+        targetable_rows = targetable.detach().cpu().tolist()
+        if not bool(targetable_rows[start_y][start_x]):
+            return None
+
+        visited = [[False for _ in range(K)] for _ in range(K)]
+        stack = [(start_y, start_x)]
+        visited[start_y][start_x] = True
+        cells: list[tuple[int, int]] = []
+        while stack:
+            cy, cx = stack.pop()
+            cells.append((cy, cx))
+            for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                if (
+                    0 <= ny < K
+                    and 0 <= nx < K
+                    and not visited[ny][nx]
+                    and bool(targetable_rows[ny][nx])
+                ):
+                    visited[ny][nx] = True
+                    stack.append((ny, nx))
+        component = self._uav_cleanup_target_component_from_cells(
+            env_idx=env_idx,
+            cells=cells,
+            pooled_confidence=pooled_confidence,
+            pooled_mass=pooled_mass,
+            coarse_x=coarse_x,
+            coarse_y=coarse_y,
+            device=device,
+            dtype=dtype,
+        )
+        if component is None or int(component["id"]) != int(component_id):
+            return None
+        return component
 
     def _uav_cleanup_target_components(
         self,
@@ -3729,25 +3749,18 @@ class WildfireSearchScenario(BaseScenario):
                             ):
                                 visited[ny][nx] = True
                                 stack.append((ny, nx))
-                    ys = torch.tensor([cell[0] for cell in cells], device=device, dtype=torch.long)
-                    xs = torch.tensor([cell[1] for cell in cells], device=device, dtype=torch.long)
-                    weights = pooled_mass[env_idx, ys, xs].clamp_min(0.0)
-                    total = weights.sum()
-                    if float(total.detach().cpu().item()) <= 1e-12:
-                        continue
-                    centroid_x = (coarse_x[xs] * weights).sum() / total
-                    centroid_y = (coarse_y[ys] * weights).sum() / total
-                    mean_value = weights.mean().clamp(0.0, 1.0)
-                    current_confidence = (
-                        pooled_confidence[env_idx, ys, xs] * weights
-                    ).sum() / total
-                    component_id = min(int(cell[0]) * K + int(cell[1]) for cell in cells)
-                    env_components.append({
-                        "id": component_id,
-                        "centroid": torch.stack((centroid_x, centroid_y)),
-                        "value": mean_value,
-                        "confidence": current_confidence.clamp(0.0, 1.0),
-                    })
+                    component = self._uav_cleanup_target_component_from_cells(
+                        env_idx=env_idx,
+                        cells=cells,
+                        pooled_confidence=pooled_confidence,
+                        pooled_mass=pooled_mass,
+                        coarse_x=coarse_x,
+                        coarse_y=coarse_y,
+                        device=device,
+                        dtype=dtype,
+                    )
+                    if component is not None:
+                        env_components.append(component)
             all_components[env_idx] = env_components
         return all_components
 
@@ -3764,6 +3777,14 @@ class WildfireSearchScenario(BaseScenario):
             if not bool(stale.any().detach().cpu().item()):
                 return
 
+            pooled_confidence, pooled_mass = self._uav_cleanup_target_pooled_maps(
+                device=device,
+                dtype=dtype,
+            )
+            coarse_x, coarse_y, _, _ = self._uav_cleanup_target_coarse_geometry(
+                device=device,
+                dtype=dtype,
+            )
             meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
                 device=device,
                 dtype=dtype,
@@ -3772,92 +3793,53 @@ class WildfireSearchScenario(BaseScenario):
             hold_steps = int(self.uav_cleanup_target_hold_steps)
 
             self.metric_uav_cleanup_target_switch_by_drone[stale] = 0.0
-            valid = self.uav_cleanup_target_valid.to(device=device)
-            age = self.uav_cleanup_target_age.to(device=device)
-            target_pos = self.uav_cleanup_target_pos.to(device=device, dtype=dtype)
-            target_confidence, target_value = self._uav_cleanup_target_cell_values_from_grid(
-                target_pos,
-                device=device,
-                dtype=dtype,
-            )
-            targetable = (
-                valid
-                & (target_confidence < float(self.uav_cleanup_target_confidence_threshold))
-                & (target_value > float(self.uav_cleanup_target_min_value))
-            )
             previous_reached = self.metric_uav_cleanup_target_reached_by_drone.to(
                 device=device,
             ) > 0.5
-            within_hold = age < hold_steps
-            needs_drone_refresh = (
-                stale.view(-1, 1)
-                & (~valid | ~targetable | ~within_hold | previous_reached)
-            )
-            refresh_env_mask = stale & needs_drone_refresh.any(dim=1)
-            keep_env_mask = stale & ~refresh_env_mask
-
-            if bool(keep_env_mask.any().detach().cpu().item()):
-                keep_drone_mask = keep_env_mask.view(-1, 1) & valid
-                self.uav_cleanup_target_age = torch.where(
-                    keep_drone_mask,
-                    self.uav_cleanup_target_age + 1,
-                    self.uav_cleanup_target_age,
-                )
-                # Refresh the held target value cheaply from the coarse cell containing the target.
-                self.uav_cleanup_target_value = torch.where(
-                    keep_drone_mask,
-                    target_value.to(
-                        device=self.uav_cleanup_target_value.device,
-                        dtype=self.uav_cleanup_target_value.dtype,
-                    ),
-                    self.uav_cleanup_target_value,
-                )
-                self._uav_cleanup_target_last_assignment_step[keep_env_mask] = current_step[
-                    keep_env_mask
-                ].to(device=self._uav_cleanup_target_last_assignment_step.device)
-
-            if not bool(refresh_env_mask.any().detach().cpu().item()):
-                return
-
-            refresh_env_indices = refresh_env_mask.nonzero(as_tuple=False).flatten()
-            pooled_confidence, pooled_mass = self._uav_cleanup_target_pooled_maps(
-                device=device,
-                dtype=dtype,
-            )
-            components_by_env = self._uav_cleanup_target_components(
-                device=device,
-                dtype=dtype,
-                pooled_confidence=pooled_confidence,
-                pooled_mass=pooled_mass,
-                env_indices=refresh_env_indices,
-            )
-            for env_idx in [int(value) for value in refresh_env_indices.detach().cpu().tolist()]:
-                components = components_by_env[env_idx]
+            stale_env_indices = [int(value) for value in stale.nonzero(as_tuple=False).flatten().detach().cpu().tolist()]
+            for env_idx in stale_env_indices:
                 self.metric_uav_cleanup_target_switch_by_drone[env_idx] = 0.0
-                comp_by_id = {int(comp["id"]): comp for comp in components}
                 used_ids: set[int] = set()
                 needing_assignment: list[int] = []
                 for drone_idx in range(self.n_drones):
                     old_valid = bool(self.uav_cleanup_target_valid[env_idx, drone_idx].detach().cpu().item())
                     old_id = int(self.uav_cleanup_target_id[env_idx, drone_idx].detach().cpu().item())
                     age = int(self.uav_cleanup_target_age[env_idx, drone_idx].detach().cpu().item())
-                    force_refresh = bool(
-                        needs_drone_refresh[env_idx, drone_idx].detach().cpu().item()
-                    )
-                    keep = (
+                    reached = bool(previous_reached[env_idx, drone_idx].detach().cpu().item())
+                    comp = None
+                    if (
                         old_valid
-                        and not force_refresh
-                        and old_id in comp_by_id
                         and age < hold_steps
-                    )
-                    if keep:
-                        comp = comp_by_id[old_id]
+                        and not reached
+                    ):
+                        comp = self._uav_cleanup_target_component_for_id(
+                            env_idx=env_idx,
+                            component_id=old_id,
+                            pooled_confidence=pooled_confidence,
+                            pooled_mass=pooled_mass,
+                            coarse_x=coarse_x,
+                            coarse_y=coarse_y,
+                            device=device,
+                            dtype=dtype,
+                        )
+                    if comp is not None:
                         self.uav_cleanup_target_pos[env_idx, drone_idx] = comp["centroid"]
                         self.uav_cleanup_target_value[env_idx, drone_idx] = comp["value"]
                         self.uav_cleanup_target_age[env_idx, drone_idx] += 1
                         used_ids.add(old_id)
                     else:
                         needing_assignment.append(drone_idx)
+
+                components: list[dict[str, Tensor | int]] | None = None
+                if needing_assignment:
+                    components_by_env = self._uav_cleanup_target_components(
+                        device=device,
+                        dtype=dtype,
+                        pooled_confidence=pooled_confidence,
+                        pooled_mass=pooled_mass,
+                        env_indices=[env_idx],
+                    )
+                    components = components_by_env[env_idx]
 
                 if components:
                     comp_ids = [int(comp["id"]) for comp in components]
@@ -3914,7 +3896,7 @@ class WildfireSearchScenario(BaseScenario):
                     self.uav_cleanup_target_id[env_idx, drone_idx] = -1
                     self.uav_cleanup_target_prev_distance_m[env_idx, drone_idx] = float("inf")
 
-                if not components:
+                if needing_assignment and not components:
                     previous_valid = self.uav_cleanup_target_valid[env_idx].clone()
                     self.uav_cleanup_target_valid[env_idx] = False
                     self.uav_cleanup_target_pos[env_idx] = 0.0

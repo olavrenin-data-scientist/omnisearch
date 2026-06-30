@@ -858,32 +858,45 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(int(scenario.uav_cleanup_target_id[0, 0]), first_id)
         self.assertEqual(int(scenario.uav_cleanup_target_age[0, 0]), 1)
 
-    def test_uav_cleanup_target_cell_values_match_pooled_map(self):
-        scenario = self._coverage_scenario(n_drones=3, grid_size=10)
-        scenario.uav_cleanup_target_grid = 8
-        scenario.uav_confidence_grid = torch.linspace(0.0, 1.0, 100).view(1, 10, 10)
-        target_pos = torch.tensor(
-            [[[-0.9, -0.9], [0.0, 0.0], [0.9, 0.9]]],
-            dtype=torch.float32,
-        )
+    def test_uav_cleanup_target_hold_updates_component_without_full_rebuild(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_cleanup_target_diagnostics = True
+        scenario.uav_cleanup_target_hold_steps = 15
+        scenario.uav_confidence_grid.fill_(1.0)
+        scenario.uav_confidence_grid[:, 1:2, 1:2] = 0.0
+        _, positions = self._set_drone_agents(scenario, [[-0.75, -0.75]])
+        scenario._refresh_uav_cleanup_target_assignments(positions)
+        first_id = int(scenario.uav_cleanup_target_id[0, 0])
 
+        scenario.uav_confidence_grid[:, 1:2, 2:3] = 0.4
+        scenario.uav_confidence_grid[:, 2:3, 1:2] = 0.4
         pooled_confidence, pooled_mass = scenario._uav_cleanup_target_pooled_maps(
-            device=target_pos.device,
-            dtype=target_pos.dtype,
+            device=positions.device,
+            dtype=positions.dtype,
         )
-        expected_confidence, expected_mass = scenario._uav_cleanup_target_cell_values(
-            pooled_confidence,
-            pooled_mass,
-            target_pos,
+        expected_components = scenario._uav_cleanup_target_components(
+            device=positions.device,
+            dtype=positions.dtype,
+            pooled_confidence=pooled_confidence,
+            pooled_mass=pooled_mass,
         )
-        actual_confidence, actual_mass = scenario._uav_cleanup_target_cell_values_from_grid(
-            target_pos,
-            device=target_pos.device,
-            dtype=target_pos.dtype,
-        )
+        expected = {int(comp["id"]): comp for comp in expected_components[0]}[first_id]
 
-        torch.testing.assert_close(actual_confidence, expected_confidence)
-        torch.testing.assert_close(actual_mass, expected_mass)
+        def fail_components(*args, **kwargs):
+            raise AssertionError("held cleanup target should not rebuild all components")
+
+        original_components = scenario._uav_cleanup_target_components
+        scenario._uav_cleanup_target_components = fail_components
+        try:
+            scenario.step_count += 1
+            scenario._refresh_uav_cleanup_target_assignments(positions)
+        finally:
+            scenario._uav_cleanup_target_components = original_components
+
+        self.assertEqual(int(scenario.uav_cleanup_target_id[0, 0]), first_id)
+        torch.testing.assert_close(scenario.uav_cleanup_target_pos[0, 0], expected["centroid"])
+        torch.testing.assert_close(scenario.uav_cleanup_target_value[0, 0], expected["value"])
+        self.assertEqual(int(scenario.uav_cleanup_target_age[0, 0]), 1)
 
     def test_uav_cleanup_target_progress_reward_uses_frontier_gate(self):
         scenario = self._coverage_scenario(grid_size=8)
