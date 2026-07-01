@@ -3,18 +3,20 @@ set -euo pipefail
 
 cd /Users/aschuetz/Software/capstone/omnisearch
 
-MODLABEL="uav3_90k_confproposal_cov0_confLG60_conf30_moveconf010_confoverlap002_thr080"
-
-RUN_TRAIN="${RUN_TRAIN:-FALSE}"
+RUN_TRAIN="${RUN_TRAIN:-TRUE}"
 RUN_VAL="${RUN_VAL:-TRUE}"
 RUN_EXPORT="${RUN_EXPORT:-FALSE}"
 RUN_SERVER="${RUN_SERVER:-FALSE}"
+NUM_STEPS=300000
+NUM_STEPS_STR=300k
+
+MODLABEL="uav3_${NUM_STEPS_STR}_confproposal_cov0_confLG60_conf30_moveconf010_confoverlap006_thr080_cleantarg010steps10_fh"
 
 if [[ "$RUN_TRAIN" == "TRUE" ]]; then
   .venv/bin/python scripts/train_happo_smoke.py \
     --uav-survivor-diagnostic \
     --uav-diagnostic-drones 3 \
-    --num-env-steps 90000 \
+    --num-env-steps ${NUM_STEPS} \
     --episode-length 300 \
     --seed 1 \
     --share-param \
@@ -29,7 +31,11 @@ if [[ "$RUN_TRAIN" == "TRUE" ]]; then
     --uav-confidence-move-reward 0.1 \
     --uav-confidence-obs-grid 6 \
     --uav-outside-footprint-penalty 0.1 \
-    --uav-confidence-overlap-penalty 0 \
+    --uav-confidence-overlap-penalty 0.02 \
+    --uav-confidence-overlap-threshold 0.80 \
+    --uav-cleanup-target-progress-reward 0.1 \
+    --uav-cleanup-target-obs \
+    --uav-cleanup-target-refresh-mode fixed-hold \
     --exp-name "$MODLABEL"
 fi
 
@@ -40,8 +46,9 @@ if [[ "$RUN_VAL" == "TRUE" ]]; then
     --checkpoint-dir "$CKPT" \
     --steps 300 \
     --seeds {1000..1099} \
-    --json-output "outputs/90k/sameckpt_newcode2_${MODLABEL}_1000_1099.json" \
-    --plots-output "outputs/90k/sameckpt_newcode2_${MODLABEL}_1000_1099.png"
+    --diagnostic-level fast \
+    --json-output "outputs/${NUM_STEPS_STR}/${MODLABEL}_1000_1099.json" \
+    --plots-output "outputs/${NUM_STEPS_STR}/${MODLABEL}_1000_1099.png"
 fi
 
 if [[ "$RUN_EXPORT" == "TRUE" ]]; then
@@ -55,6 +62,57 @@ if [[ "$RUN_EXPORT" == "TRUE" ]]; then
   cp web/trajectories/happo_trained.json "web/trajectories/${MODLABEL}.json"
 fi
 
-if [[ "$RUN_SERVER" == "TRUE" ]]; then
-  python -m http.server -d web
+#### MODEL 2
+MODLABEL="uav3_${NUM_STEPS_STR}_2frontier_baseline"
+
+if [[ "$RUN_TRAIN" == "TRUE" ]]; then
+  .venv/bin/python scripts/train_happo_smoke.py \
+    --uav-survivor-diagnostic \
+    --uav-diagnostic-drones 3 \
+    --num-env-steps ${NUM_STEPS} \
+    --episode-length 300 \
+    --seed 1 \
+    --share-param \
+    --exp-name "$MODLABEL"
 fi
+
+CKPT=$(ls -td "results/harl_runs/wildfire/wildfire_search/happo/${MODLABEL}"/*/models | head -1)
+
+if [[ "$RUN_VAL" == "TRUE" ]]; then
+  .venv/bin/python scripts/diagnose_uav_happo.py \
+    --checkpoint-dir "$CKPT" \
+    --steps 300 \
+    --seeds {1000..1099} \
+    --json-output "outputs/${NUM_STEPS_STR}/${MODLABEL}_1000_1099.json" \
+    --plots-output "outputs/${NUM_STEPS_STR}/${MODLABEL}_1000_1099.png"
+fi
+
+# #### MODEL 3
+MODLABEL="uav3_${NUM_STEPS_STR}_2frontier_baseline_cleantarget010"
+
+if [[ "$RUN_TRAIN" == "TRUE" ]]; then
+  .venv/bin/python scripts/train_happo_smoke.py \
+    --uav-survivor-diagnostic \
+    --uav-diagnostic-drones 3 \
+    --num-env-steps ${NUM_STEPS} \
+    --episode-length 300 \
+    --seed 1 \
+    --share-param \
+    --uav-cleanup-target-progress-reward 0.1 \
+    --uav-cleanup-target-obs \
+    --uav-cleanup-target-refresh-mode fixed-hold \
+    --exp-name "$MODLABEL"
+fi
+
+CKPT=$(ls -td "results/harl_runs/wildfire/wildfire_search/happo/${MODLABEL}"/*/models | head -1)
+
+if [[ "$RUN_VAL" == "TRUE" ]]; then
+  .venv/bin/python scripts/diagnose_uav_happo.py \
+    --checkpoint-dir "$CKPT" \
+    --steps 300 \
+    --seeds {1000..1099} \
+    --json-output "outputs/${NUM_STEPS_STR}/${MODLABEL}_1000_1099.json" \
+    --plots-output "outputs/${NUM_STEPS_STR}/${MODLABEL}_1000_1099.png"
+fi
+
+
