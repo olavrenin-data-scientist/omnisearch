@@ -208,6 +208,13 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_cleanup_target_assignment_distance_scale_m = 250.0
         scenario.uav_cleanup_target_refresh_mode = "exact"
         scenario.r_uav_cleanup_target_progress = 0.0
+        scenario.uav_astar_route_obs = False
+        scenario.uav_astar_grid = 8
+        scenario.uav_astar_confidence_cost_alpha = 3.0
+        scenario.uav_astar_confidence_cost_gamma = 2.0
+        scenario.uav_astar_waypoint_lookahead_m = 5.0
+        scenario.uav_astar_route_replan_steps = 5
+        scenario.uav_astar_waypoint_reached_m = 1.0
         scenario.r_uav_overlap = 0.0
         scenario.uav_overlap_allowed = 0.10
         scenario.uav_overlap_penalty_normalization = "raw"
@@ -258,6 +265,12 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.metric_uav_cleanup_target_reached_by_drone = torch.zeros(1, n_drones)
         scenario.metric_uav_cleanup_target_value_decay_by_drone = torch.zeros(1, n_drones)
         scenario.metric_uav_cleanup_target_age_by_drone = torch.zeros(1, n_drones)
+        scenario.uav_astar_waypoint_valid = torch.zeros(1, n_drones, dtype=torch.bool)
+        scenario.uav_astar_waypoint_pos = torch.zeros(1, n_drones, 2)
+        scenario.uav_astar_waypoint_target_id = torch.full((1, n_drones), -1, dtype=torch.long)
+        scenario.uav_astar_waypoint_age = torch.zeros(1, n_drones, dtype=torch.long)
+        scenario.uav_astar_path_cost_norm = torch.zeros(1, n_drones)
+        scenario._uav_astar_last_plan_step = torch.full((1,), -1, dtype=torch.long)
         return scenario
 
     def _set_drone_agents(self, scenario, positions):
@@ -778,6 +791,42 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(obs.shape[-1], 4)
         self.assertGreater(float(obs[0, 0]), 0.0)
         self.assertGreater(float(obs[0, 1]), 0.0)
+        self.assertGreater(float(obs[0, 2]), 0.0)
+        self.assertGreater(float(obs[0, 3]), 0.0)
+
+    def test_uav_astar_route_observation_is_zero_without_valid_cleanup_target(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_astar_route_obs = True
+        scenario.uav_confidence_grid.fill_(1.0)
+        agents, _ = self._set_drone_agents(scenario, [[0.0, 0.0]])
+
+        obs = scenario._uav_astar_route_observation(agents[0])
+
+        self.assertEqual(obs.shape[-1], 4)
+        self.assertTrue(torch.all(obs == 0.0))
+
+    def test_uav_astar_route_observation_follows_low_confidence_corridor(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_astar_route_obs = True
+        scenario.uav_astar_grid = 8
+        scenario.uav_astar_confidence_cost_alpha = 20.0
+        scenario.uav_astar_waypoint_lookahead_m = 5.0
+        scenario.uav_confidence_grid.fill_(1.0)
+        scenario.uav_confidence_grid[:, 1:8, 1:2] = 0.0
+        scenario.uav_confidence_grid[:, 7:8, 1:8] = 0.0
+        agents, _ = self._set_drone_agents(scenario, [[-0.70, -0.70]])
+        scenario.uav_cleanup_target_valid[0, 0] = True
+        scenario.uav_cleanup_target_pos[0, 0] = torch.tensor([0.75, 0.75])
+        scenario.uav_cleanup_target_value[0, 0] = 1.0
+        scenario.uav_cleanup_target_id[0, 0] = 42
+        scenario._uav_cleanup_target_last_assignment_step[0] = 0
+
+        obs = scenario._uav_astar_route_observation(agents[0])
+
+        self.assertEqual(obs.shape[-1], 4)
+        self.assertTrue(bool(scenario.uav_astar_waypoint_valid[0, 0]))
+        self.assertGreater(float(obs[0, 1]), 0.75)
+        self.assertLess(abs(float(obs[0, 0])), 0.50)
         self.assertGreater(float(obs[0, 2]), 0.0)
         self.assertGreater(float(obs[0, 3]), 0.0)
 

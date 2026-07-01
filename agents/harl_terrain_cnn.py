@@ -14,6 +14,8 @@ TERRAIN_CNN_CHANNELS = 2
 UGV_PLANNER_HINT_DIM = 5
 BOUNDARY_OBS_DIM = 4
 UAV_FRONTIER_OBS_DIM = 4
+UAV_CLEANUP_TARGET_OBS_DIM = 4
+UAV_ASTAR_ROUTE_OBS_DIM = 4
 
 
 def uav_frontier_observation_dim(
@@ -45,6 +47,8 @@ def wildfire_single_observation_dim(
     uav_frontier_obs: bool = False,
     uav_frontier_mode: str = "centroid",
     uav_frontier_top_k: int = 2,
+    uav_cleanup_target_obs: bool = False,
+    uav_astar_route_obs: bool = False,
 ) -> int:
     """Return the per-agent wildfire observation width for the current layout."""
     patch_size = int(local_map_patch_size)
@@ -62,6 +66,8 @@ def wildfire_single_observation_dim(
         uav_frontier_mode=uav_frontier_mode,
         uav_frontier_top_k=uav_frontier_top_k,
     )
+    uav_cleanup_target_obs_dim = UAV_CLEANUP_TARGET_OBS_DIM if bool(uav_cleanup_target_obs) else 0
+    uav_astar_route_obs_dim = UAV_ASTAR_ROUTE_OBS_DIM if bool(uav_astar_route_obs) else 0
     return (
         4  # own pos + velocity
         + 12  # lidar or drone dummy lidar
@@ -78,6 +84,8 @@ def wildfire_single_observation_dim(
         + confidence_obs_dim  # optional downsampled UAV inspection-confidence map + global mean
         + local_confidence_obs_dim  # optional pooled local confidence map around this agent
         + uav_frontier_obs_dim  # optional direction/distance/strength toward uncovered coverage frontier
+        + uav_cleanup_target_obs_dim  # optional persistent cleanup target destination
+        + uav_astar_route_obs_dim  # optional A* route waypoint toward cleanup target
     )
 
 

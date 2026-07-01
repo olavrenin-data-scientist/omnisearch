@@ -641,6 +641,30 @@ class WildfireSearchScenario(BaseScenario):
         ).replace("-", "_").lower()
         if self.uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
             raise ValueError("uav_cleanup_target_refresh_mode must be one of: exact, fixed_hold")
+        self.uav_astar_route_obs = bool(kwargs.pop("uav_astar_route_obs", False))
+        self.uav_astar_grid = int(kwargs.pop("uav_astar_grid", 32))
+        if self.uav_astar_grid < 2:
+            raise ValueError("uav_astar_grid must be at least 2")
+        self.uav_astar_confidence_cost_alpha = max(
+            float(kwargs.pop("uav_astar_confidence_cost_alpha", 3.0)),
+            0.0,
+        )
+        self.uav_astar_confidence_cost_gamma = max(
+            float(kwargs.pop("uav_astar_confidence_cost_gamma", 2.0)),
+            0.0,
+        )
+        self.uav_astar_waypoint_lookahead_m = max(
+            float(kwargs.pop("uav_astar_waypoint_lookahead_m", 50.0)),
+            1e-6,
+        )
+        self.uav_astar_route_replan_steps = max(
+            int(kwargs.pop("uav_astar_route_replan_steps", 5)),
+            1,
+        )
+        self.uav_astar_waypoint_reached_m = max(
+            float(kwargs.pop("uav_astar_waypoint_reached_m", 20.0)),
+            1e-6,
+        )
         # One-time directed-approach milestones for ground robots. The scalar
         # is the final/inner milestone reward; default fractions make 0.05 map
         # to rewards [0.02, 0.025, 0.03, 0.04, 0.05] for 75/50/40/30/20m.
@@ -927,6 +951,32 @@ class WildfireSearchScenario(BaseScenario):
             device=device,
         )
         self._uav_cleanup_target_last_assignment_step = torch.full(
+            (batch_dim,),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.uav_astar_waypoint_valid = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            dtype=torch.bool,
+            device=device,
+        )
+        self.uav_astar_waypoint_pos = torch.zeros(batch_dim, self.n_drones, 2, device=device)
+        self.uav_astar_waypoint_target_id = torch.full(
+            (batch_dim, self.n_drones),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.uav_astar_waypoint_age = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            dtype=torch.long,
+            device=device,
+        )
+        self.uav_astar_path_cost_norm = torch.zeros(batch_dim, self.n_drones, device=device)
+        self._uav_astar_last_plan_step = torch.full(
             (batch_dim,),
             -1,
             dtype=torch.long,
@@ -1282,6 +1332,25 @@ class WildfireSearchScenario(BaseScenario):
             self.uav_cleanup_target_id[env_index] = -1
             self.uav_cleanup_target_prev_distance_m[env_index] = float("inf")
             self._uav_cleanup_target_last_assignment_step[env_index] = -1
+        self._reset_uav_astar_routes(env_index)
+
+    def _reset_uav_astar_routes(self, env_index: int | None = None) -> None:
+        if not hasattr(self, "uav_astar_waypoint_valid"):
+            return
+        if env_index is None:
+            self.uav_astar_waypoint_valid.zero_()
+            self.uav_astar_waypoint_pos.zero_()
+            self.uav_astar_waypoint_target_id.fill_(-1)
+            self.uav_astar_waypoint_age.zero_()
+            self.uav_astar_path_cost_norm.zero_()
+            self._uav_astar_last_plan_step.fill_(-1)
+        else:
+            self.uav_astar_waypoint_valid[env_index] = False
+            self.uav_astar_waypoint_pos[env_index] = 0.0
+            self.uav_astar_waypoint_target_id[env_index] = -1
+            self.uav_astar_waypoint_age[env_index] = 0
+            self.uav_astar_path_cost_norm[env_index] = 0.0
+            self._uav_astar_last_plan_step[env_index] = -1
 
     # ------------------------------------------------------------------
     # Reset
@@ -3534,6 +3603,7 @@ class WildfireSearchScenario(BaseScenario):
             and self.local_confidence_obs_grid <= 0
             and not self.uav_cleanup_target_obs
             and not self.uav_cleanup_target_diagnostics
+            and not self.uav_astar_route_obs
             and self.r_uav_cleanup_target_progress <= 0.0
         )
 
@@ -3541,10 +3611,14 @@ class WildfireSearchScenario(BaseScenario):
         return self.n_drones > 0 and (
             bool(self.uav_cleanup_target_obs)
             or bool(self.uav_cleanup_target_diagnostics)
+            or bool(self.uav_astar_route_obs)
             or self.r_uav_cleanup_target_progress > 0.0
         )
 
     def _uav_cleanup_target_obs_dim(self) -> int:
+        return 4
+
+    def _uav_astar_route_obs_dim(self) -> int:
         return 4
 
     def _uav_cleanup_target_mass_map(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
@@ -4066,6 +4140,256 @@ class WildfireSearchScenario(BaseScenario):
             * gate
         )
         return reward, gate
+
+    def _uav_astar_position_to_cell(self, pos: Tensor, K: int) -> tuple[int, int]:
+        gx = int(
+            torch.clamp(
+                (pos[X] + float(self.x_semidim)) / (2.0 * float(self.x_semidim)) * float(K),
+                0,
+                K - 1,
+            )
+            .long()
+            .detach()
+            .cpu()
+            .item()
+        )
+        gy = int(
+            torch.clamp(
+                (pos[Y] + float(self.y_semidim)) / (2.0 * float(self.y_semidim)) * float(K),
+                0,
+                K - 1,
+            )
+            .long()
+            .detach()
+            .cpu()
+            .item()
+        )
+        return gx, gy
+
+    def _uav_astar_cell_center(
+        self,
+        cell: tuple[int, int],
+        *,
+        K: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        gx, gy = cell
+        cell_w = 2.0 * float(self.x_semidim) / float(K)
+        cell_h = 2.0 * float(self.y_semidim) / float(K)
+        return torch.tensor(
+            [
+                -float(self.x_semidim) + (float(gx) + 0.5) * cell_w,
+                -float(self.y_semidim) + (float(gy) + 0.5) * cell_h,
+            ],
+            device=device,
+            dtype=dtype,
+        )
+
+    def _uav_astar_pooled_confidence(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        import torch.nn.functional as F
+
+        K = int(self.uav_astar_grid)
+        confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        return F.adaptive_avg_pool2d(confidence.unsqueeze(1), (K, K)).squeeze(1)
+
+    def _uav_astar_plan(
+        self,
+        cell_cost: Tensor,
+        start: tuple[int, int],
+        goal: tuple[int, int],
+    ) -> tuple[list[tuple[int, int]], float]:
+        K = int(cell_cost.shape[-1])
+        costs = cell_cost.detach().cpu().tolist()
+        sx, sy = start
+        gx, gy = goal
+        if not (0 <= sx < K and 0 <= sy < K and 0 <= gx < K and 0 <= gy < K):
+            return [], float("inf")
+        if start == goal:
+            return [start], 0.0
+
+        def heuristic(cell: tuple[int, int]) -> float:
+            x, y = cell
+            return math.hypot(float(gx - x), float(gy - y))
+
+        neighbors = (
+            (-1, -1, math.sqrt(2.0)),
+            (0, -1, 1.0),
+            (1, -1, math.sqrt(2.0)),
+            (-1, 0, 1.0),
+            (1, 0, 1.0),
+            (-1, 1, math.sqrt(2.0)),
+            (0, 1, 1.0),
+            (1, 1, math.sqrt(2.0)),
+        )
+        open_heap: list[tuple[float, float, tuple[int, int]]] = []
+        heapq.heappush(open_heap, (heuristic(start), 0.0, start))
+        came_from: dict[tuple[int, int], tuple[int, int]] = {}
+        g_score: dict[tuple[int, int], float] = {start: 0.0}
+
+        while open_heap:
+            _, current_cost, current = heapq.heappop(open_heap)
+            if current_cost > g_score.get(current, float("inf")) + 1e-12:
+                continue
+            if current == goal:
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path.reverse()
+                return path, current_cost
+
+            x, y = current
+            current_cell_cost = float(costs[y][x])
+            if not math.isfinite(current_cell_cost):
+                continue
+            for dx, dy, step_len in neighbors:
+                nx = x + dx
+                ny = y + dy
+                if nx < 0 or nx >= K or ny < 0 or ny >= K:
+                    continue
+                next_cell_cost = float(costs[ny][nx])
+                if not math.isfinite(next_cell_cost):
+                    continue
+                edge_cost = step_len * 0.5 * (current_cell_cost + next_cell_cost)
+                tentative = current_cost + edge_cost
+                neighbor = (nx, ny)
+                if tentative + 1e-12 < g_score.get(neighbor, float("inf")):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative
+                    heapq.heappush(open_heap, (tentative + heuristic(neighbor), tentative, neighbor))
+        return [], float("inf")
+
+    def _refresh_uav_astar_routes(self, drone_pos: Tensor) -> None:
+        if not bool(self.uav_astar_route_obs) or self.n_drones <= 0:
+            return
+        if not hasattr(self, "uav_astar_waypoint_valid"):
+            return
+        with torch.no_grad():
+            self._refresh_uav_cleanup_target_assignments(drone_pos)
+            device = drone_pos.device
+            dtype = drone_pos.dtype
+            current_step = self.step_count.to(device=device)
+            stale = self._uav_astar_last_plan_step.to(device=device) != current_step
+            if not bool(stale.any().detach().cpu().item()):
+                return
+
+            K = int(self.uav_astar_grid)
+            pooled_confidence = self._uav_astar_pooled_confidence(device=device, dtype=dtype)
+            alpha = float(self.uav_astar_confidence_cost_alpha)
+            gamma = float(self.uav_astar_confidence_cost_gamma)
+            cell_cost = 1.0 + alpha * pooled_confidence.clamp(0.0, 1.0).pow(gamma)
+            meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
+                device=device,
+                dtype=dtype,
+            ).clamp_min(1e-9)
+            replan_steps = int(self.uav_astar_route_replan_steps)
+            reached_m = float(self.uav_astar_waypoint_reached_m)
+            lookahead_m = float(self.uav_astar_waypoint_lookahead_m)
+            normalizer = max(math.hypot(K - 1, K - 1) * (1.0 + alpha), 1e-6)
+            env_indices = [
+                int(value)
+                for value in stale.nonzero(as_tuple=False).flatten().detach().cpu().tolist()
+            ]
+            for env_idx in env_indices:
+                for drone_idx in range(self.n_drones):
+                    target_valid = bool(
+                        self.uav_cleanup_target_valid[env_idx, drone_idx].detach().cpu().item()
+                    )
+                    if not target_valid:
+                        self.uav_astar_waypoint_valid[env_idx, drone_idx] = False
+                        self.uav_astar_waypoint_pos[env_idx, drone_idx] = 0.0
+                        self.uav_astar_waypoint_target_id[env_idx, drone_idx] = -1
+                        self.uav_astar_waypoint_age[env_idx, drone_idx] = 0
+                        self.uav_astar_path_cost_norm[env_idx, drone_idx] = 0.0
+                        continue
+
+                    target_id = int(self.uav_cleanup_target_id[env_idx, drone_idx].detach().cpu().item())
+                    old_target_id = int(
+                        self.uav_astar_waypoint_target_id[env_idx, drone_idx].detach().cpu().item()
+                    )
+                    waypoint_valid = bool(
+                        self.uav_astar_waypoint_valid[env_idx, drone_idx].detach().cpu().item()
+                    )
+                    waypoint_age = int(
+                        self.uav_astar_waypoint_age[env_idx, drone_idx].detach().cpu().item()
+                    )
+                    waypoint_distance_m = float("inf")
+                    if waypoint_valid:
+                        waypoint_distance_m = float(
+                            (
+                                self.uav_astar_waypoint_pos[env_idx, drone_idx].to(
+                                    device=device,
+                                    dtype=dtype,
+                                )
+                                - drone_pos[env_idx, drone_idx]
+                            )
+                            .norm()
+                            .mul(meters_per_sim[env_idx])
+                            .detach()
+                            .cpu()
+                            .item()
+                        )
+                    keep_existing = (
+                        waypoint_valid
+                        and old_target_id == target_id
+                        and waypoint_age < replan_steps
+                        and waypoint_distance_m > reached_m
+                    )
+                    if keep_existing:
+                        self.uav_astar_waypoint_age[env_idx, drone_idx] += 1
+                        continue
+
+                    start = self._uav_astar_position_to_cell(drone_pos[env_idx, drone_idx], K)
+                    goal = self._uav_astar_position_to_cell(
+                        self.uav_cleanup_target_pos[env_idx, drone_idx].to(device=device, dtype=dtype),
+                        K,
+                    )
+                    path, path_cost = self._uav_astar_plan(cell_cost[env_idx], start, goal)
+                    if not path or not math.isfinite(path_cost):
+                        self.uav_astar_waypoint_valid[env_idx, drone_idx] = False
+                        self.uav_astar_waypoint_pos[env_idx, drone_idx] = 0.0
+                        self.uav_astar_waypoint_target_id[env_idx, drone_idx] = -1
+                        self.uav_astar_waypoint_age[env_idx, drone_idx] = 0
+                        self.uav_astar_path_cost_norm[env_idx, drone_idx] = 0.0
+                        continue
+
+                    waypoint_cell = path[-1]
+                    for cell in path[1:]:
+                        candidate_pos = self._uav_astar_cell_center(
+                            cell,
+                            K=K,
+                            device=device,
+                            dtype=dtype,
+                        )
+                        candidate_distance_m = float(
+                            (candidate_pos - drone_pos[env_idx, drone_idx])
+                            .norm()
+                            .mul(meters_per_sim[env_idx])
+                            .detach()
+                            .cpu()
+                            .item()
+                        )
+                        if candidate_distance_m >= lookahead_m:
+                            waypoint_cell = cell
+                            break
+                    waypoint_pos = self._uav_astar_cell_center(
+                        waypoint_cell,
+                        K=K,
+                        device=device,
+                        dtype=dtype,
+                    )
+                    self.uav_astar_waypoint_valid[env_idx, drone_idx] = True
+                    self.uav_astar_waypoint_pos[env_idx, drone_idx] = waypoint_pos
+                    self.uav_astar_waypoint_target_id[env_idx, drone_idx] = target_id
+                    self.uav_astar_waypoint_age[env_idx, drone_idx] = 0
+                    self.uav_astar_path_cost_norm[env_idx, drone_idx] = min(
+                        max(path_cost / normalizer, 0.0),
+                        1.0,
+                    )
+                self._uav_astar_last_plan_step[env_idx] = current_step[env_idx].to(
+                    device=self._uav_astar_last_plan_step.device
+                )
 
     def _uav_confidence_overlap_penalty(
         self,
@@ -5418,6 +5742,8 @@ class WildfireSearchScenario(BaseScenario):
             parts.append(self._uav_frontier_observation(agent))
         if self.uav_cleanup_target_obs:
             parts.append(self._uav_cleanup_target_observation(agent))
+        if self.uav_astar_route_obs:
+            parts.append(self._uav_astar_route_observation(agent))
         return torch.cat(parts, dim=-1)
 
     def _coverage_observation(self) -> Tensor:
@@ -5590,6 +5916,46 @@ class WildfireSearchScenario(BaseScenario):
             dtype=agent.state.pos.dtype,
         ).clamp(0.0, 1.0)
         out = torch.cat((unit, distance_norm.unsqueeze(-1), value.unsqueeze(-1)), dim=-1)
+        return torch.where(valid.unsqueeze(-1), out, torch.zeros_like(out))
+
+    def _uav_astar_route_observation(self, agent: Agent) -> Tensor:
+        dim = self._uav_astar_route_obs_dim()
+        if not agent.is_drone or self.n_drones <= 0:
+            return torch.zeros(self.world.batch_dim, dim, device=agent.state.pos.device, dtype=agent.state.pos.dtype)
+        try:
+            drone_idx = int(agent.name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            drone_idx = 0
+        drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
+        drone_pos = torch.stack(
+            [drone.state.pos for drone in self.world.agents[: self.n_drones]],
+            dim=1,
+        )
+        self._refresh_uav_astar_routes(drone_pos)
+        device = agent.state.pos.device
+        dtype = agent.state.pos.dtype
+        valid = self.uav_astar_waypoint_valid[:, drone_idx].to(device=device)
+        route_vec = (
+            self.uav_astar_waypoint_pos[:, drone_idx].to(device=device, dtype=dtype)
+            - agent.state.pos
+        )
+        distance_sim = route_vec.norm(dim=-1)
+        unit = route_vec / distance_sim.clamp_min(1e-9).unsqueeze(-1)
+        meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
+            device=device,
+            dtype=dtype,
+        ).clamp_min(1e-9)
+        distance_m = distance_sim * meters_per_sim
+        map_diag_m = (
+            math.hypot(2.0 * float(self.x_semidim), 2.0 * float(self.y_semidim))
+            * meters_per_sim
+        ).clamp_min(1e-9)
+        distance_norm = (distance_m / map_diag_m).clamp(0.0, 1.0)
+        path_cost_norm = self.uav_astar_path_cost_norm[:, drone_idx].to(
+            device=device,
+            dtype=dtype,
+        ).clamp(0.0, 1.0)
+        out = torch.cat((unit, distance_norm.unsqueeze(-1), path_cost_norm.unsqueeze(-1)), dim=-1)
         return torch.where(valid.unsqueeze(-1), out, torch.zeros_like(out))
 
     def _boundary_observation(self, agent: Agent) -> Tensor:

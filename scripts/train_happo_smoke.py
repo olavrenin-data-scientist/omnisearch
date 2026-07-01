@@ -184,6 +184,13 @@ def build_args(
     uav_cleanup_target_min_value: float = 0.05,
     uav_cleanup_target_assignment_distance_scale_m: float = 250.0,
     uav_cleanup_target_refresh_mode: str = "exact",
+    uav_astar_route_obs: bool = False,
+    uav_astar_grid: int = 32,
+    uav_astar_confidence_cost_alpha: float = 3.0,
+    uav_astar_confidence_cost_gamma: float = 2.0,
+    uav_astar_waypoint_lookahead_m: float = 50.0,
+    uav_astar_route_replan_steps: int = 5,
+    uav_astar_waypoint_reached_m: float = 20.0,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
@@ -574,6 +581,22 @@ def build_args(
     uav_cleanup_target_refresh_mode = str(uav_cleanup_target_refresh_mode).replace("-", "_").lower()
     if uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
         raise ValueError("uav_cleanup_target_refresh_mode must be one of: exact, fixed_hold")
+    uav_astar_grid = int(uav_astar_grid)
+    if uav_astar_grid < 2:
+        raise ValueError("uav_astar_grid must be at least 2")
+    uav_astar_confidence_cost_alpha = float(uav_astar_confidence_cost_alpha)
+    if uav_astar_confidence_cost_alpha < 0.0:
+        raise ValueError("uav_astar_confidence_cost_alpha must be nonnegative")
+    uav_astar_confidence_cost_gamma = float(uav_astar_confidence_cost_gamma)
+    if uav_astar_confidence_cost_gamma < 0.0:
+        raise ValueError("uav_astar_confidence_cost_gamma must be nonnegative")
+    if float(uav_astar_waypoint_lookahead_m) <= 0.0:
+        raise ValueError("uav_astar_waypoint_lookahead_m must be positive")
+    uav_astar_route_replan_steps = int(uav_astar_route_replan_steps)
+    if uav_astar_route_replan_steps < 1:
+        raise ValueError("uav_astar_route_replan_steps must be positive")
+    if float(uav_astar_waypoint_reached_m) <= 0.0:
+        raise ValueError("uav_astar_waypoint_reached_m must be positive")
     if uav_frontier_obs or uav_frontier_alignment_reward > 0.0:
         scenario_kwargs["uav_frontier_obs"] = bool(uav_frontier_obs)
         scenario_kwargs["uav_frontier_obs_radius_m"] = uav_frontier_obs_radius_m
@@ -583,7 +606,7 @@ def build_args(
         scenario_kwargs["uav_frontier_top_k"] = uav_frontier_top_k
         scenario_kwargs["uav_frontier_ownership"] = bool(uav_frontier_ownership)
         scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
-    if uav_cleanup_target_obs or uav_cleanup_target_progress_reward > 0.0:
+    if uav_cleanup_target_obs or uav_cleanup_target_progress_reward > 0.0 or uav_astar_route_obs:
         if uav_cleanup_target_obs:
             scenario_kwargs["uav_cleanup_target_obs"] = True
         scenario_kwargs["uav_cleanup_target_grid"] = uav_cleanup_target_grid
@@ -597,11 +620,20 @@ def build_args(
         )
         scenario_kwargs["uav_cleanup_target_refresh_mode"] = uav_cleanup_target_refresh_mode
         scenario_kwargs["r_uav_cleanup_target_progress"] = uav_cleanup_target_progress_reward
+        if uav_astar_route_obs:
+            scenario_kwargs["uav_astar_route_obs"] = True
+            scenario_kwargs["uav_astar_grid"] = uav_astar_grid
+            scenario_kwargs["uav_astar_confidence_cost_alpha"] = uav_astar_confidence_cost_alpha
+            scenario_kwargs["uav_astar_confidence_cost_gamma"] = uav_astar_confidence_cost_gamma
+            scenario_kwargs["uav_astar_waypoint_lookahead_m"] = float(uav_astar_waypoint_lookahead_m)
+            scenario_kwargs["uav_astar_route_replan_steps"] = uav_astar_route_replan_steps
+            scenario_kwargs["uav_astar_waypoint_reached_m"] = float(uav_astar_waypoint_reached_m)
     if (
         uav_confidence_reward > 0.0
         or uav_confidence_move_reward > 0.0
         or uav_confidence_overlap_penalty > 0.0
         or uav_cleanup_target_progress_reward > 0.0
+        or uav_astar_route_obs
         or uav_frontier_source == "confidence"
     ):
         scenario_kwargs["uav_frontier_source"] = uav_frontier_source
@@ -764,6 +796,13 @@ def build_args(
             "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
             "r_uav_cleanup_target_progress": uav_cleanup_target_progress_reward,
             "uav_cleanup_target_refresh_mode": uav_cleanup_target_refresh_mode,
+            "uav_astar_route_obs": bool(uav_astar_route_obs),
+            "uav_astar_grid": uav_astar_grid,
+            "uav_astar_confidence_cost_alpha": uav_astar_confidence_cost_alpha,
+            "uav_astar_confidence_cost_gamma": uav_astar_confidence_cost_gamma,
+            "uav_astar_waypoint_lookahead_m": float(uav_astar_waypoint_lookahead_m),
+            "uav_astar_route_replan_steps": uav_astar_route_replan_steps,
+            "uav_astar_waypoint_reached_m": float(uav_astar_waypoint_reached_m),
             "uav_confidence_overlap_threshold": uav_confidence_overlap_threshold,
             "uav_confidence_gamma": uav_confidence_gamma,
             "uav_confidence_eps": uav_confidence_eps,
@@ -790,6 +829,8 @@ def build_args(
         uav_frontier_obs=bool(uav_frontier_obs),
         uav_frontier_mode=uav_frontier_mode,
         uav_frontier_top_k=uav_frontier_top_k,
+        uav_cleanup_target_obs=bool(uav_cleanup_target_obs),
+        uav_astar_route_obs=bool(uav_astar_route_obs),
     )
     env_args = {
         "max_cycles":      episode_length,
@@ -956,6 +997,22 @@ def main():
                    help="How held cleanup targets are refreshed. 'exact' recomputes the assigned "
                         "component each step; 'fixed-hold' keeps centroid/value fixed until expiry, "
                         "reach, or reassignment.")
+    p.add_argument("--uav-astar-route-obs", action="store_true",
+                   help="Append a 4-scalar A* route observation for UAVs: waypoint direction, "
+                        "waypoint distance, and normalized path cost to the cleanup target. "
+                        "This adds no reward by itself.")
+    p.add_argument("--uav-astar-grid", type=int, default=32,
+                   help="Coarse global grid size used by --uav-astar-route-obs.")
+    p.add_argument("--uav-astar-confidence-cost-alpha", type=float, default=3.0,
+                   help="A* cell cost scale in 1 + alpha * confidence^gamma.")
+    p.add_argument("--uav-astar-confidence-cost-gamma", type=float, default=2.0,
+                   help="A* cell cost exponent in 1 + alpha * confidence^gamma.")
+    p.add_argument("--uav-astar-waypoint-lookahead-m", type=float, default=50.0,
+                   help="Physical lookahead distance for selecting the exposed A* waypoint.")
+    p.add_argument("--uav-astar-route-replan-steps", type=int, default=5,
+                   help="Hold an A* waypoint for this many steps unless reached or target changes.")
+    p.add_argument("--uav-astar-waypoint-reached-m", type=float, default=20.0,
+                   help="Distance threshold in meters for replacing the current A* waypoint.")
     p.add_argument("--preset", choices=("smoke", "tuned", "floor0-1km"), default="smoke",
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
@@ -1167,6 +1224,18 @@ def main():
     args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
     if args.uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
         p.error("--uav-cleanup-target-refresh-mode must be one of: exact, fixed-hold")
+    if args.uav_astar_grid < 2:
+        p.error("--uav-astar-grid must be at least 2")
+    if args.uav_astar_confidence_cost_alpha < 0.0:
+        p.error("--uav-astar-confidence-cost-alpha must be nonnegative")
+    if args.uav_astar_confidence_cost_gamma < 0.0:
+        p.error("--uav-astar-confidence-cost-gamma must be nonnegative")
+    if args.uav_astar_waypoint_lookahead_m <= 0.0:
+        p.error("--uav-astar-waypoint-lookahead-m must be positive")
+    if args.uav_astar_route_replan_steps < 1:
+        p.error("--uav-astar-route-replan-steps must be positive")
+    if args.uav_astar_waypoint_reached_m <= 0.0:
+        p.error("--uav-astar-waypoint-reached-m must be positive")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
@@ -1412,6 +1481,13 @@ def main():
     print(f" uav_cleanup_target_grid: {args.uav_cleanup_target_grid}")
     print(f" uav_cleanup_target_hold_steps: {args.uav_cleanup_target_hold_steps}")
     print(f" uav_cleanup_target_refresh_mode: {args.uav_cleanup_target_refresh_mode}")
+    print(f" uav_astar_route_obs: {args.uav_astar_route_obs}")
+    print(f" uav_astar_grid: {args.uav_astar_grid}")
+    print(f" uav_astar_confidence_cost_alpha: {args.uav_astar_confidence_cost_alpha}")
+    print(f" uav_astar_confidence_cost_gamma: {args.uav_astar_confidence_cost_gamma}")
+    print(f" uav_astar_waypoint_lookahead_m: {args.uav_astar_waypoint_lookahead_m}")
+    print(f" uav_astar_route_replan_steps: {args.uav_astar_route_replan_steps}")
+    print(f" uav_astar_waypoint_reached_m: {args.uav_astar_waypoint_reached_m}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
@@ -1502,6 +1578,13 @@ def main():
         uav_cleanup_target_min_value = args.uav_cleanup_target_min_value,
         uav_cleanup_target_assignment_distance_scale_m = args.uav_cleanup_target_assignment_distance_scale_m,
         uav_cleanup_target_refresh_mode = args.uav_cleanup_target_refresh_mode,
+        uav_astar_route_obs = args.uav_astar_route_obs,
+        uav_astar_grid = args.uav_astar_grid,
+        uav_astar_confidence_cost_alpha = args.uav_astar_confidence_cost_alpha,
+        uav_astar_confidence_cost_gamma = args.uav_astar_confidence_cost_gamma,
+        uav_astar_waypoint_lookahead_m = args.uav_astar_waypoint_lookahead_m,
+        uav_astar_route_replan_steps = args.uav_astar_route_replan_steps,
+        uav_astar_waypoint_reached_m = args.uav_astar_waypoint_reached_m,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
