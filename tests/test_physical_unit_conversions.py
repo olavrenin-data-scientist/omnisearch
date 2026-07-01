@@ -191,6 +191,8 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.r_uav_confidence = 0.0
         scenario.r_uav_confidence_move = 0.0
         scenario.r_uav_confidence_overlap = 0.0
+        scenario.uav_confidence_overlap_mode = "raw"
+        scenario.uav_confidence_overlap_allowed_regret = 0.10
         scenario.uav_confidence_overlap_threshold = 0.65
         scenario.uav_confidence_gamma = 2.0
         scenario.uav_confidence_eps = 0.05
@@ -1355,6 +1357,50 @@ class PhysicalUnitConversionTests(unittest.TestCase):
             1.0,
             places=6,
         )
+
+    def test_uav_confidence_overlap_penalty_opportunity_regret_mode(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.r_uav_confidence_overlap = 0.2
+        scenario.uav_confidence_overlap_mode = "opportunity_regret"
+        scenario.uav_confidence_overlap_allowed_regret = 0.10
+        scenario.uav_confidence_overlap_threshold = 0.5
+        scenario.uav_confidence_grid.fill_(1.0)
+        scenario.metric_uav_confidence_opportunity_fraction_by_drone = torch.tensor([[0.25]])
+        scenario.metric_uav_confidence_opportunity_best_gain_by_drone = torch.tensor([[1.0]])
+        drone_pos = torch.zeros(1, 1, 2)
+
+        penalty = scenario._uav_confidence_overlap_penalty(drone_pos)
+
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
+            1.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_regret_by_drone[0, 0]),
+            0.65,
+            places=6,
+        )
+        self.assertAlmostEqual(float(penalty[0, 0]), -0.2 * 0.65, places=6)
+
+        scenario.metric_uav_confidence_opportunity_fraction_by_drone = torch.tensor([[0.95]])
+        penalty = scenario._uav_confidence_overlap_penalty(drone_pos)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_regret_by_drone[0, 0]),
+            0.0,
+            places=6,
+        )
+        self.assertAlmostEqual(float(penalty[0, 0]), 0.0, places=6)
+
+        scenario.metric_uav_confidence_opportunity_fraction_by_drone = torch.tensor([[0.0]])
+        scenario.metric_uav_confidence_opportunity_best_gain_by_drone = torch.tensor([[0.0]])
+        penalty = scenario._uav_confidence_overlap_penalty(drone_pos)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_regret_by_drone[0, 0]),
+            0.0,
+            places=6,
+        )
+        self.assertAlmostEqual(float(penalty[0, 0]), 0.0, places=6)
 
     def test_uav_confidence_best_stencil_respects_physical_center_bounds(self):
         scenario = self._coverage_scenario(grid_size=16)

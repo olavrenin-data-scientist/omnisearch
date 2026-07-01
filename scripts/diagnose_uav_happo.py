@@ -234,6 +234,7 @@ def run_rollout(
     confidence_step_detection_probability_values: list[float] = []
     confidence_step_detection_probability_by_drone_values: list[float] = []
     confidence_overlap_fraction_values: list[float] = []
+    confidence_overlap_regret_values: list[float] = []
     cleanup_target_valid_values: list[float] = []
     cleanup_target_distance_values: list[float] = []
     cleanup_target_value_values: list[float] = []
@@ -556,6 +557,11 @@ def run_rollout(
             "metric_uav_confidence_overlap_fraction_by_drone",
             scenario.n_drones,
         )
+        confidence_overlap_regret_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_overlap_regret_by_drone",
+            scenario.n_drones,
+        )
         confidence_opportunity_fraction_by_drone = _metric_array(
             scenario,
             "metric_uav_confidence_opportunity_fraction_by_drone",
@@ -840,6 +846,7 @@ def run_rollout(
             confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
             confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
             confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
+            confidence_overlap_regret = float(confidence_overlap_regret_by_drone[drone_idx])
             cleanup_target_progress_reward = float(
                 cleanup_target_progress_reward_by_drone[drone_idx]
             )
@@ -1028,6 +1035,7 @@ def run_rollout(
             confidence_opportunity_best_gain_values.append(confidence_opportunity_best_gain)
             confidence_step_detection_probability_by_drone_values.append(confidence_pass_probability)
             confidence_overlap_fraction_values.append(confidence_overlap_fraction)
+            confidence_overlap_regret_values.append(confidence_overlap_regret)
             cleanup_target_valid_values.append(cleanup_target_valid)
             cleanup_target_distance_values.append(cleanup_target_distance)
             cleanup_target_value_values.append(cleanup_target_value)
@@ -1184,6 +1192,7 @@ def run_rollout(
             drone_stats["confidence_opportunity_best_gain"].append(confidence_opportunity_best_gain)
             drone_stats["confidence_pass_probability"].append(confidence_pass_probability)
             drone_stats["confidence_overlap_fraction"].append(confidence_overlap_fraction)
+            drone_stats["confidence_overlap_regret"].append(confidence_overlap_regret)
             drone_stats["cleanup_target_valid"].append(cleanup_target_valid)
             drone_stats["cleanup_target_distance_m"].append(cleanup_target_distance)
             drone_stats["cleanup_target_value"].append(cleanup_target_value)
@@ -1322,6 +1331,7 @@ def run_rollout(
                     "astar_frontier_gate": astar_frontier_gate,
                     "inefficient_move_penalty": reward_terms["inefficient_move_penalty"],
                     "confidence_overlap_penalty": reward_terms["confidence_overlap_penalty"],
+                    "confidence_overlap_regret": confidence_overlap_regret,
                     "confidence_weighted_gain": confidence_weighted_gain_drone,
                     "coverage_reward": reward_terms["coverage"],
                     "move_coverage_reward": reward_terms["move_coverage"],
@@ -1401,6 +1411,7 @@ def run_rollout(
                     "confidence_high_fraction": confidence_high_fraction,
                     "confidence_pass_probability": confidence_pass_probability,
                     "confidence_overlap_fraction": confidence_overlap_fraction,
+                    "confidence_overlap_regret": confidence_overlap_regret,
                     "confidence_step_detection_probability": confidence_step_detection_probability,
                     "cleanup_target_valid": cleanup_target_valid,
                     "cleanup_target_distance_m": cleanup_target_distance,
@@ -1625,6 +1636,7 @@ def run_rollout(
             confidence_step_detection_probability_by_drone_values
         ),
         "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction_values),
+        "avg_confidence_overlap_regret": _finite_mean(confidence_overlap_regret_values),
         "avg_cleanup_target_valid_fraction": _finite_mean(cleanup_target_valid_values),
         "avg_cleanup_target_distance_m": _finite_mean(cleanup_target_distance_values),
         "avg_cleanup_target_value": _finite_mean(cleanup_target_value_values),
@@ -3636,6 +3648,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "confidence_opportunity_best_gain": [],
         "confidence_pass_probability": [],
         "confidence_overlap_fraction": [],
+        "confidence_overlap_regret": [],
         "cleanup_target_valid": [],
         "cleanup_target_distance_m": [],
         "cleanup_target_value": [],
@@ -3778,6 +3791,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     confidence_opportunity_best_gain = stats["confidence_opportunity_best_gain"]
     confidence_pass_probability = stats["confidence_pass_probability"]
     confidence_overlap_fraction = stats["confidence_overlap_fraction"]
+    confidence_overlap_regret = stats["confidence_overlap_regret"]
     cleanup_target_valid = stats["cleanup_target_valid"]
     cleanup_target_distance = stats["cleanup_target_distance_m"]
     cleanup_target_value = stats["cleanup_target_value"]
@@ -3915,6 +3929,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_confidence_opportunity_best_gain": _finite_mean(confidence_opportunity_best_gain),
         "avg_confidence_pass_probability": _finite_mean(confidence_pass_probability),
         "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction),
+        "avg_confidence_overlap_regret": _finite_mean(confidence_overlap_regret),
         "avg_cleanup_target_valid_fraction": _finite_mean(cleanup_target_valid),
         "avg_cleanup_target_distance_m": _finite_mean(cleanup_target_distance),
         "avg_cleanup_target_value": _finite_mean(cleanup_target_value),
@@ -4766,6 +4781,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_confidence_overlap_fraction": _finite_mean([
             row["avg_confidence_overlap_fraction"] for row in rows
         ]),
+        "mean_confidence_overlap_regret": _finite_mean([
+            row.get("avg_confidence_overlap_regret", math.nan) for row in rows
+        ]),
         "mean_cleanup_target_valid_fraction": _finite_mean([
             row.get("avg_cleanup_target_valid_fraction", math.nan) for row in rows
         ]),
@@ -5251,6 +5269,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "confidence_best_gain_off_revisit",
         "avg_confidence_pass_probability",
         "avg_confidence_overlap_fraction",
+        "avg_confidence_overlap_regret",
         "avg_cleanup_target_valid_fraction",
         "avg_cleanup_target_distance_m",
         "avg_cleanup_target_value",
@@ -5419,6 +5438,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "confidence_revisit_gain_share": "confidence_revisit_gain_share",
         "confidence_pass": "avg_confidence_pass_probability",
         "confidence_overlap": "avg_confidence_overlap_fraction",
+        "confidence_overlap_regret": "avg_confidence_overlap_regret",
         "frontier_align": "avg_frontier_alignment",
         "frontier_progress": "avg_frontier_progress_fraction",
         "frontier_ratio": "avg_frontier_uncovered_ratio",
@@ -5863,6 +5883,7 @@ def _plot_time_bins_search_efficiency(ax: Any, summary: dict[str, Any]) -> None:
         ("moving no new", "moving_no_new_coverage", "#8a5cf6"),
         ("move no conf", "moving_no_confidence_gain", "#a855f7"),
         ("conf sat", "confidence_overlap_fraction", "#be185d"),
+        ("conf regret", "confidence_overlap_regret", "#f43f5e"),
     ]
     frac_lines = []
     for label, key, color in frac_series:
@@ -6743,6 +6764,7 @@ def write_distribution_plots(
         ("Confidence Useful Revisit", "confidence_useful_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Wasteful Revisit", "confidence_wasteful_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Saturated Footprint", "avg_confidence_overlap_fraction", (0.0, 1.0)),
+        ("Confidence Overlap Regret", "avg_confidence_overlap_regret", (0.0, 1.0)),
         ("Confidence Revisit Useful Share", "confidence_revisit_useful_share", (0.0, 1.0)),
         ("Confidence Revisit Gain Share", "confidence_revisit_gain_share", (0.0, 1.0)),
         ("Cleanup Target Progress", "avg_cleanup_target_progress_fraction", (-1.0, 1.0)),

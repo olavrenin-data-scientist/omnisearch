@@ -216,6 +216,8 @@ def build_args(
     uav_inefficient_move_penalty: float = 0.0,
     uav_inefficient_move_source: str = "confidence",
     uav_confidence_overlap_penalty: float = 0.0,
+    uav_confidence_overlap_mode: str = "raw",
+    uav_confidence_overlap_allowed_regret: float = 0.10,
     uav_cleanup_target_progress_reward: float = 0.0,
     uav_astar_progress_reward: float = 0.0,
     uav_confidence_overlap_threshold: float = 0.65,
@@ -292,6 +294,12 @@ def build_args(
     uav_confidence_overlap_penalty = float(uav_confidence_overlap_penalty)
     if uav_confidence_overlap_penalty < 0.0:
         raise ValueError("uav_confidence_overlap_penalty must be nonnegative")
+    uav_confidence_overlap_mode = str(uav_confidence_overlap_mode).replace("-", "_").lower()
+    if uav_confidence_overlap_mode not in {"raw", "opportunity_regret"}:
+        raise ValueError("uav_confidence_overlap_mode must be one of: raw, opportunity_regret")
+    uav_confidence_overlap_allowed_regret = float(uav_confidence_overlap_allowed_regret)
+    if not 0.0 <= uav_confidence_overlap_allowed_regret <= 1.0:
+        raise ValueError("uav_confidence_overlap_allowed_regret must be in [0, 1]")
     uav_cleanup_target_progress_reward = float(uav_cleanup_target_progress_reward)
     if uav_cleanup_target_progress_reward < 0.0:
         raise ValueError("uav_cleanup_target_progress_reward must be nonnegative")
@@ -651,6 +659,8 @@ def build_args(
         scenario_kwargs["r_uav_confidence"] = uav_confidence_reward
         scenario_kwargs["r_uav_confidence_move"] = uav_confidence_move_reward
         scenario_kwargs["r_uav_confidence_overlap"] = uav_confidence_overlap_penalty
+        scenario_kwargs["uav_confidence_overlap_mode"] = uav_confidence_overlap_mode
+        scenario_kwargs["uav_confidence_overlap_allowed_regret"] = uav_confidence_overlap_allowed_regret
         scenario_kwargs["uav_confidence_overlap_threshold"] = uav_confidence_overlap_threshold
         scenario_kwargs["uav_confidence_gamma"] = uav_confidence_gamma
         scenario_kwargs["uav_confidence_eps"] = uav_confidence_eps
@@ -805,6 +815,8 @@ def build_args(
             "r_uav_inefficient_move": uav_inefficient_move_penalty,
             "uav_inefficient_move_source": uav_inefficient_move_source,
             "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
+            "uav_confidence_overlap_mode": uav_confidence_overlap_mode,
+            "uav_confidence_overlap_allowed_regret": uav_confidence_overlap_allowed_regret,
             "r_uav_cleanup_target_progress": uav_cleanup_target_progress_reward,
             "r_uav_astar_progress": uav_astar_progress_reward,
             "uav_cleanup_target_refresh_mode": uav_cleanup_target_refresh_mode,
@@ -1097,6 +1109,14 @@ def main():
     p.add_argument("--uav-confidence-overlap-penalty", type=float, default=0.0,
                    help="Optional per-UAV penalty scale for flying over medium/high confidence cells. "
                         "Default 0 disables this penalty.")
+    p.add_argument("--uav-confidence-overlap-mode",
+                   choices=("raw", "opportunity_regret", "opportunity-regret"),
+                   default="raw",
+                   help="raw penalizes high-confidence footprint fraction directly; "
+                        "opportunity-regret scales it by missed one-step confidence-gain opportunity.")
+    p.add_argument("--uav-confidence-overlap-allowed-regret", type=float, default=0.10,
+                   help="Regret slack for --uav-confidence-overlap-mode opportunity-regret. "
+                        "0.10 means no penalty for being within 10%% of the best one-step candidate.")
     p.add_argument("--uav-cleanup-target-progress-reward", type=float, default=0.0,
                    help="Optional per-UAV reward scale for positive progress toward the persistent "
                         "cleanup target, gated off when local frontier opportunity is strong. "
@@ -1301,6 +1321,11 @@ def main():
         p.error("--uav-inefficient-move-penalty must be nonnegative")
     if args.uav_confidence_overlap_penalty < 0.0:
         p.error("--uav-confidence-overlap-penalty must be nonnegative")
+    args.uav_confidence_overlap_mode = str(args.uav_confidence_overlap_mode).replace("-", "_").lower()
+    if args.uav_confidence_overlap_mode not in {"raw", "opportunity_regret"}:
+        p.error("--uav-confidence-overlap-mode must be one of: raw, opportunity-regret")
+    if not 0.0 <= args.uav_confidence_overlap_allowed_regret <= 1.0:
+        p.error("--uav-confidence-overlap-allowed-regret must be in [0, 1]")
     if args.uav_cleanup_target_progress_reward < 0.0:
         p.error("--uav-cleanup-target-progress-reward must be nonnegative")
     if not 0.0 <= args.uav_confidence_overlap_threshold < 1.0:
@@ -1526,6 +1551,8 @@ def main():
     print(f" uav_inefficient_move_penalty: {args.uav_inefficient_move_penalty}")
     print(f" uav_inefficient_move_source: {args.uav_inefficient_move_source}")
     print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
+    print(f" uav_confidence_overlap_mode: {args.uav_confidence_overlap_mode}")
+    print(f" uav_confidence_overlap_allowed_regret: {args.uav_confidence_overlap_allowed_regret}")
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
@@ -1629,6 +1656,8 @@ def main():
         uav_inefficient_move_penalty = args.uav_inefficient_move_penalty,
         uav_inefficient_move_source = args.uav_inefficient_move_source,
         uav_confidence_overlap_penalty = args.uav_confidence_overlap_penalty,
+        uav_confidence_overlap_mode = args.uav_confidence_overlap_mode,
+        uav_confidence_overlap_allowed_regret = args.uav_confidence_overlap_allowed_regret,
         uav_cleanup_target_progress_reward = args.uav_cleanup_target_progress_reward,
         uav_astar_progress_reward = args.uav_astar_progress_reward,
         uav_confidence_overlap_threshold = args.uav_confidence_overlap_threshold,
