@@ -540,6 +540,10 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("r_uav_cleanup_target_progress", 0.0)),
             0.0,
         )
+        self.r_uav_astar_progress = max(
+            float(kwargs.pop("r_uav_astar_progress", 0.0)),
+            0.0,
+        )
         self.uav_confidence_overlap_threshold = min(
             max(float(kwargs.pop("uav_confidence_overlap_threshold", 0.65)), 0.0),
             0.999,
@@ -1083,6 +1087,34 @@ class WildfireSearchScenario(BaseScenario):
             self.n_drones,
             device=device,
         )
+        self.metric_reward_uav_astar_progress = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_astar_progress_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_astar_progress_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_astar_progress_fraction_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_astar_frontier_gate = torch.zeros(batch_dim, device=device)
+        self.metric_uav_astar_frontier_gate_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_astar_path_cost_before_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
+        self.metric_uav_astar_path_cost_after_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
         self.metric_uav_cleanup_target_frontier_gate = torch.zeros(batch_dim, device=device)
         self.metric_uav_cleanup_target_frontier_gate_by_drone = torch.zeros(
             batch_dim,
@@ -1220,6 +1252,14 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_uav_confidence_overlap_by_drone,
             self.metric_reward_uav_cleanup_target_progress,
             self.metric_reward_uav_cleanup_target_progress_by_drone,
+            self.metric_reward_uav_astar_progress,
+            self.metric_reward_uav_astar_progress_by_drone,
+            self.metric_uav_astar_progress_fraction,
+            self.metric_uav_astar_progress_fraction_by_drone,
+            self.metric_uav_astar_frontier_gate,
+            self.metric_uav_astar_frontier_gate_by_drone,
+            self.metric_uav_astar_path_cost_before_by_drone,
+            self.metric_uav_astar_path_cost_after_by_drone,
             self.metric_uav_cleanup_target_frontier_gate,
             self.metric_uav_cleanup_target_frontier_gate_by_drone,
             self.metric_uav_confidence_overlap_fraction,
@@ -2890,6 +2930,11 @@ class WildfireSearchScenario(BaseScenario):
         if self._uav_confidence_active():
             with torch.no_grad():
                 uav_confidence_probability, uav_confidence_visible = self._uav_cell_detection_probability(drone_pos)
+        uav_pre_confidence_grid = (
+            self.uav_confidence_grid.clone()
+            if self.r_uav_astar_progress > 0.0
+            else self.uav_confidence_grid
+        )
         uav_confidence_overlap_penalty = self._uav_confidence_overlap_penalty(
             drone_pos,
             visible=uav_confidence_visible,
@@ -2904,6 +2949,16 @@ class WildfireSearchScenario(BaseScenario):
             uav_cleanup_target_progress_reward,
             uav_cleanup_target_frontier_gate,
         ) = self._uav_cleanup_target_progress_reward(drone_pos)
+        (
+            uav_astar_progress_reward,
+            uav_astar_frontier_gate,
+            uav_astar_progress_fraction,
+            uav_astar_path_cost_before,
+            uav_astar_path_cost_after,
+        ) = self._uav_astar_progress_reward(
+            drone_pos,
+            confidence_grid=uav_pre_confidence_grid,
+        )
         current_coverage_fraction = self.coverage_grid.float().mean(dim=(1, 2))
         coverage_threshold_crossed = (
             (previous_coverage_fraction < self.uav_coverage_threshold_fraction)
@@ -2968,6 +3023,22 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_confidence_overlap_by_drone = uav_confidence_overlap_penalty
         self.metric_reward_uav_cleanup_target_progress = uav_cleanup_target_progress_reward.sum(dim=1)
         self.metric_reward_uav_cleanup_target_progress_by_drone = uav_cleanup_target_progress_reward
+        self.metric_reward_uav_astar_progress = uav_astar_progress_reward.sum(dim=1)
+        self.metric_reward_uav_astar_progress_by_drone = uav_astar_progress_reward
+        self.metric_uav_astar_progress_fraction_by_drone = uav_astar_progress_fraction
+        self.metric_uav_astar_progress_fraction = (
+            uav_astar_progress_fraction.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_uav_astar_frontier_gate_by_drone = uav_astar_frontier_gate
+        self.metric_uav_astar_frontier_gate = (
+            uav_astar_frontier_gate.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_uav_astar_path_cost_before_by_drone = uav_astar_path_cost_before
+        self.metric_uav_astar_path_cost_after_by_drone = uav_astar_path_cost_after
         self.metric_uav_cleanup_target_frontier_gate_by_drone = uav_cleanup_target_frontier_gate
         self.metric_uav_cleanup_target_frontier_gate = (
             uav_cleanup_target_frontier_gate.mean(dim=1)
@@ -3124,6 +3195,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + uav_confidence_move_reward[:, i]
                 r = r + uav_confidence_overlap_penalty[:, i]
                 r = r + uav_cleanup_target_progress_reward[:, i]
+                r = r + uav_astar_progress_reward[:, i]
                 r = r + uav_overlap_penalty[:, i]
                 r = r + uav_inter_uav_overlap_penalty[:, i]
                 r = r + uav_outside_footprint_penalty[:, i]
@@ -3605,6 +3677,7 @@ class WildfireSearchScenario(BaseScenario):
             and not self.uav_cleanup_target_diagnostics
             and not self.uav_astar_route_obs
             and self.r_uav_cleanup_target_progress <= 0.0
+            and self.r_uav_astar_progress <= 0.0
         )
 
     def _uav_cleanup_target_active(self) -> bool:
@@ -3613,6 +3686,7 @@ class WildfireSearchScenario(BaseScenario):
             or bool(self.uav_cleanup_target_diagnostics)
             or bool(self.uav_astar_route_obs)
             or self.r_uav_cleanup_target_progress > 0.0
+            or self.r_uav_astar_progress > 0.0
         )
 
     def _uav_cleanup_target_obs_dim(self) -> int:
@@ -4186,11 +4260,18 @@ class WildfireSearchScenario(BaseScenario):
             dtype=dtype,
         )
 
-    def _uav_astar_pooled_confidence(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+    def _uav_astar_pooled_confidence(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        confidence_grid: Tensor | None = None,
+    ) -> Tensor:
         import torch.nn.functional as F
 
         K = int(self.uav_astar_grid)
-        confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        source = self.uav_confidence_grid if confidence_grid is None else confidence_grid
+        confidence = source.to(device=device, dtype=dtype).clamp(0.0, 1.0)
         return F.adaptive_avg_pool2d(confidence.unsqueeze(1), (K, K)).squeeze(1)
 
     def _uav_astar_plan(
@@ -4259,6 +4340,122 @@ class WildfireSearchScenario(BaseScenario):
                     g_score[neighbor] = tentative
                     heapq.heappush(open_heap, (tentative + heuristic(neighbor), tentative, neighbor))
         return [], float("inf")
+
+    def _uav_astar_max_step_cost(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+        K = int(self.uav_astar_grid)
+        meters_per_sim = 1.0 / self.terrain_sim_units_per_meter.to(
+            device=device,
+            dtype=dtype,
+        ).clamp_min(1e-9)
+        map_width_m = 2.0 * float(self.x_semidim) * meters_per_sim
+        map_height_m = 2.0 * float(self.y_semidim) * meters_per_sim
+        cell_size_m = torch.minimum(
+            map_width_m / float(K),
+            map_height_m / float(K),
+        ).clamp_min(1e-6)
+        max_step_m = max(float(self.drone_speed_mps) * float(self.sim_step_seconds), 1e-6)
+        max_cell_steps = torch.as_tensor(max_step_m, device=device, dtype=dtype) / cell_size_m
+        return (max_cell_steps * (1.0 + float(self.uav_astar_confidence_cost_alpha))).clamp_min(1e-6)
+
+    def _uav_astar_path_costs_for_positions(
+        self,
+        positions: Tensor,
+        *,
+        confidence_grid: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        costs = positions.new_zeros(positions.shape[0], self.n_drones)
+        finite = torch.zeros(
+            positions.shape[0],
+            self.n_drones,
+            dtype=torch.bool,
+            device=positions.device,
+        )
+        if self.n_drones <= 0:
+            return costs, finite
+
+        with torch.no_grad():
+            device = positions.device
+            dtype = positions.dtype
+            K = int(self.uav_astar_grid)
+            pooled_confidence = self._uav_astar_pooled_confidence(
+                device=device,
+                dtype=dtype,
+                confidence_grid=confidence_grid,
+            )
+            alpha = float(self.uav_astar_confidence_cost_alpha)
+            gamma = float(self.uav_astar_confidence_cost_gamma)
+            cell_cost = 1.0 + alpha * pooled_confidence.clamp(0.0, 1.0).pow(gamma)
+            valid = self.uav_cleanup_target_valid.to(device=device)
+            target_pos = self.uav_cleanup_target_pos.to(device=device, dtype=dtype)
+
+            for env_idx in range(int(positions.shape[0])):
+                for drone_idx in range(self.n_drones):
+                    if not bool(valid[env_idx, drone_idx].detach().cpu().item()):
+                        continue
+                    start = self._uav_astar_position_to_cell(positions[env_idx, drone_idx], K)
+                    goal = self._uav_astar_position_to_cell(target_pos[env_idx, drone_idx], K)
+                    _, path_cost = self._uav_astar_plan(cell_cost[env_idx], start, goal)
+                    if math.isfinite(path_cost):
+                        costs[env_idx, drone_idx] = float(path_cost)
+                        finite[env_idx, drone_idx] = True
+        return costs, finite
+
+    def _uav_astar_progress_reward(
+        self,
+        drone_pos: Tensor,
+        *,
+        confidence_grid: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        reward = drone_pos.new_zeros(drone_pos.shape[0], self.n_drones)
+        gate = torch.zeros_like(reward)
+        progress_fraction = torch.zeros_like(reward)
+        cost_before = torch.zeros_like(reward)
+        cost_after = torch.zeros_like(reward)
+        if self.n_drones == 0 or self.r_uav_astar_progress <= 0.0:
+            return reward, gate, progress_fraction, cost_before, cost_after
+
+        valid = self.metric_uav_cleanup_target_valid_by_drone.to(
+            device=drone_pos.device,
+            dtype=torch.bool,
+        )
+        target_value = self.metric_uav_cleanup_target_value_by_drone.to(
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        ).clamp(0.0, 1.0)
+        pre_pos = self._pre_step_drone_pos.to(device=drone_pos.device, dtype=drone_pos.dtype)
+        cost_before, before_finite = self._uav_astar_path_costs_for_positions(
+            pre_pos,
+            confidence_grid=confidence_grid,
+        )
+        cost_after, after_finite = self._uav_astar_path_costs_for_positions(
+            drone_pos,
+            confidence_grid=confidence_grid,
+        )
+        valid = valid & before_finite & after_finite
+        raw_progress = cost_before - cost_after
+        max_step_cost = self._uav_astar_max_step_cost(
+            device=drone_pos.device,
+            dtype=drone_pos.dtype,
+        ).view(-1, 1)
+        progress_fraction = torch.where(
+            valid,
+            (raw_progress / max_step_cost).clamp(0.0, 1.0),
+            torch.zeros_like(raw_progress),
+        )
+        local_frontier_score = self._uav_local_frontier_score(
+            drone_pos.device,
+            drone_pos.dtype,
+        )
+        gate = (1.0 - local_frontier_score).clamp(0.0, 1.0) * valid.to(dtype=drone_pos.dtype)
+        reward = (
+            float(self.r_uav_astar_progress)
+            * progress_fraction
+            * target_value
+            * gate
+        )
+        cost_before = torch.where(valid, cost_before, torch.zeros_like(cost_before))
+        cost_after = torch.where(valid, cost_after, torch.zeros_like(cost_after))
+        return reward, gate, progress_fraction, cost_before, cost_after
 
     def _refresh_uav_astar_routes(self, drone_pos: Tensor) -> None:
         if not bool(self.uav_astar_route_obs) or self.n_drones <= 0:
@@ -6649,6 +6846,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/uav_confidence_move": self.metric_reward_uav_confidence_move,
             "reward/uav_confidence_overlap": self.metric_reward_uav_confidence_overlap,
             "reward/uav_cleanup_target_progress": self.metric_reward_uav_cleanup_target_progress,
+            "reward/uav_astar_progress": self.metric_reward_uav_astar_progress,
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,
             "reward/uav_outside_footprint": self.metric_reward_uav_outside_footprint,
@@ -6669,6 +6867,8 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/uav_frontier_alignment": self.metric_uav_frontier_alignment,
             "diagnostic/uav_frontier_progress_fraction": self.metric_uav_frontier_progress_fraction,
             "diagnostic/uav_frontier_uncovered_ratio": self.metric_uav_frontier_uncovered_ratio,
+            "diagnostic/uav_astar_progress_fraction": self.metric_uav_astar_progress_fraction,
+            "diagnostic/uav_astar_frontier_gate": self.metric_uav_astar_frontier_gate,
             "diagnostic/uav_outside_footprint_fraction": self.metric_uav_outside_footprint_fraction,
             "diagnostic/ugv_speed_limited": self.step_ugv_speed_limited.float().sum(dim=1),
             "diagnostic/ugv_path_speed": (

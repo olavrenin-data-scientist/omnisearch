@@ -217,6 +217,7 @@ def build_args(
     uav_inefficient_move_source: str = "confidence",
     uav_confidence_overlap_penalty: float = 0.0,
     uav_cleanup_target_progress_reward: float = 0.0,
+    uav_astar_progress_reward: float = 0.0,
     uav_confidence_overlap_threshold: float = 0.65,
     uav_confidence_gamma: float = 2.0,
     uav_confidence_eps: float = 0.05,
@@ -294,6 +295,9 @@ def build_args(
     uav_cleanup_target_progress_reward = float(uav_cleanup_target_progress_reward)
     if uav_cleanup_target_progress_reward < 0.0:
         raise ValueError("uav_cleanup_target_progress_reward must be nonnegative")
+    uav_astar_progress_reward = float(uav_astar_progress_reward)
+    if uav_astar_progress_reward < 0.0:
+        raise ValueError("uav_astar_progress_reward must be nonnegative")
     uav_confidence_overlap_threshold = float(uav_confidence_overlap_threshold)
     if not 0.0 <= uav_confidence_overlap_threshold < 1.0:
         raise ValueError("uav_confidence_overlap_threshold must be in [0, 1)")
@@ -606,7 +610,12 @@ def build_args(
         scenario_kwargs["uav_frontier_top_k"] = uav_frontier_top_k
         scenario_kwargs["uav_frontier_ownership"] = bool(uav_frontier_ownership)
         scenario_kwargs["r_uav_frontier_alignment"] = uav_frontier_alignment_reward
-    if uav_cleanup_target_obs or uav_cleanup_target_progress_reward > 0.0 or uav_astar_route_obs:
+    if (
+        uav_cleanup_target_obs
+        or uav_cleanup_target_progress_reward > 0.0
+        or uav_astar_route_obs
+        or uav_astar_progress_reward > 0.0
+    ):
         if uav_cleanup_target_obs:
             scenario_kwargs["uav_cleanup_target_obs"] = True
         scenario_kwargs["uav_cleanup_target_grid"] = uav_cleanup_target_grid
@@ -620,8 +629,9 @@ def build_args(
         )
         scenario_kwargs["uav_cleanup_target_refresh_mode"] = uav_cleanup_target_refresh_mode
         scenario_kwargs["r_uav_cleanup_target_progress"] = uav_cleanup_target_progress_reward
-        if uav_astar_route_obs:
-            scenario_kwargs["uav_astar_route_obs"] = True
+        scenario_kwargs["r_uav_astar_progress"] = uav_astar_progress_reward
+        if uav_astar_route_obs or uav_astar_progress_reward > 0.0:
+            scenario_kwargs["uav_astar_route_obs"] = bool(uav_astar_route_obs)
             scenario_kwargs["uav_astar_grid"] = uav_astar_grid
             scenario_kwargs["uav_astar_confidence_cost_alpha"] = uav_astar_confidence_cost_alpha
             scenario_kwargs["uav_astar_confidence_cost_gamma"] = uav_astar_confidence_cost_gamma
@@ -633,6 +643,7 @@ def build_args(
         or uav_confidence_move_reward > 0.0
         or uav_confidence_overlap_penalty > 0.0
         or uav_cleanup_target_progress_reward > 0.0
+        or uav_astar_progress_reward > 0.0
         or uav_astar_route_obs
         or uav_frontier_source == "confidence"
     ):
@@ -795,6 +806,7 @@ def build_args(
             "uav_inefficient_move_source": uav_inefficient_move_source,
             "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
             "r_uav_cleanup_target_progress": uav_cleanup_target_progress_reward,
+            "r_uav_astar_progress": uav_astar_progress_reward,
             "uav_cleanup_target_refresh_mode": uav_cleanup_target_refresh_mode,
             "uav_astar_route_obs": bool(uav_astar_route_obs),
             "uav_astar_grid": uav_astar_grid,
@@ -1089,6 +1101,10 @@ def main():
                    help="Optional per-UAV reward scale for positive progress toward the persistent "
                         "cleanup target, gated off when local frontier opportunity is strong. "
                         "Default 0 disables this reward.")
+    p.add_argument("--uav-astar-progress-reward", type=float, default=0.0,
+                   help="Optional per-UAV reward scale for reducing A* route cost toward the "
+                        "cleanup target, gated off when local frontier opportunity is strong. "
+                        "Default 0 disables this reward.")
     p.add_argument("--uav-confidence-overlap-threshold", type=float, default=0.65,
                    help="Confidence value where --uav-confidence-overlap-penalty starts. "
                         "Cells below this threshold are free; cells at 1.0 receive full penalty.")
@@ -1279,6 +1295,8 @@ def main():
         p.error("--uav-confidence-reward must be nonnegative")
     if args.uav_confidence_move_reward < 0.0:
         p.error("--uav-confidence-move-reward must be nonnegative")
+    if args.uav_astar_progress_reward < 0.0:
+        p.error("--uav-astar-progress-reward must be nonnegative")
     if args.uav_inefficient_move_penalty < 0.0:
         p.error("--uav-inefficient-move-penalty must be nonnegative")
     if args.uav_confidence_overlap_penalty < 0.0:
@@ -1509,6 +1527,7 @@ def main():
     print(f" uav_inefficient_move_source: {args.uav_inefficient_move_source}")
     print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
+    print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
     print(f" uav_confidence_gamma: {args.uav_confidence_gamma}")
     print(f" uav_confidence_eps: {args.uav_confidence_eps}")
@@ -1611,6 +1630,7 @@ def main():
         uav_inefficient_move_source = args.uav_inefficient_move_source,
         uav_confidence_overlap_penalty = args.uav_confidence_overlap_penalty,
         uav_cleanup_target_progress_reward = args.uav_cleanup_target_progress_reward,
+        uav_astar_progress_reward = args.uav_astar_progress_reward,
         uav_confidence_overlap_threshold = args.uav_confidence_overlap_threshold,
         uav_confidence_gamma = args.uav_confidence_gamma,
         uav_confidence_eps = args.uav_confidence_eps,

@@ -208,6 +208,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_cleanup_target_assignment_distance_scale_m = 250.0
         scenario.uav_cleanup_target_refresh_mode = "exact"
         scenario.r_uav_cleanup_target_progress = 0.0
+        scenario.r_uav_astar_progress = 0.0
         scenario.uav_astar_route_obs = False
         scenario.uav_astar_grid = 8
         scenario.uav_astar_confidence_cost_alpha = 3.0
@@ -259,6 +260,14 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.metric_uav_cleanup_target_progress_fraction_by_drone = torch.zeros(1, n_drones)
         scenario.metric_reward_uav_cleanup_target_progress = torch.zeros(1)
         scenario.metric_reward_uav_cleanup_target_progress_by_drone = torch.zeros(1, n_drones)
+        scenario.metric_reward_uav_astar_progress = torch.zeros(1)
+        scenario.metric_reward_uav_astar_progress_by_drone = torch.zeros(1, n_drones)
+        scenario.metric_uav_astar_progress_fraction = torch.zeros(1)
+        scenario.metric_uav_astar_progress_fraction_by_drone = torch.zeros(1, n_drones)
+        scenario.metric_uav_astar_frontier_gate = torch.zeros(1)
+        scenario.metric_uav_astar_frontier_gate_by_drone = torch.zeros(1, n_drones)
+        scenario.metric_uav_astar_path_cost_before_by_drone = torch.zeros(1, n_drones)
+        scenario.metric_uav_astar_path_cost_after_by_drone = torch.zeros(1, n_drones)
         scenario.metric_uav_cleanup_target_frontier_gate = torch.zeros(1)
         scenario.metric_uav_cleanup_target_frontier_gate_by_drone = torch.zeros(1, n_drones)
         scenario.metric_uav_cleanup_target_switch_by_drone = torch.zeros(1, n_drones)
@@ -1039,6 +1048,49 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(gate[0, 0]), 1.0, places=6)
         self.assertAlmostEqual(float(reward[0, 0]), 0.0, places=6)
+
+    def test_uav_astar_progress_reward_uses_route_cost_and_frontier_gate(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.r_uav_astar_progress = 0.2
+        scenario.uav_astar_grid = 8
+        scenario.uav_astar_confidence_cost_alpha = 20.0
+        scenario.uav_confidence_grid.fill_(1.0)
+        scenario.uav_confidence_grid[:, 1:8, 1:2] = 0.0
+        scenario.uav_confidence_grid[:, 7:8, 1:8] = 0.0
+        scenario.uav_cleanup_target_valid[0, 0] = True
+        scenario.uav_cleanup_target_pos[0, 0] = torch.tensor([0.75, 0.75])
+        scenario.metric_uav_cleanup_target_valid_by_drone = torch.tensor([[1.0]])
+        scenario.metric_uav_cleanup_target_value_by_drone = torch.tensor([[0.8]])
+        scenario._pre_step_drone_pos = torch.tensor([[[-0.75, -0.75]]])
+        post_pos = torch.tensor([[[-0.75, -0.25]]])
+        scenario._uav_local_frontier_score = lambda device, dtype: torch.tensor(
+            [[0.25]],
+            device=device,
+            dtype=dtype,
+        )
+
+        reward, gate, progress, before, after = scenario._uav_astar_progress_reward(
+            post_pos,
+            confidence_grid=scenario.uav_confidence_grid.clone(),
+        )
+
+        self.assertAlmostEqual(float(gate[0, 0]), 0.75, places=6)
+        self.assertGreater(float(before[0, 0]), float(after[0, 0]))
+        self.assertGreater(float(progress[0, 0]), 0.0)
+        self.assertGreater(float(reward[0, 0]), 0.0)
+
+        scenario._uav_local_frontier_score = lambda device, dtype: torch.ones(
+            1,
+            1,
+            device=device,
+            dtype=dtype,
+        )
+        gated_reward, gated_gate, _, _, _ = scenario._uav_astar_progress_reward(
+            post_pos,
+            confidence_grid=scenario.uav_confidence_grid.clone(),
+        )
+        self.assertAlmostEqual(float(gated_gate[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(float(gated_reward[0, 0]), 0.0, places=6)
 
     def test_confidence_frontier_features_point_toward_low_confidence_mass(self):
         scenario = self._coverage_scenario(grid_size=8)
