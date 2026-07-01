@@ -50,6 +50,7 @@ CONFIDENCE_REVISIT_USEFUL_OPPORTUNITY_THRESHOLD = 0.25
 CONFIDENCE_REVISIT_WASTEFUL_OPPORTUNITY_THRESHOLD = 0.15
 CONFIDENCE_REVISIT_MIN_GAIN = 1e-9
 DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M = 60.0
+DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD = 1e-6
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -79,6 +80,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "disable_fire": True,
         "comms_dropout": 0.0,
         "uav_confidence_diagnostics": True,
+        "uav_cleanup_target_diagnostics": (
+            str(getattr(args, "diagnostic_level", "full")).replace("-", "_").lower() == "full"
+            or bool(getattr(args, "include_cleanup_target_diagnostics", False))
+        ),
     })
     if args.n_drones is not None:
         scenario_kwargs["n_drones"] = int(args.n_drones)
@@ -110,6 +115,8 @@ def run_rollout(
     seed: int,
     *,
     diagnostic_confidence_frontier_radius_m: float = DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M,
+    moving_no_confidence_gain_threshold: float = DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
+    diagnostic_level: str = "full",
 ) -> dict[str, Any]:
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
@@ -122,6 +129,7 @@ def run_rollout(
     env.reset()
     policy.reset()
     scenario = env.scenario
+    full_diagnostics = str(diagnostic_level).replace("-", "_").lower() == "full"
     start_metrics = _start_metrics(scenario)
     coverage_geometry = _coverage_grid_geometry(scenario)
     individual_coverage_history = np.zeros(
@@ -226,11 +234,24 @@ def run_rollout(
     confidence_step_detection_probability_values: list[float] = []
     confidence_step_detection_probability_by_drone_values: list[float] = []
     confidence_overlap_fraction_values: list[float] = []
+    cleanup_target_valid_values: list[float] = []
+    cleanup_target_distance_values: list[float] = []
+    cleanup_target_value_values: list[float] = []
+    cleanup_target_progress_values: list[float] = []
+    cleanup_target_progress_fraction_values: list[float] = []
+    cleanup_target_switch_values: list[float] = []
+    cleanup_target_reached_values: list[float] = []
+    cleanup_target_value_decay_values: list[float] = []
+    cleanup_target_no_progress_values: list[float] = []
+    cleanup_target_progress_with_new_cells_values: list[float] = []
+    cleanup_target_progress_with_excess_overlap_values: list[float] = []
+    cleanup_target_frontier_gate_values: list[float] = []
     reward_uav_coverage_values: list[float] = []
     reward_uav_move_coverage_values: list[float] = []
     reward_uav_frontier_values: list[float] = []
     reward_uav_confidence_values: list[float] = []
     reward_uav_confidence_move_values: list[float] = []
+    reward_uav_cleanup_target_progress_values: list[float] = []
     penalty_uav_inefficient_move_values: list[float] = []
     penalty_uav_confidence_overlap_values: list[float] = []
     penalty_uav_overlap_values: list[float] = []
@@ -257,6 +278,7 @@ def run_rollout(
     low_action_high_motion = 0
     high_action_low_motion = 0
     moving_no_new_coverage = 0
+    moving_no_confidence_gain = 0
     frontier_high_progress_steps = 0
     frontier_high_progress_no_new_steps = 0
     frontier_high_progress_edge_steps = 0
@@ -281,129 +303,138 @@ def run_rollout(
         pre_individual_coverage = individual_coverage_history.copy()
         if scenario.n_drones > 0:
             pre_drone_pos_array = np.asarray(pre_drone_pos, dtype=float)
-            pre_drone_pos_tensor = torch.stack(
-                [agent.state.pos for agent in scenario.world.agents[:scenario.n_drones]],
-                dim=1,
-            )
-            frontier_tensor = scenario._cached_uav_frontier_features_for_positions(
-                "diagnostic_current",
-                pre_drone_pos_tensor,
-            )
-            frontier_obs = frontier_tensor[0].detach().cpu().numpy().astype(float)
-            coverage_signal = _coverage_signal_snapshot(scenario, pre_drone_pos_tensor, frontier_obs)
-            pre_footprint_radius_sim = (
-                scenario._drone_camera_ranges()[0]
-                .detach()
-                .cpu()
-                .numpy()
-                .astype(float)
-                .reshape(-1)
-            )
-            max_step_sim = (
-                float(getattr(scenario, "drone_speed_mps", 0.0))
-                * float(getattr(scenario, "sim_step_seconds", 1.0))
-                * max(
-                    float(
-                        scenario.terrain_sim_units_per_meter[0]
-                        .detach()
-                        .cpu()
-                        .item()
-                    ),
-                    1e-9,
+            if full_diagnostics:
+                pre_drone_pos_tensor = torch.stack(
+                    [agent.state.pos for agent in scenario.world.agents[:scenario.n_drones]],
+                    dim=1,
                 )
-            )
-            frontier_expected_new_cells = _frontier_expected_new_cells(
-                scenario=scenario,
-                geometry=coverage_geometry,
-                positions=pre_drone_pos_array,
-                footprint_radii_sim=pre_footprint_radius_sim,
-                pre_team_coverage=pre_team_coverage,
-                frontier_obs=frontier_obs,
-                max_step_sim=max_step_sim,
-            )
-            counterfactual = _counterfactual_move_diagnostics(
-                scenario=scenario,
-                geometry=coverage_geometry,
-                positions=pre_drone_pos_array,
-                footprint_radii_sim=pre_footprint_radius_sim,
-                pre_team_coverage=pre_team_coverage,
-                max_step_sim=max_step_sim,
-            )
-            frontier_mode = str(getattr(scenario, "uav_frontier_mode", "centroid")).replace("-", "_")
-            frontier_top_k = int(getattr(scenario, "uav_frontier_top_k", 1))
-            current_frontier_config = _current_frontier_config(scenario)
-            frontier_usefulness = _frontier_usefulness_diagnostics(
-                scenario=scenario,
-                geometry=coverage_geometry,
-                positions=pre_drone_pos_array,
-                footprint_radii_sim=pre_footprint_radius_sim,
-                pre_team_coverage=pre_team_coverage,
-                max_step_sim=max_step_sim,
-                frontier_obs=frontier_obs,
-                counterfactual=counterfactual,
-                frontier_mode=frontier_mode,
-                frontier_top_k=frontier_top_k,
-            )
-            confidence_frontier_config = _frontier_config_for(
-                scenario,
-                source="confidence",
-                mode=frontier_mode,
-            )
-            if _frontier_configs_match(confidence_frontier_config, current_frontier_config):
-                confidence_frontier_obs = frontier_obs
-                confidence_frontier_usefulness = frontier_usefulness
-            else:
-                confidence_frontier_obs = _shadow_frontier_features(
-                    scenario,
+                frontier_tensor = scenario._cached_uav_frontier_features_for_positions(
+                    "diagnostic_current",
                     pre_drone_pos_tensor,
-                    source=confidence_frontier_config["source"],
-                    mode=confidence_frontier_config["mode"],
-                    radius_m=confidence_frontier_config["radius_m"],
                 )
-                confidence_frontier_usefulness = _frontier_usefulness_diagnostics(
+                frontier_obs = frontier_tensor[0].detach().cpu().numpy().astype(float)
+                coverage_signal = _coverage_signal_snapshot(scenario, pre_drone_pos_tensor, frontier_obs)
+                pre_footprint_radius_sim = (
+                    scenario._drone_camera_ranges()[0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(float)
+                    .reshape(-1)
+                )
+                max_step_sim = (
+                    float(getattr(scenario, "drone_speed_mps", 0.0))
+                    * float(getattr(scenario, "sim_step_seconds", 1.0))
+                    * max(
+                        float(
+                            scenario.terrain_sim_units_per_meter[0]
+                            .detach()
+                            .cpu()
+                            .item()
+                        ),
+                        1e-9,
+                    )
+                )
+                frontier_expected_new_cells = _frontier_expected_new_cells(
+                    scenario=scenario,
+                    geometry=coverage_geometry,
+                    positions=pre_drone_pos_array,
+                    footprint_radii_sim=pre_footprint_radius_sim,
+                    pre_team_coverage=pre_team_coverage,
+                    frontier_obs=frontier_obs,
+                    max_step_sim=max_step_sim,
+                )
+                counterfactual = _counterfactual_move_diagnostics(
                     scenario=scenario,
                     geometry=coverage_geometry,
                     positions=pre_drone_pos_array,
                     footprint_radii_sim=pre_footprint_radius_sim,
                     pre_team_coverage=pre_team_coverage,
                     max_step_sim=max_step_sim,
-                    frontier_obs=confidence_frontier_obs,
+                )
+                frontier_mode = str(getattr(scenario, "uav_frontier_mode", "centroid")).replace("-", "_")
+                frontier_top_k = int(getattr(scenario, "uav_frontier_top_k", 1))
+                current_frontier_config = _current_frontier_config(scenario)
+                frontier_usefulness = _frontier_usefulness_diagnostics(
+                    scenario=scenario,
+                    geometry=coverage_geometry,
+                    positions=pre_drone_pos_array,
+                    footprint_radii_sim=pre_footprint_radius_sim,
+                    pre_team_coverage=pre_team_coverage,
+                    max_step_sim=max_step_sim,
+                    frontier_obs=frontier_obs,
                     counterfactual=counterfactual,
                     frontier_mode=frontier_mode,
                     frontier_top_k=frontier_top_k,
                 )
-            confidence_lg_frontier_config = _frontier_config_for(
-                scenario,
-                source="confidence",
-                mode="local_global",
-                radius_m=diagnostic_confidence_frontier_radius_m,
-            )
-            if _frontier_configs_match(confidence_lg_frontier_config, current_frontier_config):
-                confidence_lg_frontier_obs = frontier_obs
-                confidence_lg_frontier_usefulness = frontier_usefulness
-            elif _frontier_configs_match(confidence_lg_frontier_config, confidence_frontier_config):
-                confidence_lg_frontier_obs = confidence_frontier_obs
-                confidence_lg_frontier_usefulness = confidence_frontier_usefulness
-            else:
-                confidence_lg_frontier_obs = _shadow_frontier_features(
+                confidence_frontier_config = _frontier_config_for(
                     scenario,
-                    pre_drone_pos_tensor,
-                    source=confidence_lg_frontier_config["source"],
-                    mode=confidence_lg_frontier_config["mode"],
-                    radius_m=confidence_lg_frontier_config["radius_m"],
+                    source="confidence",
+                    mode=frontier_mode,
                 )
-                confidence_lg_frontier_usefulness = _frontier_usefulness_diagnostics(
-                    scenario=scenario,
-                    geometry=coverage_geometry,
-                    positions=pre_drone_pos_array,
-                    footprint_radii_sim=pre_footprint_radius_sim,
-                    pre_team_coverage=pre_team_coverage,
-                    max_step_sim=max_step_sim,
-                    frontier_obs=confidence_lg_frontier_obs,
-                    counterfactual=counterfactual,
-                    frontier_mode="local_global",
-                    frontier_top_k=2,
+                if _frontier_configs_match(confidence_frontier_config, current_frontier_config):
+                    confidence_frontier_obs = frontier_obs
+                    confidence_frontier_usefulness = frontier_usefulness
+                else:
+                    confidence_frontier_obs = _shadow_frontier_features(
+                        scenario,
+                        pre_drone_pos_tensor,
+                        source=confidence_frontier_config["source"],
+                        mode=confidence_frontier_config["mode"],
+                        radius_m=confidence_frontier_config["radius_m"],
+                    )
+                    confidence_frontier_usefulness = _frontier_usefulness_diagnostics(
+                        scenario=scenario,
+                        geometry=coverage_geometry,
+                        positions=pre_drone_pos_array,
+                        footprint_radii_sim=pre_footprint_radius_sim,
+                        pre_team_coverage=pre_team_coverage,
+                        max_step_sim=max_step_sim,
+                        frontier_obs=confidence_frontier_obs,
+                        counterfactual=counterfactual,
+                        frontier_mode=frontier_mode,
+                        frontier_top_k=frontier_top_k,
+                    )
+                confidence_lg_frontier_config = _frontier_config_for(
+                    scenario,
+                    source="confidence",
+                    mode="local_global",
+                    radius_m=diagnostic_confidence_frontier_radius_m,
                 )
+                if _frontier_configs_match(confidence_lg_frontier_config, current_frontier_config):
+                    confidence_lg_frontier_obs = frontier_obs
+                    confidence_lg_frontier_usefulness = frontier_usefulness
+                elif _frontier_configs_match(confidence_lg_frontier_config, confidence_frontier_config):
+                    confidence_lg_frontier_obs = confidence_frontier_obs
+                    confidence_lg_frontier_usefulness = confidence_frontier_usefulness
+                else:
+                    confidence_lg_frontier_obs = _shadow_frontier_features(
+                        scenario,
+                        pre_drone_pos_tensor,
+                        source=confidence_lg_frontier_config["source"],
+                        mode=confidence_lg_frontier_config["mode"],
+                        radius_m=confidence_lg_frontier_config["radius_m"],
+                    )
+                    confidence_lg_frontier_usefulness = _frontier_usefulness_diagnostics(
+                        scenario=scenario,
+                        geometry=coverage_geometry,
+                        positions=pre_drone_pos_array,
+                        footprint_radii_sim=pre_footprint_radius_sim,
+                        pre_team_coverage=pre_team_coverage,
+                        max_step_sim=max_step_sim,
+                        frontier_obs=confidence_lg_frontier_obs,
+                        counterfactual=counterfactual,
+                        frontier_mode="local_global",
+                        frontier_top_k=2,
+                    )
+            else:
+                frontier_obs = np.zeros((scenario.n_drones, 4), dtype=float)
+                coverage_signal = _empty_coverage_signal_snapshot(scenario.n_drones)
+                frontier_expected_new_cells = np.zeros(scenario.n_drones, dtype=float)
+                counterfactual = _empty_counterfactual_move_diagnostics(scenario.n_drones)
+                frontier_usefulness = _empty_frontier_usefulness_diagnostics(scenario.n_drones)
+                confidence_frontier_usefulness = _empty_frontier_usefulness_diagnostics(scenario.n_drones)
+                confidence_lg_frontier_usefulness = _empty_frontier_usefulness_diagnostics(scenario.n_drones)
         else:
             frontier_obs = np.zeros((0, 4), dtype=float)
             coverage_signal = _empty_coverage_signal_snapshot(0)
@@ -412,7 +443,7 @@ def run_rollout(
             frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
             confidence_frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
             confidence_lg_frontier_usefulness = _empty_frontier_usefulness_diagnostics(0)
-        pre_survivor_confidence = _survivor_confidence_values(scenario)
+        pre_survivor_confidence = _survivor_confidence_values(scenario) if full_diagnostics else []
         frontier_pairwise = _pairwise_direction_metrics(frontier_obs[:, :2])
         local_pairwise = _pairwise_direction_metrics(coverage_signal["local_vec"])
         global_pairwise = _pairwise_direction_metrics(coverage_signal["global_vec"])
@@ -494,6 +525,16 @@ def run_rollout(
             "metric_reward_uav_confidence_overlap_by_drone",
             scenario.n_drones,
         )
+        cleanup_target_progress_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_cleanup_target_progress_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_frontier_gate_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_frontier_gate_by_drone",
+            scenario.n_drones,
+        )
         confidence_overlap_fraction_by_drone = _metric_array(
             scenario,
             "metric_uav_confidence_overlap_fraction_by_drone",
@@ -512,6 +553,51 @@ def run_rollout(
         confidence_step_detection_probability_by_drone = _metric_array(
             scenario,
             "metric_uav_step_detection_probability_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_valid_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_valid_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_distance_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_distance_m_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_value_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_value_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_progress_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_progress_m_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_progress_fraction_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_progress_fraction_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_switch_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_switch_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_reached_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_reached_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_value_decay_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_value_decay_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_age_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_age_by_drone",
             scenario.n_drones,
         )
         confidence_mean = _metric_scalar(scenario, "metric_uav_confidence_mean")
@@ -606,26 +692,27 @@ def run_rollout(
             if scenario.n_drones > 0 and n_survivors > 0
             else np.zeros((scenario.n_drones, n_survivors), dtype=bool)
         )
-        post_survivor_confidence = _survivor_confidence_values(scenario)
         scout_credit = drone_detections & newly_scouted.reshape(1, -1)
-        perception = _drone_perception_snapshot(scenario, meters_per_sim)
-        perception_step = _update_survivor_exposure_stats(
-            survivor_exposure_stats,
-            perception=perception,
-            drone_detections=drone_detections,
-            prev_scouted=prev_scouted,
-            post_scouted=post_scouted,
-            survivor_confidence_pre=pre_survivor_confidence,
-            survivor_confidence_post=post_survivor_confidence,
-            step=step + 1,
-            n_survivors=n_survivors,
-        )
-        _append_time_bin(
-            perception_time_bins,
-            step=step,
-            max_steps=int(scenario_kwargs["max_steps"]),
-            values=perception_step,
-        )
+        if full_diagnostics:
+            post_survivor_confidence = _survivor_confidence_values(scenario)
+            perception = _drone_perception_snapshot(scenario, meters_per_sim)
+            perception_step = _update_survivor_exposure_stats(
+                survivor_exposure_stats,
+                perception=perception,
+                drone_detections=drone_detections,
+                prev_scouted=prev_scouted,
+                post_scouted=post_scouted,
+                survivor_confidence_pre=pre_survivor_confidence,
+                survivor_confidence_post=post_survivor_confidence,
+                step=step + 1,
+                n_survivors=n_survivors,
+            )
+            _append_time_bin(
+                perception_time_bins,
+                step=step,
+                max_steps=int(scenario_kwargs["max_steps"]),
+                values=perception_step,
+            )
         for drone_idx, action_vec in enumerate(action_vectors):
             post_pos = scenario.world.agents[drone_idx].state.pos[0].detach().cpu().numpy().astype(float)
             path_positions_sim.append(post_pos.copy())
@@ -737,6 +824,19 @@ def run_rollout(
             confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
             confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
             confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
+            cleanup_target_progress_reward = float(
+                cleanup_target_progress_reward_by_drone[drone_idx]
+            )
+            cleanup_target_frontier_gate = float(cleanup_target_frontier_gate_by_drone[drone_idx])
+            cleanup_target_valid = float(cleanup_target_valid_by_drone[drone_idx])
+            cleanup_target_distance = float(cleanup_target_distance_by_drone[drone_idx])
+            cleanup_target_value = float(cleanup_target_value_by_drone[drone_idx])
+            cleanup_target_progress = float(cleanup_target_progress_by_drone[drone_idx])
+            cleanup_target_progress_fraction = float(cleanup_target_progress_fraction_by_drone[drone_idx])
+            cleanup_target_switch = float(cleanup_target_switch_by_drone[drone_idx])
+            cleanup_target_reached = float(cleanup_target_reached_by_drone[drone_idx])
+            cleanup_target_value_decay = float(cleanup_target_value_decay_by_drone[drone_idx])
+            cleanup_target_age = float(cleanup_target_age_by_drone[drone_idx])
             confidence_opportunity_fraction = float(
                 confidence_opportunity_fraction_by_drone[drone_idx]
             )
@@ -830,6 +930,7 @@ def run_rollout(
                 confidence_move_reward=confidence_move_reward,
                 confidence_opportunity_fraction=confidence_opportunity_fraction,
                 confidence_overlap_penalty=confidence_overlap_penalty,
+                cleanup_target_progress_reward=cleanup_target_progress_reward,
                 scout_reward=scout_reward,
             )
             reward_terms["team"] = team_reward
@@ -907,6 +1008,24 @@ def run_rollout(
             confidence_opportunity_best_gain_values.append(confidence_opportunity_best_gain)
             confidence_step_detection_probability_by_drone_values.append(confidence_pass_probability)
             confidence_overlap_fraction_values.append(confidence_overlap_fraction)
+            cleanup_target_valid_values.append(cleanup_target_valid)
+            cleanup_target_distance_values.append(cleanup_target_distance)
+            cleanup_target_value_values.append(cleanup_target_value)
+            cleanup_target_progress_values.append(cleanup_target_progress)
+            cleanup_target_progress_fraction_values.append(cleanup_target_progress_fraction)
+            cleanup_target_switch_values.append(cleanup_target_switch)
+            cleanup_target_reached_values.append(cleanup_target_reached)
+            cleanup_target_value_decay_values.append(cleanup_target_value_decay)
+            cleanup_target_no_progress_values.append(
+                float(cleanup_target_valid >= 0.5 and cleanup_target_progress <= 1e-6)
+            )
+            cleanup_target_progress_with_new_cells_values.append(
+                float(cleanup_target_valid >= 0.5 and cleanup_target_progress > 1e-6 and new_cells >= 1.0)
+            )
+            cleanup_target_progress_with_excess_overlap_values.append(
+                float(cleanup_target_valid >= 0.5 and cleanup_target_progress > 1e-6 and excess_overlap >= 0.10)
+            )
+            cleanup_target_frontier_gate_values.append(cleanup_target_frontier_gate)
             frontier_alignment_values.append(frontier_align)
             frontier_progress_values.append(frontier_progress_frac)
             frontier_uncovered_ratio_values.append(frontier_ratio)
@@ -935,6 +1054,9 @@ def run_rollout(
             reward_uav_frontier_values.append(reward_terms["frontier"])
             reward_uav_confidence_values.append(reward_terms["confidence"])
             reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
+            reward_uav_cleanup_target_progress_values.append(
+                reward_terms["cleanup_target_progress"]
+            )
             penalty_uav_inefficient_move_values.append(reward_terms["inefficient_move_penalty"])
             penalty_uav_confidence_overlap_values.append(reward_terms["confidence_overlap_penalty"])
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
@@ -1041,6 +1163,16 @@ def run_rollout(
             drone_stats["confidence_opportunity_best_gain"].append(confidence_opportunity_best_gain)
             drone_stats["confidence_pass_probability"].append(confidence_pass_probability)
             drone_stats["confidence_overlap_fraction"].append(confidence_overlap_fraction)
+            drone_stats["cleanup_target_valid"].append(cleanup_target_valid)
+            drone_stats["cleanup_target_distance_m"].append(cleanup_target_distance)
+            drone_stats["cleanup_target_value"].append(cleanup_target_value)
+            drone_stats["cleanup_target_progress_m"].append(cleanup_target_progress)
+            drone_stats["cleanup_target_progress_fraction"].append(cleanup_target_progress_fraction)
+            drone_stats["cleanup_target_switch"].append(cleanup_target_switch)
+            drone_stats["cleanup_target_reached"].append(cleanup_target_reached)
+            drone_stats["cleanup_target_value_decay"].append(cleanup_target_value_decay)
+            drone_stats["cleanup_target_age"].append(cleanup_target_age)
+            drone_stats["cleanup_target_frontier_gate"].append(cleanup_target_frontier_gate)
             drone_stats["frontier_alignment"].append(frontier_align)
             drone_stats["frontier_progress"].append(frontier_progress_frac)
             drone_stats["frontier_uncovered_ratio"].append(frontier_ratio)
@@ -1078,6 +1210,14 @@ def run_rollout(
             if displacement_m > 1.0 and new_cells < 1.0:
                 moving_no_new_coverage += 1
                 drone_stats["moving_no_new_coverage"] += 1
+            moving_no_confidence_gain_step = bool(
+                displacement_m > 1.0
+                and math.isfinite(confidence_weighted_gain_drone)
+                and confidence_weighted_gain_drone <= moving_no_confidence_gain_threshold
+            )
+            if moving_no_confidence_gain_step:
+                moving_no_confidence_gain += 1
+                drone_stats["moving_no_confidence_gain"] += 1
             if frontier_obs_norm <= 1e-6:
                 frontier_obs_empty_steps += 1
                 drone_stats["frontier_obs_empty_steps"] += 1
@@ -1155,6 +1295,7 @@ def run_rollout(
                     "frontier_reward": reward_terms["frontier"],
                     "confidence_reward": reward_terms["confidence"],
                     "confidence_move_reward": reward_terms["confidence_move"],
+                    "cleanup_target_progress_reward": reward_terms["cleanup_target_progress"],
                     "inefficient_move_penalty": reward_terms["inefficient_move_penalty"],
                     "confidence_overlap_penalty": reward_terms["confidence_overlap_penalty"],
                     "confidence_weighted_gain": confidence_weighted_gain_drone,
@@ -1237,10 +1378,21 @@ def run_rollout(
                     "confidence_pass_probability": confidence_pass_probability,
                     "confidence_overlap_fraction": confidence_overlap_fraction,
                     "confidence_step_detection_probability": confidence_step_detection_probability,
+                    "cleanup_target_valid": cleanup_target_valid,
+                    "cleanup_target_distance_m": cleanup_target_distance,
+                    "cleanup_target_value": cleanup_target_value,
+                    "cleanup_target_progress_m": cleanup_target_progress,
+                    "cleanup_target_progress_fraction": cleanup_target_progress_fraction,
+                    "cleanup_target_switch": cleanup_target_switch,
+                    "cleanup_target_reached": cleanup_target_reached,
+                    "cleanup_target_value_decay": cleanup_target_value_decay,
+                    "cleanup_target_age": cleanup_target_age,
+                    "cleanup_target_frontier_gate": cleanup_target_frontier_gate,
                     "outside_footprint": float(outside_footprint_fraction[drone_idx]),
                     "edge_step": float(is_edge_step),
                     "corner_step": float(is_corner_step),
                     "moving_no_new_coverage": float(displacement_m > 1.0 and new_cells < 1.0),
+                    "moving_no_confidence_gain": float(moving_no_confidence_gain_step),
                     "frontier_obs_empty": float(frontier_obs_norm <= 1e-6),
                     "action_frontier_aligned": float(
                         math.isfinite(action_frontier_alignment)
@@ -1285,18 +1437,21 @@ def run_rollout(
         _finalize_drone_stats(stats, scenario)
         for stats in per_drone_stats
     ]
-    survivor_exposures = _finalize_survivor_exposure_stats(
-        survivor_exposure_stats,
-        first_scout_steps,
-    )
     final_survivor_confidence = _survivor_confidence_values(scenario)
-    for exposure in survivor_exposures:
-        survivor_idx = int(exposure.get("survivor", -1))
-        exposure["final_confidence"] = (
-            float(final_survivor_confidence[survivor_idx])
-            if 0 <= survivor_idx < len(final_survivor_confidence)
-            else math.nan
+    if full_diagnostics:
+        survivor_exposures = _finalize_survivor_exposure_stats(
+            survivor_exposure_stats,
+            first_scout_steps,
         )
+        for exposure in survivor_exposures:
+            survivor_idx = int(exposure.get("survivor", -1))
+            exposure["final_confidence"] = (
+                float(final_survivor_confidence[survivor_idx])
+                if 0 <= survivor_idx < len(final_survivor_confidence)
+                else math.nan
+            )
+    else:
+        survivor_exposures = []
     survivor_exposure_summary = _survivor_exposure_summary(survivor_exposures)
     row = {
         "seed": int(seed),
@@ -1446,6 +1601,22 @@ def run_rollout(
             confidence_step_detection_probability_by_drone_values
         ),
         "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction_values),
+        "avg_cleanup_target_valid_fraction": _finite_mean(cleanup_target_valid_values),
+        "avg_cleanup_target_distance_m": _finite_mean(cleanup_target_distance_values),
+        "avg_cleanup_target_value": _finite_mean(cleanup_target_value_values),
+        "avg_cleanup_target_progress_m": _finite_mean(cleanup_target_progress_values),
+        "avg_cleanup_target_progress_fraction": _finite_mean(cleanup_target_progress_fraction_values),
+        "cleanup_target_switch_rate": _finite_mean(cleanup_target_switch_values),
+        "cleanup_target_reached_rate": _finite_mean(cleanup_target_reached_values),
+        "avg_cleanup_target_value_decay": _finite_mean(cleanup_target_value_decay_values),
+        "cleanup_target_no_progress_frac": _finite_mean(cleanup_target_no_progress_values),
+        "cleanup_target_progress_with_new_cells_frac": _finite_mean(
+            cleanup_target_progress_with_new_cells_values
+        ),
+        "cleanup_target_progress_with_excess_overlap_frac": _finite_mean(
+            cleanup_target_progress_with_excess_overlap_values
+        ),
+        "avg_cleanup_target_frontier_gate": _finite_mean(cleanup_target_frontier_gate_values),
         "avg_frontier_alignment": _finite_mean(frontier_alignment_values),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress_values),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_uncovered_ratio_values),
@@ -1467,6 +1638,9 @@ def run_rollout(
         "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
         "avg_reward_uav_confidence": _finite_mean(reward_uav_confidence_values),
         "avg_reward_uav_confidence_move": _finite_mean(reward_uav_confidence_move_values),
+        "avg_reward_uav_cleanup_target_progress": _finite_mean(
+            reward_uav_cleanup_target_progress_values
+        ),
         "avg_penalty_uav_inefficient_move": _finite_mean(penalty_uav_inefficient_move_values),
         "avg_penalty_uav_confidence_overlap": _finite_mean(penalty_uav_confidence_overlap_values),
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
@@ -1564,6 +1738,9 @@ def run_rollout(
         "low_action_high_motion_frac": low_action_high_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "high_action_low_motion_frac": high_action_low_motion / diagnostic_steps if diagnostic_steps else 0.0,
         "moving_no_new_coverage_frac": moving_no_new_coverage / diagnostic_steps if diagnostic_steps else 0.0,
+        "moving_no_confidence_gain_frac": (
+            moving_no_confidence_gain / diagnostic_steps if diagnostic_steps else 0.0
+        ),
         "per_drone": per_drone,
         **start_metrics,
         **path_metrics,
@@ -2875,6 +3052,7 @@ def _uav_reward_terms(
     confidence_move_reward: float,
     confidence_opportunity_fraction: float,
     confidence_overlap_penalty: float,
+    cleanup_target_progress_reward: float,
     scout_reward: float,
 ) -> dict[str, float]:
     grid_cells = float(max(int(getattr(scenario, "fire_grid_size", 1)) ** 2, 1))
@@ -2955,6 +3133,7 @@ def _uav_reward_terms(
         + frontier
         + confidence_reward
         + confidence_move_reward
+        + cleanup_target_progress_reward
         + inefficient_move_penalty
         + confidence_overlap_penalty
         + overlap_penalty
@@ -2967,6 +3146,7 @@ def _uav_reward_terms(
         + abs(frontier)
         + abs(confidence_reward)
         + abs(confidence_move_reward)
+        + abs(cleanup_target_progress_reward)
         + abs(inefficient_move_penalty)
         + abs(confidence_overlap_penalty)
         + abs(overlap_penalty)
@@ -2980,6 +3160,7 @@ def _uav_reward_terms(
         "frontier": float(frontier),
         "confidence": float(confidence_reward),
         "confidence_move": float(confidence_move_reward),
+        "cleanup_target_progress": float(cleanup_target_progress_reward),
         "inefficient_move_penalty": float(inefficient_move_penalty),
         "confidence_overlap_penalty": float(confidence_overlap_penalty),
         "overlap_penalty": float(overlap_penalty),
@@ -3426,6 +3607,16 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "confidence_opportunity_best_gain": [],
         "confidence_pass_probability": [],
         "confidence_overlap_fraction": [],
+        "cleanup_target_valid": [],
+        "cleanup_target_distance_m": [],
+        "cleanup_target_value": [],
+        "cleanup_target_progress_m": [],
+        "cleanup_target_progress_fraction": [],
+        "cleanup_target_switch": [],
+        "cleanup_target_reached": [],
+        "cleanup_target_value_decay": [],
+        "cleanup_target_age": [],
+        "cleanup_target_frontier_gate": [],
         "frontier_alignment": [],
         "frontier_progress": [],
         "frontier_uncovered_ratio": [],
@@ -3448,6 +3639,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "frontier": [],
             "confidence": [],
             "confidence_move": [],
+            "cleanup_target_progress": [],
             "inefficient_move_penalty": [],
             "confidence_overlap_penalty": [],
             "overlap_penalty": [],
@@ -3471,6 +3663,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "low_action_high_motion": 0,
         "high_action_low_motion": 0,
         "moving_no_new_coverage": 0,
+        "moving_no_confidence_gain": 0,
         "frontier_high_progress_steps": 0,
         "frontier_high_progress_no_new_steps": 0,
         "frontier_high_progress_edge_steps": 0,
@@ -3555,6 +3748,16 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     confidence_opportunity_best_gain = stats["confidence_opportunity_best_gain"]
     confidence_pass_probability = stats["confidence_pass_probability"]
     confidence_overlap_fraction = stats["confidence_overlap_fraction"]
+    cleanup_target_valid = stats["cleanup_target_valid"]
+    cleanup_target_distance = stats["cleanup_target_distance_m"]
+    cleanup_target_value = stats["cleanup_target_value"]
+    cleanup_target_progress = stats["cleanup_target_progress_m"]
+    cleanup_target_progress_fraction = stats["cleanup_target_progress_fraction"]
+    cleanup_target_switch = stats["cleanup_target_switch"]
+    cleanup_target_reached = stats["cleanup_target_reached"]
+    cleanup_target_value_decay = stats["cleanup_target_value_decay"]
+    cleanup_target_age = stats["cleanup_target_age"]
+    cleanup_target_frontier_gate = stats["cleanup_target_frontier_gate"]
     frontier_alignment = stats["frontier_alignment"]
     frontier_progress = stats["frontier_progress"]
     frontier_ratio = stats["frontier_uncovered_ratio"]
@@ -3682,6 +3885,23 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_confidence_opportunity_best_gain": _finite_mean(confidence_opportunity_best_gain),
         "avg_confidence_pass_probability": _finite_mean(confidence_pass_probability),
         "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction),
+        "avg_cleanup_target_valid_fraction": _finite_mean(cleanup_target_valid),
+        "avg_cleanup_target_distance_m": _finite_mean(cleanup_target_distance),
+        "avg_cleanup_target_value": _finite_mean(cleanup_target_value),
+        "avg_cleanup_target_progress_m": _finite_mean(cleanup_target_progress),
+        "avg_cleanup_target_progress_fraction": _finite_mean(cleanup_target_progress_fraction),
+        "cleanup_target_switch_rate": _finite_mean(cleanup_target_switch),
+        "cleanup_target_reached_rate": _finite_mean(cleanup_target_reached),
+        "avg_cleanup_target_value_decay": _finite_mean(cleanup_target_value_decay),
+        "avg_cleanup_target_age": _finite_mean(cleanup_target_age),
+        "avg_cleanup_target_frontier_gate": _finite_mean(cleanup_target_frontier_gate),
+        "cleanup_target_no_progress_frac": (
+            float(np.mean([
+                valid >= 0.5 and progress <= 1e-6
+                for valid, progress in zip(cleanup_target_valid, cleanup_target_progress)
+            ]))
+            if cleanup_target_valid else 0.0
+        ),
         "avg_frontier_alignment": _finite_mean(frontier_alignment),
         "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
         "avg_frontier_uncovered_ratio": _finite_mean(frontier_ratio),
@@ -3699,6 +3919,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
         "avg_reward_uav_confidence": _finite_mean(reward_terms["confidence"]),
         "avg_reward_uav_confidence_move": _finite_mean(reward_terms["confidence_move"]),
+        "avg_reward_uav_cleanup_target_progress": _finite_mean(
+            reward_terms["cleanup_target_progress"]
+        ),
         "avg_penalty_uav_inefficient_move": _finite_mean(
             reward_terms["inefficient_move_penalty"]
         ),
@@ -3795,6 +4018,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         ),
         "moving_no_new_coverage_frac": (
             stats["moving_no_new_coverage"] / steps if steps else 0.0
+        ),
+        "moving_no_confidence_gain_frac": (
+            stats["moving_no_confidence_gain"] / steps if steps else 0.0
         ),
         **confidence_revisit,
         **path,
@@ -4509,6 +4735,42 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_confidence_overlap_fraction": _finite_mean([
             row["avg_confidence_overlap_fraction"] for row in rows
         ]),
+        "mean_cleanup_target_valid_fraction": _finite_mean([
+            row.get("avg_cleanup_target_valid_fraction", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_distance_m": _finite_mean([
+            row.get("avg_cleanup_target_distance_m", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_value": _finite_mean([
+            row.get("avg_cleanup_target_value", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_m": _finite_mean([
+            row.get("avg_cleanup_target_progress_m", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_fraction": _finite_mean([
+            row.get("avg_cleanup_target_progress_fraction", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_switch_rate": _finite_mean([
+            row.get("cleanup_target_switch_rate", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_reached_rate": _finite_mean([
+            row.get("cleanup_target_reached_rate", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_value_decay": _finite_mean([
+            row.get("avg_cleanup_target_value_decay", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_no_progress_frac": _finite_mean([
+            row.get("cleanup_target_no_progress_frac", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_with_new_cells_frac": _finite_mean([
+            row.get("cleanup_target_progress_with_new_cells_frac", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_with_excess_overlap_frac": _finite_mean([
+            row.get("cleanup_target_progress_with_excess_overlap_frac", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_frontier_gate": _finite_mean([
+            row.get("avg_cleanup_target_frontier_gate", math.nan) for row in rows
+        ]),
         "mean_frontier_alignment": _finite_mean([
             row["avg_frontier_alignment"] for row in rows
         ]),
@@ -4571,6 +4833,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_reward_uav_confidence_move": _finite_mean([
             row["avg_reward_uav_confidence_move"] for row in rows
+        ]),
+        "mean_reward_uav_cleanup_target_progress": _finite_mean([
+            row.get("avg_reward_uav_cleanup_target_progress", math.nan) for row in rows
         ]),
         "mean_penalty_uav_inefficient_move": _finite_mean([
             row["avg_penalty_uav_inefficient_move"] for row in rows
@@ -4693,6 +4958,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_moving_no_new_coverage_frac": _finite_mean([
             row["moving_no_new_coverage_frac"] for row in rows
+        ]),
+        "mean_moving_no_confidence_gain_frac": _finite_mean([
+            float(row.get("moving_no_confidence_gain_frac", math.nan)) for row in rows
         ]),
         "mean_min_start_pair_distance_m": _finite_mean([
             row["min_start_pair_distance_m"] for row in rows
@@ -4824,6 +5092,9 @@ def _summarize_outcome_splits(rows: list[dict[str, Any]]) -> list[dict[str, floa
             "moving_no_new_coverage_frac": _finite_mean([
                 float(row.get("moving_no_new_coverage_frac", math.nan)) for row in entries
             ]),
+            "moving_no_confidence_gain_frac": _finite_mean([
+                float(row.get("moving_no_confidence_gain_frac", math.nan)) for row in entries
+            ]),
             "coverage_bbox_fill_fraction": _finite_mean([
                 float(row.get("coverage_bbox_fill_fraction", math.nan)) for row in entries
             ]),
@@ -4946,6 +5217,17 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "confidence_best_gain_off_revisit",
         "avg_confidence_pass_probability",
         "avg_confidence_overlap_fraction",
+        "avg_cleanup_target_valid_fraction",
+        "avg_cleanup_target_distance_m",
+        "avg_cleanup_target_value",
+        "avg_cleanup_target_progress_m",
+        "avg_cleanup_target_progress_fraction",
+        "cleanup_target_switch_rate",
+        "cleanup_target_reached_rate",
+        "avg_cleanup_target_value_decay",
+        "avg_cleanup_target_age",
+        "cleanup_target_no_progress_frac",
+        "avg_cleanup_target_frontier_gate",
         "avg_frontier_alignment",
         "avg_frontier_progress_fraction",
         "avg_frontier_uncovered_ratio",
@@ -4963,6 +5245,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_reward_uav_frontier",
         "avg_reward_uav_confidence",
         "avg_reward_uav_confidence_move",
+        "avg_reward_uav_cleanup_target_progress",
         "avg_penalty_uav_inefficient_move",
         "avg_penalty_uav_confidence_overlap",
         "avg_penalty_uav_overlap",
@@ -5002,6 +5285,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "stalled_step_frac",
         "longest_stall_steps",
         "moving_no_new_coverage_frac",
+        "moving_no_confidence_gain_frac",
         "mean_boundary_distance_m",
         "min_boundary_distance_m",
     )
@@ -5120,6 +5404,8 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "action_frontier_no_new": "action_frontier_aligned_no_new_frac",
         "frontier_reward": "avg_reward_uav_frontier",
         "confidence_move_reward": "avg_reward_uav_confidence_move",
+        "cleanup_target_reward": "avg_reward_uav_cleanup_target_progress",
+        "cleanup_target_gate": "avg_cleanup_target_frontier_gate",
         "confidence_overlap_penalty": "avg_penalty_uav_confidence_overlap",
         "frontier_share": "avg_frontier_abs_reward_share",
         "frontier_high": "frontier_high_progress_step_frac",
@@ -5136,6 +5422,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "largest_uncovered": "coverage_largest_uncovered_component_fraction",
         "center_cov": "coverage_center_fraction",
         "moving_no_new": "moving_no_new_coverage_frac",
+        "moving_no_conf_gain": "moving_no_confidence_gain_frac",
         "start_pair": "min_start_pair_distance_m",
         "start_edge": "min_start_edge_distance_m",
     }
@@ -5218,6 +5505,7 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"fhi={drone['frontier_high_progress_step_frac']:.2f}/"
             f"{drone['frontier_high_progress_no_new_frac']:.2f}/"
             f"{drone['frontier_high_progress_edge_frac']:.2f} "
+            f"move_no_conf={drone.get('moving_no_confidence_gain_frac', math.nan):.2f} "
             f"stall={drone['stalled_step_frac']:.2f}"
         )
     return "; ".join(parts)
@@ -5271,9 +5559,12 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"{drone['mean_action_frontier_aligned_step_frac']:.3f} "
             f"front_rew={drone['mean_avg_reward_uav_frontier']:.4f} "
             f"conf_move={drone['mean_avg_reward_uav_confidence_move']:.4f} "
+            f"cleanup_rew={drone['mean_avg_reward_uav_cleanup_target_progress']:.4f} "
+            f"cleanup_gate={drone['mean_avg_cleanup_target_frontier_gate']:.3f} "
             f"front_hi={drone['mean_frontier_high_progress_step_frac']:.3f}/"
             f"{drone['mean_frontier_high_progress_no_new_frac']:.3f}/"
             f"{drone['mean_frontier_high_progress_edge_frac']:.3f} "
+            f"move_no_conf={drone['mean_moving_no_confidence_gain_frac']:.3f} "
             f"stall={drone['mean_stalled_step_frac']:.3f}"
         )
     return lines
@@ -5317,6 +5608,7 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"conf_lg={item.get('confidence_lg_frontier_candidate_capture_fraction', math.nan):.3f} "
             f"cand_avoid={item.get('candidate_avoidable_overlap', math.nan):.3f} "
             f"moving_nonew={item.get('moving_no_new_coverage', math.nan):.3f} "
+            f"moving_noconf={item.get('moving_no_confidence_gain', math.nan):.3f} "
             f"obs_dist={item.get('frontier_obs_distance', math.nan):.3f} "
             f"f_loc={item.get('frontier_local_coverage_cos', math.nan):.3f} "
             f"f_glob={item.get('frontier_global_coverage_cos', math.nan):.3f} "
@@ -5532,6 +5824,7 @@ def _plot_time_bins_search_efficiency(ax: Any, summary: dict[str, Any]) -> None:
         ("excess", "excess_overlap", "#d44a3a"),
         ("edge", "edge_step", "#20242c"),
         ("moving no new", "moving_no_new_coverage", "#8a5cf6"),
+        ("move no conf", "moving_no_confidence_gain", "#a855f7"),
         ("conf sat", "confidence_overlap_fraction", "#be185d"),
     ]
     frac_lines = []
@@ -5572,6 +5865,7 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("frontier", "frontier_reward", "#8a5cf6", False),
         ("conf", "confidence_reward", "#0f766e", False),
         ("conf move", "confidence_move_reward", "#14b8a6", False),
+        ("cleanup", "cleanup_target_progress_reward", "#f97316", False),
         ("move pen", "inefficient_move_penalty", "#7c3aed", True),
         ("conf ov pen", "confidence_overlap_penalty", "#be185d", True),
         ("coverage95", "coverage_threshold_reward", "#0f9d58", False),
@@ -6185,7 +6479,111 @@ def _plot_time_bins_frontier_reward_yield(ax: Any, summary: dict[str, Any]) -> N
     ax.set_title("Frontier Reward vs New Cells (mean)", fontsize=10)
 
 
-def write_distribution_plots(
+def _plot_time_bins_cleanup_targets(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Cleanup Target Over Time", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    series = [
+        ("valid", "cleanup_target_valid", "#4f7cff"),
+        ("value", "cleanup_target_value", "#36a269"),
+        ("progress", "cleanup_target_progress_fraction", "#d44a3a"),
+        ("gate", "cleanup_target_frontier_gate", "#0f766e"),
+        ("switch", "cleanup_target_switch", "#8a5cf6"),
+        ("reached", "cleanup_target_reached", "#d6a21d"),
+    ]
+    for label, key, color in series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        ax.plot(centers, values, marker="o", linewidth=1.4, label=label, color=color)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction / norm")
+    ax.grid(alpha=0.25)
+
+    distance = [float(row.get("cleanup_target_distance_m", math.nan)) for row in time_bins]
+    ax_distance = ax.twinx()
+    line_distance = ax_distance.plot(
+        centers,
+        distance,
+        marker="o",
+        linewidth=1.2,
+        linestyle="--",
+        color="#20242c",
+        label="distance",
+    )
+    finite_distance = [value for value in distance if math.isfinite(value)]
+    if finite_distance:
+        ax_distance.set_ylim(0.0, max(max(finite_distance) * 1.2, 1.0))
+    ax_distance.set_ylabel("distance (m)")
+    lines = ax.lines + line_distance
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=7, frameon=False)
+    ax.set_title("Cleanup Target Over Time", fontsize=10)
+
+
+def _plot_hist_panel(
+    ax: Any,
+    rows: list[dict[str, Any]],
+    *,
+    title: str,
+    key: str,
+    xlim: tuple[float, float] | None = None,
+) -> None:
+    values: list[float] = []
+    for row in rows:
+        if key not in row:
+            continue
+        try:
+            value = float(row[key])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+
+    if values:
+        bins = min(max(len(values) // 2, 5), 20)
+        ax.hist(values, bins=bins, color="#4f7cff", alpha=0.82, edgecolor="#1e2b4f")
+        mean_value = float(np.mean(values))
+        median_value = float(np.median(values))
+        ax.axvline(mean_value, color="#d44a3a", linewidth=1.4, label=f"mean {mean_value:.2f}")
+        ax.axvline(median_value, color="#20242c", linewidth=1.1, linestyle="--", label=f"med {median_value:.2f}")
+        ax.legend(fontsize=8, frameon=False)
+    else:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    ax.set_title(title, fontsize=10)
+    ax.set_ylabel("episodes")
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _plot_failure_labels_panel(
+    ax: Any,
+    label_counts: dict[str, int],
+) -> None:
+    ax.clear()
+    if label_counts:
+        labels = list(label_counts.keys())
+        counts = [label_counts[label] for label in labels]
+        y = np.arange(len(labels))
+        ax.barh(y, counts, color="#36a269", alpha=0.85)
+        ax.set_yticks(y, labels)
+        ax.invert_yaxis()
+        ax.set_xlabel("episodes")
+        for idx, count in enumerate(counts):
+            ax.text(count + 0.05, idx, str(count), va="center", fontsize=9)
+    else:
+        ax.text(0.5, 0.5, "no labels", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("Failure Labels", fontsize=10)
+    ax.grid(axis="x", alpha=0.25)
+
+
+def _write_fast_distribution_plots(
     rows: list[dict[str, Any]],
     summary: dict[str, Any],
     label_counts: dict[str, int],
@@ -6198,6 +6596,71 @@ def write_distribution_plots(
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(5, 3, figsize=(15, 18), constrained_layout=True)
+    axes_flat = axes.ravel()
+    hist_panels = [
+        ("Recall", "recall", (0.0, 1.0)),
+        ("Success", "full_success", (0.0, 1.0)),
+        ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
+        ("Final Confidence", "final_confidence_mean", (0.0, 1.0)),
+        ("Movement / Step (m)", "avg_displacement_m", None),
+        ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
+        ("Edge Step Fraction", "edge_step_frac", (0.0, 1.0)),
+    ]
+    for ax, (title, key, xlim) in zip(axes_flat, hist_panels):
+        _plot_hist_panel(ax, rows, title=title, key=key, xlim=xlim)
+
+    _plot_failure_labels_panel(axes_flat[7], label_counts)
+    _plot_per_drone_bars(
+        axes_flat[8],
+        summary,
+        "mean_path_length_m",
+        "Per-Drone Path Length",
+        "m",
+    )
+    _plot_per_drone_bars(
+        axes_flat[9],
+        summary,
+        "mean_avg_excess_overlap_fraction",
+        "Per-Drone Excess Overlap",
+        "fraction",
+    )
+    _plot_time_bins_search_efficiency(axes_flat[10], summary)
+    _plot_time_bins_reward_scale(axes_flat[11], summary)
+    _plot_time_bins_scouts(axes_flat[12], summary)
+
+    for ax in axes_flat[13:]:
+        ax.axis("off")
+
+    fig.suptitle(
+        "UAV HAPPO Fast Diagnostics "
+        f"(n={int(summary.get('episodes', len(rows)))})",
+        fontsize=14,
+    )
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def write_distribution_plots(
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+    label_counts: dict[str, int],
+    output_path: str,
+    *,
+    diagnostic_level: str = "full",
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if str(diagnostic_level).replace("-", "_").lower() == "fast":
+        _write_fast_distribution_plots(rows, summary, label_counts, output_path)
+        return
 
     panels = [
         ("Recall", "recall", (0.0, 1.0)),
@@ -6237,12 +6700,17 @@ def write_distribution_plots(
         ("Corner Step Fraction", "corner_step_frac", (0.0, 1.0)),
         ("Center Coverage", "coverage_center_fraction", (0.0, 1.0)),
         ("Moving No New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0)),
+        ("Moving No Confidence Gain", "moving_no_confidence_gain_frac", (0.0, 1.0)),
         ("Confidence Revisit", "confidence_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Useful Revisit", "confidence_useful_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Wasteful Revisit", "confidence_wasteful_revisit_step_frac", (0.0, 1.0)),
         ("Confidence Saturated Footprint", "avg_confidence_overlap_fraction", (0.0, 1.0)),
         ("Confidence Revisit Useful Share", "confidence_revisit_useful_share", (0.0, 1.0)),
         ("Confidence Revisit Gain Share", "confidence_revisit_gain_share", (0.0, 1.0)),
+        ("Cleanup Target Progress", "avg_cleanup_target_progress_fraction", (-1.0, 1.0)),
+        ("Cleanup Target Switch", "cleanup_target_switch_rate", (0.0, 1.0)),
+        ("Cleanup Target Reached", "cleanup_target_reached_rate", (0.0, 1.0)),
+        ("Cleanup Target No Progress", "cleanup_target_no_progress_frac", (0.0, 1.0)),
         ("Start Pair Min (m)", "min_start_pair_distance_m", None),
         ("Start Edge Min (m)", "min_start_edge_distance_m", None),
         ("Action Frontier Align", "avg_action_frontier_alignment", (-1.0, 1.0)),
@@ -6256,7 +6724,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(26, 3, figsize=(14, 78), constrained_layout=True)
+    fig, axes = plt.subplots(28, 3, figsize=(14, 84), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [
@@ -6380,8 +6848,9 @@ def write_distribution_plots(
     _plot_survivor_exposure_outcomes(axes_flat[custom_start + 20], summary)
     _plot_time_bins_confidence(axes_flat[custom_start + 21], summary)
     _plot_time_bins_frontier_usefulness(axes_flat[custom_start + 22], summary)
+    _plot_time_bins_cleanup_targets(axes_flat[custom_start + 23], summary)
 
-    for ax in axes_flat[custom_start + 23:]:
+    for ax in axes_flat[custom_start + 24:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -6416,6 +6885,16 @@ def main() -> None:
                         default=DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M,
                         help="Local radius for the shadow confidence local-global frontier usefulness "
                              "diagnostic. This does not change the evaluated policy.")
+    parser.add_argument("--moving-no-confidence-gain-threshold", type=float,
+                        default=DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
+                        help="Weighted confidence-gain threshold used by the diagnostics-only "
+                             "moving_no_confidence_gain metric. A drone-step counts when the UAV "
+                             "moves more than 1m and weighted confidence gain is at or below this value.")
+    parser.add_argument("--diagnostic-level", choices=("full", "fast"), default="full",
+                        help="Use 'fast' to keep core 100-seed diagnostics but skip expensive "
+                             "counterfactual, shadow-frontier, survivor-perception, and cleanup-target probes.")
+    parser.add_argument("--include-cleanup-target-diagnostics", action="store_true",
+                        help="Compute cleanup-target diagnostics even when --diagnostic-level fast is used.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--json-output", default=None, help="Optional path to write per-seed rows and summary as JSON.")
     parser.add_argument("--plots-output", default=None, help="Optional path to write histogram diagnostics as a PNG.")
@@ -6433,6 +6912,11 @@ def main() -> None:
         parser.error("--uav-start-edge-margin-m must be nonnegative")
     if args.diagnostic_confidence_frontier_radius_m <= 0.0:
         parser.error("--diagnostic-confidence-frontier-radius-m must be positive")
+    if (
+        not math.isfinite(args.moving_no_confidence_gain_threshold)
+        or args.moving_no_confidence_gain_threshold < 0.0
+    ):
+        parser.error("--moving-no-confidence-gain-threshold must be finite and nonnegative")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -6461,6 +6945,12 @@ def main() -> None:
         "shadow confidence frontier diagnostic: "
         f"local_global_radius={args.diagnostic_confidence_frontier_radius_m}m"
     )
+    print(
+        "diagnostics: "
+        f"level={args.diagnostic_level} "
+        f"cleanup_target={bool(scenario_kwargs.get('uav_cleanup_target_diagnostics', False))} "
+        f"move_no_conf_thr={args.moving_no_confidence_gain_threshold:g}"
+    )
     print("-" * 88)
 
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=not args.stochastic)
@@ -6477,10 +6967,33 @@ def main() -> None:
             scenario_kwargs,
             seed,
             diagnostic_confidence_frontier_radius_m=args.diagnostic_confidence_frontier_radius_m,
+            moving_no_confidence_gain_threshold=args.moving_no_confidence_gain_threshold,
+            diagnostic_level=args.diagnostic_level,
         )
         for seed in args.seeds
     ]
     for row in rows:
+        if args.diagnostic_level == "fast":
+            print(
+                f"seed {row['seed']:>4}: "
+                f"scouted={row['scouted']}/{row['survivors']} "
+                f"missed={row['missed']} "
+                f"recall={row['recall']:.3f} "
+                f"coverage={row['final_coverage_fraction']:.3f} "
+                f"conf={row['final_confidence_mean']:.3f} "
+                f"move={row['avg_displacement_m']:.2f}m "
+                f"new_cells={row['avg_new_coverage_cells']:.1f} "
+                f"move_no_conf={row['moving_no_confidence_gain_frac']:.2f} "
+                f"excess_ov={row['avg_excess_overlap_fraction']:.2f} "
+                f"edge={row['edge_step_frac']:.2f} "
+                f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
+                f"{_fmt_optional(row['avg_scout_time_s'])}s "
+                f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
+                f"{_fmt_optional(row['all_scouted_time_s'])}s "
+                f"label={row['failure_label']} "
+                f"first_steps={row['first_scout_steps']}"
+            )
+            continue
         print(
             f"seed {row['seed']:>4}: "
             f"scouted={row['scouted']}/{row['survivors']} "
@@ -6494,6 +7007,7 @@ def main() -> None:
             f"{row['confidence_useful_revisit_step_frac']:.2f}/"
             f"{row['confidence_wasteful_revisit_step_frac']:.2f} "
             f"conf_ov={row['avg_confidence_overlap_fraction']:.2f} "
+            f"move_no_conf={row['moving_no_confidence_gain_frac']:.2f} "
             f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
             f"{_fmt_optional(row['avg_scout_time_s'])}s "
             f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
@@ -6574,6 +7088,96 @@ def main() -> None:
         f"all_scouted_successes={summary['mean_all_scouted_step_successes']:.1f} steps/"
         f"{summary['mean_all_scouted_time_s_successes']:.1f}s"
     )
+    if args.diagnostic_level == "fast":
+        print(
+            "core search means: "
+            f"move={summary['mean_displacement_m']:.2f}m "
+            f"new_cells={summary['mean_new_coverage_cells']:.1f} "
+            f"raw_new={summary['mean_raw_new_coverage_cells']:.1f} "
+            f"edge={summary['mean_edge_step_frac']:.3f} "
+            f"corner={summary['mean_corner_step_frac']:.3f} "
+            f"confidence={summary['mean_final_confidence_mean']:.3f} "
+            f"conf_gain={summary['mean_confidence_gain']:.5f} "
+            f"move_no_conf={summary['mean_moving_no_confidence_gain_frac']:.3f}"
+        )
+        print(
+            "overlap/revisit means: "
+            f"overlap={summary['mean_overlap_fraction']:.3f} "
+            f"expected_overlap={summary['mean_expected_overlap_fraction']:.3f} "
+            f"excess_overlap={summary['mean_excess_overlap_fraction']:.3f} "
+            f"inter_uav_overlap={summary['mean_inter_uav_overlap_fraction']:.3f} "
+            f"own_revisit={summary['mean_own_history_revisit_fraction']:.3f} "
+            f"teammate_revisit={summary['mean_teammate_history_revisit_fraction']:.3f} "
+            f"avoidable={summary['mean_avoidable_revisit_fraction']:.3f}"
+        )
+        print(
+            "uav reward-scale means: "
+            f"coverage={summary['mean_reward_uav_coverage']:.4f} "
+            f"move_cov={summary['mean_reward_uav_move_coverage']:.4f} "
+            f"frontier={summary['mean_reward_uav_frontier']:.4f} "
+            f"confidence={summary['mean_reward_uav_confidence']:.4f} "
+            f"conf_move={summary['mean_reward_uav_confidence_move']:.4f} "
+            f"cleanup={summary['mean_reward_uav_cleanup_target_progress']:.4f} "
+            f"move_pen={summary['mean_penalty_uav_inefficient_move']:.4f} "
+            f"conf_ov_pen={summary['mean_penalty_uav_confidence_overlap']:.4f} "
+            f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
+            f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
+            f"outside_pen={summary['mean_penalty_uav_outside_footprint']:.4f} "
+            f"scout={summary['mean_reward_uav_scout']:.4f} "
+            f"team={summary['mean_reward_team']:.4f}"
+        )
+        print(
+            "path/edge means: "
+            f"path_len={summary['mean_path_length_m']:.1f}m "
+            f"bbox_area={summary['mean_path_bbox_area_fraction']:.3f} "
+            f"boundary_dist={summary['mean_boundary_distance_m']:.1f}m "
+            f"stall_frac={summary['mean_stalled_step_frac']:.3f} "
+            f"longest_stall={summary['mean_longest_stall_steps']:.1f} steps"
+        )
+        if summary.get("scout_time_bins"):
+            print("survivor discovery time-bins:")
+            for line in _format_scout_time_bin_summary(summary["scout_time_bins"]):
+                print(line)
+        print(
+            "failure labels: "
+            + ", ".join(f"{label}={count}" for label, count in label_counts.items())
+        )
+        print(
+            "distribution snapshots: "
+            f"coverage p25/p50/p75="
+            f"{summary['coverage_p25']:.3f}/{summary['coverage_p50']:.3f}/{summary['coverage_p75']:.3f} "
+            f"overlap p25/p50/p75="
+            f"{summary['overlap_p25']:.3f}/{summary['overlap_p50']:.3f}/{summary['overlap_p75']:.3f} "
+            f"excess p25/p50/p75="
+            f"{summary['excess_overlap_p25']:.3f}/{summary['excess_overlap_p50']:.3f}/{summary['excess_overlap_p75']:.3f} "
+            f"edge p25/p50/p75="
+            f"{summary['edge_frac_p25']:.3f}/{summary['edge_frac_p50']:.3f}/{summary['edge_frac_p75']:.3f}"
+        )
+        print("note: fast diagnostics skip counterfactual/frontier-usefulness/perception deep dives.")
+        print("note: all_scouted_successes averages only episodes that scouted every survivor.")
+
+        if args.json_output:
+            output = {
+                "checkpoint": str(checkpoint_dir),
+                "diagnostic_level": args.diagnostic_level,
+                "scenario_kwargs": scenario_kwargs,
+                "rows": rows,
+                "summary": summary,
+                "label_counts": label_counts,
+            }
+            Path(args.json_output).write_text(json.dumps(output, indent=2), encoding="utf-8")
+            print(f"wrote: {args.json_output}")
+
+        if args.plots_output:
+            write_distribution_plots(
+                rows,
+                summary,
+                label_counts,
+                args.plots_output,
+                diagnostic_level=args.diagnostic_level,
+            )
+            print(f"wrote plots: {args.plots_output}")
+        return
     print(
         "survivor perception means: "
         f"exp_steps={summary['mean_survivor_exposure_steps']:.1f} "
@@ -6622,6 +7226,7 @@ def main() -> None:
         f"team_gain={summary['mean_confidence_gain']:.5f} "
         f"drone_gain={summary['mean_confidence_gain_by_drone']:.5f} "
         f"weighted_gain={summary['mean_confidence_weighted_gain_by_drone']:.5f} "
+        f"move_no_conf={summary['mean_moving_no_confidence_gain_frac']:.3f} "
         f"opp={summary['mean_confidence_opportunity_fraction']:.3f} "
         f"best_gain={summary['mean_confidence_opportunity_best_gain']:.5f} "
         f"pass_p={summary['mean_confidence_pass_probability']:.3f} "
@@ -6632,6 +7237,20 @@ def main() -> None:
         f"sat_footprint={summary['mean_confidence_overlap_fraction']:.3f} "
         f"useful_share={summary['mean_confidence_revisit_useful_share']:.3f} "
         f"gain_share={summary['mean_confidence_revisit_gain_share']:.3f}"
+    )
+    print(
+        "cleanup target means: "
+        f"valid={summary['mean_cleanup_target_valid_fraction']:.3f} "
+        f"dist={summary['mean_cleanup_target_distance_m']:.1f}m "
+        f"value={summary['mean_cleanup_target_value']:.3f} "
+        f"progress={summary['mean_cleanup_target_progress_m']:.2f}m/"
+        f"{summary['mean_cleanup_target_progress_fraction']:.3f} "
+        f"gate={summary['mean_cleanup_target_frontier_gate']:.3f} "
+        f"switch={summary['mean_cleanup_target_switch_rate']:.3f} "
+        f"reached={summary['mean_cleanup_target_reached_rate']:.3f} "
+        f"no_prog={summary['mean_cleanup_target_no_progress_frac']:.3f} "
+        f"prog_new={summary['mean_cleanup_target_progress_with_new_cells_frac']:.3f} "
+        f"prog_excess={summary['mean_cleanup_target_progress_with_excess_overlap_frac']:.3f}"
     )
     print(
         "frontier observation/action means: "
@@ -6733,6 +7352,7 @@ def main() -> None:
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
         f"confidence={summary['mean_reward_uav_confidence']:.4f} "
         f"conf_move={summary['mean_reward_uav_confidence_move']:.4f} "
+        f"cleanup={summary['mean_reward_uav_cleanup_target_progress']:.4f} "
         f"move_pen={summary['mean_penalty_uav_inefficient_move']:.4f} "
         f"conf_ov_pen={summary['mean_penalty_uav_confidence_overlap']:.4f} "
         f"coverage95={summary['mean_reward_uav_coverage_threshold']:.4f} "
@@ -6789,7 +7409,8 @@ def main() -> None:
         "failure-mode fractions: "
         f"low_action_high_motion={summary['mean_low_action_high_motion_frac']:.3f} "
         f"high_action_low_motion={summary['mean_high_action_low_motion_frac']:.3f} "
-        f"moving_no_new_coverage={summary['mean_moving_no_new_coverage_frac']:.3f}"
+        f"moving_no_new_coverage={summary['mean_moving_no_new_coverage_frac']:.3f} "
+        f"moving_no_confidence_gain={summary['mean_moving_no_confidence_gain_frac']:.3f}"
     )
     print(
         "start means: "
@@ -6844,6 +7465,7 @@ def main() -> None:
     if args.json_output:
         output = {
             "checkpoint": str(checkpoint_dir),
+            "diagnostic_level": args.diagnostic_level,
             "scenario_kwargs": scenario_kwargs,
             "rows": rows,
             "summary": summary,
@@ -6853,7 +7475,13 @@ def main() -> None:
         print(f"wrote: {args.json_output}")
 
     if args.plots_output:
-        write_distribution_plots(rows, summary, label_counts, args.plots_output)
+        write_distribution_plots(
+            rows,
+            summary,
+            label_counts,
+            args.plots_output,
+            diagnostic_level=args.diagnostic_level,
+        )
         print(f"wrote plots: {args.plots_output}")
 
 
