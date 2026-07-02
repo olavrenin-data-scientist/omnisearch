@@ -31,6 +31,7 @@ from agents.happo_checkpoint import load_training_manifest
 from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
 from scripts.diagnose_uav_happo import (
+    DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
     TIME_BIN_COUNT,
     _append_time_bin,
     _coverage_shape_metrics,
@@ -39,6 +40,7 @@ from scripts.diagnose_uav_happo import (
     _finite_mean,
     _finite_median,
     _metric_array,
+    _metric_scalar,
     _new_time_bins,
     _path_metrics,
     _start_metrics,
@@ -144,6 +146,7 @@ def build_scenario_kwargs(args: argparse.Namespace, specs: list[StrategySpec]) -
         "drone_can_confirm": True,
         "disable_fire": True,
         "comms_dropout": 0.0,
+        "uav_confidence_diagnostics": True,
         "terrain_source": "real",
         "terrain_cache_path": str(args.terrain_cache_path),
     })
@@ -164,6 +167,7 @@ def run_rollout(
     *,
     happo_cache: dict[Path, HappoPolicy],
     stochastic_happo: bool = False,
+    moving_no_confidence_gain_threshold: float = DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
 ) -> dict[str, Any]:
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
@@ -189,6 +193,16 @@ def run_rollout(
     first_scout_steps: list[int | None] = [None] * n_survivors
     displacement_m_values: list[float] = []
     new_coverage_cells_values: list[float] = []
+    confidence_mean_values: list[float] = []
+    confidence_gain_values: list[float] = []
+    confidence_gain_by_drone_values: list[float] = []
+    confidence_weighted_gain_values: list[float] = []
+    confidence_weighted_gain_by_drone_values: list[float] = []
+    confidence_opportunity_fraction_values: list[float] = []
+    confidence_opportunity_best_gain_values: list[float] = []
+    confidence_low_fraction_values: list[float] = []
+    confidence_high_fraction_values: list[float] = []
+    confidence_overlap_fraction_values: list[float] = []
     outside_footprint_values: list[float] = []
     overlap_values: list[float] = []
     expected_overlap_values: list[float] = []
@@ -201,6 +215,7 @@ def run_rollout(
     footprint_radius_m_values: list[float] = []
     all_positions_sim: list[np.ndarray] = []
     moving_no_new_coverage = 0
+    moving_no_confidence_gain = 0
     diagnostic_steps = 0
     time_bins = _new_time_bins(TIME_BIN_COUNT)
     per_drone_stats = [_new_drone_stats(drone_idx) for drone_idx in range(n_drones)]
@@ -230,8 +245,43 @@ def run_rollout(
             "metric_uav_coverage_opportunity_available_fraction_by_drone",
             n_drones,
         )
+        confidence_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_gain_by_drone",
+            n_drones,
+        )
+        confidence_weighted_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_weighted_confidence_gain_by_drone",
+            n_drones,
+        )
+        confidence_opportunity_fraction = _metric_array(
+            scenario,
+            "metric_uav_confidence_opportunity_fraction_by_drone",
+            n_drones,
+        )
+        confidence_opportunity_best_gain = _metric_array(
+            scenario,
+            "metric_uav_confidence_opportunity_best_gain_by_drone",
+            n_drones,
+        )
+        confidence_overlap_fraction = _metric_array(
+            scenario,
+            "metric_uav_confidence_overlap_fraction_by_drone",
+            n_drones,
+        )
         boundary_distance_m = _metric_array(scenario, "metric_uav_boundary_distance_m_by_drone", n_drones)
         footprint_radius_m = _metric_array(scenario, "metric_uav_footprint_radius_m_by_drone", n_drones)
+        confidence_mean = _metric_scalar(scenario, "metric_uav_confidence_mean")
+        confidence_gain = _metric_scalar(scenario, "metric_uav_confidence_gain")
+        confidence_weighted_gain = _metric_scalar(scenario, "metric_uav_weighted_confidence_gain")
+        confidence_low_fraction = _metric_scalar(scenario, "metric_uav_confidence_low_fraction")
+        confidence_high_fraction = _metric_scalar(scenario, "metric_uav_confidence_high_fraction")
+        confidence_mean_values.append(confidence_mean)
+        confidence_gain_values.append(confidence_gain)
+        confidence_weighted_gain_values.append(confidence_weighted_gain)
+        confidence_low_fraction_values.append(confidence_low_fraction)
+        confidence_high_fraction_values.append(confidence_high_fraction)
 
         post_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         newly_scouted = post_scouted & ~prev_scouted
@@ -249,6 +299,11 @@ def run_rollout(
             displacement_vec = post_pos - pre_drone_pos[drone_idx]
             displacement_m = float(np.linalg.norm(displacement_vec) * meters_per_sim)
             new_cells = float(coverage_cells[drone_idx])
+            confidence_gain_drone = float(confidence_gain_by_drone[drone_idx])
+            confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
+            confidence_opportunity = float(confidence_opportunity_fraction[drone_idx])
+            confidence_best_gain = float(confidence_opportunity_best_gain[drone_idx])
+            confidence_overlap = float(confidence_overlap_fraction[drone_idx])
             footprint_radius = float(footprint_radius_m[drone_idx])
             distances_to_edges = _distances_to_edges_m(
                 np.asarray([post_pos], dtype=float),
@@ -259,9 +314,19 @@ def run_rollout(
             is_edge_step = bool(float(boundary_distance_m[drone_idx]) <= edge_threshold)
             is_corner_step = bool(np.count_nonzero(distances_to_edges <= edge_threshold) >= 2)
             moving_no_new = bool(displacement_m > 1.0 and new_cells < 1.0)
+            moving_no_conf = bool(
+                displacement_m > 1.0
+                and math.isfinite(confidence_weighted_gain_drone)
+                and confidence_weighted_gain_drone <= moving_no_confidence_gain_threshold
+            )
 
             displacement_m_values.append(displacement_m)
             new_coverage_cells_values.append(new_cells)
+            confidence_gain_by_drone_values.append(confidence_gain_drone)
+            confidence_weighted_gain_by_drone_values.append(confidence_weighted_gain_drone)
+            confidence_opportunity_fraction_values.append(confidence_opportunity)
+            confidence_opportunity_best_gain_values.append(confidence_best_gain)
+            confidence_overlap_fraction_values.append(confidence_overlap)
             outside_footprint_values.append(float(outside_footprint[drone_idx]))
             overlap_values.append(float(overlap[drone_idx]))
             expected_overlap_values.append(float(expected_overlap[drone_idx]))
@@ -273,12 +338,18 @@ def run_rollout(
             boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
             footprint_radius_m_values.append(footprint_radius)
             moving_no_new_coverage += int(moving_no_new)
+            moving_no_confidence_gain += int(moving_no_conf)
             diagnostic_steps += 1
 
             drone_stats = per_drone_stats[drone_idx]
             drone_stats["positions_sim"].extend([pre_drone_pos[drone_idx], post_pos.copy()])
             drone_stats["displacement_m"].append(displacement_m)
             drone_stats["new_coverage_cells"].append(new_cells)
+            drone_stats["confidence_gain"].append(confidence_gain_drone)
+            drone_stats["confidence_weighted_gain"].append(confidence_weighted_gain_drone)
+            drone_stats["confidence_opportunity_fraction"].append(confidence_opportunity)
+            drone_stats["confidence_opportunity_best_gain"].append(confidence_best_gain)
+            drone_stats["confidence_overlap_fraction"].append(confidence_overlap)
             drone_stats["outside_footprint"].append(float(outside_footprint[drone_idx]))
             drone_stats["overlap"].append(float(overlap[drone_idx]))
             drone_stats["expected_overlap"].append(float(expected_overlap[drone_idx]))
@@ -292,6 +363,7 @@ def run_rollout(
             drone_stats["is_edge_step"].append(float(is_edge_step))
             drone_stats["is_corner_step"].append(float(is_corner_step))
             drone_stats["moving_no_new_coverage"] += int(moving_no_new)
+            drone_stats["moving_no_confidence_gain"] += int(moving_no_conf)
             drone_stats["diagnostic_steps"] += 1
             for survivor_idx in np.flatnonzero(scout_credit[drone_idx]):
                 drone_stats["scout_credit_count"] += 1
@@ -304,6 +376,13 @@ def run_rollout(
                 max_steps=max_steps,
                 values={
                     "coverage_fraction": coverage_fraction_now,
+                    "confidence_mean": confidence_mean,
+                    "confidence_gain": confidence_gain_drone,
+                    "confidence_weighted_gain": confidence_weighted_gain_drone,
+                    "confidence_opportunity_fraction": confidence_opportunity,
+                    "confidence_overlap_fraction": confidence_overlap,
+                    "confidence_low_fraction": confidence_low_fraction,
+                    "confidence_high_fraction": confidence_high_fraction,
                     "displacement_m": displacement_m,
                     "new_coverage_cells": new_cells,
                     "overlap": float(overlap[drone_idx]),
@@ -317,6 +396,7 @@ def run_rollout(
                     "edge_step": float(is_edge_step),
                     "corner_step": float(is_corner_step),
                     "moving_no_new_coverage": float(moving_no_new),
+                    "moving_no_confidence_gain": float(moving_no_conf),
                 },
             )
 
@@ -332,6 +412,13 @@ def run_rollout(
     scout_steps = [value for value in first_scout_steps if value is not None]
     all_scouted_step = max(scout_steps) if scouted_count == n_survivors and scout_steps else None
     final_coverage_fraction = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
+    final_confidence_mean = float(scenario.uav_confidence_grid[0].float().mean().detach().cpu().item())
+    final_confidence_low_fraction = float(
+        (scenario.uav_confidence_grid[0] < 0.50).float().mean().detach().cpu().item()
+    )
+    final_confidence_high_fraction = float(
+        (scenario.uav_confidence_grid[0] >= 0.80).float().mean().detach().cpu().item()
+    )
     path_metrics = _path_metrics(
         all_positions_sim,
         displacement_m_values,
@@ -345,6 +432,15 @@ def run_rollout(
         _finite_mean(footprint_radius_m_values),
     )
     per_drone = [_finalize_drone_stats(stats, scenario) for stats in per_drone_stats]
+    total_new_coverage_cells = float(np.sum(new_coverage_cells_values)) if new_coverage_cells_values else 0.0
+    total_confidence_gain_by_drone = (
+        float(np.sum(confidence_gain_by_drone_values)) if confidence_gain_by_drone_values else 0.0
+    )
+    total_confidence_weighted_gain_by_drone = (
+        float(np.sum(confidence_weighted_gain_by_drone_values))
+        if confidence_weighted_gain_by_drone_values else 0.0
+    )
+    path_length_m = float(path_metrics.get("path_length_m", math.nan))
 
     row = {
         "strategy": spec.label,
@@ -357,6 +453,9 @@ def run_rollout(
         "missed": missed_count,
         "recall": scouted_count / n_survivors if n_survivors else 0.0,
         "final_coverage_fraction": final_coverage_fraction,
+        "final_confidence_mean": final_confidence_mean,
+        "final_confidence_low_fraction": final_confidence_low_fraction,
+        "final_confidence_high_fraction": final_confidence_high_fraction,
         "full_success": float(scouted_count == n_survivors),
         "avg_scout_step": float(np.mean(scout_steps)) if scout_steps else math.nan,
         "avg_scout_time_s": float(np.mean(scout_steps) * step_seconds) if scout_steps else math.nan,
@@ -369,6 +468,25 @@ def run_rollout(
         ],
         "avg_displacement_m": _finite_mean(displacement_m_values),
         "avg_new_coverage_cells": _finite_mean(new_coverage_cells_values),
+        "total_new_coverage_cells": total_new_coverage_cells,
+        "new_coverage_cells_per_meter": _safe_div(total_new_coverage_cells, path_length_m),
+        "avg_confidence_mean": _finite_mean(confidence_mean_values),
+        "avg_confidence_gain": _finite_mean(confidence_gain_values),
+        "avg_confidence_gain_by_drone": _finite_mean(confidence_gain_by_drone_values),
+        "total_confidence_gain_by_drone": total_confidence_gain_by_drone,
+        "confidence_gain_per_meter": _safe_div(total_confidence_gain_by_drone, path_length_m),
+        "avg_confidence_weighted_gain": _finite_mean(confidence_weighted_gain_values),
+        "avg_confidence_weighted_gain_by_drone": _finite_mean(confidence_weighted_gain_by_drone_values),
+        "total_confidence_weighted_gain_by_drone": total_confidence_weighted_gain_by_drone,
+        "confidence_weighted_gain_per_meter": _safe_div(
+            total_confidence_weighted_gain_by_drone,
+            path_length_m,
+        ),
+        "avg_confidence_opportunity_fraction": _finite_mean(confidence_opportunity_fraction_values),
+        "avg_confidence_opportunity_best_gain": _finite_mean(confidence_opportunity_best_gain_values),
+        "avg_confidence_low_fraction": _finite_mean(confidence_low_fraction_values),
+        "avg_confidence_high_fraction": _finite_mean(confidence_high_fraction_values),
+        "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction_values),
         "avg_outside_footprint_fraction": _finite_mean(outside_footprint_values),
         "max_outside_footprint_fraction": max(outside_footprint_values) if outside_footprint_values else 0.0,
         "outside_footprint_step_frac_10": (
@@ -403,6 +521,9 @@ def run_rollout(
             if new_coverage_cells_values else 0.0
         ),
         "moving_no_new_coverage_frac": moving_no_new_coverage / diagnostic_steps if diagnostic_steps else 0.0,
+        "moving_no_confidence_gain_frac": (
+            moving_no_confidence_gain / diagnostic_steps if diagnostic_steps else 0.0
+        ),
         "time_bins": _finalize_time_bins(time_bins),
         "per_drone": per_drone,
         **start_metrics,
@@ -414,6 +535,14 @@ def run_rollout(
     if close is not None:
         close()
     return row
+
+
+def _safe_div(numerator: float, denominator: float, *, default: float = math.nan) -> float:
+    if not math.isfinite(float(numerator)) or not math.isfinite(float(denominator)):
+        return default
+    if abs(float(denominator)) <= 1e-12:
+        return default
+    return float(numerator) / float(denominator)
 
 
 def _make_policy(
@@ -451,6 +580,11 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "positions_sim": [],
         "displacement_m": [],
         "new_coverage_cells": [],
+        "confidence_gain": [],
+        "confidence_weighted_gain": [],
+        "confidence_opportunity_fraction": [],
+        "confidence_opportunity_best_gain": [],
+        "confidence_overlap_fraction": [],
         "outside_footprint": [],
         "overlap": [],
         "expected_overlap": [],
@@ -464,6 +598,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "is_edge_step": [],
         "is_corner_step": [],
         "moving_no_new_coverage": 0,
+        "moving_no_confidence_gain": 0,
         "diagnostic_steps": 0,
         "scout_credit_count": 0,
         "scouted_survivors": set(),
@@ -480,6 +615,12 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         stats["footprint_radius_m"],
         scenario,
     )
+    total_new_coverage_cells = float(np.sum(stats["new_coverage_cells"])) if stats["new_coverage_cells"] else 0.0
+    total_confidence_gain = float(np.sum(stats["confidence_gain"])) if stats["confidence_gain"] else 0.0
+    total_confidence_weighted_gain = (
+        float(np.sum(stats["confidence_weighted_gain"])) if stats["confidence_weighted_gain"] else 0.0
+    )
+    path_length_m = float(path.get("path_length_m", math.nan))
     return {
         "drone": int(stats["drone"]),
         "diagnostic_steps": steps,
@@ -488,7 +629,17 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "first_scout_steps": [int(v) for v in stats["first_scout_steps"]],
         "avg_displacement_m": _finite_mean(stats["displacement_m"]),
         "avg_new_coverage_cells": _finite_mean(stats["new_coverage_cells"]),
-        "total_new_coverage_cells": float(np.sum(stats["new_coverage_cells"])) if stats["new_coverage_cells"] else 0.0,
+        "total_new_coverage_cells": total_new_coverage_cells,
+        "new_coverage_cells_per_meter": _safe_div(total_new_coverage_cells, path_length_m),
+        "avg_confidence_gain": _finite_mean(stats["confidence_gain"]),
+        "total_confidence_gain": total_confidence_gain,
+        "confidence_gain_per_meter": _safe_div(total_confidence_gain, path_length_m),
+        "avg_confidence_weighted_gain": _finite_mean(stats["confidence_weighted_gain"]),
+        "total_confidence_weighted_gain": total_confidence_weighted_gain,
+        "confidence_weighted_gain_per_meter": _safe_div(total_confidence_weighted_gain, path_length_m),
+        "avg_confidence_opportunity_fraction": _finite_mean(stats["confidence_opportunity_fraction"]),
+        "avg_confidence_opportunity_best_gain": _finite_mean(stats["confidence_opportunity_best_gain"]),
+        "avg_confidence_overlap_fraction": _finite_mean(stats["confidence_overlap_fraction"]),
         "new_coverage_step_frac": (
             float(np.mean([value >= 1.0 for value in stats["new_coverage_cells"]]))
             if stats["new_coverage_cells"] else 0.0
@@ -507,6 +658,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "corner_step_frac": _finite_mean(stats["is_corner_step"]),
         "moving_no_new_coverage_frac": (
             stats["moving_no_new_coverage"] / steps if steps else 0.0
+        ),
+        "moving_no_confidence_gain_frac": (
+            stats["moving_no_confidence_gain"] / steps if steps else 0.0
         ),
         **path,
     }
@@ -535,6 +689,15 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_final_coverage_fraction": _finite_mean([
             float(row["final_coverage_fraction"]) for row in rows
         ]),
+        "mean_final_confidence_mean": _finite_mean([
+            float(row["final_confidence_mean"]) for row in rows
+        ]),
+        "mean_final_confidence_low_fraction": _finite_mean([
+            float(row["final_confidence_low_fraction"]) for row in rows
+        ]),
+        "mean_final_confidence_high_fraction": _finite_mean([
+            float(row["final_confidence_high_fraction"]) for row in rows
+        ]),
         "full_success_rate": _finite_mean([float(row["full_success"]) for row in rows]),
         "mean_avg_scout_step": _finite_mean([float(row["avg_scout_step"]) for row in rows]),
         "mean_avg_scout_time_s": _finite_mean([float(row["avg_scout_time_s"]) for row in rows]),
@@ -549,6 +712,42 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_displacement_m": _finite_mean([float(row["avg_displacement_m"]) for row in rows]),
         "mean_new_coverage_cells": _finite_mean([
             float(row["avg_new_coverage_cells"]) for row in rows
+        ]),
+        "mean_total_new_coverage_cells": _finite_mean([
+            float(row["total_new_coverage_cells"]) for row in rows
+        ]),
+        "mean_new_coverage_cells_per_meter": _finite_mean([
+            float(row["new_coverage_cells_per_meter"]) for row in rows
+        ]),
+        "mean_confidence_gain": _finite_mean([
+            float(row["avg_confidence_gain"]) for row in rows
+        ]),
+        "mean_confidence_gain_by_drone": _finite_mean([
+            float(row["avg_confidence_gain_by_drone"]) for row in rows
+        ]),
+        "mean_total_confidence_gain_by_drone": _finite_mean([
+            float(row["total_confidence_gain_by_drone"]) for row in rows
+        ]),
+        "mean_confidence_gain_per_meter": _finite_mean([
+            float(row["confidence_gain_per_meter"]) for row in rows
+        ]),
+        "mean_confidence_weighted_gain": _finite_mean([
+            float(row["avg_confidence_weighted_gain"]) for row in rows
+        ]),
+        "mean_confidence_weighted_gain_by_drone": _finite_mean([
+            float(row["avg_confidence_weighted_gain_by_drone"]) for row in rows
+        ]),
+        "mean_confidence_weighted_gain_per_meter": _finite_mean([
+            float(row["confidence_weighted_gain_per_meter"]) for row in rows
+        ]),
+        "mean_confidence_opportunity_fraction": _finite_mean([
+            float(row["avg_confidence_opportunity_fraction"]) for row in rows
+        ]),
+        "mean_confidence_opportunity_best_gain": _finite_mean([
+            float(row["avg_confidence_opportunity_best_gain"]) for row in rows
+        ]),
+        "mean_confidence_overlap_fraction": _finite_mean([
+            float(row["avg_confidence_overlap_fraction"]) for row in rows
         ]),
         "mean_new_coverage_step_frac": _finite_mean([
             float(row["new_coverage_step_frac"]) for row in rows
@@ -577,6 +776,9 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ]),
         "mean_moving_no_new_coverage_frac": _finite_mean([
             float(row["moving_no_new_coverage_frac"]) for row in rows
+        ]),
+        "mean_moving_no_confidence_gain_frac": _finite_mean([
+            float(row["moving_no_confidence_gain_frac"]) for row in rows
         ]),
         "mean_path_length_m": _finite_mean([float(row["path_length_m"]) for row in rows]),
         "mean_edge_step_frac": _finite_mean([float(row["edge_step_frac"]) for row in rows]),
@@ -614,7 +816,17 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_displacement_m",
         "avg_new_coverage_cells",
         "total_new_coverage_cells",
+        "new_coverage_cells_per_meter",
         "new_coverage_step_frac",
+        "avg_confidence_gain",
+        "total_confidence_gain",
+        "confidence_gain_per_meter",
+        "avg_confidence_weighted_gain",
+        "total_confidence_weighted_gain",
+        "confidence_weighted_gain_per_meter",
+        "avg_confidence_opportunity_fraction",
+        "avg_confidence_opportunity_best_gain",
+        "avg_confidence_overlap_fraction",
         "avg_outside_footprint_fraction",
         "avg_overlap_fraction",
         "avg_expected_overlap_fraction",
@@ -625,6 +837,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "edge_step_frac",
         "corner_step_frac",
         "moving_no_new_coverage_frac",
+        "moving_no_confidence_gain_frac",
         "stalled_step_frac",
         "longest_stall_steps",
     )
@@ -653,15 +866,20 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
     metrics = {
         "recall": "recall",
         "coverage": "final_coverage_fraction",
+        "confidence": "final_confidence_mean",
         "move_m": "avg_displacement_m",
         "new_cells": "avg_new_coverage_cells",
+        "new_cells_per_m": "new_coverage_cells_per_meter",
+        "conf_gain_per_m": "confidence_gain_per_meter",
         "outside": "avg_outside_footprint_fraction",
         "overlap": "avg_overlap_fraction",
         "expected_overlap": "avg_expected_overlap_fraction",
         "excess_overlap": "avg_excess_overlap_fraction",
+        "confidence_overlap": "avg_confidence_overlap_fraction",
         "edge_frac": "edge_step_frac",
         "corner_frac": "corner_step_frac",
         "moving_no_new": "moving_no_new_coverage_frac",
+        "moving_no_conf": "moving_no_confidence_gain_frac",
     }
     out: dict[str, float] = {}
     for prefix, key in metrics.items():
@@ -723,22 +941,25 @@ def write_distribution_plots(
 
     strategies = list(summary["strategies"])
     colors = _strategy_colors(strategies)
-    fig, axes = plt.subplots(5, 3, figsize=(15, 22), constrained_layout=True)
+    fig, axes = plt.subplots(6, 3, figsize=(15, 26), constrained_layout=True)
     axes_flat = axes.ravel()
 
     hist_panels = [
         ("Survivor Recall", "recall", (0.0, 1.0), "survivors scouted / total survivors"),
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0), "fraction of map covered"),
+        ("Final Confidence", "final_confidence_mean", (0.0, 1.0), "mean inspection confidence"),
         ("Movement per Drone-Step", "avg_displacement_m", None, "meters / drone-step"),
         ("New Cells per Drone-Step", "avg_new_coverage_cells", None, "new coverage cells / drone-step"),
+        ("New Cells per Meter", "new_coverage_cells_per_meter", None, "new coverage cells / meter"),
+        ("Confidence Gain per Meter", "confidence_gain_per_meter", None, "confidence gain / meter"),
         ("Excess Footprint Overlap", "avg_excess_overlap_fraction", (0.0, 1.0), "fraction above expected overlap"),
-        ("Moving Without New Coverage", "moving_no_new_coverage_frac", (0.0, 1.0), "fraction of drone-steps"),
+        ("Moving Without Confidence Gain", "moving_no_confidence_gain_frac", (0.0, 1.0), "fraction of drone-steps"),
     ]
-    for ax, (title, key, xlim, xlabel) in zip(axes_flat[:6], hist_panels):
+    for ax, (title, key, xlim, xlabel) in zip(axes_flat[:9], hist_panels):
         _plot_overlay_hist(ax, rows, strategies, colors, key, title, xlabel, xlim)
 
     _plot_strategy_bars(
-        axes_flat[6],
+        axes_flat[9],
         summary,
         "mean_recall",
         "Mean Recall",
@@ -747,7 +968,7 @@ def write_distribution_plots(
         ylim=(0.0, 1.0),
     )
     _plot_strategy_bars(
-        axes_flat[7],
+        axes_flat[10],
         summary,
         "mean_final_coverage_fraction",
         "Mean Coverage",
@@ -756,15 +977,16 @@ def write_distribution_plots(
         ylim=(0.0, 1.0),
     )
     _plot_strategy_bars(
-        axes_flat[8],
+        axes_flat[11],
         summary,
-        "mean_displacement_m",
-        "Movement / Step",
-        "meters / drone-step",
+        "mean_final_confidence_mean",
+        "Mean Confidence",
+        "mean final confidence",
         colors,
+        ylim=(0.0, 1.0),
     )
     _plot_time_bin_lines(
-        axes_flat[9],
+        axes_flat[12],
         summary,
         "new_coverage_cells",
         "Time-Bin New Cells",
@@ -772,28 +994,28 @@ def write_distribution_plots(
         colors,
     )
     _plot_time_bin_lines(
-        axes_flat[10],
+        axes_flat[13],
         summary,
-        "coverage_fraction",
-        "Time-Bin Coverage",
-        "coverage fraction",
+        "confidence_mean",
+        "Time-Bin Confidence",
+        "mean confidence",
         colors,
         ylim=(0.0, 1.0),
     )
     _plot_time_bin_multi(
-        axes_flat[11],
+        axes_flat[14],
         summary,
         "Time-Bin Search Friction",
         {
             "excess": "excess_overlap",
-            "edge": "edge_step",
             "moving no new": "moving_no_new_coverage",
+            "moving no conf": "moving_no_confidence_gain",
         },
         colors,
     )
-    _plot_scout_time_bins(axes_flat[12], summary, colors)
-    _plot_per_drone_bars(axes_flat[13], summary, "mean_path_length_m", "Per-Drone Path Length", "m", colors)
-    _plot_failure_labels(axes_flat[14], summary, colors)
+    _plot_per_drone_bars(axes_flat[15], summary, "mean_path_length_m", "Per-Drone Path Length", "m", colors)
+    _plot_scout_time_bins(axes_flat[16], summary, colors)
+    _plot_failure_labels(axes_flat[17], summary, colors)
 
     fig.suptitle(
         "UAV Strategy Diagnostics "
@@ -1108,16 +1330,20 @@ def _print_row(row: dict[str, Any]) -> None:
         f"scouted={row['scouted']}/{row['survivors']} "
         f"recall={row['recall']:.3f} "
         f"coverage={row['final_coverage_fraction']:.3f} "
+        f"conf={row['final_confidence_mean']:.3f} "
         f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
         f"{_fmt_optional(row['avg_scout_time_s'])}s "
         f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
         f"{_fmt_optional(row['all_scouted_time_s'])}s "
         f"move={row['avg_displacement_m']:.2f}m "
         f"new={row['avg_new_coverage_cells']:.1f} "
+        f"new/m={row['new_coverage_cells_per_meter']:.3f} "
+        f"conf/m={row['confidence_gain_per_meter']:.6f} "
         f"overlap={row['avg_overlap_fraction']:.2f} "
         f"excess={row['avg_excess_overlap_fraction']:.2f} "
         f"edge={row['edge_step_frac']:.2f} "
         f"moving_nonew={row['moving_no_new_coverage_frac']:.2f} "
+        f"moving_noconf={row['moving_no_confidence_gain_frac']:.2f} "
         f"label={row['failure_label']}"
     )
 
@@ -1131,12 +1357,17 @@ def _print_summary(summary: dict[str, Any]) -> None:
             f"episodes={int(item['episodes'])} "
             f"recall={item['mean_recall']:.3f} "
             f"coverage={item['mean_final_coverage_fraction']:.3f} "
+            f"confidence={item['mean_final_confidence_mean']:.3f} "
             f"success={item['full_success_rate']:.3f} "
             f"move={item['mean_displacement_m']:.2f}m "
             f"new={item['mean_new_coverage_cells']:.1f} "
+            f"new/m={item['mean_new_coverage_cells_per_meter']:.3f} "
+            f"conf/m={item['mean_confidence_gain_per_meter']:.6f} "
             f"excess={item['mean_excess_overlap_fraction']:.3f} "
+            f"conf_ov={item['mean_confidence_overlap_fraction']:.3f} "
             f"edge={item['mean_edge_step_frac']:.3f} "
-            f"moving_nonew={item['mean_moving_no_new_coverage_frac']:.3f}"
+            f"moving_nonew={item['mean_moving_no_new_coverage_frac']:.3f} "
+            f"moving_noconf={item['mean_moving_no_confidence_gain_frac']:.3f}"
         )
         labels = item.get("label_counts", {})
         if labels:
@@ -1165,6 +1396,12 @@ def main() -> None:
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=0.0)
     parser.add_argument("--uav-start-min-separation-m", type=float, default=150.0)
     parser.add_argument("--uav-start-edge-margin-m", type=float, default=50.0)
+    parser.add_argument(
+        "--moving-no-confidence-gain-threshold",
+        type=float,
+        default=DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
+        help="Weighted confidence-gain threshold for the moving_no_confidence_gain metric.",
+    )
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--plots-output", default=None)
     args = parser.parse_args()
@@ -1182,6 +1419,11 @@ def main() -> None:
         parser.error("--uav-start-min-separation-m must be nonnegative")
     if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
         parser.error("--uav-start-edge-margin-m must be nonnegative")
+    if (
+        not math.isfinite(float(args.moving_no_confidence_gain_threshold))
+        or args.moving_no_confidence_gain_threshold < 0.0
+    ):
+        parser.error("--moving-no-confidence-gain-threshold must be finite and nonnegative")
 
     try:
         specs = parse_strategy_specs(args.strategies, happo_checkpoint=args.happo_checkpoint)
@@ -1214,6 +1456,7 @@ def main() -> None:
                 seed,
                 happo_cache=happo_cache,
                 stochastic_happo=args.stochastic_happo,
+                moving_no_confidence_gain_threshold=args.moving_no_confidence_gain_threshold,
             )
             rows.append(row)
             _print_row(row)
@@ -1227,6 +1470,7 @@ def main() -> None:
             "steps": int(args.steps),
             "seeds": [int(seed) for seed in args.seeds],
             "scenario_kwargs": scenario_kwargs,
+            "moving_no_confidence_gain_threshold": float(args.moving_no_confidence_gain_threshold),
         },
         "rows": rows,
         "summary": summary,
