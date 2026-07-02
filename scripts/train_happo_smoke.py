@@ -161,11 +161,11 @@ def build_args(
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
     ground_confirmation_range_m: float | None = None,
-    coverage_obs_grid: int = 0,
+    coverage_obs_grid: int | None = None,
     confirm_requires_los: bool = False,
     drone_can_confirm: bool = False,
     r_drone_confirm: float = 0.0,
-    local_coverage_obs_grid: int = 0,
+    local_coverage_obs_grid: int | None = None,
     local_coverage_obs_radius_m: float = 150.0,
     uav_confidence_obs_grid: int = 0,
     uav_local_confidence_obs_grid: int = 0,
@@ -262,9 +262,9 @@ def build_args(
             local_map_patch_size = DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE
         if uav_no_global_coverage_obs:
             coverage_obs_grid = 0
-        elif coverage_obs_grid <= 0:
+        elif coverage_obs_grid is None:
             coverage_obs_grid = DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID
-        if local_coverage_obs_grid <= 0:
+        if local_coverage_obs_grid is None:
             local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
         if uav_frontier_obs is None:
@@ -528,14 +528,17 @@ def build_args(
         scenario_kwargs["drone_flight_levels_m"] = tuple(float(v) for v in drone_flight_levels_m)
     if ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = float(ground_confirmation_range_m)
-    if coverage_obs_grid and coverage_obs_grid > 0:
-        scenario_kwargs["coverage_obs_grid"] = int(coverage_obs_grid)
+    coverage_obs_grid = 0 if coverage_obs_grid is None else int(coverage_obs_grid)
+    if coverage_obs_grid < 0:
+        raise ValueError("coverage_obs_grid must be nonnegative")
+    if coverage_obs_grid > 0:
+        scenario_kwargs["coverage_obs_grid"] = coverage_obs_grid
     if confirm_requires_los:
         scenario_kwargs["confirm_requires_los"] = True
     if drone_can_confirm:
         scenario_kwargs["drone_can_confirm"] = True
         scenario_kwargs["r_drone_confirm"] = float(r_drone_confirm)
-    local_coverage_obs_grid = int(local_coverage_obs_grid)
+    local_coverage_obs_grid = 0 if local_coverage_obs_grid is None else int(local_coverage_obs_grid)
     if local_coverage_obs_grid < 0 or (local_coverage_obs_grid > 0 and local_coverage_obs_grid % 2 != 1):
         raise ValueError("local_coverage_obs_grid must be 0 or a positive odd integer")
     local_coverage_obs_radius_m = float(local_coverage_obs_radius_m)
@@ -954,9 +957,10 @@ def main():
                         "Higher altitude => larger scout footprint.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
-    p.add_argument("--coverage-obs-grid", type=int, default=0,
+    p.add_argument("--coverage-obs-grid", type=int, default=None,
                    help="Add a KxK team-coverage map + global fraction to the observation so the "
-                        "policy can learn systematic sweeping (e.g. 6). 0 = off.")
+                        "policy can learn systematic sweeping (e.g. 6). 0 = off; omitted uses the "
+                        "UAV diagnostic default in --uav-survivor-diagnostic mode.")
     p.add_argument("--confirm-requires-los", action="store_true",
                    help="Require unobstructed terrain line-of-sight (not just range) for confirmation.")
     p.add_argument("--drone-can-confirm", action="store_true",
@@ -964,9 +968,10 @@ def main():
                         "(realistic aerial SAR; the honest route to >=0.9 recall).")
     p.add_argument("--r-drone-confirm", type=float, default=0.0,
                    help="Per-drone reward for a confirmation it makes (training signal for --drone-can-confirm).")
-    p.add_argument("--local-coverage-obs-grid", type=int, default=0,
+    p.add_argument("--local-coverage-obs-grid", type=int, default=None,
                    help="Add a pooled KxK ego-centric coverage map around each agent. "
-                        "Use an odd value such as 9. 0 = off.")
+                        "Use an odd value such as 9. 0 = off; omitted uses the UAV diagnostic "
+                        "default in --uav-survivor-diagnostic mode.")
     p.add_argument("--local-coverage-obs-radius-m", type=float, default=150.0,
                    help="Physical half-width/radius in meters for --local-coverage-obs-grid. "
                         "Example: 150 with K=9 gives bins about 33m wide on a 500m map.")
@@ -1220,8 +1225,11 @@ def main():
         p.error("--critic-lr must be positive")
     if args.terrain_cnn_embed_dim <= 0:
         p.error("--terrain-cnn-embed-dim must be positive")
-    if args.local_coverage_obs_grid < 0 or (
-        args.local_coverage_obs_grid > 0 and args.local_coverage_obs_grid % 2 != 1
+    if args.coverage_obs_grid is not None and args.coverage_obs_grid < 0:
+        p.error("--coverage-obs-grid must be nonnegative")
+    if args.local_coverage_obs_grid is not None and (
+        args.local_coverage_obs_grid < 0
+        or (args.local_coverage_obs_grid > 0 and args.local_coverage_obs_grid % 2 != 1)
     ):
         p.error("--local-coverage-obs-grid must be 0 or a positive odd integer")
     if args.local_coverage_obs_radius_m <= 0.0:
@@ -1395,9 +1403,9 @@ def main():
             args.entropy_coef = DEFAULT_UAV_DIAG_ENTROPY_COEF
         if args.uav_no_global_coverage_obs:
             args.coverage_obs_grid = 0
-        elif args.coverage_obs_grid <= 0:
+        elif args.coverage_obs_grid is None:
             args.coverage_obs_grid = DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID
-        if args.local_coverage_obs_grid <= 0:
+        if args.local_coverage_obs_grid is None:
             args.local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             args.local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
         if args.uav_frontier_obs is None:
@@ -1463,7 +1471,7 @@ def main():
         if args.entropy_coef == 0.01:
             args.entropy_coef = 0.02
         # Team-coverage observation: lets the policy learn systematic sweeping.
-        if args.coverage_obs_grid <= 0:
+        if args.coverage_obs_grid is None:
             args.coverage_obs_grid = 6
 
     if args.research:

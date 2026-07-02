@@ -814,6 +814,24 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.10)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 258)
 
+    def test_uav_diagnostic_explicit_zero_disables_coverage_observations(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_no_coverage_obs",
+            uav_survivor_diagnostic=True,
+            coverage_obs_grid=0,
+            local_coverage_obs_grid=0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertNotIn("coverage_obs_grid", scenario)
+        self.assertNotIn("local_coverage_obs_grid", scenario)
+        self.assertLess(algo_args["model"]["terrain_cnn_single_obs_dim"], 258)
+
     def test_diagnostic_modes_are_mutually_exclusive(self):
         with self.assertRaises(ValueError):
             build_args(
