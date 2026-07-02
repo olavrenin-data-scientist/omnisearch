@@ -121,6 +121,16 @@ def _first_happo_checkpoint(specs: list[StrategySpec]) -> Path | None:
     return None
 
 
+def _infer_terrain_cache_grid_size(path: Path) -> int:
+    with np.load(path, allow_pickle=False) as data:
+        if "land_cover" not in data:
+            raise ValueError(f"terrain cache is missing required array 'land_cover': {path}")
+        shape = tuple(int(v) for v in data["land_cover"].shape)
+    if len(shape) != 2 or shape[0] != shape[1]:
+        raise ValueError(f"terrain cache land_cover must be a square 2D grid, got {shape}: {path}")
+    return int(shape[0])
+
+
 def build_scenario_kwargs(args: argparse.Namespace, specs: list[StrategySpec]) -> dict[str, Any]:
     checkpoint_dir = _first_happo_checkpoint(specs)
     scenario_kwargs: dict[str, Any] = {}
@@ -142,6 +152,7 @@ def build_scenario_kwargs(args: argparse.Namespace, specs: list[StrategySpec]) -
         "n_drones": int(args.n_drones),
         "n_ground": 0,
         "n_survivors": int(args.n_survivors),
+        "fire_grid_size": int(args.grid_size),
         "known_survivors_at_reset": False,
         "drone_can_confirm": True,
         "disable_fire": True,
@@ -1393,6 +1404,12 @@ def main() -> None:
     parser.add_argument("--n-drones", type=int, default=3)
     parser.add_argument("--n-survivors", type=int, default=5)
     parser.add_argument("--terrain-cache-path", default=str(DEFAULT_TERRAIN_CACHE_PATH))
+    parser.add_argument(
+        "--grid-size",
+        type=int,
+        default=None,
+        help="Scenario grid size. Defaults to the square land_cover size in --terrain-cache-path.",
+    )
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=0.0)
     parser.add_argument("--uav-start-min-separation-m", type=float, default=150.0)
     parser.add_argument("--uav-start-edge-margin-m", type=float, default=50.0)
@@ -1415,6 +1432,13 @@ def main() -> None:
     args.terrain_cache_path = Path(args.terrain_cache_path)
     if not args.terrain_cache_path.is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
+    if args.grid_size is None:
+        try:
+            args.grid_size = _infer_terrain_cache_grid_size(args.terrain_cache_path)
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.grid_size <= 0:
+        parser.error("--grid-size must be positive")
     if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
         parser.error("--uav-start-min-separation-m must be nonnegative")
     if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
@@ -1436,6 +1460,7 @@ def main() -> None:
         f"{scenario_kwargs['n_drones']} UAVs, "
         f"{scenario_kwargs['n_ground']} UGVs, "
         f"{scenario_kwargs['n_survivors']} survivors, "
+        f"grid={scenario_kwargs['fire_grid_size']}x{scenario_kwargs['fire_grid_size']}, "
         f"steps={scenario_kwargs['max_steps']}"
     )
     print(f"terrain: {scenario_kwargs.get('terrain_cache_path')}")
