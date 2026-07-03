@@ -38,6 +38,18 @@ REWARD_COMPONENTS = (
     "stall_penalty",
     "travel_penalty",
 )
+ROUTE_STALL_THRESHOLDS_M = (
+    ("le0", 0.0),
+    ("lt005", 0.05),
+    ("lt010", 0.10),
+    ("lt020", 0.20),
+)
+ROUTE_STALL_PENALTY_THRESHOLD_M = 0.10
+ROUTE_STALL_PENALTY_COEFFS = (
+    ("k001", 0.01),
+    ("k002", 0.02),
+    ("k005", 0.05),
+)
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -401,6 +413,13 @@ def _new_time_series() -> dict:
         "shadow_astar_action_alignment": [],
         "shadow_astar_movement_alignment": [],
         "shadow_astar_progress_m": [],
+        "shadow_astar_target_progress_m": [],
+        "shadow_astar_route_target_gap_m": [],
+        "shadow_astar_route_target_conflict": [],
+        "shadow_astar_detour_no_progress": [],
+        "shadow_astar_hyp_stall_penalty_abs": {
+            key: [] for key, _coeff in ROUTE_STALL_PENALTY_COEFFS
+        },
         "reward": {name: [] for name in REWARD_COMPONENTS},
     }
 
@@ -463,6 +482,7 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
         ts = row.get("time_series", {})
         fractions = ts.get("episode_fraction", [])
         rewards = ts.get("reward", {})
+        stall_penalties = ts.get("shadow_astar_hyp_stall_penalty_abs", {})
         for i, frac in enumerate(fractions):
             if frac is None:
                 continue
@@ -493,10 +513,16 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "shadow_astar_action_alignment": _series_at(ts, "shadow_astar_action_alignment", i),
                 "shadow_astar_movement_alignment": _series_at(ts, "shadow_astar_movement_alignment", i),
                 "shadow_astar_progress_m": _series_at(ts, "shadow_astar_progress_m", i),
+                "shadow_astar_target_progress_m": _series_at(ts, "shadow_astar_target_progress_m", i),
+                "shadow_astar_route_target_gap_m": _series_at(ts, "shadow_astar_route_target_gap_m", i),
+                "shadow_astar_route_target_conflict": _series_at(ts, "shadow_astar_route_target_conflict", i),
+                "shadow_astar_detour_no_progress": _series_at(ts, "shadow_astar_detour_no_progress", i),
             }
             for name in REWARD_COMPONENTS:
                 step[f"reward_abs_{name}"] = _series_at(rewards, name, i, absolute=True)
                 step[f"reward_{name}"] = _series_at(rewards, name, i)
+            for key, _coeff in ROUTE_STALL_PENALTY_COEFFS:
+                step[f"hyp_route_stall_penalty_abs_{key}"] = _series_at(stall_penalties, key, i)
             bucket_rows[bin_idx].append(step)
 
     out = []
@@ -532,15 +558,38 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "shadow_astar_action_alignment",
             "shadow_astar_movement_alignment",
             "shadow_astar_progress_m",
+            "shadow_astar_target_progress_m",
+            "shadow_astar_route_target_gap_m",
+            "shadow_astar_route_target_conflict",
+            "shadow_astar_detour_no_progress",
         )
         for key in keys:
             row[key] = _finite_mean(step.get(key) for step in bucket)
+        detour_steps = [
+            step
+            for step in bucket
+            if (step.get("shadow_astar_detour_needed") is not None and float(step["shadow_astar_detour_needed"]) > 0.5)
+        ]
+        detour_progress = _finite(step.get("shadow_astar_progress_m") for step in detour_steps)
+        for threshold_key, threshold_m in ROUTE_STALL_THRESHOLDS_M:
+            if detour_progress:
+                if threshold_m <= 0.0:
+                    value = np.mean([p <= 0.0 for p in detour_progress])
+                else:
+                    value = np.mean([p < threshold_m for p in detour_progress])
+                row[f"shadow_astar_detour_stall_fraction_{threshold_key}"] = float(value)
+            else:
+                row[f"shadow_astar_detour_stall_fraction_{threshold_key}"] = float("nan")
         for name in REWARD_COMPONENTS:
             row[f"reward_abs_{name}"] = _finite_mean(
                 step.get(f"reward_abs_{name}") for step in bucket
             )
             row[f"reward_{name}"] = _finite_mean(
                 step.get(f"reward_{name}") for step in bucket
+            )
+        for key, _coeff in ROUTE_STALL_PENALTY_COEFFS:
+            row[f"hyp_route_stall_penalty_abs_{key}"] = _finite_mean(
+                step.get(f"hyp_route_stall_penalty_abs_{key}") for step in bucket
             )
         out.append(row)
     return out
@@ -620,6 +669,30 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         "mean_shadow_astar_progress_m": _finite_mean(
             row["mean_shadow_astar_progress_m"] for row in rows
         ),
+        "mean_shadow_astar_detour_progress_m": _finite_mean(
+            row["mean_shadow_astar_detour_progress_m"] for row in rows
+        ),
+        "mean_shadow_astar_clear_progress_m": _finite_mean(
+            row["mean_shadow_astar_clear_progress_m"] for row in rows
+        ),
+        "mean_shadow_astar_target_progress_m": _finite_mean(
+            row["mean_shadow_astar_target_progress_m"] for row in rows
+        ),
+        "mean_shadow_astar_route_target_gap_m": _finite_mean(
+            row["mean_shadow_astar_route_target_gap_m"] for row in rows
+        ),
+        "mean_shadow_astar_route_target_conflict_fraction": _finite_mean(
+            row["shadow_astar_route_target_conflict_fraction"] for row in rows
+        ),
+        "mean_shadow_astar_detour_no_progress_fraction": _finite_mean(
+            row["shadow_astar_detour_no_progress_fraction"] for row in rows
+        ),
+        "mean_shadow_astar_detour_stall_fraction_lt010": _finite_mean(
+            row["shadow_astar_detour_stall_fraction_lt010"] for row in rows
+        ),
+        "mean_hyp_route_stall_penalty_abs_k002": _finite_mean(
+            row["mean_hyp_route_stall_penalty_abs_k002"] for row in rows
+        ),
         "time_bins": _time_bin_summary(rows, bins),
     }
 
@@ -663,7 +736,7 @@ def _plot_ugv_diagnostics(
     import matplotlib.pyplot as plt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(5, 3, figsize=(15, 21), constrained_layout=True)
+    fig, axes = plt.subplots(6, 3, figsize=(15, 25), constrained_layout=True)
     axes = axes.reshape(-1)
 
     ax = axes[0]
@@ -760,6 +833,18 @@ def _plot_ugv_diagnostics(
                 label=name.replace("_", " "),
                 color=reward_colors.get(name),
             )
+    stall_colors = {"k001": "#f59e0b", "k002": "#dc2626", "k005": "#7f1d1d"}
+    for key, coeff in ROUTE_STALL_PENALTY_COEFFS:
+        y = [b[f"hyp_route_stall_penalty_abs_{key}"] for b in bins]
+        if any(math.isfinite(float(v)) and abs(float(v)) > 1e-12 for v in y if v is not None):
+            ax.plot(
+                x,
+                y,
+                marker="x",
+                linestyle="--",
+                label=f"route stall {coeff:g}",
+                color=stall_colors.get(key),
+            )
     ax.set_title("Time-Bin Reward Scale (mean abs)")
     ax.set_xlabel("episode fraction")
     ax.set_ylabel("abs reward/penalty per step")
@@ -806,6 +891,61 @@ def _plot_ugv_diagnostics(
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines + lines2, labels + labels2, fontsize=7, ncol=2)
+
+    ax = axes[15]
+    ax.plot(x, [b["shadow_astar_progress_m"] for b in bins], marker="o", label="route progress", color="#0f766e")
+    ax.plot(x, [b["shadow_astar_target_progress_m"] for b in bins], marker="o", label="target progress", color="#2563eb")
+    ax.plot(x, [b["shadow_astar_route_target_gap_m"] for b in bins], marker="o", label="route-target gap", color="#7c3aed")
+    ax.axhline(0.0, color="#64748b", lw=0.8)
+    ax.set_title("Time-Bin Route vs Target Progress")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("m/step")
+    ax2 = ax.twinx()
+    ax2.plot(
+        x,
+        [b["shadow_astar_detour_stall_fraction_le0"] for b in bins],
+        marker="o",
+        linestyle="--",
+        label="detour <=0m",
+        color="#ef4444",
+    )
+    ax2.plot(
+        x,
+        [b["shadow_astar_detour_stall_fraction_lt010"] for b in bins],
+        marker="o",
+        linestyle="--",
+        label="detour <0.10m",
+        color="#f97316",
+    )
+    ax2.set_ylim(0.0, 1.0)
+    ax2.set_ylabel("detour-step fraction")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=7, ncol=2)
+
+    _plot_hist_by_success(
+        axes[16],
+        rows,
+        "shadow_astar_detour_no_progress_fraction",
+        "Detour No-Progress",
+        "fraction of detour steps",
+    )
+
+    ax = axes[17]
+    for key, coeff in ROUTE_STALL_PENALTY_COEFFS:
+        ax.plot(
+            x,
+            [b[f"hyp_route_stall_penalty_abs_{key}"] for b in bins],
+            marker="o",
+            label=f"k={coeff:g}",
+            color=stall_colors.get(key),
+        )
+    ax.set_title("Hypothetical Route-Stall Penalty")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("abs penalty / step")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
 
     fig.suptitle(
         f"UGV HAPPO Diagnostics ({'deterministic' if deterministic else 'stochastic'}, n={len(rows)})",
@@ -878,6 +1018,18 @@ def run_rollout(
     shadow_astar_action_alignments: list[float] = []
     shadow_astar_movement_alignments: list[float] = []
     shadow_astar_progress_meters: list[float] = []
+    shadow_astar_detour_progress_meters: list[float] = []
+    shadow_astar_clear_progress_meters: list[float] = []
+    shadow_astar_target_progress_meters: list[float] = []
+    shadow_astar_route_target_gaps_m: list[float] = []
+    shadow_astar_route_target_conflicts: list[bool] = []
+    shadow_astar_detour_no_progress: list[bool] = []
+    shadow_astar_detour_stalls: dict[str, list[bool]] = {
+        key: [] for key, _threshold_m in ROUTE_STALL_THRESHOLDS_M
+    }
+    hyp_route_stall_penalty_abs: dict[str, list[float]] = {
+        key: [] for key, _coeff in ROUTE_STALL_PENALTY_COEFFS
+    }
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     max_steps = int(scenario_kwargs["max_steps"])
     time_series = _new_time_series()
@@ -949,8 +1101,13 @@ def run_rollout(
         displacement_m = _distance_sim_to_m(scenario, torch.linalg.norm(displacement, dim=-1))
         displacement_meters.append(displacement_m)
         dist_after_m = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+        target_progress_m = dist_before_m - dist_after_m
         shadow_movement_alignment = None
         shadow_progress_m = None
+        shadow_route_target_gap_m = None
+        shadow_route_target_conflict = None
+        shadow_detour_no_progress = None
+        hyp_step_stall_penalty_abs = {key: 0.0 for key, _coeff in ROUTE_STALL_PENALTY_COEFFS}
         shadow_valid = bool(shadow_hint and shadow_hint["valid"])
         shadow_direct_blocked = bool(shadow_hint["direct_blocked"]) if shadow_valid else False
         shadow_detour_needed = bool(shadow_hint["detour_needed"]) if shadow_valid else False
@@ -966,6 +1123,12 @@ def run_rollout(
             before_wp_m = float(torch.linalg.norm(waypoint_pos - pos_before, dim=-1)[0].detach().cpu().item()) / max(scale, 1e-9)
             after_wp_m = float(torch.linalg.norm(waypoint_pos - ground.state.pos, dim=-1)[0].detach().cpu().item()) / max(scale, 1e-9)
             shadow_progress_m = before_wp_m - after_wp_m
+            shadow_route_target_gap_m = shadow_progress_m - target_progress_m
+            shadow_route_target_conflict = bool(
+                abs(shadow_progress_m) > 1e-6
+                and abs(target_progress_m) > 1e-6
+                and (shadow_progress_m * target_progress_m) < 0.0
+            )
             shadow_astar_valid.append(True)
             shadow_astar_direct_blocked.append(shadow_direct_blocked)
             shadow_astar_detour_needed.append(shadow_detour_needed)
@@ -976,6 +1139,25 @@ def run_rollout(
             if shadow_movement_alignment is not None:
                 shadow_astar_movement_alignments.append(shadow_movement_alignment)
             shadow_astar_progress_meters.append(shadow_progress_m)
+            shadow_astar_target_progress_meters.append(target_progress_m)
+            shadow_astar_route_target_gaps_m.append(shadow_route_target_gap_m)
+            shadow_astar_route_target_conflicts.append(shadow_route_target_conflict)
+            if shadow_detour_needed:
+                shadow_astar_detour_progress_meters.append(shadow_progress_m)
+                shadow_detour_no_progress = bool(shadow_progress_m <= 0.0)
+                shadow_astar_detour_no_progress.append(shadow_detour_no_progress)
+                for key, threshold_m in ROUTE_STALL_THRESHOLDS_M:
+                    if threshold_m <= 0.0:
+                        shadow_astar_detour_stalls[key].append(bool(shadow_progress_m <= 0.0))
+                    else:
+                        shadow_astar_detour_stalls[key].append(bool(shadow_progress_m < threshold_m))
+                stall_m = max(0.0, ROUTE_STALL_PENALTY_THRESHOLD_M - shadow_progress_m)
+                stall_scale = float(getattr(scenario, "ugv_planner_progress_scale_m", 1.0))
+                stall_fraction = min(max(stall_m / max(stall_scale, 1e-9), 0.0), 1.0)
+                for key, coeff in ROUTE_STALL_PENALTY_COEFFS:
+                    hyp_step_stall_penalty_abs[key] = float(coeff) * stall_fraction
+            else:
+                shadow_astar_clear_progress_meters.append(shadow_progress_m)
             shadow_planner_total_steps += 1
             speed_mps = displacement_m / step_seconds
             for bucket_name in ("all", "blocked" if shadow_direct_blocked else "clear"):
@@ -1000,11 +1182,13 @@ def run_rollout(
             shadow_astar_valid.append(False)
             shadow_astar_direct_blocked.append(False)
             shadow_astar_detour_needed.append(False)
+        for key, value in hyp_step_stall_penalty_abs.items():
+            hyp_route_stall_penalty_abs[key].append(value)
         reward_components = _reward_components(scenario)
         time_series["step"].append(step)
         time_series["episode_fraction"].append((step + 1) / max_steps)
         time_series["distance_m"].append(dist_after_m)
-        time_series["progress_m"].append(dist_before_m - dist_after_m)
+        time_series["progress_m"].append(target_progress_m)
         time_series["movement_m"].append(displacement_m)
         time_series["speed_mps"].append(displacement_m / step_seconds)
         time_series["action_norm"].append(action_norm)
@@ -1030,6 +1214,18 @@ def run_rollout(
         _append_optional(time_series["shadow_astar_action_alignment"], action_shadow_alignment)
         _append_optional(time_series["shadow_astar_movement_alignment"], shadow_movement_alignment)
         _append_optional(time_series["shadow_astar_progress_m"], shadow_progress_m)
+        _append_optional(time_series["shadow_astar_target_progress_m"], target_progress_m if shadow_valid else None)
+        _append_optional(time_series["shadow_astar_route_target_gap_m"], shadow_route_target_gap_m)
+        _append_optional(
+            time_series["shadow_astar_route_target_conflict"],
+            float(shadow_route_target_conflict) if shadow_route_target_conflict is not None else None,
+        )
+        _append_optional(
+            time_series["shadow_astar_detour_no_progress"],
+            float(shadow_detour_no_progress) if shadow_detour_no_progress is not None else None,
+        )
+        for key, value in hyp_step_stall_penalty_abs.items():
+            time_series["shadow_astar_hyp_stall_penalty_abs"][key].append(value)
         for name in REWARD_COMPONENTS:
             time_series["reward"][name].append(reward_components.get(name, 0.0))
         if planner_hint is not None:
@@ -1063,6 +1259,18 @@ def run_rollout(
         if confirmation_step is not None
         else None
     )
+    detour_stall_fractions = {
+        f"shadow_astar_detour_stall_fraction_{key}": (
+            float(np.mean(values)) if values else 0.0
+        )
+        for key, values in shadow_astar_detour_stalls.items()
+    }
+    hyp_route_stall_penalty_means = {
+        f"mean_hyp_route_stall_penalty_abs_{key}": (
+            float(np.mean(values)) if values else 0.0
+        )
+        for key, values in hyp_route_stall_penalty_abs.items()
+    }
     return {
         "seed": seed,
         "confirmed": float(scenario.found_survivors[0].sum().item()),
@@ -1145,6 +1353,26 @@ def run_rollout(
         "mean_shadow_astar_progress_m": (
             float(np.mean(shadow_astar_progress_meters)) if shadow_astar_progress_meters else 0.0
         ),
+        "mean_shadow_astar_detour_progress_m": (
+            float(np.mean(shadow_astar_detour_progress_meters)) if shadow_astar_detour_progress_meters else 0.0
+        ),
+        "mean_shadow_astar_clear_progress_m": (
+            float(np.mean(shadow_astar_clear_progress_meters)) if shadow_astar_clear_progress_meters else 0.0
+        ),
+        "mean_shadow_astar_target_progress_m": (
+            float(np.mean(shadow_astar_target_progress_meters)) if shadow_astar_target_progress_meters else 0.0
+        ),
+        "mean_shadow_astar_route_target_gap_m": (
+            float(np.mean(shadow_astar_route_target_gaps_m)) if shadow_astar_route_target_gaps_m else 0.0
+        ),
+        "shadow_astar_route_target_conflict_fraction": (
+            float(np.mean(shadow_astar_route_target_conflicts)) if shadow_astar_route_target_conflicts else 0.0
+        ),
+        "shadow_astar_detour_no_progress_fraction": (
+            float(np.mean(shadow_astar_detour_no_progress)) if shadow_astar_detour_no_progress else 0.0
+        ),
+        **detour_stall_fractions,
+        **hyp_route_stall_penalty_means,
         "time_series": time_series,
     }
 
@@ -1629,7 +1857,9 @@ def main() -> None:
             f"corr={row['mean_motion_correction_m']:.2f}m "
             f"astar_align={row['mean_shadow_astar_movement_alignment']:.3f} "
             f"astar_blocked={row['shadow_astar_direct_blocked_fraction']:.3f} "
-            f"astar_detour={row['shadow_astar_detour_needed_fraction']:.3f}"
+            f"astar_detour={row['shadow_astar_detour_needed_fraction']:.3f} "
+            f"route_stall010={row['shadow_astar_detour_stall_fraction_lt010']:.3f} "
+            f"route_pen002={row['mean_hyp_route_stall_penalty_abs_k002']:.4f}"
         )
 
     print("-" * 72)
@@ -1668,7 +1898,12 @@ def main() -> None:
         f"shadow_astar_blocked={summary['mean_shadow_astar_direct_blocked_fraction']:.3f} "
         f"shadow_astar_detour={summary['mean_shadow_astar_detour_needed_fraction']:.3f} "
         f"shadow_astar_align={summary['mean_shadow_astar_movement_alignment']:.3f} "
-        f"shadow_astar_progress={summary['mean_shadow_astar_progress_m']:.2f}m"
+        f"shadow_astar_progress={summary['mean_shadow_astar_progress_m']:.2f}m "
+        f"detour_progress={summary['mean_shadow_astar_detour_progress_m']:.2f}m "
+        f"detour_no_progress={summary['mean_shadow_astar_detour_no_progress_fraction']:.3f} "
+        f"detour_stall010={summary['mean_shadow_astar_detour_stall_fraction_lt010']:.3f} "
+        f"route_target_conflict={summary['mean_shadow_astar_route_target_conflict_fraction']:.3f} "
+        f"hyp_route_pen002={summary['mean_hyp_route_stall_penalty_abs_k002']:.4f}"
     )
     _print_planner_alignment_table("planner alignment by A* direct-path state:", rows)
     failed_rows = [row for row in rows if row["full_success"] <= 0.0]
