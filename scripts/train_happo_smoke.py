@@ -48,14 +48,23 @@ DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_UAV_DIAG_COVERAGE_OBS_GRID = 6
 DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID = 9
 DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M = 150.0
+DEFAULT_UAV_DIAG_CONFIDENCE_OBS_GRID = 6
 DEFAULT_UAV_FRONTIER_OBS_RADIUS_M = 150.0
+DEFAULT_UAV_DIAG_FRONTIER_OBS_RADIUS_M = 60.0
 DEFAULT_UAV_DIAG_DRONES = 3
-DEFAULT_UAV_DIAG_COVERAGE_REWARD = 20.0
-DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD = 0.001
-DEFAULT_UAV_DIAG_OVERLAP_PENALTY = 0.10
+DEFAULT_UAV_DIAG_COVERAGE_REWARD = 0.0
+DEFAULT_UAV_DIAG_MOVE_COVERAGE_REWARD = 0.0
+DEFAULT_UAV_DIAG_OVERLAP_PENALTY = 0.0
 DEFAULT_UAV_DIAG_OVERLAP_ALLOWED = 0.10
 DEFAULT_UAV_DIAG_OUTSIDE_FOOTPRINT_PENALTY = 0.10
-DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD = 0.10
+DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD = 0.05
+DEFAULT_UAV_DIAG_CONFIDENCE_REWARD = 30.0
+DEFAULT_UAV_DIAG_CONFIDENCE_MOVE_REWARD = 0.10
+DEFAULT_UAV_DIAG_INEFFICIENT_MOVE_PENALTY = 0.01
+DEFAULT_UAV_DIAG_INEFFICIENT_MOVE_SOURCE = "coverage"
+DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_PENALTY = 0.06
+DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD = 0.80
+DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD = 0.10
 DEFAULT_UAV_DIAG_ENTROPY_COEF = 0.05
 DEFAULT_UAV_DIAG_EPISODE_LENGTH = 300
 DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS = 8
@@ -64,9 +73,12 @@ DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M = 150.0
 DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
 DEFAULT_UAV_FRONTIER_MODE = "sector_topk"
+DEFAULT_UAV_DIAG_FRONTIER_MODE = "local_global"
+DEFAULT_UAV_DIAG_FRONTIER_SOURCE = "confidence"
 DEFAULT_UAV_FRONTIER_SECTORS = 8
 DEFAULT_UAV_FRONTIER_TOP_K = 2
 DEFAULT_UAV_FRONTIER_OWNERSHIP = True
+DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE = "fixed_hold"
 
 
 def _resolve_uav_reward_defaults(
@@ -167,23 +179,23 @@ def build_args(
     r_drone_confirm: float = 0.0,
     local_coverage_obs_grid: int | None = None,
     local_coverage_obs_radius_m: float = 150.0,
-    uav_confidence_obs_grid: int = 0,
+    uav_confidence_obs_grid: int | None = None,
     uav_local_confidence_obs_grid: int = 0,
     uav_local_confidence_obs_radius_m: float = 150.0,
     uav_frontier_obs: bool | None = None,
-    uav_frontier_obs_radius_m: float = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
-    uav_frontier_mode: str = DEFAULT_UAV_FRONTIER_MODE,
-    uav_frontier_source: str = "coverage",
+    uav_frontier_obs_radius_m: float | None = None,
+    uav_frontier_mode: str | None = None,
+    uav_frontier_source: str | None = None,
     uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
     uav_frontier_top_k: int = DEFAULT_UAV_FRONTIER_TOP_K,
     uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
-    uav_cleanup_target_obs: bool = False,
+    uav_cleanup_target_obs: bool | None = None,
     uav_cleanup_target_grid: int = 16,
     uav_cleanup_target_hold_steps: int = 15,
     uav_cleanup_target_confidence_threshold: float = 0.80,
     uav_cleanup_target_min_value: float = 0.05,
     uav_cleanup_target_assignment_distance_scale_m: float = 250.0,
-    uav_cleanup_target_refresh_mode: str = "exact",
+    uav_cleanup_target_refresh_mode: str | None = None,
     uav_astar_route_obs: bool = False,
     uav_astar_grid: int = 32,
     uav_astar_confidence_cost_alpha: float = 3.0,
@@ -211,16 +223,16 @@ def build_args(
     uav_coverage_opportunity_reward: float | None = None,
     uav_coverage_opportunity_cap: float = 1.0,
     uav_frontier_alignment_reward: float | None = None,
-    uav_confidence_reward: float = 0.0,
-    uav_confidence_move_reward: float = 0.0,
-    uav_inefficient_move_penalty: float = 0.0,
-    uav_inefficient_move_source: str = "confidence",
-    uav_confidence_overlap_penalty: float = 0.0,
+    uav_confidence_reward: float | None = None,
+    uav_confidence_move_reward: float | None = None,
+    uav_inefficient_move_penalty: float | None = None,
+    uav_inefficient_move_source: str | None = None,
+    uav_confidence_overlap_penalty: float | None = None,
     uav_confidence_overlap_mode: str = "raw",
     uav_confidence_overlap_allowed_regret: float = 0.10,
-    uav_cleanup_target_progress_reward: float = 0.0,
+    uav_cleanup_target_progress_reward: float | None = None,
     uav_astar_progress_reward: float = 0.0,
-    uav_confidence_overlap_threshold: float = 0.65,
+    uav_confidence_overlap_threshold: float | None = None,
     uav_confidence_gamma: float = 2.0,
     uav_confidence_eps: float = 0.05,
     uav_confidence_opportunity_eps: float = 1e-6,
@@ -267,10 +279,36 @@ def build_args(
         if local_coverage_obs_grid is None:
             local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
+        if uav_confidence_obs_grid is None:
+            uav_confidence_obs_grid = DEFAULT_UAV_DIAG_CONFIDENCE_OBS_GRID
         if uav_frontier_obs is None:
             uav_frontier_obs = True
+        if uav_frontier_obs_radius_m is None:
+            uav_frontier_obs_radius_m = DEFAULT_UAV_DIAG_FRONTIER_OBS_RADIUS_M
+        if uav_frontier_mode is None:
+            uav_frontier_mode = DEFAULT_UAV_DIAG_FRONTIER_MODE
+        if uav_frontier_source is None:
+            uav_frontier_source = DEFAULT_UAV_DIAG_FRONTIER_SOURCE
         if uav_frontier_alignment_reward is None:
             uav_frontier_alignment_reward = DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD
+        if uav_cleanup_target_obs is None:
+            uav_cleanup_target_obs = True
+        if uav_cleanup_target_refresh_mode is None:
+            uav_cleanup_target_refresh_mode = DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE
+        if uav_confidence_reward is None:
+            uav_confidence_reward = DEFAULT_UAV_DIAG_CONFIDENCE_REWARD
+        if uav_confidence_move_reward is None:
+            uav_confidence_move_reward = DEFAULT_UAV_DIAG_CONFIDENCE_MOVE_REWARD
+        if uav_inefficient_move_penalty is None:
+            uav_inefficient_move_penalty = DEFAULT_UAV_DIAG_INEFFICIENT_MOVE_PENALTY
+        if uav_inefficient_move_source is None:
+            uav_inefficient_move_source = DEFAULT_UAV_DIAG_INEFFICIENT_MOVE_SOURCE
+        if uav_confidence_overlap_penalty is None:
+            uav_confidence_overlap_penalty = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_PENALTY
+        if uav_confidence_overlap_threshold is None:
+            uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
+        if uav_cleanup_target_progress_reward is None:
+            uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
         if share_param is None:
             share_param = True
         if uav_start_min_separation_m is None:
@@ -281,8 +319,34 @@ def build_args(
             action_transform = "radial_tanh"
     if uav_frontier_obs is None:
         uav_frontier_obs = False
+    if uav_confidence_obs_grid is None:
+        uav_confidence_obs_grid = 0
+    if uav_frontier_obs_radius_m is None:
+        uav_frontier_obs_radius_m = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M
+    if uav_frontier_mode is None:
+        uav_frontier_mode = DEFAULT_UAV_FRONTIER_MODE
+    if uav_frontier_source is None:
+        uav_frontier_source = "coverage"
     if uav_frontier_alignment_reward is None:
         uav_frontier_alignment_reward = 0.0
+    if uav_cleanup_target_obs is None:
+        uav_cleanup_target_obs = False
+    if uav_cleanup_target_refresh_mode is None:
+        uav_cleanup_target_refresh_mode = "exact"
+    if uav_confidence_reward is None:
+        uav_confidence_reward = 0.0
+    if uav_confidence_move_reward is None:
+        uav_confidence_move_reward = 0.0
+    if uav_inefficient_move_penalty is None:
+        uav_inefficient_move_penalty = 0.0
+    if uav_inefficient_move_source is None:
+        uav_inefficient_move_source = "confidence"
+    if uav_confidence_overlap_penalty is None:
+        uav_confidence_overlap_penalty = 0.0
+    if uav_confidence_overlap_threshold is None:
+        uav_confidence_overlap_threshold = 0.65
+    if uav_cleanup_target_progress_reward is None:
+        uav_cleanup_target_progress_reward = 0.0
     if share_param is None:
         share_param = False
     uav_confidence_reward = float(uav_confidence_reward)
@@ -291,6 +355,12 @@ def build_args(
     uav_confidence_move_reward = float(uav_confidence_move_reward)
     if uav_confidence_move_reward < 0.0:
         raise ValueError("uav_confidence_move_reward must be nonnegative")
+    uav_inefficient_move_penalty = float(uav_inefficient_move_penalty)
+    if uav_inefficient_move_penalty < 0.0:
+        raise ValueError("uav_inefficient_move_penalty must be nonnegative")
+    uav_inefficient_move_source = str(uav_inefficient_move_source).replace("-", "_").lower()
+    if uav_inefficient_move_source not in {"coverage", "confidence"}:
+        raise ValueError("uav_inefficient_move_source must be one of: coverage, confidence")
     uav_confidence_overlap_penalty = float(uav_confidence_overlap_penalty)
     if uav_confidence_overlap_penalty < 0.0:
         raise ValueError("uav_confidence_overlap_penalty must be nonnegative")
@@ -975,9 +1045,10 @@ def main():
     p.add_argument("--local-coverage-obs-radius-m", type=float, default=150.0,
                    help="Physical half-width/radius in meters for --local-coverage-obs-grid. "
                         "Example: 150 with K=9 gives bins about 33m wide on a 500m map.")
-    p.add_argument("--uav-confidence-obs-grid", type=int, default=0,
+    p.add_argument("--uav-confidence-obs-grid", type=int, default=None,
                    help="Add a KxK UAV inspection-confidence map + global mean to the observation. "
-                        "0 = off.")
+                        "0 = off; omitted uses the UAV diagnostic default in "
+                        "--uav-survivor-diagnostic mode.")
     p.add_argument("--uav-local-confidence-obs-grid", type=int, default=0,
                    help="Add a pooled KxK ego-centric UAV inspection-confidence map. "
                         "Use an odd value such as 9. 0 = off.")
@@ -989,17 +1060,19 @@ def main():
                         "toward nearby unsearched team-coverage cells.")
     p.add_argument("--uav-no-frontier-obs", dest="uav_frontier_obs", action="store_false",
                    help="Disable UAV frontier observation, overriding UAV diagnostic defaults.")
-    p.add_argument("--uav-frontier-obs-radius-m", type=float, default=DEFAULT_UAV_FRONTIER_OBS_RADIUS_M,
+    p.add_argument("--uav-frontier-obs-radius-m", type=float, default=None,
                    help="Physical radius in meters used for --uav-frontier-obs and frontier-alignment reward.")
     p.add_argument("--uav-frontier-mode", choices=("centroid", "sector_topk", "sector-topk", "local_global", "local-global"),
-                   default=DEFAULT_UAV_FRONTIER_MODE,
+                   default=None,
                    help="Frontier feature/reward mode. centroid is the legacy averaged direction; "
                         "sector_topk uses top-k uncovered sector candidates; local_global exposes "
-                        "one local confidence candidate plus one team-diversified global confidence candidate.")
+                        "one local candidate plus one team-diversified global candidate. Omitted uses "
+                        "the UAV diagnostic default in --uav-survivor-diagnostic mode.")
     p.add_argument("--uav-frontier-source", choices=("coverage", "confidence"),
-                   default="coverage",
+                   default=None,
                    help="Map used to score UAV frontier candidates. coverage uses binary uncovered cells; "
-                        "confidence uses the probabilistic inspection-confidence map.")
+                        "confidence uses the probabilistic inspection-confidence map. Omitted uses the "
+                        "UAV diagnostic default in --uav-survivor-diagnostic mode.")
     p.add_argument("--uav-frontier-sectors", type=int, default=DEFAULT_UAV_FRONTIER_SECTORS,
                    help="Number of angular sectors for --uav-frontier-mode sector_topk.")
     p.add_argument("--uav-frontier-top-k", type=int, default=DEFAULT_UAV_FRONTIER_TOP_K,
@@ -1009,8 +1082,11 @@ def main():
                    help="Ownership-weight sector scores by which UAV is closest to uncovered cells.")
     p.add_argument("--uav-frontier-no-ownership", dest="uav_frontier_ownership", action="store_false",
                    help="Disable ownership weighting for sector-top-k frontier scoring.")
-    p.add_argument("--uav-cleanup-target-obs", action="store_true",
+    p.set_defaults(uav_cleanup_target_obs=None)
+    p.add_argument("--uav-cleanup-target-obs", dest="uav_cleanup_target_obs", action="store_true",
                    help="Append a persistent low-confidence cleanup target observation to each UAV.")
+    p.add_argument("--uav-no-cleanup-target-obs", dest="uav_cleanup_target_obs", action="store_false",
+                   help="Disable persistent cleanup target observation, overriding UAV diagnostic defaults.")
     p.add_argument("--uav-cleanup-target-grid", type=int, default=16,
                    help="Coarse grid size used for persistent UAV cleanup targets.")
     p.add_argument("--uav-cleanup-target-hold-steps", type=int, default=15,
@@ -1021,11 +1097,12 @@ def main():
                    help="Minimum pooled cleanup mass for targetable cleanup cells.")
     p.add_argument("--uav-cleanup-target-assignment-distance-scale-m", type=float, default=250.0,
                    help="Distance scale for greedy cleanup target assignment in meters.")
-    p.add_argument("--uav-cleanup-target-refresh-mode", default="exact",
+    p.add_argument("--uav-cleanup-target-refresh-mode", default=None,
                    choices=("exact", "fixed-hold", "fixed_hold"),
                    help="How held cleanup targets are refreshed. 'exact' recomputes the assigned "
                         "component each step; 'fixed-hold' keeps centroid/value fixed until expiry, "
-                        "reach, or reassignment.")
+                        "reach, or reassignment. Omitted uses the UAV diagnostic default in "
+                        "--uav-survivor-diagnostic mode.")
     p.add_argument("--uav-astar-route-obs", action="store_true",
                    help="Append a 4-scalar A* route observation for UAVs: waypoint direction, "
                         "waypoint distance, and normalized path cost to the cleanup target. "
@@ -1098,22 +1175,24 @@ def main():
     p.add_argument("--uav-frontier-alignment-reward", type=float, default=None,
                    help="Reward scale for clamped progress toward the local uncovered frontier. "
                         "Use with --uav-frontier-obs for the cleanest learning signal.")
-    p.add_argument("--uav-confidence-reward", type=float, default=0.0,
+    p.add_argument("--uav-confidence-reward", type=float, default=None,
                    help="Optional per-UAV reward scale for marginal probabilistic inspection-confidence gain. "
-                        "Default 0 disables this reward.")
-    p.add_argument("--uav-confidence-move-reward", type=float, default=0.0,
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-confidence-move-reward", type=float, default=None,
                    help="Optional per-UAV reward scale for movement that captures a high fraction of the "
-                        "best one-step confidence-gain opportunity. Default 0 disables this reward.")
-    p.add_argument("--uav-inefficient-move-penalty", type=float, default=0.0,
+                        "best one-step confidence-gain opportunity. Omit in UAV diagnostic mode for its "
+                        "default; pass 0 to disable.")
+    p.add_argument("--uav-inefficient-move-penalty", type=float, default=None,
                    help="Optional per-UAV penalty scale for movement that captures little search opportunity. "
-                        "Default 0 disables this penalty.")
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-inefficient-move-source", choices=("coverage", "confidence"),
-                   default="confidence",
+                   default=None,
                    help="Opportunity signal used by --uav-inefficient-move-penalty. "
-                        "confidence uses actual/best confidence gain; coverage uses actual/reachable new cells.")
-    p.add_argument("--uav-confidence-overlap-penalty", type=float, default=0.0,
+                        "confidence uses actual/best confidence gain; coverage uses actual/reachable new cells. "
+                        "Omitted uses the UAV diagnostic default in --uav-survivor-diagnostic mode.")
+    p.add_argument("--uav-confidence-overlap-penalty", type=float, default=None,
                    help="Optional per-UAV penalty scale for flying over medium/high confidence cells. "
-                        "Default 0 disables this penalty.")
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-confidence-overlap-mode",
                    choices=("raw", "opportunity_regret", "opportunity-regret"),
                    default="raw",
@@ -1122,17 +1201,18 @@ def main():
     p.add_argument("--uav-confidence-overlap-allowed-regret", type=float, default=0.10,
                    help="Regret slack for --uav-confidence-overlap-mode opportunity-regret. "
                         "0.10 means no penalty for being within 10%% of the best one-step candidate.")
-    p.add_argument("--uav-cleanup-target-progress-reward", type=float, default=0.0,
+    p.add_argument("--uav-cleanup-target-progress-reward", type=float, default=None,
                    help="Optional per-UAV reward scale for positive progress toward the persistent "
                         "cleanup target, gated off when local frontier opportunity is strong. "
-                        "Default 0 disables this reward.")
+                        "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
     p.add_argument("--uav-astar-progress-reward", type=float, default=0.0,
                    help="Optional per-UAV reward scale for reducing A* route cost toward the "
                         "cleanup target, gated off when local frontier opportunity is strong. "
                         "Default 0 disables this reward.")
-    p.add_argument("--uav-confidence-overlap-threshold", type=float, default=0.65,
+    p.add_argument("--uav-confidence-overlap-threshold", type=float, default=None,
                    help="Confidence value where --uav-confidence-overlap-penalty starts. "
-                        "Cells below this threshold are free; cells at 1.0 receive full penalty.")
+                        "Cells below this threshold are free; cells at 1.0 receive full penalty. "
+                        "Omitted uses the UAV diagnostic default in --uav-survivor-diagnostic mode.")
     p.add_argument("--uav-confidence-gamma", type=float, default=2.0,
                    help="Exponent for weighting confidence reward toward low-confidence cells. "
                         "Higher values focus more strongly on poorly inspected cells.")
@@ -1234,7 +1314,7 @@ def main():
         p.error("--local-coverage-obs-grid must be 0 or a positive odd integer")
     if args.local_coverage_obs_radius_m <= 0.0:
         p.error("--local-coverage-obs-radius-m must be positive")
-    if args.uav_confidence_obs_grid < 0:
+    if args.uav_confidence_obs_grid is not None and args.uav_confidence_obs_grid < 0:
         p.error("--uav-confidence-obs-grid must be nonnegative")
     if args.uav_local_confidence_obs_grid < 0 or (
         args.uav_local_confidence_obs_grid > 0
@@ -1243,14 +1323,16 @@ def main():
         p.error("--uav-local-confidence-obs-grid must be 0 or a positive odd integer")
     if args.uav_local_confidence_obs_radius_m <= 0.0:
         p.error("--uav-local-confidence-obs-radius-m must be positive")
-    if args.uav_frontier_obs_radius_m <= 0.0:
+    if args.uav_frontier_obs_radius_m is not None and args.uav_frontier_obs_radius_m <= 0.0:
         p.error("--uav-frontier-obs-radius-m must be positive")
-    args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
-    if args.uav_frontier_mode not in {"centroid", "sector_topk", "local_global"}:
-        p.error("--uav-frontier-mode must be one of: centroid, sector_topk, local_global")
-    args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
-    if args.uav_frontier_source not in {"coverage", "confidence"}:
-        p.error("--uav-frontier-source must be one of: coverage, confidence")
+    if args.uav_frontier_mode is not None:
+        args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
+        if args.uav_frontier_mode not in {"centroid", "sector_topk", "local_global"}:
+            p.error("--uav-frontier-mode must be one of: centroid, sector_topk, local_global")
+    if args.uav_frontier_source is not None:
+        args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
+        if args.uav_frontier_source not in {"coverage", "confidence"}:
+            p.error("--uav-frontier-source must be one of: coverage, confidence")
     if args.uav_frontier_sectors < 2:
         p.error("--uav-frontier-sectors must be at least 2")
     if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:
@@ -1265,9 +1347,10 @@ def main():
         p.error("--uav-cleanup-target-min-value must be nonnegative")
     if args.uav_cleanup_target_assignment_distance_scale_m <= 0.0:
         p.error("--uav-cleanup-target-assignment-distance-scale-m must be positive")
-    args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
-    if args.uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
-        p.error("--uav-cleanup-target-refresh-mode must be one of: exact, fixed-hold")
+    if args.uav_cleanup_target_refresh_mode is not None:
+        args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
+        if args.uav_cleanup_target_refresh_mode not in {"exact", "fixed_hold"}:
+            p.error("--uav-cleanup-target-refresh-mode must be one of: exact, fixed-hold")
     if args.uav_astar_grid < 2:
         p.error("--uav-astar-grid must be at least 2")
     if args.uav_astar_confidence_cost_alpha < 0.0:
@@ -1319,24 +1402,30 @@ def main():
         p.error("--uav-coverage-opportunity-cap must be nonnegative")
     if args.uav_frontier_alignment_reward is not None and args.uav_frontier_alignment_reward < 0.0:
         p.error("--uav-frontier-alignment-reward must be nonnegative")
-    if args.uav_confidence_reward < 0.0:
+    if args.uav_confidence_reward is not None and args.uav_confidence_reward < 0.0:
         p.error("--uav-confidence-reward must be nonnegative")
-    if args.uav_confidence_move_reward < 0.0:
+    if args.uav_confidence_move_reward is not None and args.uav_confidence_move_reward < 0.0:
         p.error("--uav-confidence-move-reward must be nonnegative")
     if args.uav_astar_progress_reward < 0.0:
         p.error("--uav-astar-progress-reward must be nonnegative")
-    if args.uav_inefficient_move_penalty < 0.0:
+    if args.uav_inefficient_move_penalty is not None and args.uav_inefficient_move_penalty < 0.0:
         p.error("--uav-inefficient-move-penalty must be nonnegative")
-    if args.uav_confidence_overlap_penalty < 0.0:
+    if args.uav_confidence_overlap_penalty is not None and args.uav_confidence_overlap_penalty < 0.0:
         p.error("--uav-confidence-overlap-penalty must be nonnegative")
     args.uav_confidence_overlap_mode = str(args.uav_confidence_overlap_mode).replace("-", "_").lower()
     if args.uav_confidence_overlap_mode not in {"raw", "opportunity_regret"}:
         p.error("--uav-confidence-overlap-mode must be one of: raw, opportunity-regret")
     if not 0.0 <= args.uav_confidence_overlap_allowed_regret <= 1.0:
         p.error("--uav-confidence-overlap-allowed-regret must be in [0, 1]")
-    if args.uav_cleanup_target_progress_reward < 0.0:
+    if (
+        args.uav_cleanup_target_progress_reward is not None
+        and args.uav_cleanup_target_progress_reward < 0.0
+    ):
         p.error("--uav-cleanup-target-progress-reward must be nonnegative")
-    if not 0.0 <= args.uav_confidence_overlap_threshold < 1.0:
+    if (
+        args.uav_confidence_overlap_threshold is not None
+        and not 0.0 <= args.uav_confidence_overlap_threshold < 1.0
+    ):
         p.error("--uav-confidence-overlap-threshold must be in [0, 1)")
     if args.uav_confidence_gamma < 0.0:
         p.error("--uav-confidence-gamma must be nonnegative")
@@ -1408,10 +1497,36 @@ def main():
         if args.local_coverage_obs_grid is None:
             args.local_coverage_obs_grid = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_GRID
             args.local_coverage_obs_radius_m = DEFAULT_UAV_DIAG_LOCAL_COVERAGE_OBS_RADIUS_M
+        if args.uav_confidence_obs_grid is None:
+            args.uav_confidence_obs_grid = DEFAULT_UAV_DIAG_CONFIDENCE_OBS_GRID
         if args.uav_frontier_obs is None:
             args.uav_frontier_obs = True
+        if args.uav_frontier_obs_radius_m is None:
+            args.uav_frontier_obs_radius_m = DEFAULT_UAV_DIAG_FRONTIER_OBS_RADIUS_M
+        if args.uav_frontier_mode is None:
+            args.uav_frontier_mode = DEFAULT_UAV_DIAG_FRONTIER_MODE
+        if args.uav_frontier_source is None:
+            args.uav_frontier_source = DEFAULT_UAV_DIAG_FRONTIER_SOURCE
         if args.uav_frontier_alignment_reward is None:
             args.uav_frontier_alignment_reward = DEFAULT_UAV_DIAG_FRONTIER_ALIGNMENT_REWARD
+        if args.uav_cleanup_target_obs is None:
+            args.uav_cleanup_target_obs = True
+        if args.uav_cleanup_target_refresh_mode is None:
+            args.uav_cleanup_target_refresh_mode = DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE
+        if args.uav_confidence_reward is None:
+            args.uav_confidence_reward = DEFAULT_UAV_DIAG_CONFIDENCE_REWARD
+        if args.uav_confidence_move_reward is None:
+            args.uav_confidence_move_reward = DEFAULT_UAV_DIAG_CONFIDENCE_MOVE_REWARD
+        if args.uav_inefficient_move_penalty is None:
+            args.uav_inefficient_move_penalty = DEFAULT_UAV_DIAG_INEFFICIENT_MOVE_PENALTY
+        if args.uav_inefficient_move_source is None:
+            args.uav_inefficient_move_source = DEFAULT_UAV_DIAG_INEFFICIENT_MOVE_SOURCE
+        if args.uav_confidence_overlap_penalty is None:
+            args.uav_confidence_overlap_penalty = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_PENALTY
+        if args.uav_confidence_overlap_threshold is None:
+            args.uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
+        if args.uav_cleanup_target_progress_reward is None:
+            args.uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
         if args.share_param is None:
             args.share_param = True
         if args.uav_start_min_separation_m is None:
@@ -1424,10 +1539,39 @@ def main():
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
     if args.uav_frontier_obs is None:
         args.uav_frontier_obs = False
+    if args.uav_confidence_obs_grid is None:
+        args.uav_confidence_obs_grid = 0
+    if args.uav_frontier_obs_radius_m is None:
+        args.uav_frontier_obs_radius_m = DEFAULT_UAV_FRONTIER_OBS_RADIUS_M
+    if args.uav_frontier_mode is None:
+        args.uav_frontier_mode = DEFAULT_UAV_FRONTIER_MODE
+    if args.uav_frontier_source is None:
+        args.uav_frontier_source = "coverage"
     if args.uav_frontier_alignment_reward is None:
         args.uav_frontier_alignment_reward = 0.0
+    if args.uav_cleanup_target_obs is None:
+        args.uav_cleanup_target_obs = False
+    if args.uav_cleanup_target_refresh_mode is None:
+        args.uav_cleanup_target_refresh_mode = "exact"
+    if args.uav_confidence_reward is None:
+        args.uav_confidence_reward = 0.0
+    if args.uav_confidence_move_reward is None:
+        args.uav_confidence_move_reward = 0.0
+    if args.uav_inefficient_move_penalty is None:
+        args.uav_inefficient_move_penalty = 0.0
+    if args.uav_inefficient_move_source is None:
+        args.uav_inefficient_move_source = "confidence"
+    if args.uav_confidence_overlap_penalty is None:
+        args.uav_confidence_overlap_penalty = 0.0
+    if args.uav_confidence_overlap_threshold is None:
+        args.uav_confidence_overlap_threshold = 0.65
+    if args.uav_cleanup_target_progress_reward is None:
+        args.uav_cleanup_target_progress_reward = 0.0
     if args.share_param is None:
         args.share_param = False
+    args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
+    args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
+    args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
 
     (
         args.uav_coverage_reward,
