@@ -158,6 +158,45 @@ def _planner_hint_from_observation(
     return planner_vec, direct_blocked
 
 
+def _shadow_astar_hint(
+    scenario: WildfireSearchScenario,
+    pos: torch.Tensor,
+    target_pos: torch.Tensor,
+) -> dict:
+    """Compute the local A* hint without appending it to the actor observation."""
+    out = {
+        "valid": False,
+        "unit": None,
+        "waypoint_pos": None,
+        "waypoint_distance_m": None,
+        "direct_blocked": False,
+        "detour_needed": False,
+    }
+    route = scenario._local_astar_route_for_env(0, pos[0], target_pos[0])
+    if route is None:
+        return out
+    waypoint, direct_blocked, detour_needed = route
+    waypoint_pos = scenario._grid_cell_center_to_world(
+        waypoint,
+        device=pos.device,
+        dtype=pos.dtype,
+    ).view(1, 2)
+    delta = waypoint_pos - pos
+    dist = torch.linalg.norm(delta, dim=-1)
+    if float(dist[0].detach().cpu().item()) <= 1e-9:
+        return out
+    scale = float(scenario.terrain_sim_units_per_meter[0])
+    out.update({
+        "valid": True,
+        "unit": delta / dist.clamp_min(1e-9).unsqueeze(-1),
+        "waypoint_pos": waypoint_pos,
+        "waypoint_distance_m": float(dist[0].detach().cpu().item()) / max(scale, 1e-9),
+        "direct_blocked": bool(direct_blocked),
+        "detour_needed": bool(detour_needed),
+    })
+    return out
+
+
 def _empty_planner_bucket() -> dict:
     return {
         "steps": 0,
@@ -351,6 +390,13 @@ def _new_time_series() -> dict:
         "speed_limit_scale": [],
         "motion_correction_m": [],
         "within_confirm_range": [],
+        "shadow_astar_valid": [],
+        "shadow_astar_direct_blocked": [],
+        "shadow_astar_detour_needed": [],
+        "shadow_astar_waypoint_distance_m": [],
+        "shadow_astar_action_alignment": [],
+        "shadow_astar_movement_alignment": [],
+        "shadow_astar_progress_m": [],
         "reward": {name: [] for name in REWARD_COMPONENTS},
     }
 
@@ -436,6 +482,13 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "speed_limit_scale": _series_at(ts, "speed_limit_scale", i),
                 "motion_correction_m": _series_at(ts, "motion_correction_m", i),
                 "within_confirm_range": _series_at(ts, "within_confirm_range", i),
+                "shadow_astar_valid": _series_at(ts, "shadow_astar_valid", i),
+                "shadow_astar_direct_blocked": _series_at(ts, "shadow_astar_direct_blocked", i),
+                "shadow_astar_detour_needed": _series_at(ts, "shadow_astar_detour_needed", i),
+                "shadow_astar_waypoint_distance_m": _series_at(ts, "shadow_astar_waypoint_distance_m", i),
+                "shadow_astar_action_alignment": _series_at(ts, "shadow_astar_action_alignment", i),
+                "shadow_astar_movement_alignment": _series_at(ts, "shadow_astar_movement_alignment", i),
+                "shadow_astar_progress_m": _series_at(ts, "shadow_astar_progress_m", i),
             }
             for name in REWARD_COMPONENTS:
                 step[f"reward_abs_{name}"] = _series_at(rewards, name, i, absolute=True)
@@ -468,6 +521,13 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "speed_limit_scale",
             "motion_correction_m",
             "within_confirm_range",
+            "shadow_astar_valid",
+            "shadow_astar_direct_blocked",
+            "shadow_astar_detour_needed",
+            "shadow_astar_waypoint_distance_m",
+            "shadow_astar_action_alignment",
+            "shadow_astar_movement_alignment",
+            "shadow_astar_progress_m",
         )
         for key in keys:
             row[key] = _finite_mean(step.get(key) for step in bucket)
@@ -538,6 +598,24 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         ),
         "mean_frac_speed_limited": _finite_mean(row["frac_speed_limited"] for row in rows),
         "mean_motion_correction_m": _finite_mean(row["mean_motion_correction_m"] for row in rows),
+        "mean_shadow_astar_valid_fraction": _finite_mean(
+            row["shadow_astar_valid_fraction"] for row in rows
+        ),
+        "mean_shadow_astar_direct_blocked_fraction": _finite_mean(
+            row["shadow_astar_direct_blocked_fraction"] for row in rows
+        ),
+        "mean_shadow_astar_detour_needed_fraction": _finite_mean(
+            row["shadow_astar_detour_needed_fraction"] for row in rows
+        ),
+        "mean_shadow_astar_action_alignment": _finite_mean(
+            row["mean_shadow_astar_action_alignment"] for row in rows
+        ),
+        "mean_shadow_astar_movement_alignment": _finite_mean(
+            row["mean_shadow_astar_movement_alignment"] for row in rows
+        ),
+        "mean_shadow_astar_progress_m": _finite_mean(
+            row["mean_shadow_astar_progress_m"] for row in rows
+        ),
         "time_bins": _time_bin_summary(rows, bins),
     }
 
@@ -581,7 +659,7 @@ def _plot_ugv_diagnostics(
     import matplotlib.pyplot as plt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(4, 3, figsize=(15, 17), constrained_layout=True)
+    fig, axes = plt.subplots(5, 3, figsize=(15, 21), constrained_layout=True)
     axes = axes.reshape(-1)
 
     ax = axes[0]
@@ -684,6 +762,47 @@ def _plot_ugv_diagnostics(
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=7, ncol=2)
 
+    ax = axes[12]
+    shadow_metrics = [
+        ("valid", "shadow_astar_valid_fraction"),
+        ("direct blocked", "shadow_astar_direct_blocked_fraction"),
+        ("detour", "shadow_astar_detour_needed_fraction"),
+    ]
+    ax.bar(
+        [label for label, _ in shadow_metrics],
+        [_finite_mean(row.get(key) for row in rows) for _, key in shadow_metrics],
+        color="#6366f1",
+        alpha=0.75,
+    )
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title("Shadow A* Route State")
+    ax.set_ylabel("fraction")
+
+    _plot_hist_by_success(
+        axes[13],
+        rows,
+        "mean_shadow_astar_movement_alignment",
+        "Movement vs Shadow A*",
+        "cosine",
+    )
+
+    ax = axes[14]
+    ax.plot(x, [b["shadow_astar_action_alignment"] for b in bins], marker="o", label="action align", color="#2563eb")
+    ax.plot(x, [b["shadow_astar_movement_alignment"] for b in bins], marker="o", label="move align", color="#16a34a")
+    ax.plot(x, [b["shadow_astar_progress_m"] for b in bins], marker="o", label="progress m", color="#0f766e")
+    ax.set_title("Time-Bin Shadow A*")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("cosine or m/step")
+    ax2 = ax.twinx()
+    ax2.plot(x, [b["shadow_astar_valid"] for b in bins], marker="o", label="valid", color="#64748b")
+    ax2.plot(x, [b["shadow_astar_direct_blocked"] for b in bins], marker="o", label="direct blocked", color="#ef4444")
+    ax2.plot(x, [b["shadow_astar_detour_needed"] for b in bins], marker="o", label="detour", color="#f97316")
+    ax2.set_ylabel("fraction")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=7, ncol=2)
+
     fig.suptitle(
         f"UGV HAPPO Diagnostics ({'deterministic' if deterministic else 'stochastic'}, n={len(rows)})",
         fontsize=15,
@@ -692,7 +811,14 @@ def _plot_ugv_diagnostics(
     plt.close(fig)
 
 
-def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, deterministic: bool) -> dict:
+def run_rollout(
+    checkpoint_dir: Path,
+    scenario_kwargs: dict,
+    seed: int,
+    deterministic: bool,
+    *,
+    shadow_planner: bool = True,
+) -> dict:
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
@@ -733,7 +859,21 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         "clear": _empty_planner_bucket(),
         "blocked": _empty_planner_bucket(),
     }
+    shadow_planner_buckets = {
+        "all": _empty_planner_bucket(),
+        "clear": _empty_planner_bucket(),
+        "blocked": _empty_planner_bucket(),
+        "detour": _empty_planner_bucket(),
+    }
     planner_total_steps = 0
+    shadow_planner_total_steps = 0
+    shadow_astar_valid: list[bool] = []
+    shadow_astar_direct_blocked: list[bool] = []
+    shadow_astar_detour_needed: list[bool] = []
+    shadow_astar_waypoint_distances_m: list[float] = []
+    shadow_astar_action_alignments: list[float] = []
+    shadow_astar_movement_alignments: list[float] = []
+    shadow_astar_progress_meters: list[float] = []
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     max_steps = int(scenario_kwargs["max_steps"])
     time_series = _new_time_series()
@@ -743,6 +883,7 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
         dist_before_m = _distance_m(scenario, pos_before, survivor_before)
+        shadow_hint = _shadow_astar_hint(scenario, pos_before, survivor_before) if shadow_planner else None
         dist, obs_before = _actor_distribution(policy, env, agent_idx=0, return_obs=True)
         planner_hint = _planner_hint_from_observation(scenario, obs_before)
         raw_mean = dist.mean.detach().cpu().numpy()
@@ -761,6 +902,9 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         if planner_hint is not None:
             planner_vec, direct_blocked = planner_hint
             action_planner_alignment = _cosine_alignment(actions[0], planner_vec)
+        action_shadow_alignment = None
+        if shadow_hint and shadow_hint["valid"]:
+            action_shadow_alignment = _cosine_alignment(actions[0], shadow_hint["unit"])
         action_norm = float(torch.linalg.norm(actions[0], dim=-1)[0])
         action_norms.append(action_norm)
         saturated = bool((actions[0].abs() >= 0.98).any().item())
@@ -801,6 +945,57 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         displacement_m = _distance_sim_to_m(scenario, torch.linalg.norm(displacement, dim=-1))
         displacement_meters.append(displacement_m)
         dist_after_m = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+        shadow_movement_alignment = None
+        shadow_progress_m = None
+        shadow_valid = bool(shadow_hint and shadow_hint["valid"])
+        shadow_direct_blocked = bool(shadow_hint["direct_blocked"]) if shadow_valid else False
+        shadow_detour_needed = bool(shadow_hint["detour_needed"]) if shadow_valid else False
+        shadow_waypoint_distance_m = (
+            float(shadow_hint["waypoint_distance_m"])
+            if shadow_valid and shadow_hint["waypoint_distance_m"] is not None
+            else None
+        )
+        if shadow_valid:
+            shadow_movement_alignment = _cosine_alignment(displacement, shadow_hint["unit"])
+            scale = float(scenario.terrain_sim_units_per_meter[0])
+            waypoint_pos = shadow_hint["waypoint_pos"]
+            before_wp_m = float(torch.linalg.norm(waypoint_pos - pos_before, dim=-1)[0].detach().cpu().item()) / max(scale, 1e-9)
+            after_wp_m = float(torch.linalg.norm(waypoint_pos - ground.state.pos, dim=-1)[0].detach().cpu().item()) / max(scale, 1e-9)
+            shadow_progress_m = before_wp_m - after_wp_m
+            shadow_astar_valid.append(True)
+            shadow_astar_direct_blocked.append(shadow_direct_blocked)
+            shadow_astar_detour_needed.append(shadow_detour_needed)
+            if shadow_waypoint_distance_m is not None:
+                shadow_astar_waypoint_distances_m.append(shadow_waypoint_distance_m)
+            if action_shadow_alignment is not None:
+                shadow_astar_action_alignments.append(action_shadow_alignment)
+            if shadow_movement_alignment is not None:
+                shadow_astar_movement_alignments.append(shadow_movement_alignment)
+            shadow_astar_progress_meters.append(shadow_progress_m)
+            shadow_planner_total_steps += 1
+            speed_mps = displacement_m / step_seconds
+            for bucket_name in ("all", "blocked" if shadow_direct_blocked else "clear"):
+                _record_planner_bucket(
+                    shadow_planner_buckets[bucket_name],
+                    action_target=action_target_alignment,
+                    movement_target=disp_alignment,
+                    action_planner=action_shadow_alignment,
+                    movement_planner=shadow_movement_alignment,
+                    speed_mps=speed_mps,
+                )
+            if shadow_detour_needed:
+                _record_planner_bucket(
+                    shadow_planner_buckets["detour"],
+                    action_target=action_target_alignment,
+                    movement_target=disp_alignment,
+                    action_planner=action_shadow_alignment,
+                    movement_planner=shadow_movement_alignment,
+                    speed_mps=speed_mps,
+                )
+        else:
+            shadow_astar_valid.append(False)
+            shadow_astar_direct_blocked.append(False)
+            shadow_astar_detour_needed.append(False)
         reward_components = _reward_components(scenario)
         time_series["step"].append(step)
         time_series["episode_fraction"].append((step + 1) / max_steps)
@@ -824,6 +1019,13 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         time_series["within_confirm_range"].append(
             _metric_scalar(scenario, "metric_ugv_within_confirm_range")
         )
+        time_series["shadow_astar_valid"].append(float(shadow_valid))
+        time_series["shadow_astar_direct_blocked"].append(float(shadow_direct_blocked))
+        time_series["shadow_astar_detour_needed"].append(float(shadow_detour_needed))
+        _append_optional(time_series["shadow_astar_waypoint_distance_m"], shadow_waypoint_distance_m)
+        _append_optional(time_series["shadow_astar_action_alignment"], action_shadow_alignment)
+        _append_optional(time_series["shadow_astar_movement_alignment"], shadow_movement_alignment)
+        _append_optional(time_series["shadow_astar_progress_m"], shadow_progress_m)
         for name in REWARD_COMPONENTS:
             time_series["reward"][name].append(reward_components.get(name, 0.0))
         if planner_hint is not None:
@@ -916,6 +1118,29 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         "mean_motion_correction_m": float(np.mean(motion_corrections_m)) if motion_corrections_m else 0.0,
         "planner_total_steps": planner_total_steps,
         "planner_buckets": planner_buckets,
+        "shadow_planner_total_steps": shadow_planner_total_steps,
+        "shadow_planner_buckets": shadow_planner_buckets,
+        "shadow_astar_valid_fraction": (
+            float(np.mean(shadow_astar_valid)) if shadow_astar_valid else 0.0
+        ),
+        "shadow_astar_direct_blocked_fraction": (
+            float(np.mean(shadow_astar_direct_blocked)) if shadow_astar_direct_blocked else 0.0
+        ),
+        "shadow_astar_detour_needed_fraction": (
+            float(np.mean(shadow_astar_detour_needed)) if shadow_astar_detour_needed else 0.0
+        ),
+        "mean_shadow_astar_waypoint_distance_m": (
+            float(np.mean(shadow_astar_waypoint_distances_m)) if shadow_astar_waypoint_distances_m else 0.0
+        ),
+        "mean_shadow_astar_action_alignment": (
+            float(np.mean(shadow_astar_action_alignments)) if shadow_astar_action_alignments else 0.0
+        ),
+        "mean_shadow_astar_movement_alignment": (
+            float(np.mean(shadow_astar_movement_alignments)) if shadow_astar_movement_alignments else 0.0
+        ),
+        "mean_shadow_astar_progress_m": (
+            float(np.mean(shadow_astar_progress_meters)) if shadow_astar_progress_meters else 0.0
+        ),
         "time_series": time_series,
     }
 
@@ -1163,24 +1388,38 @@ def _fmt_optional(value: float | None, width: int = 6, precision: int = 3) -> st
     return f"{value:{width}.{precision}f}"
 
 
-def _aggregate_planner_buckets(rows: list[dict]) -> tuple[int, dict]:
-    buckets = {
-        "all": _empty_planner_bucket(),
-        "clear": _empty_planner_bucket(),
-        "blocked": _empty_planner_bucket(),
-    }
+def _aggregate_planner_buckets(
+    rows: list[dict],
+    *,
+    buckets_key: str = "planner_buckets",
+    total_steps_key: str = "planner_total_steps",
+    bucket_names: tuple[str, ...] = ("all", "clear", "blocked"),
+) -> tuple[int, dict]:
+    buckets = {name: _empty_planner_bucket() for name in bucket_names}
     total_steps = 0
     for row in rows:
-        total_steps += int(row.get("planner_total_steps", 0))
-        row_buckets = row.get("planner_buckets", {})
+        total_steps += int(row.get(total_steps_key, 0))
+        row_buckets = row.get(buckets_key, {})
         for name in buckets:
             if name in row_buckets:
                 _merge_planner_bucket(buckets[name], row_buckets[name])
     return total_steps, buckets
 
 
-def _print_planner_alignment_table(title: str, rows: list[dict]) -> None:
-    total_steps, buckets = _aggregate_planner_buckets(rows)
+def _print_planner_alignment_table(
+    title: str,
+    rows: list[dict],
+    *,
+    buckets_key: str = "planner_buckets",
+    total_steps_key: str = "planner_total_steps",
+    labels: tuple[tuple[str, str], ...] = (("all", "all"), ("clear", "clear"), ("blocked", "blocked")),
+) -> None:
+    total_steps, buckets = _aggregate_planner_buckets(
+        rows,
+        buckets_key=buckets_key,
+        total_steps_key=total_steps_key,
+        bucket_names=tuple(name for name, _ in labels),
+    )
     valid_steps = int(buckets["all"]["steps"])
     if total_steps <= 0 or valid_steps <= 0:
         return
@@ -1191,7 +1430,7 @@ def _print_planner_alignment_table(title: str, rows: list[dict]) -> None:
         "condition  frac_steps steps act_target move_target act_astar "
         "move_astar speed"
     )
-    for name, label in (("all", "all"), ("clear", "clear"), ("blocked", "blocked")):
+    for name, label in labels:
         bucket = buckets[name]
         steps = int(bucket["steps"])
         frac = steps / valid_steps if valid_steps else 0.0
@@ -1311,6 +1550,8 @@ def main() -> None:
                         help="Optional path to write structured diagnostic rows and summary.")
     parser.add_argument("--plots-output", default=None,
                         help="Optional path to write diagnostic distribution/time-bin plots.")
+    parser.add_argument("--shadow-ugv-planner", action=argparse.BooleanOptionalAction, default=True,
+                        help="Compute local A* diagnostics without changing the actor observation.")
     args = parser.parse_args()
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
@@ -1337,10 +1578,17 @@ def main() -> None:
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
         f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)}"
     )
+    print(f"shadow_ugv_planner: {bool(args.shadow_ugv_planner)}")
     print("-" * 72)
 
     rows = [
-        run_rollout(checkpoint_dir, scenario_kwargs, seed, deterministic=not args.stochastic)
+        run_rollout(
+            checkpoint_dir,
+            scenario_kwargs,
+            seed,
+            deterministic=not args.stochastic,
+            shadow_planner=bool(args.shadow_ugv_planner),
+        )
         for seed in args.seeds
     ]
     summary = _summarize_rows(rows, args.time_bins)
@@ -1363,7 +1611,10 @@ def main() -> None:
             f"raw_oob={row['frac_raw_mean_oob']:.3f} "
             f"blocked={row['frac_proposed_path_blocked']:.3f} "
             f"speedlim={row['frac_speed_limited']:.3f} "
-            f"corr={row['mean_motion_correction_m']:.2f}m"
+            f"corr={row['mean_motion_correction_m']:.2f}m "
+            f"astar_align={row['mean_shadow_astar_movement_alignment']:.3f} "
+            f"astar_blocked={row['shadow_astar_direct_blocked_fraction']:.3f} "
+            f"astar_detour={row['shadow_astar_detour_needed_fraction']:.3f}"
         )
 
     print("-" * 72)
@@ -1397,12 +1648,32 @@ def main() -> None:
         f"proposed_move={np.mean([r['mean_proposed_displacement_m'] for r in rows]):.2f}m "
         f"corrected_move={np.mean([r['mean_corrected_displacement_m'] for r in rows]):.2f}m "
         f"actual_move={np.mean([r['mean_actual_displacement_m'] for r in rows]):.2f}m "
-        f"correction={np.mean([r['mean_motion_correction_m'] for r in rows]):.2f}m"
+        f"correction={np.mean([r['mean_motion_correction_m'] for r in rows]):.2f}m "
+        f"shadow_astar_valid={summary['mean_shadow_astar_valid_fraction']:.3f} "
+        f"shadow_astar_blocked={summary['mean_shadow_astar_direct_blocked_fraction']:.3f} "
+        f"shadow_astar_detour={summary['mean_shadow_astar_detour_needed_fraction']:.3f} "
+        f"shadow_astar_align={summary['mean_shadow_astar_movement_alignment']:.3f} "
+        f"shadow_astar_progress={summary['mean_shadow_astar_progress_m']:.2f}m"
     )
     _print_planner_alignment_table("planner alignment by A* direct-path state:", rows)
     failed_rows = [row for row in rows if row["full_success"] <= 0.0]
     if failed_rows:
         _print_planner_alignment_table("planner alignment by A* direct-path state, failures only:", failed_rows)
+    _print_planner_alignment_table(
+        "shadow A* alignment by local route state:",
+        rows,
+        buckets_key="shadow_planner_buckets",
+        total_steps_key="shadow_planner_total_steps",
+        labels=(("all", "all"), ("clear", "clear"), ("blocked", "blocked"), ("detour", "detour")),
+    )
+    if failed_rows:
+        _print_planner_alignment_table(
+            "shadow A* alignment by local route state, failures only:",
+            failed_rows,
+            buckets_key="shadow_planner_buckets",
+            total_steps_key="shadow_planner_total_steps",
+            labels=(("all", "all"), ("clear", "clear"), ("blocked", "blocked"), ("detour", "detour")),
+        )
 
     print("-" * 72)
     print("fixed-command one-step motion probe:")
@@ -1453,6 +1724,7 @@ def main() -> None:
             "deterministic": not args.stochastic,
             "steps": int(args.steps),
             "seeds": list(args.seeds),
+            "shadow_ugv_planner": bool(args.shadow_ugv_planner),
             "scenario_kwargs": scenario_kwargs,
             "summary": summary,
             "rows": rows,
