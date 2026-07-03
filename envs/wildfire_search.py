@@ -23,6 +23,7 @@ import heapq
 import math
 from typing import Callable, Dict, List
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -1007,6 +1008,8 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_frontier_feature_cache = {}
         self._uav_cleanup_target_geometry_cache = {}
         self._uav_terrain_cache_version = 0
+        self._ugv_planner_route_cache: dict[tuple, tuple[tuple[int, int], bool, bool] | None] = {}
+        self._ugv_planner_terrain_cache_version = 0
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.step_ugv_proposed_path_blocked = torch.zeros(
             batch_dim, self.n_ground, dtype=torch.bool, device=device,
@@ -1489,6 +1492,7 @@ class WildfireSearchScenario(BaseScenario):
                 self._seed_initial_fire(b, H, W)
             self._initialize_known_survivors_at_reset(b)
         self._invalidate_uav_terrain_caches()
+        self._invalidate_ugv_planner_route_cache(env_index, terrain_changed=True)
 
         drone_agents = self.world.agents[:self.n_drones]
         if drone_agents:
@@ -2247,6 +2251,7 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_intensity_grid,
             torch.zeros_like(self.fire_intensity_grid),
         )
+        self._invalidate_ugv_planner_route_cache(terrain_changed=True)
 
     def _directional_fire_exposure(self) -> Tensor:
         """Directional source exposure from burning cells into neighboring cells."""
@@ -3402,6 +3407,28 @@ class WildfireSearchScenario(BaseScenario):
             self._uav_land_cover_factor_cache.clear()
         self._uav_terrain_cache_version = getattr(self, "_uav_terrain_cache_version", 0) + 1
         self._invalidate_uav_runtime_caches()
+
+    def _invalidate_ugv_planner_route_cache(
+        self,
+        env_index: int | None = None,
+        *,
+        terrain_changed: bool = False,
+    ) -> None:
+        if not hasattr(self, "_ugv_planner_route_cache"):
+            self._ugv_planner_route_cache = {}
+        if terrain_changed:
+            self._ugv_planner_terrain_cache_version = (
+                getattr(self, "_ugv_planner_terrain_cache_version", 0) + 1
+            )
+        if env_index is None:
+            self._ugv_planner_route_cache.clear()
+            return
+        env_index = int(env_index)
+        self._ugv_planner_route_cache = {
+            key: value
+            for key, value in self._ugv_planner_route_cache.items()
+            if key[0] != env_index
+        }
 
     def _uav_grid_geometry(self, device: torch.device, dtype: torch.dtype) -> tuple:
         if not hasattr(self, "_uav_grid_geometry_cache"):
@@ -6360,10 +6387,12 @@ class WildfireSearchScenario(BaseScenario):
             return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
         if self.ugv_planner_hint != "local_astar":
             raise RuntimeError(f"unsupported ugv_planner_hint: {self.ugv_planner_hint!r}")
+        agent_idx = self.world.agents.index(agent)
+        if agent_idx == self.n_drones:
+            self._invalidate_ugv_planner_route_cache()
         if agent.is_drone or self.n_survivors == 0:
             return torch.zeros(self.world.batch_dim, UGV_PLANNER_HINT_DIM, device=agent.state.pos.device)
 
-        agent_idx = self.world.agents.index(agent)
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
         targetable = local_known & ~local_confirmed
@@ -6384,15 +6413,27 @@ class WildfireSearchScenario(BaseScenario):
                 continue
             out[env_index] = self._local_astar_hint_for_env(
                 env_index,
+                agent_idx - self.n_drones,
                 agent.state.pos[env_index],
                 target_pos[env_index],
             )
         return out
 
-    def _local_astar_hint_for_env(self, env_index: int, pos: Tensor, target_pos: Tensor) -> Tensor:
+    def _local_astar_hint_for_env(
+        self,
+        env_index: int,
+        ground_index: int | None,
+        pos: Tensor,
+        target_pos: Tensor,
+    ) -> Tensor:
         device = pos.device
         hint = torch.zeros(UGV_PLANNER_HINT_DIM, device=device)
-        route = self._local_astar_route_for_env(env_index, pos, target_pos)
+        route = self._local_astar_route_for_env(
+            env_index,
+            pos,
+            target_pos,
+            ground_index=ground_index,
+        )
         if route is None:
             return hint
         waypoint, direct_blocked, _detour_needed = route
@@ -6422,11 +6463,56 @@ class WildfireSearchScenario(BaseScenario):
         env_index: int,
         pos: Tensor,
         target_pos: Tensor,
+        *,
+        ground_index: int | None = None,
+    ) -> tuple[tuple[int, int], bool, bool] | None:
+        pos_cell = self._single_position_to_grid_cell(pos)
+        target_cell = self._single_position_to_grid_cell(target_pos)
+        if ground_index is None:
+            return self._local_astar_route_uncached_for_env(
+                env_index,
+                pos,
+                target_pos,
+                pos_cell=pos_cell,
+                target_cell=target_cell,
+            )
+
+        key = (
+            int(env_index),
+            int(ground_index),
+            int(pos_cell[0]),
+            int(pos_cell[1]),
+            int(target_cell[0]),
+            int(target_cell[1]),
+            int(self.ugv_planner_patch_size),
+            int(self.ugv_planner_lookahead_cells),
+            int(getattr(self, "_ugv_planner_terrain_cache_version", 0)),
+        )
+        if not hasattr(self, "_ugv_planner_route_cache"):
+            self._ugv_planner_route_cache = {}
+        if key not in self._ugv_planner_route_cache:
+            self._ugv_planner_route_cache[key] = self._local_astar_route_uncached_for_env(
+                env_index,
+                pos,
+                target_pos,
+                pos_cell=pos_cell,
+                target_cell=target_cell,
+            )
+        return self._ugv_planner_route_cache[key]
+
+    def _local_astar_route_uncached_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        pos_cell: tuple[int, int] | None = None,
+        target_cell: tuple[int, int] | None = None,
     ) -> tuple[tuple[int, int], bool, bool] | None:
         patch_size = self.ugv_planner_patch_size
         radius = patch_size // 2
-        pos_cell = self._single_position_to_grid_cell(pos)
-        target_cell = self._single_position_to_grid_cell(target_pos)
+        pos_cell = pos_cell if pos_cell is not None else self._single_position_to_grid_cell(pos)
+        target_cell = target_cell if target_cell is not None else self._single_position_to_grid_cell(target_pos)
         sx, sy = pos_cell
         x0 = max(0, sx - radius)
         x1 = min(self.fire_grid_size - 1, sx + radius)
@@ -6434,15 +6520,273 @@ class WildfireSearchScenario(BaseScenario):
         y1 = min(self.fire_grid_size - 1, sy + radius)
         bounds = (x0, x1, y0, y1)
 
-        start = self._nearest_traversable_cell_in_bounds(env_index, sx, sy, bounds)
+        traversable_patch = (
+            self.traversable_grid[env_index, y0 : y1 + 1, x0 : x1 + 1]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(bool, copy=False)
+        )
+        movement_cost_patch = (
+            self.mobility_cost_grid[env_index, y0 : y1 + 1, x0 : x1 + 1]
+            + self.fire_grid[env_index, y0 : y1 + 1, x0 : x1 + 1].float() * 25.0
+        ).detach().cpu().numpy()
+
+        def in_bounds(cell: tuple[int, int]) -> bool:
+            x, y = cell
+            return x0 <= x <= x1 and y0 <= y <= y1
+
+        def local(cell: tuple[int, int]) -> tuple[int, int]:
+            x, y = cell
+            return x - x0, y - y0
+
+        def traversable_at(cell: tuple[int, int]) -> bool:
+            if not in_bounds(cell):
+                return False
+            lx, ly = local(cell)
+            return bool(traversable_patch[ly, lx])
+
+        def cost_at(cell: tuple[int, int]) -> float:
+            lx, ly = local(cell)
+            return float(movement_cost_patch[ly, lx])
+
+        def open_cell(cell: tuple[int, int]) -> bool:
+            if not traversable_at(cell):
+                return False
+            return math.isfinite(cost_at(cell))
+
+        def nearest_traversable_cell(gx: int, gy: int) -> tuple[int, int] | None:
+            gx_clamped = max(x0, min(x1, gx))
+            gy_clamped = max(y0, min(y1, gy))
+            if traversable_at((gx_clamped, gy_clamped)):
+                return gx_clamped, gy_clamped
+            max_radius = max(x1 - x0, y1 - y0)
+            for search_radius in range(1, max_radius + 1):
+                candidates = []
+                cy0, cy1 = max(y0, gy_clamped - search_radius), min(y1, gy_clamped + search_radius)
+                cx0, cx1 = max(x0, gx_clamped - search_radius), min(x1, gx_clamped + search_radius)
+                for y in range(cy0, cy1 + 1):
+                    candidates.extend(((cx0, y), (cx1, y)))
+                for x in range(cx0 + 1, cx1):
+                    candidates.extend(((x, cy0), (x, cy1)))
+                valid = [(x, y) for x, y in candidates if traversable_at((x, y))]
+                if valid:
+                    return min(
+                        valid,
+                        key=lambda cell: (cell[0] - gx_clamped) ** 2 + (cell[1] - gy_clamped) ** 2,
+                    )
+            return None
+
+        def local_planner_goal_candidates(
+            start: tuple[int, int],
+            target: tuple[int, int],
+        ) -> list[tuple[int, int]]:
+            tx, ty = target
+            if x0 <= tx <= x1 and y0 <= ty <= y1:
+                nearest = nearest_traversable_cell(tx, ty)
+                return [] if nearest is None else [nearest]
+
+            start_x, start_y = start
+            dir_x = float(tx - start_x)
+            dir_y = float(ty - start_y)
+            dir_norm = max(math.hypot(dir_x, dir_y), 1e-9)
+            dir_x /= dir_norm
+            dir_y /= dir_norm
+            boundary = []
+            interior = []
+            for y in range(y0, y1 + 1):
+                for x in range(x0, x1 + 1):
+                    if not traversable_at((x, y)) or (x, y) == start:
+                        continue
+                    dx = x - start_x
+                    dy = y - start_y
+                    projection = dx * dir_x + dy * dir_y
+                    lateral = abs(dx * dir_y - dy * dir_x)
+                    score = projection - 0.05 * lateral
+                    item = (score, (x, y))
+                    if x in (x0, x1) or y in (y0, y1):
+                        boundary.append(item)
+                    else:
+                        interior.append(item)
+            ordered = sorted(boundary or interior, key=lambda item: item[0], reverse=True)
+            return [cell for _, cell in ordered]
+
+        def grid_segment_cells(
+            start: tuple[int, int],
+            end: tuple[int, int],
+        ) -> list[tuple[int, int]]:
+            start_x, start_y = start
+            end_x, end_y = end
+            steps = max(abs(end_x - start_x), abs(end_y - start_y))
+            if steps == 0:
+                return [start]
+            cells = []
+            previous: tuple[int, int] | None = None
+            for i in range(steps + 1):
+                x = int(round(start_x + (end_x - start_x) * i / steps))
+                y = int(round(start_y + (end_y - start_y) * i / steps))
+                cell = (x, y)
+                if cell != previous:
+                    cells.append(cell)
+                    previous = cell
+            return cells
+
+        def segment_is_traversable(
+            start: tuple[int, int],
+            end: tuple[int, int],
+        ) -> bool:
+            cells = grid_segment_cells(start, end)
+            previous = cells[0]
+            if not traversable_at(previous):
+                return False
+            for cell in cells[1:]:
+                x, y = cell
+                px, py = previous
+                if not traversable_at(cell):
+                    return False
+                if x != px and y != py:
+                    if not traversable_at((px, y)) or not traversable_at((x, py)):
+                        return False
+                previous = cell
+            return True
+
+        def grid_path_cost(path: list[tuple[int, int]]) -> float:
+            if len(path) < 2:
+                return 0.0
+            total = 0.0
+            for (path_x0, path_y0), (path_x1, path_y1) in zip(path[:-1], path[1:]):
+                if (
+                    not traversable_at((path_x0, path_y0))
+                    or not traversable_at((path_x1, path_y1))
+                ):
+                    return float("inf")
+                if path_x0 != path_x1 and path_y0 != path_y1:
+                    if (
+                        not traversable_at((path_x0, path_y1))
+                        or not traversable_at((path_x1, path_y0))
+                    ):
+                        return float("inf")
+                    step_len = math.sqrt(2.0)
+                else:
+                    step_len = 1.0
+                c0 = cost_at((path_x0, path_y0))
+                c1 = cost_at((path_x1, path_y1))
+                if not math.isfinite(c0) or not math.isfinite(c1):
+                    return float("inf")
+                total += step_len * (c0 + c1) * 0.5
+            return total
+
+        def local_astar_grid_path(
+            start: tuple[int, int],
+            goal: tuple[int, int],
+        ) -> list[tuple[int, int]]:
+            if start == goal:
+                return [start]
+            if not open_cell(start) or not open_cell(goal):
+                return []
+            finite_open_cost = movement_cost_patch[
+                traversable_patch & np.isfinite(movement_cost_patch)
+            ]
+            if finite_open_cost.size == 0:
+                return []
+            min_cost = float(finite_open_cost.min())
+            min_cost = max(min_cost, 1e-6)
+
+            def heuristic(cell: tuple[int, int]) -> float:
+                return math.hypot(goal[0] - cell[0], goal[1] - cell[1]) * min_cost
+
+            open_heap = [(heuristic(start), 0.0, start)]
+            came_from: dict[tuple[int, int], tuple[int, int]] = {}
+            best_cost = {start: 0.0}
+            neighbor_offsets = (
+                (-1, 0, 1.0),
+                (1, 0, 1.0),
+                (0, -1, 1.0),
+                (0, 1, 1.0),
+                (-1, -1, math.sqrt(2.0)),
+                (-1, 1, math.sqrt(2.0)),
+                (1, -1, math.sqrt(2.0)),
+                (1, 1, math.sqrt(2.0)),
+            )
+            while open_heap:
+                _, cost_so_far, current = heapq.heappop(open_heap)
+                if current == goal:
+                    return self._reconstruct_grid_path(came_from, current)
+                if cost_so_far > best_cost.get(current, float("inf")) + 1e-9:
+                    continue
+                current_x, current_y = current
+                for ox, oy, step_len in neighbor_offsets:
+                    nxt = (current_x + ox, current_y + oy)
+                    if not open_cell(nxt):
+                        continue
+                    if ox != 0 and oy != 0 and (
+                        not open_cell((current_x + ox, current_y))
+                        or not open_cell((current_x, current_y + oy))
+                    ):
+                        continue
+                    nx, ny = nxt
+                    edge_cost = step_len * (
+                        cost_at((current_x, current_y)) + cost_at((nx, ny))
+                    ) * 0.5
+                    new_cost = cost_so_far + edge_cost
+                    if new_cost < best_cost.get(nxt, float("inf")):
+                        best_cost[nxt] = new_cost
+                        came_from[nxt] = current
+                        heapq.heappush(open_heap, (new_cost + heuristic(nxt), new_cost, nxt))
+            return []
+
+        def route_lookahead_cell(path: list[tuple[int, int]]) -> tuple[int, int]:
+            start = path[0]
+            best = path[min(1, len(path) - 1)]
+            stop = min(self.ugv_planner_lookahead_cells, len(path) - 1)
+            for idx in range(2, stop + 1):
+                candidate = path[idx]
+                if not segment_is_traversable(start, candidate):
+                    break
+                best = candidate
+            return best
+
+        def local_astar_detour_needed(
+            start: tuple[int, int],
+            goal: tuple[int, int],
+            waypoint: tuple[int, int],
+            path: list[tuple[int, int]],
+            direct_blocked: bool,
+        ) -> bool:
+            if direct_blocked:
+                return True
+            start_x, start_y = start
+            goal_x, goal_y = goal
+            waypoint_x, waypoint_y = waypoint
+            direct_vec = (goal_x - start_x, goal_y - start_y)
+            waypoint_vec = (waypoint_x - start_x, waypoint_y - start_y)
+            direct_norm = math.hypot(*direct_vec)
+            waypoint_norm = math.hypot(*waypoint_vec)
+            direction_detour = False
+            if direct_norm > 1e-9 and waypoint_norm > 1e-9:
+                cos_to_goal = (
+                    direct_vec[0] * waypoint_vec[0] + direct_vec[1] * waypoint_vec[1]
+                ) / (direct_norm * waypoint_norm)
+                direction_detour = cos_to_goal < math.cos(math.radians(30.0))
+
+            direct_cells = grid_segment_cells(start, goal)
+            direct_cost = grid_path_cost(direct_cells)
+            astar_cost = grid_path_cost(path)
+            cost_detour = (
+                math.isfinite(direct_cost)
+                and math.isfinite(astar_cost)
+                and astar_cost > 1e-9
+                and direct_cost > astar_cost * 1.25
+            )
+            return direction_detour or cost_detour
+
+        start = nearest_traversable_cell(sx, sy)
         if start is None:
             return None
 
-        goal_candidates = self._local_planner_goal_candidates(
-            env_index,
+        goal_candidates = local_planner_goal_candidates(
             start,
             target_cell,
-            bounds,
         )
         if not goal_candidates:
             return None
@@ -6450,17 +6794,16 @@ class WildfireSearchScenario(BaseScenario):
         path: list[tuple[int, int]] = []
         goal = goal_candidates[0]
         for candidate in goal_candidates:
-            path = self._local_astar_grid_path(env_index, start, candidate, bounds)
+            path = local_astar_grid_path(start, candidate)
             if len(path) >= 2:
                 goal = candidate
                 break
         if len(path) < 2:
             return None
 
-        traversable = self.traversable_grid[env_index]
-        direct_blocked = not self._grid_segment_is_traversable(traversable, start, goal)
-        waypoint = self._route_lookahead_cell(traversable, path, 0)
-        detour_needed = self._local_astar_detour_needed(env_index, start, goal, waypoint, path, direct_blocked)
+        direct_blocked = not segment_is_traversable(start, goal)
+        waypoint = route_lookahead_cell(path)
+        detour_needed = local_astar_detour_needed(start, goal, waypoint, path, direct_blocked)
         return waypoint, direct_blocked, detour_needed
 
     def _ugv_planner_progress_rewards(
@@ -6494,6 +6837,7 @@ class WildfireSearchScenario(BaseScenario):
                     env_index,
                     start_pos[env_index, ground_index],
                     target_pos[env_index, ground_index],
+                    ground_index=ground_index,
                 )
                 if route is None:
                     continue

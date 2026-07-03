@@ -54,6 +54,79 @@ class SurvivorCommunicationTests(unittest.TestCase):
             **params,
         )
 
+    def _reference_local_astar_route(self, scenario, env_index, pos, target_pos):
+        patch_size = scenario.ugv_planner_patch_size
+        radius = patch_size // 2
+        pos_cell = scenario._single_position_to_grid_cell(pos)
+        target_cell = scenario._single_position_to_grid_cell(target_pos)
+        sx, sy = pos_cell
+        x0 = max(0, sx - radius)
+        x1 = min(scenario.fire_grid_size - 1, sx + radius)
+        y0 = max(0, sy - radius)
+        y1 = min(scenario.fire_grid_size - 1, sy + radius)
+        bounds = (x0, x1, y0, y1)
+
+        start = scenario._nearest_traversable_cell_in_bounds(env_index, sx, sy, bounds)
+        if start is None:
+            return None
+        goal_candidates = scenario._local_planner_goal_candidates(
+            env_index,
+            start,
+            target_cell,
+            bounds,
+        )
+        if not goal_candidates:
+            return None
+
+        path = []
+        goal = goal_candidates[0]
+        for candidate in goal_candidates:
+            path = scenario._local_astar_grid_path(env_index, start, candidate, bounds)
+            if len(path) >= 2:
+                goal = candidate
+                break
+        if len(path) < 2:
+            return None
+
+        traversable = scenario.traversable_grid[env_index]
+        direct_blocked = not scenario._grid_segment_is_traversable(traversable, start, goal)
+        waypoint = scenario._route_lookahead_cell(traversable, path, 0)
+        detour_needed = scenario._local_astar_detour_needed(
+            env_index,
+            start,
+            goal,
+            waypoint,
+            path,
+            direct_blocked,
+        )
+        return waypoint, direct_blocked, detour_needed
+
+    def _set_local_astar_case(self, scenario, start_cell, target_cell, blocked_cells=()):
+        ground = scenario.world.agents[scenario.n_drones]
+        survivor = scenario._survivors[0]
+        device = ground.state.pos.device
+        dtype = ground.state.pos.dtype
+        scenario.traversable_grid.fill_(True)
+        scenario.mobility_cost_grid.fill_(1.0)
+        scenario.fire_grid.zero_()
+        for x, y in blocked_cells:
+            scenario.traversable_grid[0, y, x] = False
+        ground.state.pos[:] = scenario._grid_cell_center_to_world(
+            start_cell,
+            device=device,
+            dtype=dtype,
+        ).view(1, 2)
+        survivor.state.pos[:] = scenario._grid_cell_center_to_world(
+            target_cell,
+            device=device,
+            dtype=dtype,
+        ).view(1, 2)
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, scenario.n_drones, 0] = True
+        scenario.found_survivors.zero_()
+        scenario._invalidate_ugv_planner_route_cache(terrain_changed=True)
+        return ground, survivor
+
     def test_default_ground_speed_model_uses_spot_like_terrain_values(self):
         env = self._diagnostic_env()
         scenario = env.scenario
@@ -380,6 +453,117 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertGreater(float(hint[2]), 0.0)
         self.assertEqual(float(hint[3]), 1.0)
         self.assertEqual(float(hint[4]), 0.0)
+
+    def test_optimized_local_astar_route_matches_reference_cases(self):
+        route_cases = (
+            ("clear_direct", (64, 64), (67, 64), ()),
+            ("blocked_direct", (64, 64), (69, 64), ((66, 64),)),
+            ("diagonal_corner_blocked", (64, 64), (67, 67), ((65, 64), (64, 65))),
+            ("target_outside_patch", (64, 64), (90, 64), ()),
+            ("start_blocked", (64, 64), (69, 64), ((64, 64),)),
+            (
+                "no_reachable_route",
+                (64, 64),
+                (69, 64),
+                tuple(
+                    (x, y)
+                    for x in range(59, 70)
+                    for y in range(59, 70)
+                    if (x, y) != (64, 64)
+                ),
+            ),
+        )
+        for patch_size in (7, 11, 15):
+            env = self._diagnostic_env(
+                ugv_planner_hint="local_astar",
+                ugv_planner_patch_size=patch_size,
+                ugv_planner_lookahead_cells=patch_size // 2,
+            )
+            scenario = env.scenario
+            ground = env.agents[0]
+            survivor = scenario._survivors[0]
+            for name, start_cell, target_cell, blocked_cells in route_cases:
+                with self.subTest(patch_size=patch_size, case=name):
+                    self._set_local_astar_case(
+                        scenario,
+                        start_cell,
+                        target_cell,
+                        blocked_cells,
+                    )
+                    expected = self._reference_local_astar_route(
+                        scenario,
+                        0,
+                        ground.state.pos[0],
+                        survivor.state.pos[0],
+                    )
+                    actual = scenario._local_astar_route_for_env(
+                        0,
+                        ground.state.pos[0],
+                        survivor.state.pos[0],
+                    )
+                    self.assertEqual(actual, expected)
+
+    def test_ugv_planner_reward_reuses_hint_route_cache(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (69, 64),
+            ((66, 64),),
+        )
+        scenario.r_ugv_planner_progress = 0.05
+        scenario.ugv_planner_progress_scale_m = 1.0
+
+        original = scenario._local_astar_route_uncached_for_env
+        calls = {"count": 0}
+
+        def counted(*args, **kwargs):
+            calls["count"] += 1
+            return original(*args, **kwargs)
+
+        scenario._local_astar_route_uncached_for_env = counted
+        scenario.observation(ground)
+        self.assertEqual(calls["count"], 1)
+
+        start_pos = ground.state.pos.unsqueeze(1).clone()
+        target_pos = survivor.state.pos.unsqueeze(1).clone()
+        route = scenario._local_astar_route_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+        )
+        self.assertIsNotNone(route)
+        waypoint, _direct_blocked, _detour_needed = route
+        waypoint_pos = scenario._grid_cell_center_to_world(
+            waypoint,
+            device=ground.state.pos.device,
+            dtype=ground.state.pos.dtype,
+        ).view(1, 1, 2)
+        direction = waypoint_pos - start_pos
+        direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        end_pos = start_pos + direction * scale
+        gate = torch.ones(1, 1, dtype=torch.bool)
+
+        reward, progress_m, _progress_scaled, active, direct_blocked, detour_needed = (
+            scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, gate)
+        )
+        self.assertEqual(calls["count"], 1)
+        self.assertTrue(bool(active[0, 0]))
+        self.assertTrue(bool(direct_blocked[0, 0]))
+        self.assertTrue(bool(detour_needed[0, 0]))
+        self.assertGreater(float(progress_m[0, 0]), 0.0)
+        self.assertGreater(float(reward[0, 0]), 0.0)
+
+        scenario._invalidate_ugv_planner_route_cache()
+        scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, gate)
+        self.assertEqual(calls["count"], 2)
 
     def test_known_survivor_spawn_distance_range_samples_angles(self):
         labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
