@@ -258,12 +258,15 @@ def build_args(
     terrain_cnn_encoder: bool = False,
     terrain_cnn_embed_dim: int = 16,
     ugv_planner_hint: str = "none",
+    ugv_planner_detour_obs: bool = False,
     ugv_planner_patch_size: int = 11,
     ugv_planner_lookahead_cells: int = 10,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     if ugv_planner_hint not in {"none", "local_astar"}:
         raise ValueError("ugv_planner_hint must be one of: none, local_astar")
+    if ugv_planner_detour_obs and ugv_planner_hint != "local_astar":
+        raise ValueError("ugv_planner_detour_obs requires ugv_planner_hint='local_astar'")
     if uav_survivor_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -561,6 +564,7 @@ def build_args(
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
+        "ugv_planner_detour_obs": bool(ugv_planner_detour_obs),
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "drone_min_footprint_m": drone_min_footprint_m,
@@ -919,6 +923,7 @@ def build_args(
         n_agents=n_agents,
         n_survivors=int(scenario_kwargs["n_survivors"]),
         ugv_planner_hint=ugv_planner_hint,
+        ugv_planner_detour_obs=bool(ugv_planner_detour_obs),
         coverage_obs_grid=int(coverage_obs_grid),
         local_coverage_obs_grid=int(local_coverage_obs_grid),
         uav_confidence_obs_grid=int(uav_confidence_obs_grid),
@@ -1004,6 +1009,9 @@ def main():
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
     p.add_argument("--ugv-planner-hint", choices=("none", "local_astar", "local-astar"), default="none",
                    help="Optional UGV observation hint. local_astar exposes a local A* waypoint vector.")
+    p.add_argument("--ugv-planner-detour-obs", action="store_true",
+                   help="Append a detour-needed bit to the local A* UGV planner hint. "
+                        "Changes observation size, so use only for new A* trainings.")
     p.add_argument("--ugv-planner-patch-size", type=int, default=11,
                    help="Odd local grid size used by --ugv-planner-hint local_astar.")
     p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
@@ -1458,6 +1466,8 @@ def main():
         p.error("--ugv-planner-progress-reward must be nonnegative")
     if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint != "local_astar":
         p.error("--ugv-planner-progress-reward requires --ugv-planner-hint local_astar")
+    if args.ugv_planner_detour_obs and args.ugv_planner_hint != "local_astar":
+        p.error("--ugv-planner-detour-obs requires --ugv-planner-hint local_astar")
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -1685,6 +1695,7 @@ def main():
     print(f" uav_astar_waypoint_reached_m: {args.uav_astar_waypoint_reached_m}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
+    print(f" ugv_planner_detour_obs: {bool(args.ugv_planner_detour_obs)}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
@@ -1837,6 +1848,7 @@ def main():
         terrain_cnn_encoder = args.terrain_cnn_encoder,
         terrain_cnn_embed_dim = args.terrain_cnn_embed_dim,
         ugv_planner_hint = args.ugv_planner_hint,
+        ugv_planner_detour_obs = bool(args.ugv_planner_detour_obs),
         ugv_planner_patch_size = args.ugv_planner_patch_size,
         ugv_planner_lookahead_cells = args.ugv_planner_lookahead_cells,
     )

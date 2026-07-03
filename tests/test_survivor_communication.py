@@ -423,6 +423,32 @@ class SurvivorCommunicationTests(unittest.TestCase):
         expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7
         self.assertEqual(obs.shape[-1], expected_width)
 
+    def test_local_astar_planner_detour_obs_appends_detour_bit(self):
+        env = self._diagnostic_env(
+            local_map_patch_size=7,
+            ugv_planner_hint="local_astar",
+            ugv_planner_detour_obs=True,
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, _survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (69, 64),
+            ((66, 64),),
+        )
+
+        obs = scenario.observation(ground)
+        expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 6 + 2 + 4 + 7
+        hint_offset = 4 + 12 + 1 + 2 * 7 * 7 + 9
+        hint = obs[0, hint_offset : hint_offset + 6]
+
+        self.assertEqual(obs.shape[-1], expected_width)
+        self.assertEqual(float(hint[3]), 1.0)
+        self.assertEqual(float(hint[4]), 1.0)
+        self.assertEqual(float(hint[5]), 1.0)
+
     def test_local_astar_planner_hint_points_toward_clear_local_target(self):
         env = self._diagnostic_env(
             local_map_patch_size=7,

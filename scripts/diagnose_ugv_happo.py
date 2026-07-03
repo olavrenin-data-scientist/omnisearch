@@ -101,6 +101,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["local_map_patch_size"] = int(args.local_map_patch_size)
     if args.ugv_planner_hint is not None:
         scenario_kwargs["ugv_planner_hint"] = args.ugv_planner_hint.replace("-", "_")
+    if args.ugv_planner_detour_obs is not None:
+        scenario_kwargs["ugv_planner_detour_obs"] = bool(args.ugv_planner_detour_obs)
     if args.ugv_planner_patch_size is not None:
         scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
     if args.ugv_planner_lookahead_cells is not None:
@@ -1531,6 +1533,8 @@ def main() -> None:
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--ugv-planner-hint", choices=("none", "local_astar", "local-astar"), default=None,
                         help="Override the checkpoint's UGV planner hint setting.")
+    parser.add_argument("--ugv-planner-detour-obs", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override whether local A* planner observations include detour_needed.")
     parser.add_argument("--ugv-planner-patch-size", type=int, default=None,
                         help="Override the checkpoint's local A* planner patch size.")
     parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
@@ -1575,6 +1579,7 @@ def main() -> None:
     print(
         "planner_hint: "
         f"{scenario_kwargs.get('ugv_planner_hint', 'none')} "
+        f"detour_obs={bool(scenario_kwargs.get('ugv_planner_detour_obs', False))} "
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
         f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)}"
     )

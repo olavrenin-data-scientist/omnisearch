@@ -277,6 +277,7 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_planner_hint = str(kwargs.pop("ugv_planner_hint", "none")).replace("-", "_")
         if self.ugv_planner_hint not in {"none", "local_astar"}:
             raise ValueError("ugv_planner_hint must be one of: none, local_astar")
+        self.ugv_planner_detour_obs = bool(kwargs.pop("ugv_planner_detour_obs", False))
         self.ugv_planner_patch_size = int(kwargs.pop("ugv_planner_patch_size", 11))
         if self.ugv_planner_patch_size < 1 or self.ugv_planner_patch_size % 2 != 1:
             raise ValueError("ugv_planner_patch_size must be a positive odd integer")
@@ -6380,6 +6381,7 @@ class WildfireSearchScenario(BaseScenario):
         """Optional local A* waypoint hint for ground robots.
 
         Feature order is [unit_dx, unit_dy, distance_norm, valid, direct_blocked].
+        If ``ugv_planner_detour_obs`` is enabled, detour_needed is appended.
         The planner is constrained to ``ugv_planner_patch_size`` cells around the
         UGV and does not expose the full route.
         """
@@ -6387,11 +6389,12 @@ class WildfireSearchScenario(BaseScenario):
             return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
         if self.ugv_planner_hint != "local_astar":
             raise RuntimeError(f"unsupported ugv_planner_hint: {self.ugv_planner_hint!r}")
+        hint_dim = self._ugv_planner_hint_dim()
         agent_idx = self.world.agents.index(agent)
         if agent_idx == self.n_drones:
             self._invalidate_ugv_planner_route_cache()
         if agent.is_drone or self.n_survivors == 0:
-            return torch.zeros(self.world.batch_dim, UGV_PLANNER_HINT_DIM, device=agent.state.pos.device)
+            return torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
 
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
@@ -6407,7 +6410,7 @@ class WildfireSearchScenario(BaseScenario):
         has_target = targetable.any(dim=-1)
         target_pos = survivor_pos.gather(1, target_idx.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
 
-        out = torch.zeros(self.world.batch_dim, UGV_PLANNER_HINT_DIM, device=agent.state.pos.device)
+        out = torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
         for env_index in range(self.world.batch_dim):
             if not bool(has_target[env_index].item()):
                 continue
@@ -6419,6 +6422,11 @@ class WildfireSearchScenario(BaseScenario):
             )
         return out
 
+    def _ugv_planner_hint_dim(self) -> int:
+        if self.ugv_planner_hint != "local_astar":
+            return 0
+        return UGV_PLANNER_HINT_DIM + int(bool(self.ugv_planner_detour_obs))
+
     def _local_astar_hint_for_env(
         self,
         env_index: int,
@@ -6427,7 +6435,7 @@ class WildfireSearchScenario(BaseScenario):
         target_pos: Tensor,
     ) -> Tensor:
         device = pos.device
-        hint = torch.zeros(UGV_PLANNER_HINT_DIM, device=device)
+        hint = torch.zeros(self._ugv_planner_hint_dim(), device=device)
         route = self._local_astar_route_for_env(
             env_index,
             pos,
@@ -6436,7 +6444,7 @@ class WildfireSearchScenario(BaseScenario):
         )
         if route is None:
             return hint
-        waypoint, direct_blocked, _detour_needed = route
+        waypoint, direct_blocked, detour_needed = route
         waypoint_pos = self._grid_cell_center_to_world(waypoint, device=device, dtype=pos.dtype)
         delta = waypoint_pos - pos
         dist = torch.linalg.norm(delta)
@@ -6456,6 +6464,8 @@ class WildfireSearchScenario(BaseScenario):
         hint[2] = min(max(dist_m / planner_range_m, 0.0), 1.0)
         hint[3] = 1.0
         hint[4] = 1.0 if direct_blocked else 0.0
+        if self.ugv_planner_detour_obs:
+            hint[5] = 1.0 if detour_needed else 0.0
         return hint
 
     def _local_astar_route_for_env(

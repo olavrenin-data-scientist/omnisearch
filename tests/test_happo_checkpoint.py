@@ -217,6 +217,7 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_known_survivor_diagnostic=True,
             local_map_patch_size=7,
             ugv_planner_hint="local-astar",
+            ugv_planner_detour_obs=True,
             ugv_planner_patch_size=11,
             ugv_planner_lookahead_cells=6,
             ugv_planner_progress_reward=0.05,
@@ -224,10 +225,11 @@ class HappoCheckpointTests(unittest.TestCase):
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_planner_hint"], "local_astar")
+        self.assertTrue(scenario["ugv_planner_detour_obs"])
         self.assertEqual(scenario["ugv_planner_patch_size"], 11)
         self.assertEqual(scenario["ugv_planner_lookahead_cells"], 5)
         self.assertEqual(scenario["r_ugv_planner_progress"], 0.05)
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 6 + 2 + 4 + 7)
 
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
