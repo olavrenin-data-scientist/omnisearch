@@ -150,6 +150,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.r_ground_approach, 0.05)
         self.assertEqual(scenario.r_ugv_movement_alignment, 0.20)
         self.assertEqual(scenario.r_ugv_planner_progress, 0.0)
+        self.assertFalse(scenario.ugv_route_aware_reward)
         self.assertEqual(scenario.r_ugv_stall_penalty, 0.0)
         self.assertEqual(scenario.r_fire_penalty, -0.20)
         self.assertEqual(scenario.r_ground_travel_cost, -0.01)
@@ -891,6 +892,85 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(scenario.metric_ugv_planner_direct_blocked[0]), 1.0)
         self.assertEqual(float(scenario.metric_ugv_planner_detour_needed[0]), 1.0)
 
+    def test_route_aware_reward_suppresses_direct_rewards_during_detour(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_astar",
+            ugv_route_aware_reward=True,
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            start_cell=(64, 64),
+            target_cell=(69, 64),
+            blocked_cells=((66, 64),),
+        )
+        device = ground.state.pos.device
+        dtype = ground.state.pos.dtype
+        scenario.r_ground_shaping = 0.5
+        scenario.r_ground_approach = 0.0
+        scenario.ground_approach_milestone_rewards_tensor.zero_()
+        scenario.r_ugv_movement_alignment = 0.2
+        scenario.r_ugv_planner_progress = 0.05
+        scenario.ugv_planner_progress_scale_m = 1.0
+        scenario.detection_range_by_env.zero_()
+
+        scenario._compute_step_rewards()
+        route = scenario._local_astar_route_for_env(0, ground.state.pos[0], survivor.state.pos[0])
+        self.assertIsNotNone(route)
+        waypoint, direct_blocked, detour_needed = route
+        self.assertTrue(direct_blocked)
+        self.assertTrue(detour_needed)
+
+        waypoint_pos = scenario._grid_cell_center_to_world(waypoint, device=device, dtype=dtype)
+        direction = waypoint_pos - ground.state.pos[0]
+        direction = direction / direction.norm().clamp_min(1e-9)
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:] = ground.state.pos + direction.view(1, 2) * scale
+        scenario.step_ugv_actual_displacement_m[0, 0] = 1.0
+        scenario._compute_step_rewards()
+
+        self.assertEqual(float(scenario.metric_ugv_route_aware_active[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_planner_detour_needed[0]), 1.0)
+        self.assertEqual(float(scenario.metric_reward_ugv_progress[0]), 0.0)
+        self.assertEqual(float(scenario.metric_reward_ugv_movement_alignment[0]), 0.0)
+        self.assertGreater(float(scenario.metric_reward_ugv_planner_progress[0]), 0.0)
+
+    def test_route_aware_reward_keeps_direct_rewards_on_clear_route(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_astar",
+            ugv_route_aware_reward=True,
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            start_cell=(64, 64),
+            target_cell=(72, 64),
+        )
+        scenario.r_ground_shaping = 0.5
+        scenario.r_ground_approach = 0.0
+        scenario.ground_approach_milestone_rewards_tensor.zero_()
+        scenario.r_ugv_movement_alignment = 0.2
+        scenario.r_ugv_planner_progress = 0.05
+        scenario.ugv_planner_progress_scale_m = 1.0
+        scenario.detection_range_by_env.zero_()
+
+        scenario._compute_step_rewards()
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:, 0] = ground.state.pos[:, 0] + scale
+        scenario.step_ugv_actual_displacement_m[0, 0] = 1.0
+        scenario._compute_step_rewards()
+
+        self.assertEqual(float(scenario.metric_ugv_route_aware_active[0]), 0.0)
+        self.assertEqual(float(scenario.metric_ugv_planner_detour_needed[0]), 0.0)
+        self.assertGreater(float(scenario.metric_reward_ugv_progress[0]), 0.0)
+        self.assertGreater(float(scenario.metric_reward_ugv_movement_alignment[0]), 0.0)
+
     def test_info_contains_training_debug_metrics(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario
@@ -930,6 +1010,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "diagnostic/ugv_planner_active",
             "diagnostic/ugv_planner_direct_blocked",
             "diagnostic/ugv_planner_detour_needed",
+            "diagnostic/ugv_route_aware_active",
             "diagnostic/ugv_action_alignment",
             "diagnostic/ugv_movement_alignment",
         ):

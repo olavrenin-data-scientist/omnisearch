@@ -221,6 +221,7 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_planner_patch_size=11,
             ugv_planner_lookahead_cells=6,
             ugv_planner_progress_reward=0.05,
+            ugv_route_aware_reward=True,
         )
 
         scenario = env_args["scenario_kwargs"]
@@ -229,6 +230,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_patch_size"], 11)
         self.assertEqual(scenario["ugv_planner_lookahead_cells"], 5)
         self.assertEqual(scenario["r_ugv_planner_progress"], 0.05)
+        self.assertTrue(scenario["ugv_route_aware_reward"])
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 6 + 2 + 4 + 7)
 
     def test_ugv_known_survivor_diagnostic_build_args(self):

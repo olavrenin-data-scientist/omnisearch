@@ -278,6 +278,9 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_planner_hint not in {"none", "local_astar"}:
             raise ValueError("ugv_planner_hint must be one of: none, local_astar")
         self.ugv_planner_detour_obs = bool(kwargs.pop("ugv_planner_detour_obs", False))
+        self.ugv_route_aware_reward = bool(kwargs.pop("ugv_route_aware_reward", False))
+        if self.ugv_route_aware_reward and self.ugv_planner_hint != "local_astar":
+            raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
         self.ugv_planner_patch_size = int(kwargs.pop("ugv_planner_patch_size", 11))
         if self.ugv_planner_patch_size < 1 or self.ugv_planner_patch_size % 2 != 1:
             raise ValueError("ugv_planner_patch_size must be a positive odd integer")
@@ -1219,6 +1222,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_planner_active = torch.zeros(batch_dim, device=device)
         self.metric_ugv_planner_direct_blocked = torch.zeros(batch_dim, device=device)
         self.metric_ugv_planner_detour_needed = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_route_aware_active = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
 
     def _reset_step_metric_buffers(self, env_index: int | None = None) -> None:
@@ -1342,6 +1346,7 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_planner_active,
             self.metric_ugv_planner_direct_blocked,
             self.metric_ugv_planner_detour_needed,
+            self.metric_ugv_route_aware_active,
             self.metric_reward_ugv_stall_penalty,
         ]
         for buffer in buffers:
@@ -2842,6 +2847,22 @@ class WildfireSearchScenario(BaseScenario):
             planner_active = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_direct_blocked = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_detour_needed = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+        route_aware_active = (
+            planner_active & planner_detour_needed
+            if self.ugv_route_aware_reward
+            else torch.zeros_like(planner_active)
+        )
+        if self.ugv_route_aware_reward:
+            ground_shaping = torch.where(
+                route_aware_active,
+                torch.zeros_like(ground_shaping),
+                ground_shaping,
+            )
+            movement_alignment_reward = torch.where(
+                route_aware_active,
+                torch.zeros_like(movement_alignment_reward),
+                movement_alignment_reward,
+            )
         stalled_while_seeking = (
             prev_known
             & outside_confirm_range
@@ -3212,6 +3233,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_planner_active = planner_active.float().sum(dim=1)
         self.metric_ugv_planner_direct_blocked = planner_direct_blocked.float().sum(dim=1)
         self.metric_ugv_planner_detour_needed = planner_detour_needed.float().sum(dim=1)
+        self.metric_ugv_route_aware_active = route_aware_active.float().sum(dim=1)
         self.metric_ugv_action_alignment = action_alignment.sum(dim=1)
         self.metric_ugv_movement_alignment = movement_alignment.sum(dim=1)
         self.metric_ugv_within_confirm_range = (
@@ -6830,8 +6852,8 @@ class WildfireSearchScenario(BaseScenario):
         direct_blocked_out = torch.zeros_like(gate, dtype=torch.bool)
         detour_needed_out = torch.zeros_like(gate, dtype=torch.bool)
         if (
-            self.r_ugv_planner_progress <= 0.0
-            or self.ugv_planner_hint != "local_astar"
+            self.ugv_planner_hint != "local_astar"
+            or (self.r_ugv_planner_progress <= 0.0 and not self.ugv_route_aware_reward)
             or start_pos.shape[1] == 0
         ):
             return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out
@@ -7322,6 +7344,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_planner_active": self.metric_ugv_planner_active,
             "diagnostic/ugv_planner_direct_blocked": self.metric_ugv_planner_direct_blocked,
             "diagnostic/ugv_planner_detour_needed": self.metric_ugv_planner_detour_needed,
+            "diagnostic/ugv_route_aware_active": self.metric_ugv_route_aware_active,
             "diagnostic/ugv_action_alignment": self.metric_ugv_action_alignment,
             "diagnostic/ugv_movement_alignment": self.metric_ugv_movement_alignment,
             "diagnostic/uav_final_target_distance_m": self.metric_uav_target_distance_m,

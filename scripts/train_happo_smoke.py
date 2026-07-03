@@ -247,6 +247,7 @@ def build_args(
     uav_start_edge_margin_m: float | None = None,
     ugv_movement_alignment_reward: float = 0.20,
     ugv_planner_progress_reward: float = 0.0,
+    ugv_route_aware_reward: bool = False,
     ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
     ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
     ugv_stall_penalty: float = 0.0,
@@ -267,6 +268,8 @@ def build_args(
         raise ValueError("ugv_planner_hint must be one of: none, local_astar")
     if ugv_planner_detour_obs and ugv_planner_hint != "local_astar":
         raise ValueError("ugv_planner_detour_obs requires ugv_planner_hint='local_astar'")
+    if ugv_route_aware_reward and ugv_planner_hint != "local_astar":
+        raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
     if uav_survivor_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -439,6 +442,8 @@ def build_args(
         raise ValueError("ugv_planner_progress_reward must be nonnegative")
     if ugv_planner_progress_reward > 0.0 and ugv_planner_hint != "local_astar":
         raise ValueError("ugv_planner_progress_reward requires ugv_planner_hint='local_astar'")
+    if ugv_route_aware_reward and ugv_planner_hint != "local_astar":
+        raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
     uav_coverage_reward = float(uav_coverage_reward)
     if uav_coverage_reward < 0.0:
         raise ValueError("uav_coverage_reward must be nonnegative")
@@ -565,6 +570,7 @@ def build_args(
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
         "ugv_planner_detour_obs": bool(ugv_planner_detour_obs),
+        "ugv_route_aware_reward": bool(ugv_route_aware_reward),
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "drone_min_footprint_m": drone_min_footprint_m,
@@ -1012,6 +1018,9 @@ def main():
     p.add_argument("--ugv-planner-detour-obs", action="store_true",
                    help="Append a detour-needed bit to the local A* UGV planner hint. "
                         "Changes observation size, so use only for new A* trainings.")
+    p.add_argument("--ugv-route-aware-reward", action="store_true",
+                   help="When local A* detects a detour, suppress direct target-distance and "
+                        "movement-alignment rewards for that UGV step. Requires local_astar.")
     p.add_argument("--ugv-planner-patch-size", type=int, default=11,
                    help="Odd local grid size used by --ugv-planner-hint local_astar.")
     p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
@@ -1468,6 +1477,8 @@ def main():
         p.error("--ugv-planner-progress-reward requires --ugv-planner-hint local_astar")
     if args.ugv_planner_detour_obs and args.ugv_planner_hint != "local_astar":
         p.error("--ugv-planner-detour-obs requires --ugv-planner-hint local_astar")
+    if args.ugv_route_aware_reward and args.ugv_planner_hint != "local_astar":
+        p.error("--ugv-route-aware-reward requires --ugv-planner-hint local_astar")
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -1696,6 +1707,7 @@ def main():
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_detour_obs: {bool(args.ugv_planner_detour_obs)}")
+    print(f" ugv_route_aware_reward: {bool(args.ugv_route_aware_reward)}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
@@ -1838,6 +1850,7 @@ def main():
         uav_start_edge_margin_m = args.uav_start_edge_margin_m,
         ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
         ugv_planner_progress_reward = args.ugv_planner_progress_reward,
+        ugv_route_aware_reward = bool(args.ugv_route_aware_reward),
         ugv_approach_reward = args.ugv_approach_reward,
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,

@@ -103,6 +103,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_hint"] = args.ugv_planner_hint.replace("-", "_")
     if args.ugv_planner_detour_obs is not None:
         scenario_kwargs["ugv_planner_detour_obs"] = bool(args.ugv_planner_detour_obs)
+    if args.ugv_route_aware_reward is not None:
+        scenario_kwargs["ugv_route_aware_reward"] = bool(args.ugv_route_aware_reward)
     if args.ugv_planner_patch_size is not None:
         scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
     if args.ugv_planner_lookahead_cells is not None:
@@ -1535,6 +1537,8 @@ def main() -> None:
                         help="Override the checkpoint's UGV planner hint setting.")
     parser.add_argument("--ugv-planner-detour-obs", action=argparse.BooleanOptionalAction, default=None,
                         help="Override whether local A* planner observations include detour_needed.")
+    parser.add_argument("--ugv-route-aware-reward", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override route-aware reward switching for local A* detours.")
     parser.add_argument("--ugv-planner-patch-size", type=int, default=None,
                         help="Override the checkpoint's local A* planner patch size.")
     parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
@@ -1574,12 +1578,18 @@ def main() -> None:
 
     checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
     scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)
+    if (
+        bool(scenario_kwargs.get("ugv_route_aware_reward", False))
+        and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
+    ):
+        parser.error("--ugv-route-aware-reward requires --ugv-planner-hint local_astar")
     print(f"checkpoint: {checkpoint_dir}")
     print(f"steps: {args.steps}")
     print(
         "planner_hint: "
         f"{scenario_kwargs.get('ugv_planner_hint', 'none')} "
         f"detour_obs={bool(scenario_kwargs.get('ugv_planner_detour_obs', False))} "
+        f"route_aware={bool(scenario_kwargs.get('ugv_route_aware_reward', False))} "
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
         f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)}"
     )
