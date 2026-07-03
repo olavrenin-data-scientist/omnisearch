@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -24,6 +26,18 @@ if str(ROOT) not in sys.path:
 from agents.happo_checkpoint import load_training_manifest
 from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
+
+
+REWARD_COMPONENTS = (
+    "team",
+    "ground_confirm",
+    "progress",
+    "movement_align",
+    "approach",
+    "planner_progress",
+    "stall_penalty",
+    "travel_penalty",
+)
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -281,6 +295,403 @@ def _ground_cell_diagnostics(scenario: WildfireSearchScenario, pos: torch.Tensor
     }
 
 
+def _tensor_scalar(value) -> float:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().reshape(-1)[0].item())
+    if isinstance(value, np.generic):
+        return float(value.item())
+    return float(value)
+
+
+def _metric_scalar(scenario: WildfireSearchScenario, name: str) -> float:
+    value = getattr(scenario, name, None)
+    if value is None:
+        return 0.0
+    return _tensor_scalar(value)
+
+
+def _reward_components(scenario: WildfireSearchScenario) -> dict[str, float]:
+    travel_penalty = 0.0
+    if getattr(scenario, "n_ground", 0) > 0:
+        travel_penalty = (
+            _tensor_scalar(scenario.step_ugv_travel_cost[0, 0])
+            * float(getattr(scenario, "r_ground_travel_cost", 0.0))
+        )
+    return {
+        "team": _metric_scalar(scenario, "metric_reward_team"),
+        "ground_confirm": _metric_scalar(scenario, "metric_reward_ground_confirm"),
+        "progress": _metric_scalar(scenario, "metric_reward_ugv_progress"),
+        "movement_align": _metric_scalar(scenario, "metric_reward_ugv_movement_alignment"),
+        "approach": _metric_scalar(scenario, "metric_reward_ugv_approach"),
+        "planner_progress": _metric_scalar(scenario, "metric_reward_ugv_planner_progress"),
+        "stall_penalty": _metric_scalar(scenario, "metric_reward_ugv_stall_penalty"),
+        "travel_penalty": travel_penalty,
+    }
+
+
+def _new_time_series() -> dict:
+    return {
+        "step": [],
+        "episode_fraction": [],
+        "distance_m": [],
+        "progress_m": [],
+        "movement_m": [],
+        "speed_mps": [],
+        "action_norm": [],
+        "raw_mean_norm": [],
+        "raw_oob": [],
+        "action_saturated": [],
+        "action_target_alignment": [],
+        "movement_target_alignment": [],
+        "action_movement_alignment": [],
+        "blocked": [],
+        "speed_limited": [],
+        "near_zero": [],
+        "path_speed": [],
+        "speed_limit_scale": [],
+        "motion_correction_m": [],
+        "within_confirm_range": [],
+        "reward": {name: [] for name in REWARD_COMPONENTS},
+    }
+
+
+def _append_optional(series: list, value: float | None) -> None:
+    series.append(None if value is None else float(value))
+
+
+def _finite(values) -> list[float]:
+    out = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            out.append(f)
+    return out
+
+
+def _finite_mean(values) -> float:
+    xs = _finite(values)
+    return float(np.mean(xs)) if xs else float("nan")
+
+
+def _finite_median(values) -> float:
+    xs = _finite(values)
+    return float(np.median(xs)) if xs else float("nan")
+
+
+def _finite_sum(values) -> float:
+    xs = _finite(values)
+    return float(np.sum(xs)) if xs else 0.0
+
+
+def _json_sanitize(value):
+    if isinstance(value, dict):
+        return {str(k): _json_sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return [_json_sanitize(v) for v in value.tolist()]
+    if isinstance(value, np.generic):
+        return _json_sanitize(value.item())
+    if isinstance(value, torch.Tensor):
+        return _json_sanitize(value.detach().cpu().tolist())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
+    bins = max(int(bins), 1)
+    bucket_rows: list[list[dict]] = [[] for _ in range(bins)]
+    for row in rows:
+        ts = row.get("time_series", {})
+        fractions = ts.get("episode_fraction", [])
+        rewards = ts.get("reward", {})
+        for i, frac in enumerate(fractions):
+            if frac is None:
+                continue
+            bin_idx = min(max(int(float(frac) * bins), 0), bins - 1)
+            step = {
+                "distance_m": _series_at(ts, "distance_m", i),
+                "progress_m": _series_at(ts, "progress_m", i),
+                "movement_m": _series_at(ts, "movement_m", i),
+                "speed_mps": _series_at(ts, "speed_mps", i),
+                "action_norm": _series_at(ts, "action_norm", i),
+                "raw_mean_norm": _series_at(ts, "raw_mean_norm", i),
+                "raw_oob": _series_at(ts, "raw_oob", i),
+                "action_saturated": _series_at(ts, "action_saturated", i),
+                "action_target_alignment": _series_at(ts, "action_target_alignment", i),
+                "movement_target_alignment": _series_at(ts, "movement_target_alignment", i),
+                "action_movement_alignment": _series_at(ts, "action_movement_alignment", i),
+                "blocked": _series_at(ts, "blocked", i),
+                "speed_limited": _series_at(ts, "speed_limited", i),
+                "near_zero": _series_at(ts, "near_zero", i),
+                "path_speed": _series_at(ts, "path_speed", i),
+                "speed_limit_scale": _series_at(ts, "speed_limit_scale", i),
+                "motion_correction_m": _series_at(ts, "motion_correction_m", i),
+                "within_confirm_range": _series_at(ts, "within_confirm_range", i),
+            }
+            for name in REWARD_COMPONENTS:
+                step[f"reward_abs_{name}"] = _series_at(rewards, name, i, absolute=True)
+                step[f"reward_{name}"] = _series_at(rewards, name, i)
+            bucket_rows[bin_idx].append(step)
+
+    out = []
+    for idx, bucket in enumerate(bucket_rows):
+        row = {
+            "bin": idx,
+            "episode_fraction_mid": (idx + 0.5) / bins,
+            "n_steps": len(bucket),
+        }
+        keys = (
+            "distance_m",
+            "progress_m",
+            "movement_m",
+            "speed_mps",
+            "action_norm",
+            "raw_mean_norm",
+            "raw_oob",
+            "action_saturated",
+            "action_target_alignment",
+            "movement_target_alignment",
+            "action_movement_alignment",
+            "blocked",
+            "speed_limited",
+            "near_zero",
+            "path_speed",
+            "speed_limit_scale",
+            "motion_correction_m",
+            "within_confirm_range",
+        )
+        for key in keys:
+            row[key] = _finite_mean(step.get(key) for step in bucket)
+        for name in REWARD_COMPONENTS:
+            row[f"reward_abs_{name}"] = _finite_mean(
+                step.get(f"reward_abs_{name}") for step in bucket
+            )
+            row[f"reward_{name}"] = _finite_mean(
+                step.get(f"reward_{name}") for step in bucket
+            )
+        out.append(row)
+    return out
+
+
+def _series_at(container: dict, key: str, index: int, *, absolute: bool = False):
+    values = container.get(key, [])
+    if index >= len(values):
+        return None
+    value = values[index]
+    if value is None:
+        return None
+    value = float(value)
+    return abs(value) if absolute else value
+
+
+def _summarize_rows(rows: list[dict], bins: int) -> dict:
+    confirmation_steps = [
+        row["confirmation_step"]
+        for row in rows
+        if row.get("confirmation_step") is not None
+    ]
+    path_efficiencies = [
+        row["path_efficiency"]
+        for row in rows
+        if row.get("path_efficiency") is not None
+    ]
+    return {
+        "episodes": len(rows),
+        "success_rate": _finite_mean(row["full_success"] for row in rows),
+        "mean_confirmed": _finite_mean(row["confirmed"] for row in rows),
+        "mean_initial_distance_m": _finite_mean(row["initial_distance_m"] for row in rows),
+        "mean_final_distance_m": _finite_mean(row["final_distance_m"] for row in rows),
+        "mean_min_distance_m": _finite_mean(row["min_distance_m"] for row in rows),
+        "mean_confirmation_step_successes": _finite_mean(confirmation_steps),
+        "median_confirmation_step_successes": _finite_median(confirmation_steps),
+        "mean_confirmation_time_s_successes": _finite_mean(
+            row["confirmation_time_s"]
+            for row in rows
+            if row.get("confirmation_time_s") is not None
+        ),
+        "mean_path_length_m": _finite_mean(row["path_length_m"] for row in rows),
+        "mean_path_efficiency_successes_or_progress": _finite_mean(path_efficiencies),
+        "mean_path_to_initial_ratio": _finite_mean(row["path_to_initial_ratio"] for row in rows),
+        "mean_action_target_alignment": _finite_mean(
+            row["mean_action_target_alignment"] for row in rows
+        ),
+        "mean_displacement_target_alignment": _finite_mean(
+            row["mean_displacement_target_alignment"] for row in rows
+        ),
+        "mean_action_displacement_alignment": _finite_mean(
+            row["mean_action_displacement_alignment"] for row in rows
+        ),
+        "mean_speed_mps": _finite_mean(row["mean_speed_mps"] for row in rows),
+        "mean_frac_raw_mean_oob": _finite_mean(row["frac_raw_mean_oob"] for row in rows),
+        "mean_frac_action_saturated": _finite_mean(row["frac_action_saturated"] for row in rows),
+        "mean_frac_proposed_path_blocked": _finite_mean(
+            row["frac_proposed_path_blocked"] for row in rows
+        ),
+        "mean_frac_speed_limited": _finite_mean(row["frac_speed_limited"] for row in rows),
+        "mean_motion_correction_m": _finite_mean(row["mean_motion_correction_m"] for row in rows),
+        "time_bins": _time_bin_summary(rows, bins),
+    }
+
+
+def _plot_hist_by_success(ax, rows: list[dict], key: str, title: str, xlabel: str) -> None:
+    success = _finite(row.get(key) for row in rows if row.get("full_success", 0.0) > 0.0)
+    failure = _finite(row.get(key) for row in rows if row.get("full_success", 0.0) <= 0.0)
+    data = []
+    labels = []
+    colors = []
+    if failure:
+        data.append(failure)
+        labels.append("failure")
+        colors.append("#ef4444")
+    if success:
+        data.append(success)
+        labels.append("success")
+        colors.append("#22c55e")
+    if data:
+        ax.hist(data, bins=16, alpha=0.65, label=labels, color=colors)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("episodes")
+    if len(data) > 1:
+        ax.legend(fontsize=8)
+    all_values = failure + success
+    if all_values:
+        ax.axvline(float(np.mean(all_values)), color="black", lw=1.2, label="mean")
+
+
+def _plot_ugv_diagnostics(
+    rows: list[dict],
+    summary: dict,
+    output_path: Path,
+    *,
+    deterministic: bool,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(4, 3, figsize=(15, 17), constrained_layout=True)
+    axes = axes.reshape(-1)
+
+    ax = axes[0]
+    successes = int(sum(1 for row in rows if row.get("full_success", 0.0) > 0.0))
+    failures = len(rows) - successes
+    ax.bar(["success", "failure"], [successes, failures], color=["#22c55e", "#ef4444"], alpha=0.8)
+    ax.set_title("Confirmation Outcome")
+    ax.set_ylabel("episodes")
+    ax.text(
+        0.02,
+        0.95,
+        f"success={summary['success_rate']:.2f}",
+        transform=ax.transAxes,
+        va="top",
+        fontsize=9,
+    )
+
+    _plot_hist_by_success(axes[1], rows, "final_distance_m", "Final Distance", "m")
+    _plot_hist_by_success(axes[2], rows, "min_distance_m", "Min Distance", "m")
+    _plot_hist_by_success(axes[3], rows, "confirmation_step", "Time To Confirm", "step")
+    _plot_hist_by_success(axes[4], rows, "path_length_m", "Path Length", "m")
+    _plot_hist_by_success(axes[5], rows, "path_to_initial_ratio", "Path / Initial Distance", "ratio")
+    _plot_hist_by_success(axes[6], rows, "mean_speed_mps", "Speed", "m/s")
+    _plot_hist_by_success(axes[7], rows, "mean_action_target_alignment", "Action Target Alignment", "cosine")
+
+    ax = axes[8]
+    metrics = [
+        ("blocked", "frac_proposed_path_blocked"),
+        ("speedlim", "frac_speed_limited"),
+        ("near0", "frac_near_zero_displacement"),
+        ("raw_oob", "frac_raw_mean_oob"),
+        ("sat", "frac_action_saturated"),
+    ]
+    ax.bar(
+        [label for label, _ in metrics],
+        [_finite_mean(row.get(key) for row in rows) for _, key in metrics],
+        color="#64748b",
+        alpha=0.75,
+    )
+    ax.set_ylim(0.0, 1.0)
+    ax.set_title("Constraint / Action Health")
+    ax.set_ylabel("fraction")
+
+    bins = summary.get("time_bins", [])
+    x = [b["episode_fraction_mid"] for b in bins]
+
+    ax = axes[9]
+    ax.plot(x, [b["distance_m"] for b in bins], marker="o", label="distance", color="#2563eb")
+    ax.set_title("Time-Bin Distance / Progress")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("distance (m)")
+    ax2 = ax.twinx()
+    ax2.plot(x, [b["progress_m"] for b in bins], marker="o", label="progress", color="#16a34a")
+    ax2.set_ylabel("progress (m/step)")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=8)
+
+    ax = axes[10]
+    ax.plot(x, [b["speed_mps"] for b in bins], marker="o", label="speed", color="#2563eb")
+    ax.plot(x, [b["movement_m"] for b in bins], marker="o", label="move/step", color="#0f766e")
+    ax.set_title("Time-Bin Movement")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("m/s or m/step")
+    ax2 = ax.twinx()
+    ax2.plot(x, [b["blocked"] for b in bins], marker="o", label="blocked", color="#ef4444")
+    ax2.plot(x, [b["speed_limited"] for b in bins], marker="o", label="speedlim", color="#f97316")
+    ax2.plot(x, [b["near_zero"] for b in bins], marker="o", label="near0", color="#a855f7")
+    ax2.set_ylabel("fraction")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=8)
+
+    ax = axes[11]
+    reward_colors = {
+        "team": "#2563eb",
+        "ground_confirm": "#22c55e",
+        "progress": "#0f766e",
+        "movement_align": "#84cc16",
+        "approach": "#eab308",
+        "planner_progress": "#8b5cf6",
+        "stall_penalty": "#ef4444",
+        "travel_penalty": "#111827",
+    }
+    for name in REWARD_COMPONENTS:
+        y = [b[f"reward_abs_{name}"] for b in bins]
+        if any(math.isfinite(float(v)) and abs(float(v)) > 1e-12 for v in y if v is not None):
+            ax.plot(
+                x,
+                y,
+                marker="o",
+                label=name.replace("_", " "),
+                color=reward_colors.get(name),
+            )
+    ax.set_title("Time-Bin Reward Scale (mean abs)")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("abs reward/penalty per step")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=7, ncol=2)
+
+    fig.suptitle(
+        f"UGV HAPPO Diagnostics ({'deterministic' if deterministic else 'stochastic'}, n={len(rows)})",
+        fontsize=15,
+    )
+    fig.savefig(output_path, dpi=170)
+    plt.close(fig)
+
+
 def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, deterministic: bool) -> dict:
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
     env = vmas.make_env(
@@ -324,17 +735,23 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
     }
     planner_total_steps = 0
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
+    max_steps = int(scenario_kwargs["max_steps"])
+    time_series = _new_time_series()
+    confirmation_step: int | None = None
 
-    for _ in range(scenario_kwargs["max_steps"]):
+    for step in range(max_steps):
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
+        dist_before_m = _distance_m(scenario, pos_before, survivor_before)
         dist, obs_before = _actor_distribution(policy, env, agent_idx=0, return_obs=True)
         planner_hint = _planner_hint_from_observation(scenario, obs_before)
         raw_mean = dist.mean.detach().cpu().numpy()
         raw_std = dist.stddev.detach().cpu().numpy()
-        raw_mean_norms.append(float(np.linalg.norm(raw_mean[0])))
+        raw_mean_norm = float(np.linalg.norm(raw_mean[0]))
+        raw_mean_norms.append(raw_mean_norm)
         raw_mean_abs_max.append(float(np.max(np.abs(raw_mean[0]))))
-        raw_mean_oob.append(bool(np.any(np.abs(raw_mean[0]) > 1.0)))
+        raw_oob = bool(np.any(np.abs(raw_mean[0]) > 1.0))
+        raw_mean_oob.append(raw_oob)
         raw_stds.append(float(np.mean(raw_std[0])))
         actions = policy(env)
         action_target_alignment = _action_alignment(actions[0], ground.state.pos, survivor.state.pos)
@@ -344,25 +761,35 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         if planner_hint is not None:
             planner_vec, direct_blocked = planner_hint
             action_planner_alignment = _cosine_alignment(actions[0], planner_vec)
-        action_norms.append(float(torch.linalg.norm(actions[0], dim=-1)[0]))
-        saturated_actions.append(bool((actions[0].abs() >= 0.98).any().item()))
+        action_norm = float(torch.linalg.norm(actions[0], dim=-1)[0])
+        action_norms.append(action_norm)
+        saturated = bool((actions[0].abs() >= 0.98).any().item())
+        saturated_actions.append(saturated)
         env.step(actions)
-        proposed_path_blocked.append(bool(scenario.step_ugv_proposed_path_blocked[0, 0].item()))
-        speed_limited.append(bool(scenario.step_ugv_speed_limited[0, 0].item()))
-        path_speeds.append(float(scenario.step_ugv_path_speed[0, 0].detach().cpu().item()))
-        speed_limit_scales.append(float(scenario.step_ugv_speed_limit_scale[0, 0].detach().cpu().item()))
-        proposed_displacements_m.append(
-            float(scenario.step_ugv_proposed_displacement_m[0, 0].detach().cpu().item())
+        blocked = bool(scenario.step_ugv_proposed_path_blocked[0, 0].item())
+        proposed_path_blocked.append(blocked)
+        limited = bool(scenario.step_ugv_speed_limited[0, 0].item())
+        speed_limited.append(limited)
+        path_speed = float(scenario.step_ugv_path_speed[0, 0].detach().cpu().item())
+        path_speeds.append(path_speed)
+        speed_limit_scale = float(scenario.step_ugv_speed_limit_scale[0, 0].detach().cpu().item())
+        speed_limit_scales.append(speed_limit_scale)
+        proposed_displacement_m = float(
+            scenario.step_ugv_proposed_displacement_m[0, 0].detach().cpu().item()
         )
-        corrected_displacements_m.append(
-            float(scenario.step_ugv_corrected_displacement_m[0, 0].detach().cpu().item())
+        proposed_displacements_m.append(proposed_displacement_m)
+        corrected_displacement_m = float(
+            scenario.step_ugv_corrected_displacement_m[0, 0].detach().cpu().item()
         )
-        actual_displacements_m.append(
-            float(scenario.step_ugv_actual_displacement_m[0, 0].detach().cpu().item())
+        corrected_displacements_m.append(corrected_displacement_m)
+        actual_displacement_m = float(
+            scenario.step_ugv_actual_displacement_m[0, 0].detach().cpu().item()
         )
-        motion_corrections_m.append(
-            float(scenario.step_ugv_motion_correction_m[0, 0].detach().cpu().item())
+        actual_displacements_m.append(actual_displacement_m)
+        motion_correction_m = float(
+            scenario.step_ugv_motion_correction_m[0, 0].detach().cpu().item()
         )
+        motion_corrections_m.append(motion_correction_m)
         displacement = ground.state.pos - pos_before
         target_before = survivor_before - pos_before
         disp_alignment = _cosine_alignment(displacement, target_before)
@@ -373,6 +800,32 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
             action_displacement_alignments.append(action_disp_alignment)
         displacement_m = _distance_sim_to_m(scenario, torch.linalg.norm(displacement, dim=-1))
         displacement_meters.append(displacement_m)
+        dist_after_m = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+        reward_components = _reward_components(scenario)
+        time_series["step"].append(step)
+        time_series["episode_fraction"].append((step + 1) / max_steps)
+        time_series["distance_m"].append(dist_after_m)
+        time_series["progress_m"].append(dist_before_m - dist_after_m)
+        time_series["movement_m"].append(displacement_m)
+        time_series["speed_mps"].append(displacement_m / step_seconds)
+        time_series["action_norm"].append(action_norm)
+        time_series["raw_mean_norm"].append(raw_mean_norm)
+        time_series["raw_oob"].append(float(raw_oob))
+        time_series["action_saturated"].append(float(saturated))
+        _append_optional(time_series["action_target_alignment"], action_target_alignment)
+        _append_optional(time_series["movement_target_alignment"], disp_alignment)
+        _append_optional(time_series["action_movement_alignment"], action_disp_alignment)
+        time_series["blocked"].append(float(blocked))
+        time_series["speed_limited"].append(float(limited))
+        time_series["near_zero"].append(float(displacement_m < 0.05))
+        time_series["path_speed"].append(path_speed)
+        time_series["speed_limit_scale"].append(speed_limit_scale)
+        time_series["motion_correction_m"].append(motion_correction_m)
+        time_series["within_confirm_range"].append(
+            _metric_scalar(scenario, "metric_ugv_within_confirm_range")
+        )
+        for name in REWARD_COMPONENTS:
+            time_series["reward"][name].append(reward_components.get(name, 0.0))
         if planner_hint is not None:
             movement_planner_alignment = _cosine_alignment(displacement, planner_vec)
             speed_mps = displacement_m / step_seconds
@@ -386,11 +839,24 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
                     movement_planner=movement_planner_alignment,
                     speed_mps=speed_mps,
                 )
-        min_distance = min(min_distance, _distance_m(scenario, ground.state.pos, survivor.state.pos))
+        min_distance = min(min_distance, dist_after_m)
         if bool(scenario.found_survivors[0, 0]):
+            confirmation_step = step
             break
 
     final_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+    path_length_m = _finite_sum(displacement_meters)
+    direct_progress_m = initial_distance - final_distance
+    path_efficiency = (
+        path_length_m / direct_progress_m
+        if direct_progress_m > 1e-6
+        else None
+    )
+    confirmation_time_s = (
+        (confirmation_step + 1) * step_seconds
+        if confirmation_step is not None
+        else None
+    )
     return {
         "seed": seed,
         "confirmed": float(scenario.found_survivors[0].sum().item()),
@@ -398,6 +864,13 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         "initial_distance_m": initial_distance,
         "final_distance_m": final_distance,
         "min_distance_m": min_distance,
+        "confirmation_step": confirmation_step,
+        "confirmation_time_s": confirmation_time_s,
+        "episode_steps": len(time_series["step"]),
+        "path_length_m": path_length_m,
+        "direct_progress_m": direct_progress_m,
+        "path_efficiency": path_efficiency,
+        "path_to_initial_ratio": path_length_m / max(initial_distance, 1e-6),
         "mean_action_target_alignment": float(np.mean(alignments)) if alignments else 0.0,
         "frac_action_toward_target": float(np.mean([a > 0.0 for a in alignments])) if alignments else 0.0,
         "mean_displacement_target_alignment": (
@@ -443,6 +916,7 @@ def run_rollout(checkpoint_dir: Path, scenario_kwargs: dict, seed: int, determin
         "mean_motion_correction_m": float(np.mean(motion_corrections_m)) if motion_corrections_m else 0.0,
         "planner_total_steps": planner_total_steps,
         "planner_buckets": planner_buckets,
+        "time_series": time_series,
     }
 
 
@@ -831,6 +1305,12 @@ def main() -> None:
                         help="How many final steps to print in each trace.")
     parser.add_argument("--trace-stride", type=int, default=25,
                         help="Also print every Nth trace step; 0 disables periodic trace rows.")
+    parser.add_argument("--time-bins", type=int, default=5,
+                        help="Number of episode-fraction bins for time-series diagnostics.")
+    parser.add_argument("--json-output", default=None,
+                        help="Optional path to write structured diagnostic rows and summary.")
+    parser.add_argument("--plots-output", default=None,
+                        help="Optional path to write diagnostic distribution/time-bin plots.")
     args = parser.parse_args()
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
@@ -863,6 +1343,7 @@ def main() -> None:
         run_rollout(checkpoint_dir, scenario_kwargs, seed, deterministic=not args.stochastic)
         for seed in args.seeds
     ]
+    summary = _summarize_rows(rows, args.time_bins)
     for row in rows:
         print(
             f"seed {row['seed']:>4}: confirmed={row['confirmed']:.0f} "
@@ -870,6 +1351,8 @@ def main() -> None:
             f"initial={row['initial_distance_m']:.1f}m "
             f"final={row['final_distance_m']:.1f}m "
             f"min={row['min_distance_m']:.1f}m "
+            f"ttc={row['confirmation_step'] if row['confirmation_step'] is not None else '-'} "
+            f"path={row['path_length_m']:.1f}m "
             f"align={row['mean_action_target_alignment']:.3f} "
             f"toward={row['frac_action_toward_target']:.3f} "
             f"disp_align={row['mean_displacement_target_alignment']:.3f} "
@@ -886,10 +1369,13 @@ def main() -> None:
     print("-" * 72)
     print(
         "means: "
-        f"confirmed={np.mean([r['confirmed'] for r in rows]):.3f} "
-        f"success={np.mean([r['full_success'] for r in rows]):.3f} "
-        f"final={np.mean([r['final_distance_m'] for r in rows]):.1f}m "
-        f"min={np.mean([r['min_distance_m'] for r in rows]):.1f}m "
+        f"confirmed={summary['mean_confirmed']:.3f} "
+        f"success={summary['success_rate']:.3f} "
+        f"final={summary['mean_final_distance_m']:.1f}m "
+        f"min={summary['mean_min_distance_m']:.1f}m "
+        f"ttc={summary['mean_confirmation_step_successes']:.1f} steps "
+        f"path={summary['mean_path_length_m']:.1f}m "
+        f"path_eff={summary['mean_path_efficiency_successes_or_progress']:.2f} "
         f"align={np.mean([r['mean_action_target_alignment'] for r in rows]):.3f} "
         f"toward={np.mean([r['frac_action_toward_target'] for r in rows]):.3f} "
         f"disp_align={np.mean([r['mean_displacement_target_alignment'] for r in rows]):.3f} "
@@ -958,6 +1444,34 @@ def main() -> None:
         for result in trace_rows:
             if args.trace_all or result["full_success"] <= 0.0:
                 _print_failure_trace(result, tail=args.trace_tail, stride=args.trace_stride)
+
+    if args.json_output:
+        output = Path(args.json_output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "checkpoint": str(checkpoint_dir),
+            "deterministic": not args.stochastic,
+            "steps": int(args.steps),
+            "seeds": list(args.seeds),
+            "scenario_kwargs": scenario_kwargs,
+            "summary": summary,
+            "rows": rows,
+        }
+        output.write_text(
+            json.dumps(_json_sanitize(payload), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        print(f"wrote JSON diagnostics: {output}")
+
+    if args.plots_output:
+        output = Path(args.plots_output)
+        _plot_ugv_diagnostics(
+            rows,
+            summary,
+            output,
+            deterministic=not args.stochastic,
+        )
+        print(f"wrote diagnostic plots: {output}")
 
 
 if __name__ == "__main__":
