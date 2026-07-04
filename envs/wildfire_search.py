@@ -59,7 +59,8 @@ DEFAULT_GROUND_APPROACH_REWARD = 0.05
 DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 UGV_PLANNER_HINT_DIM = 5
-UGV_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
+UGV_LOCAL_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
+UGV_PLANNER_HINT_MODES = UGV_LOCAL_PLANNER_HINT_MODES | {"global_astar"}
 
 
 def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
@@ -277,10 +278,12 @@ class WildfireSearchScenario(BaseScenario):
         kwargs.pop("ugv_local_map_patch_shift", None)  # obsolete target-lookahead patch option
         self.ugv_planner_hint = str(kwargs.pop("ugv_planner_hint", "none")).replace("-", "_")
         if self.ugv_planner_hint not in {"none"} | UGV_PLANNER_HINT_MODES:
-            raise ValueError("ugv_planner_hint must be one of: none, local_astar, local_escape_astar")
+            raise ValueError(
+                "ugv_planner_hint must be one of: none, local_astar, local_escape_astar, global_astar"
+            )
         self.ugv_planner_detour_obs = bool(kwargs.pop("ugv_planner_detour_obs", False))
         self.ugv_route_aware_reward = bool(kwargs.pop("ugv_route_aware_reward", False))
-        if self.ugv_route_aware_reward and self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
+        if self.ugv_route_aware_reward and self.ugv_planner_hint not in UGV_LOCAL_PLANNER_HINT_MODES:
             raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
         self.ugv_planner_patch_size = int(kwargs.pop("ugv_planner_patch_size", 11))
         if self.ugv_planner_patch_size < 1 or self.ugv_planner_patch_size % 2 != 1:
@@ -288,6 +291,10 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_planner_lookahead_cells = min(
             max(int(kwargs.pop("ugv_planner_lookahead_cells", 10)), 1),
             max(self.ugv_planner_patch_size // 2, 1),
+        )
+        self.ugv_global_planner_lookahead_m = max(
+            float(kwargs.pop("ugv_global_planner_lookahead_m", 20.0)),
+            1e-6,
         )
         land_cover_costs = _land_cover_values(
             kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0, 8.0)),
@@ -476,17 +483,20 @@ class WildfireSearchScenario(BaseScenario):
             "planner_blend",
             "escape_blend",
             "escape_route_switch",
+            "planner_follow",
         }:
             raise ValueError(
                 "ugv_dense_reward_mode must be one of: target, positive_target, "
-                "planner_blend, escape_blend, escape_route_switch"
+                "planner_blend, escape_blend, escape_route_switch, planner_follow"
             )
-        if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
+        if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint not in UGV_LOCAL_PLANNER_HINT_MODES:
             raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
         if self.ugv_dense_reward_mode == "escape_blend" and self.ugv_planner_hint != "local_escape_astar":
             raise ValueError("ugv_dense_reward_mode='escape_blend' requires ugv_planner_hint='local_escape_astar'")
         if self.ugv_dense_reward_mode == "escape_route_switch" and self.ugv_planner_hint != "local_astar":
             raise ValueError("ugv_dense_reward_mode='escape_route_switch' requires ugv_planner_hint='local_astar'")
+        if self.ugv_dense_reward_mode == "planner_follow" and self.ugv_planner_hint != "global_astar":
+            raise ValueError("ugv_dense_reward_mode='planner_follow' requires ugv_planner_hint='global_astar'")
         if self.ugv_route_aware_reward and self.ugv_dense_reward_mode != "target":
             raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
         self.ugv_planner_blend_weight = min(
@@ -1099,6 +1109,34 @@ class WildfireSearchScenario(BaseScenario):
             [[] for _ in range(self.n_ground)]
             for _ in range(batch_dim)
         ]
+        self.ugv_global_route_target_idx = torch.full(
+            (batch_dim, self.n_ground),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_global_route_path_index = torch.zeros(
+            batch_dim,
+            self.n_ground,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_global_route_goal_cell = torch.full(
+            (batch_dim, self.n_ground, 2),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_global_route_waypoint_cell = torch.full(
+            (batch_dim, self.n_ground, 2),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_global_route_paths: list[list[list[tuple[int, int]]]] = [
+            [[] for _ in range(self.n_ground)]
+            for _ in range(batch_dim)
+        ]
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.step_ugv_proposed_path_blocked = torch.zeros(
             batch_dim, self.n_ground, dtype=torch.bool, device=device,
@@ -1318,6 +1356,15 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_escape_route_waypoint_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_ugv_escape_route_path_index = torch.zeros(batch_dim, device=device)
         self.metric_ugv_escape_route_path_length = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_valid = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_active = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_waypoint_distance_m = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_progress_m = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_progress_scaled = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_path_index = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_path_length = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_direct_blocked = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_global_route_detour_needed = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_aware_active = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
 
@@ -1453,6 +1500,15 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_escape_route_waypoint_distance_m,
             self.metric_ugv_escape_route_path_index,
             self.metric_ugv_escape_route_path_length,
+            self.metric_ugv_global_route_valid,
+            self.metric_ugv_global_route_active,
+            self.metric_ugv_global_route_waypoint_distance_m,
+            self.metric_ugv_global_route_progress_m,
+            self.metric_ugv_global_route_progress_scaled,
+            self.metric_ugv_global_route_path_index,
+            self.metric_ugv_global_route_path_length,
+            self.metric_ugv_global_route_direct_blocked,
+            self.metric_ugv_global_route_detour_needed,
             self.metric_ugv_route_aware_active,
             self.metric_reward_ugv_stall_penalty,
         ]
@@ -1514,6 +1570,34 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_escape_route_waypoint_cell[env_index] = -1
         if hasattr(self, "ugv_escape_route_paths"):
             self.ugv_escape_route_paths[env_index] = [
+                [] for _ in range(self.n_ground)
+            ]
+
+    def _reset_ugv_global_routes(self, env_index: int | None = None) -> None:
+        if not hasattr(self, "ugv_global_route_target_idx"):
+            return
+        tensors = (
+            self.ugv_global_route_path_index,
+        )
+        if env_index is None:
+            for tensor in tensors:
+                tensor.zero_()
+            self.ugv_global_route_target_idx.fill_(-1)
+            self.ugv_global_route_goal_cell.fill_(-1)
+            self.ugv_global_route_waypoint_cell.fill_(-1)
+            self.ugv_global_route_paths = [
+                [[] for _ in range(self.n_ground)]
+                for _ in range(self.world.batch_dim)
+            ]
+            return
+        env_index = int(env_index)
+        for tensor in tensors:
+            tensor[env_index] = 0
+        self.ugv_global_route_target_idx[env_index] = -1
+        self.ugv_global_route_goal_cell[env_index] = -1
+        self.ugv_global_route_waypoint_cell[env_index] = -1
+        if hasattr(self, "ugv_global_route_paths"):
+            self.ugv_global_route_paths[env_index] = [
                 [] for _ in range(self.n_ground)
             ]
 
@@ -1600,6 +1684,7 @@ class WildfireSearchScenario(BaseScenario):
             self._reset_ground_motion_diagnostics()
             self._reset_uav_cleanup_targets()
             self._reset_ugv_escape_routes()
+            self._reset_ugv_global_routes()
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
@@ -1627,6 +1712,7 @@ class WildfireSearchScenario(BaseScenario):
             self._reset_ground_motion_diagnostics(env_index)
             self._reset_uav_cleanup_targets(env_index)
             self._reset_ugv_escape_routes(env_index)
+            self._reset_ugv_global_routes(env_index)
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
@@ -2973,6 +3059,7 @@ class WildfireSearchScenario(BaseScenario):
                 self._pre_step_ground_pos,
                 ground_pos,
                 target_pos,
+                curr_ground_target_idx,
                 prev_known & outside_confirm_range,
             )
         else:
@@ -3057,6 +3144,22 @@ class WildfireSearchScenario(BaseScenario):
                 torch.zeros_like(planner_progress_reward),
                 planner_progress_reward,
             )
+        elif self.ugv_dense_reward_mode == "planner_follow":
+            planner_movement = (
+                planner_progress_m
+                / self.step_ugv_actual_displacement_m.to(planner_progress_m.device).clamp_min(1e-6)
+            ).clamp(min=-1.0, max=1.0)
+            progress_reward_basis = torch.where(
+                planner_active,
+                planner_progress_scaled,
+                torch.zeros_like(ground_progress_scaled),
+            )
+            movement_reward_basis = torch.where(
+                planner_active,
+                planner_movement,
+                torch.zeros_like(movement_alignment),
+            )
+            planner_progress_reward = torch.zeros_like(planner_progress_reward)
         ground_shaping = torch.where(
             prev_known,
             progress_reward_basis * self.r_ground_shaping,
@@ -3708,6 +3811,8 @@ class WildfireSearchScenario(BaseScenario):
             )
             if hasattr(self, "ugv_escape_route_active"):
                 self._reset_ugv_escape_routes(env_index)
+            if hasattr(self, "ugv_global_route_target_idx"):
+                self._reset_ugv_global_routes(env_index)
         if env_index is None:
             self._ugv_planner_route_cache.clear()
             return
@@ -6706,6 +6811,7 @@ class WildfireSearchScenario(BaseScenario):
                 agent_idx - self.n_drones,
                 agent.state.pos[env_index],
                 target_pos[env_index],
+                target_idx=int(target_idx[env_index].item()),
             )
         return out
 
@@ -6720,6 +6826,8 @@ class WildfireSearchScenario(BaseScenario):
         ground_index: int | None,
         pos: Tensor,
         target_pos: Tensor,
+        *,
+        target_idx: int | None = None,
     ) -> Tensor:
         if (
             self.ugv_dense_reward_mode == "escape_route_switch"
@@ -6747,6 +6855,7 @@ class WildfireSearchScenario(BaseScenario):
             pos,
             target_pos,
             ground_index=ground_index,
+            target_idx=target_idx,
         )
         hint = torch.zeros(self._ugv_planner_hint_dim(), device=pos.device)
         if route is None:
@@ -6758,6 +6867,11 @@ class WildfireSearchScenario(BaseScenario):
             waypoint,
             direct_blocked=direct_blocked,
             detour_needed=detour_needed,
+            planner_range_m=(
+                self.ugv_global_planner_lookahead_m
+                if self.ugv_planner_hint == "global_astar"
+                else None
+            ),
         )
 
     def _ugv_planner_hint_from_waypoint(
@@ -6768,6 +6882,7 @@ class WildfireSearchScenario(BaseScenario):
         *,
         direct_blocked: bool,
         detour_needed: bool,
+        planner_range_m: float | None = None,
     ) -> Tensor:
         device = pos.device
         hint = torch.zeros(self._ugv_planner_hint_dim(), device=device)
@@ -6777,12 +6892,15 @@ class WildfireSearchScenario(BaseScenario):
         if float(dist.item()) <= 1e-9:
             return hint
 
-        patch_size = self.ugv_planner_patch_size
-        radius = patch_size // 2
         scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
-        cell_w_sim = 2.0 * float(self.x_semidim) / float(self.fire_grid_size)
-        cell_h_sim = 2.0 * float(self.y_semidim) / float(self.fire_grid_size)
-        planner_range_m = max(radius * max(cell_w_sim, cell_h_sim) / max(scale, 1e-9), 1e-6)
+        if planner_range_m is None:
+            patch_size = self.ugv_planner_patch_size
+            radius = patch_size // 2
+            cell_w_sim = 2.0 * float(self.x_semidim) / float(self.fire_grid_size)
+            cell_h_sim = 2.0 * float(self.y_semidim) / float(self.fire_grid_size)
+            planner_range_m = max(radius * max(cell_w_sim, cell_h_sim) / max(scale, 1e-9), 1e-6)
+        else:
+            planner_range_m = max(float(planner_range_m), 1e-6)
         dist_m = float(dist.detach().cpu().item()) / max(scale, 1e-9)
         unit = delta / dist.clamp_min(1e-9)
         hint[0] = unit[X]
@@ -6844,6 +6962,7 @@ class WildfireSearchScenario(BaseScenario):
         target_pos: Tensor,
         *,
         ground_index: int | None = None,
+        target_idx: int | None = None,
     ) -> tuple[tuple[int, int], bool, bool] | None:
         if self.ugv_planner_hint == "local_astar":
             return self._local_astar_route_for_env(
@@ -6859,7 +6978,360 @@ class WildfireSearchScenario(BaseScenario):
                 target_pos,
                 ground_index=ground_index,
             )
+        if self.ugv_planner_hint == "global_astar":
+            return self._global_astar_route_for_env(
+                env_index,
+                pos,
+                target_pos,
+                ground_index=ground_index,
+                target_idx=target_idx,
+            )
         return None
+
+    def _global_astar_route_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        ground_index: int | None = None,
+        target_idx: int | None = None,
+    ) -> tuple[tuple[int, int], bool, bool] | None:
+        plan = self._global_astar_route_info_for_env(
+            env_index,
+            pos,
+            target_pos,
+            ground_index=ground_index,
+            target_idx=target_idx,
+            update_index=True,
+        )
+        return None if plan is None else plan["route"]
+
+    def _global_astar_route_info_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        ground_index: int | None = None,
+        target_idx: int | None = None,
+        update_index: bool = False,
+    ) -> dict | None:
+        if ground_index is None or target_idx is None:
+            return self._global_astar_plan_uncached_for_env(
+                env_index,
+                pos,
+                target_pos,
+                update_state=False,
+            )
+
+        current_target = int(target_idx)
+        needs_plan = (
+            int(self.ugv_global_route_target_idx[env_index, ground_index].item()) != current_target
+            or not self.ugv_global_route_paths[env_index][ground_index]
+        )
+        if needs_plan:
+            plan = self._global_astar_plan_uncached_for_env(
+                env_index,
+                pos,
+                target_pos,
+                update_state=False,
+            )
+            if plan is None:
+                self.ugv_global_route_target_idx[env_index, ground_index] = -1
+                self.ugv_global_route_paths[env_index][ground_index] = []
+                return None
+            self.ugv_global_route_target_idx[env_index, ground_index] = current_target
+            self.ugv_global_route_paths[env_index][ground_index] = list(plan["path"])
+            gx, gy = plan["goal"]
+            self.ugv_global_route_goal_cell[env_index, ground_index, 0] = int(gx)
+            self.ugv_global_route_goal_cell[env_index, ground_index, 1] = int(gy)
+            self.ugv_global_route_path_index[env_index, ground_index] = 0
+
+        path = self.ugv_global_route_paths[env_index][ground_index]
+        if len(path) < 2:
+            return None
+        goal = path[-1]
+        waypoint, nearest_idx, waypoint_idx = self._global_route_waypoint_for_env(
+            env_index,
+            pos,
+            path,
+            start_idx=int(self.ugv_global_route_path_index[env_index, ground_index].item()),
+        )
+        if update_index:
+            self.ugv_global_route_path_index[env_index, ground_index] = int(nearest_idx)
+            self.ugv_global_route_waypoint_cell[env_index, ground_index, 0] = int(waypoint[0])
+            self.ugv_global_route_waypoint_cell[env_index, ground_index, 1] = int(waypoint[1])
+
+        start = self._single_position_to_grid_cell(pos)
+        traversable = self.traversable_grid[env_index]
+        direct_blocked = not self._grid_segment_is_traversable(traversable, start, goal)
+        detour_needed = self._local_astar_detour_needed(
+            env_index,
+            start,
+            goal,
+            waypoint,
+            path[nearest_idx:],
+            direct_blocked,
+        )
+        return {
+            "route": (waypoint, bool(direct_blocked), bool(detour_needed)),
+            "start": start,
+            "goal": goal,
+            "waypoint": waypoint,
+            "path": path,
+            "path_index": int(nearest_idx),
+            "waypoint_index": int(waypoint_idx),
+            "direct_blocked": bool(direct_blocked),
+            "detour_needed": bool(detour_needed),
+            "planner_mode": "global_astar",
+        }
+
+    def _global_astar_plan_uncached_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        update_state: bool = False,
+    ) -> dict | None:
+        del update_state
+        start_guess = self._single_position_to_grid_cell(pos)
+        target_cell = self._single_position_to_grid_cell(target_pos)
+        bounds = (0, self.fire_grid_size - 1, 0, self.fire_grid_size - 1)
+        start = self._nearest_traversable_cell_in_bounds(
+            env_index,
+            start_guess[0],
+            start_guess[1],
+            bounds,
+        )
+        if start is None:
+            return None
+
+        traversable = (
+            self.traversable_grid[env_index]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(bool, copy=False)
+        )
+        movement_cost = (
+            self.mobility_cost_grid[env_index]
+            + self.fire_grid[env_index].float() * 25.0
+        ).detach().cpu().numpy()
+        finite_open = traversable & np.isfinite(movement_cost)
+        if not bool(finite_open.any()):
+            return None
+
+        goals = self._global_astar_goal_cells_for_env(
+            env_index,
+            target_pos,
+            traversable,
+            movement_cost,
+        )
+        if not goals:
+            nearest_goal = self._nearest_traversable_cell_in_bounds(
+                env_index,
+                target_cell[0],
+                target_cell[1],
+                bounds,
+            )
+            if nearest_goal is None:
+                return None
+            goals = [nearest_goal]
+
+        path = self._global_astar_grid_path(env_index, start, goals, traversable, movement_cost)
+        if len(path) < 2:
+            return None
+        waypoint, nearest_idx, waypoint_idx = self._global_route_waypoint_for_env(
+            env_index,
+            pos,
+            path,
+            start_idx=0,
+        )
+        goal = path[-1]
+        direct_blocked = not self._grid_segment_is_traversable(self.traversable_grid[env_index], start, goal)
+        detour_needed = self._local_astar_detour_needed(
+            env_index,
+            start,
+            goal,
+            waypoint,
+            path,
+            direct_blocked,
+        )
+        return {
+            "route": (waypoint, bool(direct_blocked), bool(detour_needed)),
+            "start": start,
+            "goal": goal,
+            "waypoint": waypoint,
+            "path": path,
+            "path_index": int(nearest_idx),
+            "waypoint_index": int(waypoint_idx),
+            "direct_blocked": bool(direct_blocked),
+            "detour_needed": bool(detour_needed),
+            "planner_mode": "global_astar",
+        }
+
+    def _global_astar_goal_cells_for_env(
+        self,
+        env_index: int,
+        target_pos: Tensor,
+        traversable: np.ndarray,
+        movement_cost: np.ndarray,
+    ) -> list[tuple[int, int]]:
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        confirm_radius_sim = float(self.detection_range_by_env[env_index].detach().cpu().item())
+        if confirm_radius_sim <= 1e-9 and scale > 1e-9:
+            confirm_radius_sim = float(self.ground_confirmation_range_m) * scale
+        G = int(self.fire_grid_size)
+        ys, xs = np.nonzero(traversable & np.isfinite(movement_cost))
+        if xs.size == 0:
+            return []
+        cell_w = 2.0 * float(self.x_semidim) / float(G)
+        cell_h = 2.0 * float(self.y_semidim) / float(G)
+        centers_x = -float(self.x_semidim) + (xs.astype(np.float64) + 0.5) * cell_w
+        centers_y = -float(self.y_semidim) + (ys.astype(np.float64) + 0.5) * cell_h
+        target_x = float(target_pos[X].detach().cpu().item())
+        target_y = float(target_pos[Y].detach().cpu().item())
+        dist2 = (centers_x - target_x) ** 2 + (centers_y - target_y) ** 2
+        in_radius = dist2 <= confirm_radius_sim ** 2
+        if not bool(np.any(in_radius)):
+            return []
+        candidate_x = xs[in_radius]
+        candidate_y = ys[in_radius]
+        candidate_dist2 = dist2[in_radius]
+        order = np.argsort(candidate_dist2, kind="stable")
+        return [
+            (int(candidate_x[i]), int(candidate_y[i]))
+            for i in order
+        ]
+
+    def _global_astar_grid_path(
+        self,
+        env_index: int,
+        start: tuple[int, int],
+        goals: list[tuple[int, int]],
+        traversable: np.ndarray,
+        movement_cost: np.ndarray,
+    ) -> list[tuple[int, int]]:
+        del env_index
+        if not goals:
+            return []
+        G = int(self.fire_grid_size)
+        goal_set = set(goals)
+
+        def in_bounds(cell: tuple[int, int]) -> bool:
+            x, y = cell
+            return 0 <= x < G and 0 <= y < G
+
+        def open_cell(cell: tuple[int, int]) -> bool:
+            if not in_bounds(cell):
+                return False
+            x, y = cell
+            return bool(traversable[y, x]) and math.isfinite(float(movement_cost[y, x]))
+
+        if not open_cell(start):
+            return []
+        if start in goal_set:
+            return [start]
+        goals = [goal for goal in goals if open_cell(goal)]
+        if not goals:
+            return []
+        finite_open_cost = movement_cost[traversable & np.isfinite(movement_cost)]
+        if finite_open_cost.size == 0:
+            return []
+        min_cost = max(float(finite_open_cost.min()), 1e-6)
+        goal_array = np.asarray(goals, dtype=np.float64)
+
+        def heuristic(cell: tuple[int, int]) -> float:
+            dx = goal_array[:, 0] - float(cell[0])
+            dy = goal_array[:, 1] - float(cell[1])
+            return float(np.sqrt(dx * dx + dy * dy).min()) * min_cost
+
+        neighbor_offsets = (
+            (-1, 0, 1.0),
+            (1, 0, 1.0),
+            (0, -1, 1.0),
+            (0, 1, 1.0),
+            (-1, -1, math.sqrt(2.0)),
+            (-1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)),
+            (1, 1, math.sqrt(2.0)),
+        )
+        open_heap = [(heuristic(start), 0.0, start)]
+        came_from: dict[tuple[int, int], tuple[int, int]] = {}
+        best_cost: dict[tuple[int, int], float] = {start: 0.0}
+        while open_heap:
+            _, cost_so_far, current = heapq.heappop(open_heap)
+            if current in goal_set:
+                return self._reconstruct_grid_path(came_from, current)
+            if cost_so_far > best_cost.get(current, float("inf")) + 1e-9:
+                continue
+            cx, cy = current
+            for ox, oy, step_len in neighbor_offsets:
+                nxt = (cx + ox, cy + oy)
+                if not open_cell(nxt):
+                    continue
+                if ox != 0 and oy != 0 and (
+                    not open_cell((cx + ox, cy)) or not open_cell((cx, cy + oy))
+                ):
+                    continue
+                nx, ny = nxt
+                edge_cost = step_len * (
+                    float(movement_cost[cy, cx]) + float(movement_cost[ny, nx])
+                ) * 0.5
+                new_cost = cost_so_far + edge_cost
+                if new_cost < best_cost.get(nxt, float("inf")):
+                    best_cost[nxt] = new_cost
+                    came_from[nxt] = current
+                    heapq.heappush(open_heap, (new_cost + heuristic(nxt), new_cost, nxt))
+        return []
+
+    def _global_route_waypoint_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        path: list[tuple[int, int]],
+        *,
+        start_idx: int,
+    ) -> tuple[tuple[int, int], int, int]:
+        if len(path) < 2:
+            cell = path[0] if path else self._single_position_to_grid_cell(pos)
+            return cell, 0, 0
+        pos_cell = self._single_position_to_grid_cell(pos)
+        start_idx = max(0, min(int(start_idx), len(path) - 1))
+        nearest_offset, _nearest_cell = min(
+            enumerate(path[start_idx:]),
+            key=lambda item: (
+                item[1][0] - pos_cell[0]
+            ) ** 2 + (
+                item[1][1] - pos_cell[1]
+            ) ** 2,
+        )
+        nearest_idx = start_idx + int(nearest_offset)
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        cell_w_m = (2.0 * float(self.x_semidim) / float(self.fire_grid_size)) / max(scale, 1e-9)
+        cell_h_m = (2.0 * float(self.y_semidim) / float(self.fire_grid_size)) / max(scale, 1e-9)
+        traversable = self.traversable_grid[env_index]
+        waypoint = path[min(nearest_idx + 1, len(path) - 1)]
+        waypoint_idx = min(nearest_idx + 1, len(path) - 1)
+        accumulated_m = 0.0
+        previous = path[nearest_idx]
+        for idx in range(nearest_idx + 1, len(path)):
+            candidate = path[idx]
+            dx = abs(candidate[0] - previous[0])
+            dy = abs(candidate[1] - previous[1])
+            step_m = math.hypot(dx * cell_w_m, dy * cell_h_m)
+            next_accumulated = accumulated_m + step_m
+            if next_accumulated > self.ugv_global_planner_lookahead_m and idx > nearest_idx + 1:
+                break
+            if not self._grid_segment_is_traversable(traversable, path[nearest_idx], candidate):
+                break
+            waypoint = candidate
+            waypoint_idx = idx
+            accumulated_m = next_accumulated
+            previous = candidate
+        return waypoint, nearest_idx, waypoint_idx
 
     def _local_astar_route_for_env(
         self,
@@ -7770,6 +8242,7 @@ class WildfireSearchScenario(BaseScenario):
         start_pos: Tensor,
         end_pos: Tensor,
         target_pos: Tensor,
+        target_idx: Tensor,
         gate: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         reward = torch.zeros_like(gate, dtype=start_pos.dtype)
@@ -7786,6 +8259,7 @@ class WildfireSearchScenario(BaseScenario):
                 and not self.ugv_route_aware_reward
                 and self.ugv_dense_reward_mode != "planner_blend"
                 and self.ugv_dense_reward_mode != "escape_blend"
+                and self.ugv_dense_reward_mode != "planner_follow"
             )
             or start_pos.shape[1] == 0
         ):
@@ -7814,6 +8288,7 @@ class WildfireSearchScenario(BaseScenario):
                         start_pos[env_index, ground_index],
                         target_pos[env_index, ground_index],
                         ground_index=ground_index,
+                        target_idx=int(target_idx[env_index, ground_index].item()),
                     )
                 if route is None:
                     continue
@@ -7821,7 +8296,7 @@ class WildfireSearchScenario(BaseScenario):
                 direct_blocked_out[env_index, ground_index] = direct_blocked
                 detour_needed_out[env_index, ground_index] = detour_needed
                 escape_mode_out[env_index, ground_index] = escape_mode
-                if not detour_needed:
+                if not detour_needed and self.ugv_dense_reward_mode != "planner_follow":
                     continue
                 waypoint_pos = self._grid_cell_center_to_world(
                     waypoint,
@@ -7836,6 +8311,21 @@ class WildfireSearchScenario(BaseScenario):
                 progress_scaled[env_index, ground_index] = step_progress_scaled
                 reward[env_index, ground_index] = step_progress_scaled * self.r_ugv_planner_progress
                 active[env_index, ground_index] = True
+                if self.ugv_planner_hint == "global_astar":
+                    self.metric_ugv_global_route_valid[env_index] += 1.0
+                    self.metric_ugv_global_route_active[env_index] += 1.0
+                    self.metric_ugv_global_route_waypoint_distance_m[env_index] += before_m
+                    self.metric_ugv_global_route_progress_m[env_index] += step_progress_m
+                    self.metric_ugv_global_route_progress_scaled[env_index] += step_progress_scaled
+                    self.metric_ugv_global_route_direct_blocked[env_index] += float(direct_blocked)
+                    self.metric_ugv_global_route_detour_needed[env_index] += float(detour_needed)
+                    if hasattr(self, "ugv_global_route_paths"):
+                        route_path = self.ugv_global_route_paths[env_index][ground_index]
+                        self.metric_ugv_global_route_path_length[env_index] += float(len(route_path))
+                    if hasattr(self, "ugv_global_route_path_index"):
+                        self.metric_ugv_global_route_path_index[env_index] += (
+                            self.ugv_global_route_path_index[env_index, ground_index].float()
+                        )
         return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out, escape_mode_out
 
     def _local_astar_detour_needed(
@@ -8306,6 +8796,17 @@ class WildfireSearchScenario(BaseScenario):
             ),
             "diagnostic/ugv_escape_route_path_index": self.metric_ugv_escape_route_path_index,
             "diagnostic/ugv_escape_route_path_length": self.metric_ugv_escape_route_path_length,
+            "diagnostic/ugv_global_route_valid": self.metric_ugv_global_route_valid,
+            "diagnostic/ugv_global_route_active": self.metric_ugv_global_route_active,
+            "diagnostic/ugv_global_route_waypoint_distance_m": (
+                self.metric_ugv_global_route_waypoint_distance_m
+            ),
+            "diagnostic/ugv_global_route_progress_m": self.metric_ugv_global_route_progress_m,
+            "diagnostic/ugv_global_route_progress_scaled": self.metric_ugv_global_route_progress_scaled,
+            "diagnostic/ugv_global_route_path_index": self.metric_ugv_global_route_path_index,
+            "diagnostic/ugv_global_route_path_length": self.metric_ugv_global_route_path_length,
+            "diagnostic/ugv_global_route_direct_blocked": self.metric_ugv_global_route_direct_blocked,
+            "diagnostic/ugv_global_route_detour_needed": self.metric_ugv_global_route_detour_needed,
             "diagnostic/ugv_route_aware_active": self.metric_ugv_route_aware_active,
             "diagnostic/ugv_action_alignment": self.metric_ugv_action_alignment,
             "diagnostic/ugv_movement_alignment": self.metric_ugv_movement_alignment,

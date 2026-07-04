@@ -269,26 +269,29 @@ def build_args(
     ugv_planner_detour_obs: bool = False,
     ugv_planner_patch_size: int = 11,
     ugv_planner_lookahead_cells: int = 10,
+    ugv_global_planner_lookahead_m: float = 20.0,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     ugv_local_planners = {"local_astar", "local_escape_astar"}
-    if ugv_planner_hint not in {"none"} | ugv_local_planners:
-        raise ValueError("ugv_planner_hint must be one of: none, local_astar, local_escape_astar")
-    if ugv_planner_detour_obs and ugv_planner_hint not in ugv_local_planners:
-        raise ValueError("ugv_planner_detour_obs requires a local UGV planner hint")
+    ugv_planners = ugv_local_planners | {"global_astar"}
+    if ugv_planner_hint not in {"none"} | ugv_planners:
+        raise ValueError("ugv_planner_hint must be one of: none, local_astar, local_escape_astar, global_astar")
+    if ugv_planner_detour_obs and ugv_planner_hint not in ugv_planners:
+        raise ValueError("ugv_planner_detour_obs requires a UGV planner hint")
     if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_dense_reward_mode = str(ugv_dense_reward_mode).replace("-", "_")
     if ugv_dense_reward_mode not in {
         "target",
         "positive_target",
-        "planner_blend",
-        "escape_blend",
-        "escape_route_switch",
-    }:
+            "planner_blend",
+            "escape_blend",
+            "escape_route_switch",
+            "planner_follow",
+        }:
         raise ValueError(
             "ugv_dense_reward_mode must be one of: target, positive_target, "
-            "planner_blend, escape_blend, escape_route_switch"
+            "planner_blend, escape_blend, escape_route_switch, planner_follow"
         )
     if ugv_dense_reward_mode == "planner_blend" and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
@@ -296,6 +299,8 @@ def build_args(
         raise ValueError("ugv_dense_reward_mode='escape_blend' requires ugv_planner_hint='local_escape_astar'")
     if ugv_dense_reward_mode == "escape_route_switch" and ugv_planner_hint != "local_astar":
         raise ValueError("ugv_dense_reward_mode='escape_route_switch' requires ugv_planner_hint='local_astar'")
+    if ugv_dense_reward_mode == "planner_follow" and ugv_planner_hint != "global_astar":
+        raise ValueError("ugv_dense_reward_mode='planner_follow' requires ugv_planner_hint='global_astar'")
     if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
         raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
     if uav_survivor_diagnostic:
@@ -468,8 +473,8 @@ def build_args(
     ugv_planner_progress_reward = float(ugv_planner_progress_reward)
     if ugv_planner_progress_reward < 0.0:
         raise ValueError("ugv_planner_progress_reward must be nonnegative")
-    if ugv_planner_progress_reward > 0.0 and ugv_planner_hint not in ugv_local_planners:
-        raise ValueError("ugv_planner_progress_reward requires a local UGV planner hint")
+    if ugv_planner_progress_reward > 0.0 and ugv_planner_hint not in ugv_planners:
+        raise ValueError("ugv_planner_progress_reward requires a UGV planner hint")
     if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_planner_blend_weight = min(max(float(ugv_planner_blend_weight), 0.0), 1.0)
@@ -478,6 +483,7 @@ def build_args(
     ugv_escape_movement_threshold_m = max(float(ugv_escape_movement_threshold_m), 0.0)
     ugv_escape_waypoint_reached_m = max(float(ugv_escape_waypoint_reached_m), 1e-6)
     ugv_escape_max_steps = max(int(ugv_escape_max_steps), 1)
+    ugv_global_planner_lookahead_m = max(float(ugv_global_planner_lookahead_m), 1e-6)
     uav_coverage_reward = float(uav_coverage_reward)
     if uav_coverage_reward < 0.0:
         raise ValueError("uav_coverage_reward must be nonnegative")
@@ -614,6 +620,7 @@ def build_args(
         "ugv_escape_max_steps": ugv_escape_max_steps,
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
+        "ugv_global_planner_lookahead_m": ugv_global_planner_lookahead_m,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
@@ -1055,10 +1062,19 @@ def main():
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
     p.add_argument("--ugv-planner-hint",
-                   choices=("none", "local_astar", "local-astar", "local_escape_astar", "local-escape-astar"),
+                   choices=(
+                       "none",
+                       "local_astar",
+                       "local-astar",
+                       "local_escape_astar",
+                       "local-escape-astar",
+                       "global_astar",
+                       "global-astar",
+                   ),
                    default="none",
                    help="Optional UGV observation hint. local_astar exposes a local A* waypoint vector; "
-                        "local_escape_astar uses the same shape with escape-aware local exits.")
+                        "local_escape_astar uses the same shape with escape-aware local exits; "
+                        "global_astar follows a cached full-map static route.")
     p.add_argument("--ugv-planner-detour-obs", action="store_true",
                    help="Append a detour-needed bit to the local A* UGV planner hint. "
                         "Changes observation size, so use only for new A* trainings.")
@@ -1076,6 +1092,8 @@ def main():
                        "escape-blend",
                        "escape_route_switch",
                        "escape-route-switch",
+                       "planner_follow",
+                       "planner-follow",
                    ),
                    default="target",
                    help="How UGV dense progress/alignment rewards are shaped. target keeps legacy "
@@ -1084,7 +1102,8 @@ def main():
                         "signals during local detours; escape_blend only blends during "
                         "local_escape_astar escape steps; escape_route_switch keeps survivor "
                         "shaping until local_astar detects sustained stalled blocked motion, then "
-                        "temporarily follows a stored escape route.")
+                        "temporarily follows a stored escape route; planner_follow replaces dense "
+                        "survivor shaping with the global_astar waypoint.")
     p.add_argument("--ugv-planner-blend-weight", type=float, default=0.70,
                    help="Planner weight used by --ugv-dense-reward-mode planner_blend during local detours.")
     p.add_argument("--ugv-escape-stall-steps", type=int, default=5,
@@ -1101,6 +1120,8 @@ def main():
                    help="Odd local grid size used by local UGV planner hints.")
     p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
                    help="Maximum number of A* route cells to skip ahead when forming the waypoint hint.")
+    p.add_argument("--ugv-global-planner-lookahead-m", type=float, default=20.0,
+                   help="Physical lookahead distance for global_astar waypoint hints.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -1550,10 +1571,11 @@ def main():
     if args.ugv_planner_progress_reward < 0.0:
         p.error("--ugv-planner-progress-reward must be nonnegative")
     ugv_local_planners = {"local_astar", "local_escape_astar"}
-    if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint not in ugv_local_planners:
-        p.error("--ugv-planner-progress-reward requires a local UGV planner hint")
-    if args.ugv_planner_detour_obs and args.ugv_planner_hint not in ugv_local_planners:
-        p.error("--ugv-planner-detour-obs requires a local UGV planner hint")
+    ugv_planners = ugv_local_planners | {"global_astar"}
+    if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint not in ugv_planners:
+        p.error("--ugv-planner-progress-reward requires a UGV planner hint")
+    if args.ugv_planner_detour_obs and args.ugv_planner_hint not in ugv_planners:
+        p.error("--ugv-planner-detour-obs requires a UGV planner hint")
     if args.ugv_route_aware_reward and args.ugv_planner_hint not in ugv_local_planners:
         p.error("--ugv-route-aware-reward requires a local UGV planner hint")
     args.ugv_dense_reward_mode = args.ugv_dense_reward_mode.replace("-", "_")
@@ -1563,6 +1585,8 @@ def main():
         p.error("--ugv-dense-reward-mode escape_blend requires --ugv-planner-hint local_escape_astar")
     if args.ugv_dense_reward_mode == "escape_route_switch" and args.ugv_planner_hint != "local_astar":
         p.error("--ugv-dense-reward-mode escape_route_switch requires --ugv-planner-hint local_astar")
+    if args.ugv_dense_reward_mode == "planner_follow" and args.ugv_planner_hint != "global_astar":
+        p.error("--ugv-dense-reward-mode planner_follow requires --ugv-planner-hint global_astar")
     if args.ugv_route_aware_reward and args.ugv_dense_reward_mode != "target":
         p.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
     args.ugv_planner_blend_weight = min(max(float(args.ugv_planner_blend_weight), 0.0), 1.0)
@@ -1576,6 +1600,8 @@ def main():
         p.error("--ugv-escape-waypoint-reached-m must be positive")
     if args.ugv_escape_max_steps < 1:
         p.error("--ugv-escape-max-steps must be positive")
+    if args.ugv_global_planner_lookahead_m <= 0.0:
+        p.error("--ugv-global-planner-lookahead-m must be positive")
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -1816,6 +1842,7 @@ def main():
         f"max_steps={args.ugv_escape_max_steps}"
     )
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
+    print(f" ugv_global_planner_lookahead_m: {args.ugv_global_planner_lookahead_m}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
@@ -1978,6 +2005,7 @@ def main():
         ugv_planner_detour_obs = bool(args.ugv_planner_detour_obs),
         ugv_planner_patch_size = args.ugv_planner_patch_size,
         ugv_planner_lookahead_cells = args.ugv_planner_lookahead_cells,
+        ugv_global_planner_lookahead_m = args.ugv_global_planner_lookahead_m,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)

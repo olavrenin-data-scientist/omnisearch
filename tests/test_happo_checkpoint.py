@@ -308,6 +308,27 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_escape_waypoint_reached_m"], 5.0)
         self.assertEqual(scenario["ugv_escape_max_steps"], 12)
 
+    def test_build_args_accepts_global_astar_planner_follow(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="global-planner",
+            ugv_known_survivor_diagnostic=True,
+            local_map_patch_size=7,
+            ugv_planner_hint="global-astar",
+            ugv_dense_reward_mode="planner-follow",
+            ugv_global_planner_lookahead_m=25.0,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
+        self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
+        self.assertEqual(scenario["ugv_global_planner_lookahead_m"], 25.0)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7)
+
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
             num_env_steps=100,

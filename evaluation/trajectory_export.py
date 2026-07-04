@@ -94,7 +94,7 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
     if getattr(agent, "is_drone", False):
         return None
     planner_mode = str(getattr(scenario, "ugv_planner_hint", "none")).replace("-", "_")
-    if planner_mode not in {"local_astar", "local_escape_astar"}:
+    if planner_mode not in {"local_astar", "local_escape_astar", "global_astar"}:
         return None
     if getattr(scenario, "n_survivors", 0) <= 0:
         return None
@@ -128,11 +128,23 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
             target_pos,
         )
         route = None if route_info is None else route_info["route"]
+    elif planner_mode == "global_astar":
+        route_info = scenario._global_astar_route_info_for_env(
+            env_index,
+            ground_pos,
+            target_pos,
+            ground_index=ground_index,
+            target_idx=target_index,
+            update_index=True,
+        )
+        route = None if route_info is None else route_info["route"]
     else:
         route = scenario._ugv_planner_route_for_env(
             env_index,
             ground_pos,
             target_pos,
+            ground_index=ground_index,
+            target_idx=target_index,
         )
     if route is None:
         return None

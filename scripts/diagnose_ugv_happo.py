@@ -138,6 +138,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
     if args.ugv_planner_lookahead_cells is not None:
         scenario_kwargs["ugv_planner_lookahead_cells"] = int(args.ugv_planner_lookahead_cells)
+    if args.ugv_global_planner_lookahead_m is not None:
+        scenario_kwargs["ugv_global_planner_lookahead_m"] = float(args.ugv_global_planner_lookahead_m)
     if "ugv_planner_lookahead_cells" in scenario_kwargs:
         patch_size = int(scenario_kwargs.get("ugv_planner_patch_size", 11))
         scenario_kwargs["ugv_planner_lookahead_cells"] = min(
@@ -176,7 +178,7 @@ def _planner_hint_from_observation(
     obs: torch.Tensor,
 ) -> tuple[torch.Tensor, bool] | None:
     """Extract [unit_dx, unit_dy, ..., valid, direct_blocked] from one UGV obs."""
-    if getattr(scenario, "ugv_planner_hint", "none") not in {"local_astar", "local_escape_astar"}:
+    if getattr(scenario, "ugv_planner_hint", "none") not in {"local_astar", "local_escape_astar", "global_astar"}:
         return None
     patch_size = int(getattr(scenario, "local_map_patch_size", 3))
     offset = 4 + 12 + 1 + 2 * patch_size * patch_size + 9
@@ -291,6 +293,73 @@ def _shadow_astar_route_details(
 ) -> dict | None:
     """Reconstruct the local A* route and expose why it differs from the target."""
     planner_mode = str(getattr(scenario, "ugv_planner_hint", "none")).replace("-", "_")
+    if planner_mode == "global_astar":
+        plan = scenario._global_astar_route_info_for_env(
+            env_index,
+            pos[0],
+            target_pos[0],
+        )
+        if plan is None:
+            return None
+        start = plan["start"]
+        goal = plan["goal"]
+        waypoint = plan["waypoint"]
+        path = plan["path"]
+        if len(path) < 2:
+            return None
+        sx_i, sy_i = start
+        gx, gy = goal
+        wx, wy = waypoint
+        direct_vec = np.array([gx - sx_i, gy - sy_i], dtype=np.float64)
+        waypoint_vec = np.array([wx - sx_i, wy - sy_i], dtype=np.float64)
+        direct_norm = float(np.linalg.norm(direct_vec))
+        waypoint_norm = float(np.linalg.norm(waypoint_vec))
+        target_astar_alignment = None
+        target_astar_angle_deg = None
+        direction_detour = False
+        if direct_norm > 1e-9 and waypoint_norm > 1e-9:
+            target_astar_alignment = float(np.dot(direct_vec, waypoint_vec) / (direct_norm * waypoint_norm))
+            target_astar_alignment = max(min(target_astar_alignment, 1.0), -1.0)
+            target_astar_angle_deg = float(np.degrees(np.arccos(target_astar_alignment)))
+            direction_detour = target_astar_alignment < math.cos(math.radians(30.0))
+
+        direct_cells = scenario._grid_segment_cells(start, goal)
+        direct_cost = scenario._grid_path_cost(env_index, direct_cells)
+        astar_cost = scenario._grid_path_cost(env_index, path)
+        cost_ratio = None
+        if math.isfinite(direct_cost) and math.isfinite(astar_cost) and astar_cost > 1e-9:
+            cost_ratio = float(direct_cost / astar_cost)
+        cost_detour = (
+            math.isfinite(direct_cost)
+            and math.isfinite(astar_cost)
+            and astar_cost > 1e-9
+            and direct_cost > astar_cost * 1.25
+        )
+        return {
+            "start": start,
+            "goal": goal,
+            "waypoint": waypoint,
+            "path": path,
+            "direct_blocked": bool(plan["direct_blocked"]),
+            "detour_needed": bool(plan["detour_needed"]),
+            "direction_detour": bool(direction_detour),
+            "cost_detour": bool(cost_detour),
+            "target_astar_alignment": target_astar_alignment,
+            "target_astar_angle_deg": target_astar_angle_deg,
+            "direct_cost": float(direct_cost) if math.isfinite(direct_cost) else None,
+            "astar_cost": float(astar_cost) if math.isfinite(astar_cost) else None,
+            "cost_ratio": cost_ratio,
+            "direct_blocked_cells": _segment_blocked_cell_count(
+                scenario,
+                env_index,
+                direct_cells,
+            ),
+            "planner_mode": planner_mode,
+            "escape_mode": False,
+            "exit_clearance_cells": None,
+            "exit_openness": None,
+            "target_corridor_blocked_fraction": None,
+        }
     if planner_mode == "local_escape_astar":
         plan = scenario._local_escape_astar_route_info_for_env(
             env_index,
@@ -2532,7 +2601,15 @@ def main() -> None:
                         help="Omit for no upper bound when a min distance is provided.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--ugv-planner-hint",
-                        choices=("none", "local_astar", "local-astar", "local_escape_astar", "local-escape-astar"),
+                        choices=(
+                            "none",
+                            "local_astar",
+                            "local-astar",
+                            "local_escape_astar",
+                            "local-escape-astar",
+                            "global_astar",
+                            "global-astar",
+                        ),
                         default=None,
                         help="Override the checkpoint's UGV planner hint setting.")
     parser.add_argument("--ugv-planner-detour-obs", action=argparse.BooleanOptionalAction, default=None,
@@ -2550,6 +2627,8 @@ def main() -> None:
                             "escape-blend",
                             "escape_route_switch",
                             "escape-route-switch",
+                            "planner_follow",
+                            "planner-follow",
                         ),
                         default=None,
                         help="Override UGV dense reward shaping mode for reward diagnostics.")
@@ -2569,6 +2648,8 @@ def main() -> None:
                         help="Override the checkpoint's local A* planner patch size.")
     parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
                         help="Override the checkpoint's planner waypoint lookahead.")
+    parser.add_argument("--ugv-global-planner-lookahead-m", type=float, default=None,
+                        help="Override the checkpoint's global planner waypoint lookahead in meters.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--trace-failures", action="store_true",
                         help="Print per-step diagnostics for seeds that fail to confirm.")
@@ -2595,6 +2676,8 @@ def main() -> None:
         parser.error("--ugv-planner-patch-size must be a positive odd integer")
     if args.ugv_planner_lookahead_cells is not None and args.ugv_planner_lookahead_cells < 1:
         parser.error("--ugv-planner-lookahead-cells must be positive")
+    if args.ugv_global_planner_lookahead_m is not None and args.ugv_global_planner_lookahead_m <= 0.0:
+        parser.error("--ugv-global-planner-lookahead-m must be positive")
     if args.ugv_escape_stall_steps is not None and args.ugv_escape_stall_steps < 1:
         parser.error("--ugv-escape-stall-steps must be positive")
     if args.ugv_escape_progress_threshold_m is not None and args.ugv_escape_progress_threshold_m < 0.0:
@@ -2615,6 +2698,7 @@ def main() -> None:
     checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
     scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)
     ugv_local_planners = {"local_astar", "local_escape_astar"}
+    ugv_planners = ugv_local_planners | {"global_astar"}
     if (
         bool(scenario_kwargs.get("ugv_route_aware_reward", False))
         and scenario_kwargs.get("ugv_planner_hint", "none") not in ugv_local_planners
@@ -2635,6 +2719,11 @@ def main() -> None:
         and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
     ):
         parser.error("--ugv-dense-reward-mode escape_route_switch requires --ugv-planner-hint local_astar")
+    if (
+        scenario_kwargs.get("ugv_dense_reward_mode", "target") == "planner_follow"
+        and scenario_kwargs.get("ugv_planner_hint", "none") != "global_astar"
+    ):
+        parser.error("--ugv-dense-reward-mode planner_follow requires --ugv-planner-hint global_astar")
     if (
         bool(scenario_kwargs.get("ugv_route_aware_reward", False))
         and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"

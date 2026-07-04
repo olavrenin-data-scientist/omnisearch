@@ -508,6 +508,56 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(hint[3]), 1.0)
         self.assertEqual(float(hint[4]), 0.0)
 
+    def test_global_astar_planner_hint_appends_same_features(self):
+        env = self._diagnostic_env(
+            local_map_patch_size=7,
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, _survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (74, 64),
+        )
+
+        obs = scenario.observation(ground)
+        expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7
+        hint_offset = 4 + 12 + 1 + 2 * 7 * 7 + 9
+        hint = obs[0, hint_offset : hint_offset + 5]
+
+        self.assertEqual(obs.shape[-1], expected_width)
+        self.assertGreater(float(hint[0]), 0.8)
+        self.assertLess(abs(float(hint[1])), 0.2)
+        self.assertEqual(float(hint[3]), 1.0)
+        self.assertEqual(float(hint[4]), 0.0)
+
+    def test_global_astar_routes_around_full_grid_wall(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+            tuple((68, y) for y in range(58, 71)),
+        )
+
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["direct_blocked"])
+        self.assertTrue(plan["detour_needed"])
+        self.assertGreaterEqual(len(plan["path"]), 2)
+        self.assertNotIn((68, 64), plan["path"])
+        self.assertNotEqual(plan["waypoint"][1], 64)
+
     def test_optimized_local_astar_route_matches_reference_cases(self):
         route_cases = (
             ("clear_direct", (64, 64), (67, 64), ()),
@@ -717,8 +767,9 @@ class SurvivorCommunicationTests(unittest.TestCase):
         end_pos = start_pos + direction * scale
         gate = torch.ones(1, 1, dtype=torch.bool)
 
+        target_idx = torch.zeros_like(gate, dtype=torch.long)
         reward, progress_m, _progress_scaled, active, direct_blocked, detour_needed, escape_mode = (
-            scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, gate)
+            scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, target_idx, gate)
         )
         self.assertEqual(calls["count"], 1)
         self.assertTrue(bool(active[0, 0]))
@@ -729,7 +780,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertGreater(float(reward[0, 0]), 0.0)
 
         scenario._invalidate_ugv_planner_route_cache()
-        scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, gate)
+        target_idx = torch.zeros_like(gate, dtype=torch.long)
+        scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, target_idx, gate)
         self.assertEqual(calls["count"], 2)
 
     def test_known_survivor_spawn_distance_range_samples_angles(self):
@@ -1177,6 +1229,60 @@ class SurvivorCommunicationTests(unittest.TestCase):
             places=5,
         )
 
+    def test_planner_follow_dense_reward_uses_global_astar_waypoint(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_dense_reward_mode="planner_follow",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            start_cell=(64, 64),
+            target_cell=(76, 64),
+            blocked_cells=tuple((68, y) for y in range(58, 71)),
+        )
+        device = ground.state.pos.device
+        dtype = ground.state.pos.dtype
+        scenario.r_ground_shaping = 0.5
+        scenario.r_ground_approach = 0.0
+        scenario.ground_approach_milestone_rewards_tensor.zero_()
+        scenario.r_ugv_movement_alignment = 0.2
+        scenario.r_ugv_planner_progress = 0.05
+        scenario.ugv_planner_progress_scale_m = 1.0
+        scenario.detection_range_by_env.zero_()
+
+        scenario._compute_step_rewards()
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        waypoint = plan["waypoint"]
+        waypoint_pos = scenario._grid_cell_center_to_world(waypoint, device=device, dtype=dtype)
+        direction = waypoint_pos - ground.state.pos[0]
+        direction = direction / direction.norm().clamp_min(1e-9)
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:] = ground.state.pos + direction.view(1, 2) * scale
+        scenario.step_ugv_actual_displacement_m[0, 0] = 1.0
+        scenario._compute_step_rewards()
+
+        self.assertEqual(float(scenario.metric_ugv_planner_active[0]), 1.0)
+        self.assertEqual(float(scenario.metric_reward_ugv_planner_progress[0]), 0.0)
+        expected_progress_reward = 0.5 * float(scenario.metric_ugv_planner_progress_scaled[0])
+        expected_alignment_reward = 0.2 * min(max(float(scenario.metric_ugv_planner_progress_m[0]), -1.0), 1.0)
+        self.assertAlmostEqual(float(scenario.metric_reward_ugv_progress[0]), expected_progress_reward, places=5)
+        self.assertAlmostEqual(
+            float(scenario.metric_reward_ugv_movement_alignment[0]),
+            expected_alignment_reward,
+            places=5,
+        )
+        self.assertGreater(float(scenario.metric_ugv_global_route_active[0]), 0.0)
+
     def test_escape_blend_dense_reward_only_uses_escape_progress(self):
         env = self._diagnostic_env(
             ugv_planner_hint="local_escape_astar",
@@ -1348,6 +1454,15 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "diagnostic/ugv_planner_active",
             "diagnostic/ugv_planner_direct_blocked",
             "diagnostic/ugv_planner_detour_needed",
+            "diagnostic/ugv_global_route_valid",
+            "diagnostic/ugv_global_route_active",
+            "diagnostic/ugv_global_route_waypoint_distance_m",
+            "diagnostic/ugv_global_route_progress_m",
+            "diagnostic/ugv_global_route_progress_scaled",
+            "diagnostic/ugv_global_route_path_index",
+            "diagnostic/ugv_global_route_path_length",
+            "diagnostic/ugv_global_route_direct_blocked",
+            "diagnostic/ugv_global_route_detour_needed",
             "diagnostic/ugv_route_aware_active",
             "diagnostic/ugv_action_alignment",
             "diagnostic/ugv_movement_alignment",

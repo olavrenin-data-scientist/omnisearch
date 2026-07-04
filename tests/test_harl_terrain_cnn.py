@@ -52,11 +52,18 @@ class HARLTerrainCNNTests(unittest.TestCase):
             n_survivors=1,
             ugv_planner_hint="local-escape-astar",
         )
+        with_global_planner = wildfire_single_observation_dim(
+            local_map_patch_size=7,
+            n_agents=1,
+            n_survivors=1,
+            ugv_planner_hint="global-astar",
+        )
 
         self.assertEqual(base, 4 + 12 + 1 + 2 * 7 * 7 + 9 + 2 + 4 + 7)
         self.assertEqual(with_planner, base + 5)
         self.assertEqual(with_planner_detour, base + 6)
         self.assertEqual(with_escape_planner, base + 5)
+        self.assertEqual(with_global_planner, base + 5)
 
         with_coverage = wildfire_single_observation_dim(
             local_map_patch_size=7,
