@@ -1093,6 +1093,11 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_terrain_cache_version = 0
         self._ugv_planner_route_cache: dict[tuple, tuple[tuple[int, int], bool, bool] | None] = {}
         self._ugv_planner_terrain_cache_version = 0
+        self._ugv_planner_layer_cache_version = 0
+        self._ugv_planner_fire_buffer_mask_cache = {}
+        self._ugv_planner_blocked_fire_mask_cache = {}
+        self._ugv_planner_layer_tensor_cache = {}
+        self._ugv_planner_layer_array_cache = {}
         self.ugv_escape_route_active = torch.zeros(
             batch_dim,
             self.n_ground,
@@ -2466,32 +2471,85 @@ class WildfireSearchScenario(BaseScenario):
         self.speed_multiplier_grid[env_index] = torch.where(
             traversable, speed.clamp(0.0, 1.0), torch.zeros_like(speed),
         )
+        if hasattr(self, "_ugv_planner_layer_tensor_cache"):
+            self._invalidate_ugv_planner_layer_cache(env_index)
+
+    def _invalidate_ugv_planner_layer_cache(self, env_index: int | None = None) -> None:
+        del env_index
+        self._ugv_planner_layer_cache_version = (
+            getattr(self, "_ugv_planner_layer_cache_version", 0) + 1
+        )
+        caches = (
+            "_ugv_planner_fire_buffer_mask_cache",
+            "_ugv_planner_blocked_fire_mask_cache",
+            "_ugv_planner_layer_tensor_cache",
+            "_ugv_planner_layer_array_cache",
+        )
+        for name in caches:
+            if hasattr(self, name):
+                getattr(self, name).clear()
 
     def _ugv_planner_fire_buffer_mask(self, env_index: int) -> Tensor:
+        version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
+        key = (int(env_index), version)
+        cache = getattr(self, "_ugv_planner_fire_buffer_mask_cache", None)
+        if cache is None:
+            self._ugv_planner_fire_buffer_mask_cache = {}
+            cache = self._ugv_planner_fire_buffer_mask_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
         fire = self.fire_grid[env_index].bool()
         if (
             self.ugv_planner_fire_buffer_m <= 0.0
             or self.ugv_planner_fire_buffer_cost <= 0.0
             or not bool(fire.any().item())
         ):
-            return torch.zeros_like(fire)
+            mask = torch.zeros_like(fire)
+            cache[key] = mask
+            return mask
         scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
         radius_sim = float(self.ugv_planner_fire_buffer_m) * max(scale, 1e-9)
         radius_cells = self._world_length_to_cells(radius_sim, min_cells=0)
         if radius_cells <= 0:
-            return torch.zeros_like(fire)
-        return (self._local_true_count(fire, radius_cells) > 0.0) & ~fire
+            mask = torch.zeros_like(fire)
+            cache[key] = mask
+            return mask
+        mask = (self._local_true_count(fire, radius_cells) > 0.0) & ~fire
+        cache[key] = mask
+        return mask
 
     def _ugv_planner_blocked_fire_mask(self, env_index: int) -> Tensor:
+        version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
+        key = (int(env_index), version)
+        cache = getattr(self, "_ugv_planner_blocked_fire_mask_cache", None)
+        if cache is None:
+            self._ugv_planner_blocked_fire_mask_cache = {}
+            cache = self._ugv_planner_blocked_fire_mask_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
         fire = self.fire_grid[env_index].bool()
         if self.ugv_planner_fire_block_threshold <= 0.0:
+            cache[key] = fire
             return fire
-        return fire & (
+        mask = fire & (
             self.fire_intensity_grid[env_index].clamp(0.0, 1.0)
             >= float(self.ugv_planner_fire_block_threshold)
         )
+        cache[key] = mask
+        return mask
 
     def _ugv_planner_layer_tensors_for_env(self, env_index: int) -> tuple[Tensor, Tensor]:
+        version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
+        key = (int(env_index), version)
+        cache = getattr(self, "_ugv_planner_layer_tensor_cache", None)
+        if cache is None:
+            self._ugv_planner_layer_tensor_cache = {}
+            cache = self._ugv_planner_layer_tensor_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
         traversable = self.traversable_grid[env_index].clone()
         if self.ugv_planner_land_cover_cost_values is None:
             movement_cost = self.mobility_cost_grid[env_index].clone()
@@ -2532,14 +2590,26 @@ class WildfireSearchScenario(BaseScenario):
                 self._ugv_planner_fire_buffer_mask(env_index).float()
                 * float(self.ugv_planner_fire_buffer_cost)
             )
+        cache[key] = (traversable, movement_cost)
         return traversable, movement_cost
 
     def _ugv_planner_layer_arrays_for_env(self, env_index: int) -> tuple[np.ndarray, np.ndarray]:
+        version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
+        key = (int(env_index), version)
+        cache = getattr(self, "_ugv_planner_layer_array_cache", None)
+        if cache is None:
+            self._ugv_planner_layer_array_cache = {}
+            cache = self._ugv_planner_layer_array_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
         traversable, movement_cost = self._ugv_planner_layer_tensors_for_env(env_index)
-        return (
+        arrays = (
             traversable.detach().cpu().numpy().astype(bool, copy=False),
             movement_cost.detach().cpu().numpy(),
         )
+        cache[key] = arrays
+        return arrays
 
     def _ugv_route_fire_stats_for_env(self, env_index: int, path: list[tuple[int, int]]) -> dict[str, float]:
         if not path:
@@ -2592,6 +2662,7 @@ class WildfireSearchScenario(BaseScenario):
     def _invalidate_ugv_planner_routes_for_fire_change(self) -> None:
         if self.ugv_planner_fire_mode == "off":
             return
+        self._invalidate_ugv_planner_layer_cache()
         if self.ugv_planner_fire_replan_policy == "always":
             self._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
             return
@@ -2777,6 +2848,8 @@ class WildfireSearchScenario(BaseScenario):
             smoke = smoke + self.wind_strength * (shifted - smoke)
 
         self.smoke_grid = smoke.clamp(0.0, 1.0)
+        if self.ugv_planner_fire_mode != "off":
+            self._invalidate_ugv_planner_layer_cache()
 
     def _normalized_wind(self) -> tuple[float, float]:
         wind_x, wind_y = self.wind_direction
@@ -4034,6 +4107,7 @@ class WildfireSearchScenario(BaseScenario):
         if not hasattr(self, "_ugv_planner_route_cache"):
             self._ugv_planner_route_cache = {}
         if terrain_changed:
+            self._invalidate_ugv_planner_layer_cache(env_index)
             self._ugv_planner_terrain_cache_version = (
                 getattr(self, "_ugv_planner_terrain_cache_version", 0) + 1
             )
@@ -7355,8 +7429,7 @@ class WildfireSearchScenario(BaseScenario):
         if start is None:
             return None
 
-        traversable = planner_traversable_tensor.detach().cpu().numpy().astype(bool, copy=False)
-        movement_cost = planner_cost_tensor.detach().cpu().numpy()
+        traversable, movement_cost = self._ugv_planner_layer_arrays_for_env(env_index)
         finite_open = traversable & np.isfinite(movement_cost)
         if not bool(finite_open.any()):
             return None
@@ -7480,12 +7553,17 @@ class WildfireSearchScenario(BaseScenario):
         if finite_open_cost.size == 0:
             return []
         min_cost = max(float(finite_open_cost.min()), 1e-6)
-        goal_array = np.asarray(goals, dtype=np.float64)
+        grid_y = np.arange(G, dtype=np.float64)[:, None]
+        grid_x = np.arange(G, dtype=np.float64)[None, :]
+        heuristic_dist2 = np.full((G, G), np.inf, dtype=np.float64)
+        for gx, gy in goals:
+            dx = grid_x - float(gx)
+            dy = grid_y - float(gy)
+            heuristic_dist2 = np.minimum(heuristic_dist2, dx * dx + dy * dy)
+        heuristic_grid = np.sqrt(heuristic_dist2) * min_cost
 
         def heuristic(cell: tuple[int, int]) -> float:
-            dx = goal_array[:, 0] - float(cell[0])
-            dy = goal_array[:, 1] - float(cell[1])
-            return float(np.sqrt(dx * dx + dy * dy).min()) * min_cost
+            return float(heuristic_grid[cell[1], cell[0]])
 
         neighbor_offsets = (
             (-1, 0, 1.0),

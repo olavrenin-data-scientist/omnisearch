@@ -702,6 +702,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario = env.scenario
         scenario.fire_grid[0, 64, 68] = True
         scenario.fire_intensity_grid[0, 64, 68] = 0.4
+        scenario._invalidate_ugv_planner_layer_cache()
 
         traversable, movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
 
@@ -713,6 +714,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         )
 
         scenario.fire_intensity_grid[0, 64, 68] = 0.8
+        scenario._invalidate_ugv_planner_layer_cache()
         traversable, _movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
 
         self.assertFalse(bool(traversable[64, 68].item()))
@@ -731,6 +733,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.fire_grid[0, 64, 68] = True
         scenario.smoke_grid[0, 64, 68] = 1.0
         scenario.smolder_grid[0, 64, 68] = 1.0
+        scenario._invalidate_ugv_planner_layer_cache()
 
         traversable, movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
 
