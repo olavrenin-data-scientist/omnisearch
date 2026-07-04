@@ -2442,7 +2442,15 @@ def main() -> None:
     parser.add_argument("--ugv-route-aware-reward", action=argparse.BooleanOptionalAction, default=None,
                         help="Override route-aware reward switching for local A* detours.")
     parser.add_argument("--ugv-dense-reward-mode",
-                        choices=("target", "positive_target", "positive-target", "planner_blend", "planner-blend"),
+                        choices=(
+                            "target",
+                            "positive_target",
+                            "positive-target",
+                            "planner_blend",
+                            "planner-blend",
+                            "escape_blend",
+                            "escape-blend",
+                        ),
                         default=None,
                         help="Override UGV dense reward shaping mode for reward diagnostics.")
     parser.add_argument("--ugv-planner-blend-weight", type=float, default=None,
@@ -2497,6 +2505,11 @@ def main() -> None:
         and scenario_kwargs.get("ugv_planner_hint", "none") not in ugv_local_planners
     ):
         parser.error("--ugv-dense-reward-mode planner_blend requires a local UGV planner hint")
+    if (
+        scenario_kwargs.get("ugv_dense_reward_mode", "target") == "escape_blend"
+        and scenario_kwargs.get("ugv_planner_hint", "none") != "local_escape_astar"
+    ):
+        parser.error("--ugv-dense-reward-mode escape_blend requires --ugv-planner-hint local_escape_astar")
     if (
         bool(scenario_kwargs.get("ugv_route_aware_reward", False))
         and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"

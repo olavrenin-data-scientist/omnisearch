@@ -470,12 +470,14 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.20)
         self.r_ugv_planner_progress = max(float(kwargs.pop("r_ugv_planner_progress", 0.0)), 0.0)
         self.ugv_dense_reward_mode = str(kwargs.pop("ugv_dense_reward_mode", "target")).replace("-", "_")
-        if self.ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend"}:
+        if self.ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend", "escape_blend"}:
             raise ValueError(
-                "ugv_dense_reward_mode must be one of: target, positive_target, planner_blend"
+                "ugv_dense_reward_mode must be one of: target, positive_target, planner_blend, escape_blend"
             )
         if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
             raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
+        if self.ugv_dense_reward_mode == "escape_blend" and self.ugv_planner_hint != "local_escape_astar":
+            raise ValueError("ugv_dense_reward_mode='escape_blend' requires ugv_planner_hint='local_escape_astar'")
         if self.ugv_route_aware_reward and self.ugv_dense_reward_mode != "target":
             raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
         self.ugv_planner_blend_weight = min(
@@ -1236,6 +1238,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_planner_active = torch.zeros(batch_dim, device=device)
         self.metric_ugv_planner_direct_blocked = torch.zeros(batch_dim, device=device)
         self.metric_ugv_planner_detour_needed = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_planner_escape_mode = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_aware_active = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
 
@@ -1360,6 +1363,7 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_planner_active,
             self.metric_ugv_planner_direct_blocked,
             self.metric_ugv_planner_detour_needed,
+            self.metric_ugv_planner_escape_mode,
             self.metric_ugv_route_aware_active,
             self.metric_reward_ugv_stall_penalty,
         ]
@@ -2842,6 +2846,7 @@ class WildfireSearchScenario(BaseScenario):
                 planner_active,
                 planner_direct_blocked,
                 planner_detour_needed,
+                planner_escape_mode,
             ) = self._ugv_planner_progress_rewards(
                 self._pre_step_ground_pos,
                 ground_pos,
@@ -2855,13 +2860,17 @@ class WildfireSearchScenario(BaseScenario):
             planner_active = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_direct_blocked = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_detour_needed = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+            planner_escape_mode = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
         progress_reward_basis = ground_progress_scaled
         movement_reward_basis = movement_alignment
         if self.ugv_dense_reward_mode == "positive_target":
             progress_reward_basis = ground_progress_scaled.clamp(min=0.0)
             movement_reward_basis = movement_alignment.clamp(min=0.0)
-        elif self.ugv_dense_reward_mode == "planner_blend":
-            detour_blend_active = planner_active & planner_detour_needed
+        elif self.ugv_dense_reward_mode in {"planner_blend", "escape_blend"}:
+            if self.ugv_dense_reward_mode == "escape_blend":
+                detour_blend_active = planner_active & planner_escape_mode
+            else:
+                detour_blend_active = planner_active & planner_detour_needed
             w = float(self.ugv_planner_blend_weight)
             target_progress = ground_progress_scaled.clamp(min=0.0)
             target_movement = movement_alignment.clamp(min=0.0)
@@ -3276,6 +3285,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_planner_active = planner_active.float().sum(dim=1)
         self.metric_ugv_planner_direct_blocked = planner_direct_blocked.float().sum(dim=1)
         self.metric_ugv_planner_detour_needed = planner_detour_needed.float().sum(dim=1)
+        self.metric_ugv_planner_escape_mode = planner_escape_mode.float().sum(dim=1)
         self.metric_ugv_route_aware_active = route_aware_active.float().sum(dim=1)
         self.metric_ugv_action_alignment = action_alignment.sum(dim=1)
         self.metric_ugv_movement_alignment = movement_alignment.sum(dim=1)
@@ -6913,20 +6923,35 @@ class WildfireSearchScenario(BaseScenario):
         *,
         ground_index: int | None = None,
     ) -> tuple[tuple[int, int], bool, bool] | None:
+        plan = self._local_escape_astar_plan_cached_for_env(
+            env_index,
+            pos,
+            target_pos,
+            ground_index=ground_index,
+        )
+        return None if plan is None else plan["route"]
+
+    def _local_escape_astar_plan_cached_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        ground_index: int | None = None,
+    ) -> dict | None:
         pos_cell = self._single_position_to_grid_cell(pos)
         target_cell = self._single_position_to_grid_cell(target_pos)
         if ground_index is None:
-            plan = self._local_escape_astar_plan_for_env(
+            return self._local_escape_astar_plan_for_env(
                 env_index,
                 pos,
                 target_pos,
                 pos_cell=pos_cell,
                 target_cell=target_cell,
             )
-            return None if plan is None else plan["route"]
 
         key = (
-            "local_escape_astar",
+            "local_escape_astar_plan",
             int(env_index),
             int(ground_index),
             int(pos_cell[0]),
@@ -6940,14 +6965,13 @@ class WildfireSearchScenario(BaseScenario):
         if not hasattr(self, "_ugv_planner_route_cache"):
             self._ugv_planner_route_cache = {}
         if key not in self._ugv_planner_route_cache:
-            plan = self._local_escape_astar_plan_for_env(
+            self._ugv_planner_route_cache[key] = self._local_escape_astar_plan_for_env(
                 env_index,
                 pos,
                 target_pos,
                 pos_cell=pos_cell,
                 target_cell=target_cell,
             )
-            self._ugv_planner_route_cache[key] = None if plan is None else plan["route"]
         return self._ugv_planner_route_cache[key]
 
     def _local_escape_astar_route_info_for_env(
@@ -6956,7 +6980,12 @@ class WildfireSearchScenario(BaseScenario):
         pos: Tensor,
         target_pos: Tensor,
     ) -> dict | None:
-        return self._local_escape_astar_plan_for_env(env_index, pos, target_pos)
+        return self._local_escape_astar_plan_for_env(
+            env_index,
+            pos,
+            target_pos,
+            include_details=True,
+        )
 
     def _local_escape_astar_plan_for_env(
         self,
@@ -6966,6 +6995,7 @@ class WildfireSearchScenario(BaseScenario):
         *,
         pos_cell: tuple[int, int] | None = None,
         target_cell: tuple[int, int] | None = None,
+        include_details: bool = False,
     ) -> dict | None:
         patch_size = self.ugv_planner_patch_size
         radius = patch_size // 2
@@ -7039,34 +7069,30 @@ class WildfireSearchScenario(BaseScenario):
         )
         if old_route is not None:
             waypoint, direct_blocked, detour_needed = old_route
-            old_waypoint_openness = local_openness(waypoint)
-            waypoint_vec = (float(waypoint[0] - start[0]), float(waypoint[1] - start[1]))
-            target_vec = (float(tx - start[0]), float(ty - start[1]))
-            waypoint_norm = max(math.hypot(*waypoint_vec), 1e-9)
-            target_norm = max(math.hypot(*target_vec), 1e-9)
-            waypoint_target_alignment = (
-                waypoint_vec[0] * target_vec[0] + waypoint_vec[1] * target_vec[1]
-            ) / (waypoint_norm * target_norm)
-            target_corridor_blocked_fraction = segment_blocked_fraction(start, waypoint)
-            trap_like = bool(
-                direct_blocked
-                and target_corridor_blocked_fraction >= 0.50
-                and old_waypoint_openness <= 0.25
-                and waypoint_target_alignment > 0.0
-            )
-            if not trap_like:
+            if not (direct_blocked and detour_needed):
+                old_goal = waypoint
+                old_path = [start, waypoint] if waypoint != start else [start]
+                if include_details:
+                    goal_candidates = self._local_planner_goal_candidates(env_index, start, target_cell, bounds)
+                    for candidate in goal_candidates:
+                        candidate_path = self._local_astar_grid_path(env_index, start, candidate, bounds)
+                        if len(candidate_path) >= 2:
+                            old_goal = candidate
+                            old_path = candidate_path
+                            break
+                target_corridor_blocked_fraction = segment_blocked_fraction(start, old_goal)
                 path = [start, waypoint] if waypoint != start else [start]
                 return {
                     "route": old_route,
                     "start": start,
-                    "goal": waypoint,
+                    "goal": old_goal,
                     "waypoint": waypoint,
-                    "path": path,
+                    "path": old_path,
                     "escape_mode": False,
                     "direct_blocked": bool(direct_blocked),
                     "detour_needed": bool(detour_needed),
                     "exit_clearance_cells": None,
-                    "exit_openness": old_waypoint_openness,
+                    "exit_openness": local_openness(waypoint) if include_details else None,
                     "target_corridor_blocked_fraction": target_corridor_blocked_fraction,
                 }
         else:
@@ -7224,23 +7250,25 @@ class WildfireSearchScenario(BaseScenario):
         end_pos: Tensor,
         target_pos: Tensor,
         gate: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         reward = torch.zeros_like(gate, dtype=start_pos.dtype)
         progress_m = torch.zeros_like(reward)
         progress_scaled = torch.zeros_like(reward)
         active = torch.zeros_like(gate, dtype=torch.bool)
         direct_blocked_out = torch.zeros_like(gate, dtype=torch.bool)
         detour_needed_out = torch.zeros_like(gate, dtype=torch.bool)
+        escape_mode_out = torch.zeros_like(gate, dtype=torch.bool)
         if (
             self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES
             or (
                 self.r_ugv_planner_progress <= 0.0
                 and not self.ugv_route_aware_reward
                 and self.ugv_dense_reward_mode != "planner_blend"
+                and self.ugv_dense_reward_mode != "escape_blend"
             )
             or start_pos.shape[1] == 0
         ):
-            return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out
+            return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out, escape_mode_out
 
         sim_units_per_meter = self.terrain_sim_units_per_meter.to(start_pos.device).clamp_min(1e-9)
         batch_dim, n_ground, _ = start_pos.shape
@@ -7249,17 +7277,29 @@ class WildfireSearchScenario(BaseScenario):
             for ground_index in range(n_ground):
                 if not bool(gate[env_index, ground_index].item()):
                     continue
-                route = self._ugv_planner_route_for_env(
-                    env_index,
-                    start_pos[env_index, ground_index],
-                    target_pos[env_index, ground_index],
-                    ground_index=ground_index,
-                )
+                escape_mode = False
+                if self.ugv_planner_hint == "local_escape_astar":
+                    plan = self._local_escape_astar_plan_cached_for_env(
+                        env_index,
+                        start_pos[env_index, ground_index],
+                        target_pos[env_index, ground_index],
+                        ground_index=ground_index,
+                    )
+                    route = None if plan is None else plan["route"]
+                    escape_mode = bool(plan.get("escape_mode", False)) if plan is not None else False
+                else:
+                    route = self._ugv_planner_route_for_env(
+                        env_index,
+                        start_pos[env_index, ground_index],
+                        target_pos[env_index, ground_index],
+                        ground_index=ground_index,
+                    )
                 if route is None:
                     continue
                 waypoint, direct_blocked, detour_needed = route
                 direct_blocked_out[env_index, ground_index] = direct_blocked
                 detour_needed_out[env_index, ground_index] = detour_needed
+                escape_mode_out[env_index, ground_index] = escape_mode
                 if not detour_needed:
                     continue
                 waypoint_pos = self._grid_cell_center_to_world(
@@ -7275,7 +7315,7 @@ class WildfireSearchScenario(BaseScenario):
                 progress_scaled[env_index, ground_index] = step_progress_scaled
                 reward[env_index, ground_index] = step_progress_scaled * self.r_ugv_planner_progress
                 active[env_index, ground_index] = True
-        return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out
+        return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out, escape_mode_out
 
     def _local_astar_detour_needed(
         self,
@@ -7728,6 +7768,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_planner_active": self.metric_ugv_planner_active,
             "diagnostic/ugv_planner_direct_blocked": self.metric_ugv_planner_direct_blocked,
             "diagnostic/ugv_planner_detour_needed": self.metric_ugv_planner_detour_needed,
+            "diagnostic/ugv_planner_escape_mode": self.metric_ugv_planner_escape_mode,
             "diagnostic/ugv_route_aware_active": self.metric_ugv_route_aware_active,
             "diagnostic/ugv_action_alignment": self.metric_ugv_action_alignment,
             "diagnostic/ugv_movement_alignment": self.metric_ugv_movement_alignment,

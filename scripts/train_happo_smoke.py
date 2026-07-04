@@ -274,10 +274,12 @@ def build_args(
     if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_dense_reward_mode = str(ugv_dense_reward_mode).replace("-", "_")
-    if ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend"}:
-        raise ValueError("ugv_dense_reward_mode must be one of: target, positive_target, planner_blend")
+    if ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend", "escape_blend"}:
+        raise ValueError("ugv_dense_reward_mode must be one of: target, positive_target, planner_blend, escape_blend")
     if ugv_dense_reward_mode == "planner_blend" and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
+    if ugv_dense_reward_mode == "escape_blend" and ugv_planner_hint != "local_escape_astar":
+        raise ValueError("ugv_dense_reward_mode='escape_blend' requires ugv_planner_hint='local_escape_astar'")
     if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
         raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
     if uav_survivor_diagnostic:
@@ -1038,12 +1040,21 @@ def main():
                    help="When local A* detects a detour, suppress direct target-distance and "
                         "movement-alignment rewards for that UGV step. Requires a local UGV planner hint.")
     p.add_argument("--ugv-dense-reward-mode",
-                   choices=("target", "positive_target", "positive-target", "planner_blend", "planner-blend"),
+                   choices=(
+                       "target",
+                       "positive_target",
+                       "positive-target",
+                       "planner_blend",
+                       "planner-blend",
+                       "escape_blend",
+                       "escape-blend",
+                   ),
                    default="target",
                    help="How UGV dense progress/alignment rewards are shaped. target keeps legacy "
                         "signed survivor homing; positive_target clips survivor progress/alignment "
                         "to nonnegative; planner_blend blends nonnegative survivor and local-A* "
-                        "signals during local detours.")
+                        "signals during local detours; escape_blend only blends during "
+                        "local_escape_astar escape steps.")
     p.add_argument("--ugv-planner-blend-weight", type=float, default=0.70,
                    help="Planner weight used by --ugv-dense-reward-mode planner_blend during local detours.")
     p.add_argument("--ugv-planner-patch-size", type=int, default=11,
@@ -1508,6 +1519,8 @@ def main():
     args.ugv_dense_reward_mode = args.ugv_dense_reward_mode.replace("-", "_")
     if args.ugv_dense_reward_mode == "planner_blend" and args.ugv_planner_hint not in ugv_local_planners:
         p.error("--ugv-dense-reward-mode planner_blend requires a local UGV planner hint")
+    if args.ugv_dense_reward_mode == "escape_blend" and args.ugv_planner_hint != "local_escape_astar":
+        p.error("--ugv-dense-reward-mode escape_blend requires --ugv-planner-hint local_escape_astar")
     if args.ugv_route_aware_reward and args.ugv_dense_reward_mode != "target":
         p.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
     args.ugv_planner_blend_weight = min(max(float(args.ugv_planner_blend_weight), 0.0), 1.0)

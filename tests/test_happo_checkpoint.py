@@ -260,6 +260,26 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_blend_weight"], 0.5)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 6 + 2 + 4 + 7)
 
+    def test_build_args_accepts_escape_blend_dense_reward_mode(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="escape-blend",
+            ugv_known_survivor_diagnostic=True,
+            local_map_patch_size=7,
+            ugv_planner_hint="local-escape-astar",
+            ugv_dense_reward_mode="escape-blend",
+            ugv_planner_blend_weight=0.5,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_planner_hint"], "local_escape_astar")
+        self.assertEqual(scenario["ugv_dense_reward_mode"], "escape_blend")
+        self.assertEqual(scenario["ugv_planner_blend_weight"], 0.5)
+
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
             num_env_steps=100,
