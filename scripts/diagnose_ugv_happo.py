@@ -166,7 +166,7 @@ def _planner_hint_from_observation(
     obs: torch.Tensor,
 ) -> tuple[torch.Tensor, bool] | None:
     """Extract [unit_dx, unit_dy, ..., valid, direct_blocked] from one UGV obs."""
-    if getattr(scenario, "ugv_planner_hint", "none") != "local_astar":
+    if getattr(scenario, "ugv_planner_hint", "none") not in {"local_astar", "local_escape_astar"}:
         return None
     patch_size = int(getattr(scenario, "local_map_patch_size", 3))
     offset = 4 + 12 + 1 + 2 * patch_size * patch_size + 9
@@ -204,6 +204,11 @@ def _shadow_astar_hint(
         "direct_blocked_cells": 0,
         "goal_cell": None,
         "waypoint_cell": None,
+        "planner_mode": getattr(scenario, "ugv_planner_hint", "none"),
+        "escape_mode": False,
+        "exit_clearance_cells": None,
+        "exit_openness": None,
+        "target_corridor_blocked_fraction": None,
     }
     details = _shadow_astar_route_details(scenario, pos, target_pos)
     if details is None:
@@ -236,6 +241,11 @@ def _shadow_astar_hint(
         "direct_blocked_cells": int(details["direct_blocked_cells"]),
         "goal_cell": details["goal"],
         "waypoint_cell": waypoint,
+        "planner_mode": details.get("planner_mode", getattr(scenario, "ugv_planner_hint", "none")),
+        "escape_mode": bool(details.get("escape_mode", False)),
+        "exit_clearance_cells": details.get("exit_clearance_cells"),
+        "exit_openness": details.get("exit_openness"),
+        "target_corridor_blocked_fraction": details.get("target_corridor_blocked_fraction"),
     })
     return out
 
@@ -270,6 +280,75 @@ def _shadow_astar_route_details(
     env_index: int = 0,
 ) -> dict | None:
     """Reconstruct the local A* route and expose why it differs from the target."""
+    planner_mode = str(getattr(scenario, "ugv_planner_hint", "none")).replace("-", "_")
+    if planner_mode == "local_escape_astar":
+        plan = scenario._local_escape_astar_route_info_for_env(
+            env_index,
+            pos[0],
+            target_pos[0],
+        )
+        if plan is None:
+            return None
+        start = plan["start"]
+        goal = plan["goal"]
+        waypoint = plan["waypoint"]
+        path = plan["path"]
+        if len(path) < 2:
+            return None
+        sx_i, sy_i = start
+        gx, gy = goal
+        wx, wy = waypoint
+        direct_vec = np.array([gx - sx_i, gy - sy_i], dtype=np.float64)
+        waypoint_vec = np.array([wx - sx_i, wy - sy_i], dtype=np.float64)
+        direct_norm = float(np.linalg.norm(direct_vec))
+        waypoint_norm = float(np.linalg.norm(waypoint_vec))
+        target_astar_alignment = None
+        target_astar_angle_deg = None
+        direction_detour = False
+        if direct_norm > 1e-9 and waypoint_norm > 1e-9:
+            target_astar_alignment = float(np.dot(direct_vec, waypoint_vec) / (direct_norm * waypoint_norm))
+            target_astar_alignment = max(min(target_astar_alignment, 1.0), -1.0)
+            target_astar_angle_deg = float(np.degrees(np.arccos(target_astar_alignment)))
+            direction_detour = target_astar_alignment < math.cos(math.radians(30.0))
+
+        direct_cells = scenario._grid_segment_cells(start, goal)
+        direct_cost = scenario._grid_path_cost(env_index, direct_cells)
+        astar_cost = scenario._grid_path_cost(env_index, path)
+        cost_ratio = None
+        if math.isfinite(direct_cost) and math.isfinite(astar_cost) and astar_cost > 1e-9:
+            cost_ratio = float(direct_cost / astar_cost)
+        cost_detour = (
+            math.isfinite(direct_cost)
+            and math.isfinite(astar_cost)
+            and astar_cost > 1e-9
+            and direct_cost > astar_cost * 1.25
+        )
+        return {
+            "start": start,
+            "goal": goal,
+            "waypoint": waypoint,
+            "path": path,
+            "direct_blocked": bool(plan["direct_blocked"]),
+            "detour_needed": bool(plan["detour_needed"]),
+            "direction_detour": bool(direction_detour),
+            "cost_detour": bool(cost_detour),
+            "target_astar_alignment": target_astar_alignment,
+            "target_astar_angle_deg": target_astar_angle_deg,
+            "direct_cost": float(direct_cost) if math.isfinite(direct_cost) else None,
+            "astar_cost": float(astar_cost) if math.isfinite(astar_cost) else None,
+            "cost_ratio": cost_ratio,
+            "direct_blocked_cells": _segment_blocked_cell_count(
+                scenario,
+                env_index,
+                direct_cells,
+            ),
+            "planner_mode": planner_mode,
+            "escape_mode": bool(plan.get("escape_mode", False)),
+            "exit_clearance_cells": plan.get("exit_clearance_cells"),
+            "exit_openness": plan.get("exit_openness"),
+            "target_corridor_blocked_fraction": plan.get("target_corridor_blocked_fraction"),
+        }
+
     patch_size = int(getattr(scenario, "ugv_planner_patch_size", 11))
     radius = patch_size // 2
     sx, sy = scenario._single_position_to_grid_cell(pos[0])
@@ -355,6 +434,11 @@ def _shadow_astar_route_details(
             env_index,
             direct_cells,
         ),
+        "planner_mode": planner_mode,
+        "escape_mode": False,
+        "exit_clearance_cells": None,
+        "exit_openness": None,
+        "target_corridor_blocked_fraction": None,
     }
 
 
@@ -564,6 +648,10 @@ def _new_time_series() -> dict:
         "shadow_astar_target_angle_deg": [],
         "shadow_astar_cost_ratio": [],
         "shadow_astar_direct_blocked_cells": [],
+        "shadow_astar_escape_mode": [],
+        "shadow_astar_exit_clearance_cells": [],
+        "shadow_astar_exit_openness": [],
+        "shadow_astar_target_corridor_blocked_fraction": [],
         "shadow_astar_waypoint_distance_m": [],
         "shadow_astar_action_alignment": [],
         "shadow_astar_movement_alignment": [],
@@ -845,6 +933,10 @@ def _group_metric_summary(rows: list[dict]) -> dict:
         "shadow_astar_route_target_conflict_fraction",
         "shadow_astar_detour_needed_fraction",
         "shadow_astar_direct_blocked_fraction",
+        "shadow_astar_escape_mode_fraction",
+        "mean_shadow_astar_exit_clearance_cells",
+        "mean_shadow_astar_exit_openness",
+        "mean_shadow_astar_target_corridor_blocked_fraction",
         "shadow_astar_direction_detour_fraction",
         "shadow_astar_cost_detour_fraction",
         "shadow_astar_detour_stall_fraction_lt010",
@@ -932,6 +1024,18 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         ),
         "mean_shadow_astar_direct_blocked_cells": _finite_mean(
             row["mean_shadow_astar_direct_blocked_cells"] for row in rows
+        ),
+        "mean_shadow_astar_escape_mode_fraction": _finite_mean(
+            row.get("shadow_astar_escape_mode_fraction") for row in rows
+        ),
+        "mean_shadow_astar_exit_clearance_cells": _finite_mean(
+            row.get("mean_shadow_astar_exit_clearance_cells") for row in rows
+        ),
+        "mean_shadow_astar_exit_openness": _finite_mean(
+            row.get("mean_shadow_astar_exit_openness") for row in rows
+        ),
+        "mean_shadow_astar_target_corridor_blocked_fraction": _finite_mean(
+            row.get("mean_shadow_astar_target_corridor_blocked_fraction") for row in rows
         ),
         "mean_shadow_astar_action_alignment": _finite_mean(
             row["mean_shadow_astar_action_alignment"] for row in rows
@@ -1406,6 +1510,10 @@ def run_rollout(
     shadow_astar_target_angles_deg: list[float] = []
     shadow_astar_cost_ratios: list[float] = []
     shadow_astar_direct_blocked_cells: list[int] = []
+    shadow_astar_escape_modes: list[bool] = []
+    shadow_astar_exit_clearance_cells: list[float] = []
+    shadow_astar_exit_openness: list[float] = []
+    shadow_astar_target_corridor_blocked_fractions: list[float] = []
     shadow_astar_waypoint_distances_m: list[float] = []
     shadow_astar_action_alignments: list[float] = []
     shadow_astar_movement_alignments: list[float] = []
@@ -1522,6 +1630,22 @@ def run_rollout(
             else None
         )
         shadow_direct_blocked_cell_count = int(shadow_hint["direct_blocked_cells"]) if shadow_valid else 0
+        shadow_escape_mode = bool(shadow_hint["escape_mode"]) if shadow_valid else False
+        shadow_exit_clearance_cells = (
+            float(shadow_hint["exit_clearance_cells"])
+            if shadow_valid and shadow_hint["exit_clearance_cells"] is not None
+            else None
+        )
+        shadow_exit_openness = (
+            float(shadow_hint["exit_openness"])
+            if shadow_valid and shadow_hint["exit_openness"] is not None
+            else None
+        )
+        shadow_target_corridor_blocked_fraction = (
+            float(shadow_hint["target_corridor_blocked_fraction"])
+            if shadow_valid and shadow_hint["target_corridor_blocked_fraction"] is not None
+            else None
+        )
         shadow_waypoint_distance_m = (
             float(shadow_hint["waypoint_distance_m"])
             if shadow_valid and shadow_hint["waypoint_distance_m"] is not None
@@ -1546,6 +1670,15 @@ def run_rollout(
             shadow_astar_direction_detours.append(shadow_direction_detour)
             shadow_astar_cost_detours.append(shadow_cost_detour)
             shadow_astar_direct_blocked_cells.append(shadow_direct_blocked_cell_count)
+            shadow_astar_escape_modes.append(shadow_escape_mode)
+            if shadow_exit_clearance_cells is not None:
+                shadow_astar_exit_clearance_cells.append(shadow_exit_clearance_cells)
+            if shadow_exit_openness is not None:
+                shadow_astar_exit_openness.append(shadow_exit_openness)
+            if shadow_target_corridor_blocked_fraction is not None:
+                shadow_astar_target_corridor_blocked_fractions.append(
+                    shadow_target_corridor_blocked_fraction
+                )
             if shadow_target_astar_alignment is not None:
                 shadow_astar_target_alignments.append(shadow_target_astar_alignment)
             if shadow_target_astar_angle_deg is not None:
@@ -1605,6 +1738,7 @@ def run_rollout(
             shadow_astar_direction_detours.append(False)
             shadow_astar_cost_detours.append(False)
             shadow_astar_direct_blocked_cells.append(0)
+            shadow_astar_escape_modes.append(False)
         for key, value in hyp_step_stall_penalty_abs.items():
             hyp_route_stall_penalty_abs[key].append(value)
         reward_components = _reward_components(scenario)
@@ -1647,6 +1781,13 @@ def run_rollout(
         _append_optional(time_series["shadow_astar_target_angle_deg"], shadow_target_astar_angle_deg)
         _append_optional(time_series["shadow_astar_cost_ratio"], shadow_cost_ratio)
         time_series["shadow_astar_direct_blocked_cells"].append(float(shadow_direct_blocked_cell_count))
+        time_series["shadow_astar_escape_mode"].append(float(shadow_escape_mode))
+        _append_optional(time_series["shadow_astar_exit_clearance_cells"], shadow_exit_clearance_cells)
+        _append_optional(time_series["shadow_astar_exit_openness"], shadow_exit_openness)
+        _append_optional(
+            time_series["shadow_astar_target_corridor_blocked_fraction"],
+            shadow_target_corridor_blocked_fraction,
+        )
         _append_optional(time_series["shadow_astar_waypoint_distance_m"], shadow_waypoint_distance_m)
         _append_optional(time_series["shadow_astar_action_alignment"], action_shadow_alignment)
         _append_optional(time_series["shadow_astar_movement_alignment"], shadow_movement_alignment)
@@ -1799,6 +1940,20 @@ def run_rollout(
         ),
         "mean_shadow_astar_direct_blocked_cells": (
             float(np.mean(shadow_astar_direct_blocked_cells)) if shadow_astar_direct_blocked_cells else 0.0
+        ),
+        "shadow_astar_escape_mode_fraction": (
+            float(np.mean(shadow_astar_escape_modes)) if shadow_astar_escape_modes else 0.0
+        ),
+        "mean_shadow_astar_exit_clearance_cells": (
+            float(np.mean(shadow_astar_exit_clearance_cells)) if shadow_astar_exit_clearance_cells else 0.0
+        ),
+        "mean_shadow_astar_exit_openness": (
+            float(np.mean(shadow_astar_exit_openness)) if shadow_astar_exit_openness else 0.0
+        ),
+        "mean_shadow_astar_target_corridor_blocked_fraction": (
+            float(np.mean(shadow_astar_target_corridor_blocked_fractions))
+            if shadow_astar_target_corridor_blocked_fractions
+            else 0.0
         ),
         "mean_shadow_astar_waypoint_distance_m": (
             float(np.mean(shadow_astar_waypoint_distances_m)) if shadow_astar_waypoint_distances_m else 0.0
@@ -2264,7 +2419,9 @@ def main() -> None:
     parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
                         help="Omit for no upper bound when a min distance is provided.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
-    parser.add_argument("--ugv-planner-hint", choices=("none", "local_astar", "local-astar"), default=None,
+    parser.add_argument("--ugv-planner-hint",
+                        choices=("none", "local_astar", "local-astar", "local_escape_astar", "local-escape-astar"),
+                        default=None,
                         help="Override the checkpoint's UGV planner hint setting.")
     parser.add_argument("--ugv-planner-detour-obs", action=argparse.BooleanOptionalAction, default=None,
                         help="Override whether local A* planner observations include detour_needed.")
@@ -2315,16 +2472,17 @@ def main() -> None:
 
     checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
     scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)
+    ugv_local_planners = {"local_astar", "local_escape_astar"}
     if (
         bool(scenario_kwargs.get("ugv_route_aware_reward", False))
-        and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
+        and scenario_kwargs.get("ugv_planner_hint", "none") not in ugv_local_planners
     ):
-        parser.error("--ugv-route-aware-reward requires --ugv-planner-hint local_astar")
+        parser.error("--ugv-route-aware-reward requires a local UGV planner hint")
     if (
         scenario_kwargs.get("ugv_dense_reward_mode", "target") == "planner_blend"
-        and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
+        and scenario_kwargs.get("ugv_planner_hint", "none") not in ugv_local_planners
     ):
-        parser.error("--ugv-dense-reward-mode planner_blend requires --ugv-planner-hint local_astar")
+        parser.error("--ugv-dense-reward-mode planner_blend requires a local UGV planner hint")
     if (
         bool(scenario_kwargs.get("ugv_route_aware_reward", False))
         and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"

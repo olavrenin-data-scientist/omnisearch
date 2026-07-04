@@ -93,7 +93,8 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
     """Export the same local A* waypoint used by UGV planner observations."""
     if getattr(agent, "is_drone", False):
         return None
-    if getattr(scenario, "ugv_planner_hint", "none") != "local_astar":
+    planner_mode = str(getattr(scenario, "ugv_planner_hint", "none")).replace("-", "_")
+    if planner_mode not in {"local_astar", "local_escape_astar"}:
         return None
     if getattr(scenario, "n_survivors", 0) <= 0:
         return None
@@ -119,11 +120,20 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
         return None
 
     target_pos = scenario._survivors[target_index].state.pos[env_index]
-    route = scenario._local_astar_route_for_env(
-        env_index,
-        ground_pos,
-        target_pos,
-    )
+    route_info = None
+    if planner_mode == "local_escape_astar":
+        route_info = scenario._local_escape_astar_route_info_for_env(
+            env_index,
+            ground_pos,
+            target_pos,
+        )
+        route = None if route_info is None else route_info["route"]
+    else:
+        route = scenario._ugv_planner_route_for_env(
+            env_index,
+            ground_pos,
+            target_pos,
+        )
     if route is None:
         return None
 
@@ -159,6 +169,23 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
         "target_distance_m": float(dists[target_index] / scale),
         "direct_blocked": bool(direct_blocked),
         "detour_needed": bool(detour_needed),
+        "planner_mode": planner_mode,
+        "escape_mode": bool(route_info.get("escape_mode", False)) if route_info else False,
+        "exit_clearance_cells": (
+            float(route_info["exit_clearance_cells"])
+            if route_info and route_info.get("exit_clearance_cells") is not None
+            else None
+        ),
+        "exit_openness": (
+            float(route_info["exit_openness"])
+            if route_info and route_info.get("exit_openness") is not None
+            else None
+        ),
+        "target_corridor_blocked_fraction": (
+            float(route_info["target_corridor_blocked_fraction"])
+            if route_info and route_info.get("target_corridor_blocked_fraction") is not None
+            else None
+        ),
     }
 
 

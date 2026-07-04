@@ -233,6 +233,29 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_lookahead_cells"], 5)
         self.assertEqual(scenario["r_ugv_planner_progress"], 0.05)
         self.assertTrue(scenario["ugv_route_aware_reward"])
+
+    def test_build_args_accepts_escape_ugv_planner_hint(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="escape-planner",
+            ugv_known_survivor_diagnostic=True,
+            local_map_patch_size=7,
+            ugv_planner_hint="local-escape-astar",
+            ugv_planner_detour_obs=True,
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=6,
+            ugv_planner_progress_reward=0.05,
+            ugv_planner_blend_weight=0.5,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_planner_hint"], "local_escape_astar")
+        self.assertTrue(scenario["ugv_planner_detour_obs"])
+        self.assertEqual(scenario["ugv_planner_lookahead_cells"], 5)
         self.assertEqual(scenario["ugv_dense_reward_mode"], "target")
         self.assertEqual(scenario["ugv_planner_blend_weight"], 0.5)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 6 + 2 + 4 + 7)

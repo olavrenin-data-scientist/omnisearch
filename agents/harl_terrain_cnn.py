@@ -54,7 +54,7 @@ def wildfire_single_observation_dim(
     """Return the per-agent wildfire observation width for the current layout."""
     patch_size = int(local_map_patch_size)
     planner_hint_dim = 0
-    if str(ugv_planner_hint).replace("-", "_") == "local_astar":
+    if str(ugv_planner_hint).replace("-", "_") in {"local_astar", "local_escape_astar"}:
         planner_hint_dim = UGV_PLANNER_HINT_DIM + int(bool(ugv_planner_detour_obs))
     coverage_grid = max(int(coverage_obs_grid), 0)
     coverage_obs_dim = coverage_grid * coverage_grid + 1 if coverage_grid > 0 else 0

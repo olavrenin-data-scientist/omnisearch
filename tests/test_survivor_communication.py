@@ -483,6 +483,31 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(hint[3]), 1.0)
         self.assertEqual(float(hint[4]), 0.0)
 
+    def test_local_escape_astar_planner_hint_appends_same_features(self):
+        env = self._diagnostic_env(
+            local_map_patch_size=7,
+            ugv_planner_hint="local_escape_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, _survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (68, 64),
+        )
+
+        obs = scenario.observation(ground)
+        expected_width = 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7
+        hint_offset = 4 + 12 + 1 + 2 * 7 * 7 + 9
+        hint = obs[0, hint_offset : hint_offset + 5]
+
+        self.assertEqual(obs.shape[-1], expected_width)
+        self.assertGreater(float(hint[0]), 0.8)
+        self.assertLess(abs(float(hint[1])), 0.2)
+        self.assertEqual(float(hint[3]), 1.0)
+        self.assertEqual(float(hint[4]), 0.0)
+
     def test_optimized_local_astar_route_matches_reference_cases(self):
         route_cases = (
             ("clear_direct", (64, 64), (67, 64), ()),
@@ -531,6 +556,117 @@ class SurvivorCommunicationTests(unittest.TestCase):
                         survivor.state.pos[0],
                     )
                     self.assertEqual(actual, expected)
+
+    def test_local_escape_astar_clear_path_matches_local_astar(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_escape_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (68, 64),
+        )
+
+        expected = scenario._local_astar_route_uncached_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+        actual = scenario._local_escape_astar_route_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertEqual(actual, expected)
+
+    def test_local_escape_astar_exits_target_facing_dead_end(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_escape_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (59, 59),
+            tuple((62, y) for y in range(59, 70)),
+        )
+
+        old_route = scenario._local_astar_route_uncached_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+        plan = scenario._local_escape_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNone(old_route)
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["escape_mode"])
+        waypoint, direct_blocked, detour_needed = plan["route"]
+        self.assertGreater(waypoint[0], 64)
+        self.assertTrue(detour_needed)
+        self.assertGreaterEqual(float(plan["exit_openness"]), 0.25)
+
+    def test_local_escape_astar_respects_diagonal_corner_cutting(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_escape_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (67, 67),
+            ((65, 64), (64, 65)),
+        )
+
+        plan = scenario._local_escape_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertNotEqual(plan["waypoint"], (65, 65))
+        self.assertTrue(plan["detour_needed"])
+
+    def test_local_escape_astar_returns_none_when_no_reachable_exit(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_escape_astar",
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        blocked = tuple(
+            (64 + dx, 64 + dy)
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            if not (dx == 0 and dy == 0)
+        )
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (69, 64),
+            blocked,
+        )
+
+        route = scenario._local_escape_astar_route_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNone(route)
 
     def test_ugv_planner_reward_reuses_hint_route_cache(self):
         env = self._diagnostic_env(

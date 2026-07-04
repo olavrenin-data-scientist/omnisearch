@@ -266,17 +266,18 @@ def build_args(
     ugv_planner_lookahead_cells: int = 10,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
-    if ugv_planner_hint not in {"none", "local_astar"}:
-        raise ValueError("ugv_planner_hint must be one of: none, local_astar")
-    if ugv_planner_detour_obs and ugv_planner_hint != "local_astar":
-        raise ValueError("ugv_planner_detour_obs requires ugv_planner_hint='local_astar'")
-    if ugv_route_aware_reward and ugv_planner_hint != "local_astar":
-        raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
+    ugv_local_planners = {"local_astar", "local_escape_astar"}
+    if ugv_planner_hint not in {"none"} | ugv_local_planners:
+        raise ValueError("ugv_planner_hint must be one of: none, local_astar, local_escape_astar")
+    if ugv_planner_detour_obs and ugv_planner_hint not in ugv_local_planners:
+        raise ValueError("ugv_planner_detour_obs requires a local UGV planner hint")
+    if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
+        raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_dense_reward_mode = str(ugv_dense_reward_mode).replace("-", "_")
     if ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend"}:
         raise ValueError("ugv_dense_reward_mode must be one of: target, positive_target, planner_blend")
-    if ugv_dense_reward_mode == "planner_blend" and ugv_planner_hint != "local_astar":
-        raise ValueError("ugv_dense_reward_mode='planner_blend' requires ugv_planner_hint='local_astar'")
+    if ugv_dense_reward_mode == "planner_blend" and ugv_planner_hint not in ugv_local_planners:
+        raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
     if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
         raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
     if uav_survivor_diagnostic:
@@ -449,10 +450,10 @@ def build_args(
     ugv_planner_progress_reward = float(ugv_planner_progress_reward)
     if ugv_planner_progress_reward < 0.0:
         raise ValueError("ugv_planner_progress_reward must be nonnegative")
-    if ugv_planner_progress_reward > 0.0 and ugv_planner_hint != "local_astar":
-        raise ValueError("ugv_planner_progress_reward requires ugv_planner_hint='local_astar'")
-    if ugv_route_aware_reward and ugv_planner_hint != "local_astar":
-        raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
+    if ugv_planner_progress_reward > 0.0 and ugv_planner_hint not in ugv_local_planners:
+        raise ValueError("ugv_planner_progress_reward requires a local UGV planner hint")
+    if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
+        raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_planner_blend_weight = min(max(float(ugv_planner_blend_weight), 0.0), 1.0)
     uav_coverage_reward = float(uav_coverage_reward)
     if uav_coverage_reward < 0.0:
@@ -1025,14 +1026,17 @@ def main():
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
-    p.add_argument("--ugv-planner-hint", choices=("none", "local_astar", "local-astar"), default="none",
-                   help="Optional UGV observation hint. local_astar exposes a local A* waypoint vector.")
+    p.add_argument("--ugv-planner-hint",
+                   choices=("none", "local_astar", "local-astar", "local_escape_astar", "local-escape-astar"),
+                   default="none",
+                   help="Optional UGV observation hint. local_astar exposes a local A* waypoint vector; "
+                        "local_escape_astar uses the same shape with escape-aware local exits.")
     p.add_argument("--ugv-planner-detour-obs", action="store_true",
                    help="Append a detour-needed bit to the local A* UGV planner hint. "
                         "Changes observation size, so use only for new A* trainings.")
     p.add_argument("--ugv-route-aware-reward", action="store_true",
                    help="When local A* detects a detour, suppress direct target-distance and "
-                        "movement-alignment rewards for that UGV step. Requires local_astar.")
+                        "movement-alignment rewards for that UGV step. Requires a local UGV planner hint.")
     p.add_argument("--ugv-dense-reward-mode",
                    choices=("target", "positive_target", "positive-target", "planner_blend", "planner-blend"),
                    default="target",
@@ -1043,7 +1047,7 @@ def main():
     p.add_argument("--ugv-planner-blend-weight", type=float, default=0.70,
                    help="Planner weight used by --ugv-dense-reward-mode planner_blend during local detours.")
     p.add_argument("--ugv-planner-patch-size", type=int, default=11,
-                   help="Odd local grid size used by --ugv-planner-hint local_astar.")
+                   help="Odd local grid size used by local UGV planner hints.")
     p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
                    help="Maximum number of A* route cells to skip ahead when forming the waypoint hint.")
     p.add_argument("--model-dir", default=None,
@@ -1292,7 +1296,7 @@ def main():
                         "diagnostic task.")
     p.add_argument("--ugv-planner-progress-reward", type=float, default=0.0,
                    help="Reward scale for actual UGV progress toward the local A* waypoint when "
-                        "the planner detects a detour. Requires --ugv-planner-hint local_astar.")
+                        "the planner detects a detour. Requires a local UGV planner hint.")
     p.add_argument("--ugv-approach-reward", type=float, default=DEFAULT_UGV_APPROACH_REWARD,
                    help="Inner UGV approach milestone reward. "
                         "Default fractions make this 0.05 produce 75/50/40/30/20m "
@@ -1494,15 +1498,16 @@ def main():
         p.error("--uav-diagnostic-drones must be positive")
     if args.ugv_planner_progress_reward < 0.0:
         p.error("--ugv-planner-progress-reward must be nonnegative")
-    if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint != "local_astar":
-        p.error("--ugv-planner-progress-reward requires --ugv-planner-hint local_astar")
-    if args.ugv_planner_detour_obs and args.ugv_planner_hint != "local_astar":
-        p.error("--ugv-planner-detour-obs requires --ugv-planner-hint local_astar")
-    if args.ugv_route_aware_reward and args.ugv_planner_hint != "local_astar":
-        p.error("--ugv-route-aware-reward requires --ugv-planner-hint local_astar")
+    ugv_local_planners = {"local_astar", "local_escape_astar"}
+    if args.ugv_planner_progress_reward > 0.0 and args.ugv_planner_hint not in ugv_local_planners:
+        p.error("--ugv-planner-progress-reward requires a local UGV planner hint")
+    if args.ugv_planner_detour_obs and args.ugv_planner_hint not in ugv_local_planners:
+        p.error("--ugv-planner-detour-obs requires a local UGV planner hint")
+    if args.ugv_route_aware_reward and args.ugv_planner_hint not in ugv_local_planners:
+        p.error("--ugv-route-aware-reward requires a local UGV planner hint")
     args.ugv_dense_reward_mode = args.ugv_dense_reward_mode.replace("-", "_")
-    if args.ugv_dense_reward_mode == "planner_blend" and args.ugv_planner_hint != "local_astar":
-        p.error("--ugv-dense-reward-mode planner_blend requires --ugv-planner-hint local_astar")
+    if args.ugv_dense_reward_mode == "planner_blend" and args.ugv_planner_hint not in ugv_local_planners:
+        p.error("--ugv-dense-reward-mode planner_blend requires a local UGV planner hint")
     if args.ugv_route_aware_reward and args.ugv_dense_reward_mode != "target":
         p.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
     args.ugv_planner_blend_weight = min(max(float(args.ugv_planner_blend_weight), 0.0), 1.0)

@@ -59,6 +59,7 @@ DEFAULT_GROUND_APPROACH_REWARD = 0.05
 DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 UGV_PLANNER_HINT_DIM = 5
+UGV_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
 
 
 def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
@@ -275,12 +276,12 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("local_map_patch_size must be a positive odd integer")
         kwargs.pop("ugv_local_map_patch_shift", None)  # obsolete target-lookahead patch option
         self.ugv_planner_hint = str(kwargs.pop("ugv_planner_hint", "none")).replace("-", "_")
-        if self.ugv_planner_hint not in {"none", "local_astar"}:
-            raise ValueError("ugv_planner_hint must be one of: none, local_astar")
+        if self.ugv_planner_hint not in {"none"} | UGV_PLANNER_HINT_MODES:
+            raise ValueError("ugv_planner_hint must be one of: none, local_astar, local_escape_astar")
         self.ugv_planner_detour_obs = bool(kwargs.pop("ugv_planner_detour_obs", False))
         self.ugv_route_aware_reward = bool(kwargs.pop("ugv_route_aware_reward", False))
-        if self.ugv_route_aware_reward and self.ugv_planner_hint != "local_astar":
-            raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
+        if self.ugv_route_aware_reward and self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
+            raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
         self.ugv_planner_patch_size = int(kwargs.pop("ugv_planner_patch_size", 11))
         if self.ugv_planner_patch_size < 1 or self.ugv_planner_patch_size % 2 != 1:
             raise ValueError("ugv_planner_patch_size must be a positive odd integer")
@@ -473,8 +474,8 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError(
                 "ugv_dense_reward_mode must be one of: target, positive_target, planner_blend"
             )
-        if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint != "local_astar":
-            raise ValueError("ugv_dense_reward_mode='planner_blend' requires ugv_planner_hint='local_astar'")
+        if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
+            raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
         if self.ugv_route_aware_reward and self.ugv_dense_reward_mode != "target":
             raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
         self.ugv_planner_blend_weight = min(
@@ -6451,7 +6452,7 @@ class WildfireSearchScenario(BaseScenario):
         """
         if self.ugv_planner_hint == "none":
             return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
-        if self.ugv_planner_hint != "local_astar":
+        if self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
             raise RuntimeError(f"unsupported ugv_planner_hint: {self.ugv_planner_hint!r}")
         hint_dim = self._ugv_planner_hint_dim()
         agent_idx = self.world.agents.index(agent)
@@ -6487,7 +6488,7 @@ class WildfireSearchScenario(BaseScenario):
         return out
 
     def _ugv_planner_hint_dim(self) -> int:
-        if self.ugv_planner_hint != "local_astar":
+        if self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
             return 0
         return UGV_PLANNER_HINT_DIM + int(bool(self.ugv_planner_detour_obs))
 
@@ -6500,7 +6501,7 @@ class WildfireSearchScenario(BaseScenario):
     ) -> Tensor:
         device = pos.device
         hint = torch.zeros(self._ugv_planner_hint_dim(), device=device)
-        route = self._local_astar_route_for_env(
+        route = self._ugv_planner_route_for_env(
             env_index,
             pos,
             target_pos,
@@ -6531,6 +6532,30 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_planner_detour_obs:
             hint[5] = 1.0 if detour_needed else 0.0
         return hint
+
+    def _ugv_planner_route_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        ground_index: int | None = None,
+    ) -> tuple[tuple[int, int], bool, bool] | None:
+        if self.ugv_planner_hint == "local_astar":
+            return self._local_astar_route_for_env(
+                env_index,
+                pos,
+                target_pos,
+                ground_index=ground_index,
+            )
+        if self.ugv_planner_hint == "local_escape_astar":
+            return self._local_escape_astar_route_for_env(
+                env_index,
+                pos,
+                target_pos,
+                ground_index=ground_index,
+            )
+        return None
 
     def _local_astar_route_for_env(
         self,
@@ -6880,6 +6905,309 @@ class WildfireSearchScenario(BaseScenario):
         detour_needed = local_astar_detour_needed(start, goal, waypoint, path, direct_blocked)
         return waypoint, direct_blocked, detour_needed
 
+    def _local_escape_astar_route_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        ground_index: int | None = None,
+    ) -> tuple[tuple[int, int], bool, bool] | None:
+        pos_cell = self._single_position_to_grid_cell(pos)
+        target_cell = self._single_position_to_grid_cell(target_pos)
+        if ground_index is None:
+            plan = self._local_escape_astar_plan_for_env(
+                env_index,
+                pos,
+                target_pos,
+                pos_cell=pos_cell,
+                target_cell=target_cell,
+            )
+            return None if plan is None else plan["route"]
+
+        key = (
+            "local_escape_astar",
+            int(env_index),
+            int(ground_index),
+            int(pos_cell[0]),
+            int(pos_cell[1]),
+            int(target_cell[0]),
+            int(target_cell[1]),
+            int(self.ugv_planner_patch_size),
+            int(self.ugv_planner_lookahead_cells),
+            int(getattr(self, "_ugv_planner_terrain_cache_version", 0)),
+        )
+        if not hasattr(self, "_ugv_planner_route_cache"):
+            self._ugv_planner_route_cache = {}
+        if key not in self._ugv_planner_route_cache:
+            plan = self._local_escape_astar_plan_for_env(
+                env_index,
+                pos,
+                target_pos,
+                pos_cell=pos_cell,
+                target_cell=target_cell,
+            )
+            self._ugv_planner_route_cache[key] = None if plan is None else plan["route"]
+        return self._ugv_planner_route_cache[key]
+
+    def _local_escape_astar_route_info_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+    ) -> dict | None:
+        return self._local_escape_astar_plan_for_env(env_index, pos, target_pos)
+
+    def _local_escape_astar_plan_for_env(
+        self,
+        env_index: int,
+        pos: Tensor,
+        target_pos: Tensor,
+        *,
+        pos_cell: tuple[int, int] | None = None,
+        target_cell: tuple[int, int] | None = None,
+    ) -> dict | None:
+        patch_size = self.ugv_planner_patch_size
+        radius = patch_size // 2
+        pos_cell = pos_cell if pos_cell is not None else self._single_position_to_grid_cell(pos)
+        target_cell = target_cell if target_cell is not None else self._single_position_to_grid_cell(target_pos)
+        sx, sy = pos_cell
+        tx, ty = target_cell
+        x0 = max(0, sx - radius)
+        x1 = min(self.fire_grid_size - 1, sx + radius)
+        y0 = max(0, sy - radius)
+        y1 = min(self.fire_grid_size - 1, sy + radius)
+        bounds = (x0, x1, y0, y1)
+
+        traversable = self.traversable_grid[env_index]
+        movement_cost = self.mobility_cost_grid[env_index] + self.fire_grid[env_index].float() * 25.0
+
+        def in_bounds(cell: tuple[int, int]) -> bool:
+            x, y = cell
+            return x0 <= x <= x1 and y0 <= y <= y1
+
+        def open_cell(cell: tuple[int, int]) -> bool:
+            x, y = cell
+            if not in_bounds(cell):
+                return False
+            return bool(traversable[y, x].item()) and math.isfinite(float(movement_cost[y, x].item()))
+
+        def segment_blocked_fraction(start: tuple[int, int], goal: tuple[int, int]) -> float:
+            cells = self._grid_segment_cells(start, goal)
+            blocked = 0
+            checks = 0
+            previous = cells[0] if cells else None
+            for cell in cells:
+                checks += 1
+                if not open_cell(cell):
+                    blocked += 1
+                if previous is not None:
+                    px, py = previous
+                    x, y = cell
+                    if x != px and y != py:
+                        checks += 2
+                        if not open_cell((px, y)):
+                            blocked += 1
+                        if not open_cell((x, py)):
+                            blocked += 1
+                previous = cell
+            return float(blocked) / float(max(checks, 1))
+
+        def local_openness(cell: tuple[int, int]) -> float:
+            x, y = cell
+            total = 0
+            open_count = 0
+            for oy in (-1, 0, 1):
+                for ox in (-1, 0, 1):
+                    if ox == 0 and oy == 0:
+                        continue
+                    total += 1
+                    if open_cell((x + ox, y + oy)):
+                        open_count += 1
+            return float(open_count) / float(max(total, 1))
+
+        blocked_cells = [
+            (x, y)
+            for y in range(y0, y1 + 1)
+            for x in range(x0, x1 + 1)
+            if not open_cell((x, y))
+        ]
+
+        def clearance_cells(cell: tuple[int, int]) -> float:
+            if not blocked_cells:
+                return float(radius + 1)
+            x, y = cell
+            return min(math.hypot(x - bx, y - by) for bx, by in blocked_cells)
+
+        start = self._nearest_traversable_cell_in_bounds(env_index, sx, sy, bounds)
+        if start is None:
+            return None
+
+        goal_candidates = self._local_planner_goal_candidates(env_index, start, target_cell, bounds)
+        old_goal = goal_candidates[0] if goal_candidates else start
+        old_path: list[tuple[int, int]] = []
+        for candidate in goal_candidates:
+            candidate_path = self._local_astar_grid_path(env_index, start, candidate, bounds)
+            if len(candidate_path) >= 2:
+                old_goal = candidate
+                old_path = candidate_path
+                break
+
+        old_route = self._local_astar_route_uncached_for_env(
+            env_index,
+            pos,
+            target_pos,
+            pos_cell=pos_cell,
+            target_cell=target_cell,
+        )
+        target_corridor_blocked_fraction = segment_blocked_fraction(start, old_goal)
+        old_direct_blocked = (
+            len(old_path) < 2
+            or not self._grid_segment_is_traversable(traversable, start, old_goal)
+        )
+        escape_mode = bool(old_direct_blocked or target_corridor_blocked_fraction >= 0.25 or old_route is None)
+        if not escape_mode and old_route is not None:
+            waypoint, direct_blocked, detour_needed = old_route
+            return {
+                "route": old_route,
+                "start": start,
+                "goal": old_goal,
+                "waypoint": waypoint,
+                "path": old_path,
+                "escape_mode": False,
+                "direct_blocked": bool(direct_blocked),
+                "detour_needed": bool(detour_needed),
+                "exit_clearance_cells": clearance_cells(old_goal),
+                "exit_openness": local_openness(old_goal),
+                "target_corridor_blocked_fraction": target_corridor_blocked_fraction,
+            }
+
+        finite_cost = movement_cost[y0 : y1 + 1, x0 : x1 + 1]
+        finite_mask = torch.isfinite(finite_cost)
+        if not bool(finite_mask.any().item()):
+            return None
+
+        neighbor_offsets = (
+            (-1, 0, 1.0),
+            (1, 0, 1.0),
+            (0, -1, 1.0),
+            (0, 1, 1.0),
+            (-1, -1, math.sqrt(2.0)),
+            (-1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)),
+            (1, 1, math.sqrt(2.0)),
+        )
+        open_heap = [(0.0, start)]
+        came_from: dict[tuple[int, int], tuple[int, int]] = {}
+        best_cost: dict[tuple[int, int], float] = {start: 0.0}
+        while open_heap:
+            cost_so_far, current = heapq.heappop(open_heap)
+            if cost_so_far > best_cost.get(current, float("inf")) + 1e-9:
+                continue
+            cx, cy = current
+            for ox, oy, step_len in neighbor_offsets:
+                nxt = (cx + ox, cy + oy)
+                if not open_cell(nxt):
+                    continue
+                if ox != 0 and oy != 0 and (
+                    not open_cell((cx + ox, cy)) or not open_cell((cx, cy + oy))
+                ):
+                    continue
+                nx, ny = nxt
+                edge_cost = step_len * (
+                    float(movement_cost[cy, cx].item()) + float(movement_cost[ny, nx].item())
+                ) * 0.5
+                new_cost = cost_so_far + edge_cost
+                if new_cost < best_cost.get(nxt, float("inf")):
+                    best_cost[nxt] = new_cost
+                    came_from[nxt] = current
+                    heapq.heappush(open_heap, (new_cost, nxt))
+
+        def reconstruct(goal: tuple[int, int]) -> list[tuple[int, int]]:
+            path = [goal]
+            current = goal
+            while current in came_from:
+                current = came_from[current]
+                path.append(current)
+            path.reverse()
+            return path
+
+        reachable = [cell for cell in best_cost if cell != start]
+        boundary = [
+            cell
+            for cell in reachable
+            if cell[0] in (x0, x1) or cell[1] in (y0, y1)
+        ]
+        candidates = boundary or reachable
+        if not candidates:
+            return None
+
+        target_vec = (float(tx - start[0]), float(ty - start[1]))
+        target_norm = max(math.hypot(*target_vec), 1e-9)
+        max_cost = max(max(best_cost.values()), 1e-9)
+        max_clearance = max(float(radius), 1.0)
+        best_cell: tuple[int, int] | None = None
+        best_score: tuple[float, float, float, float, float, float] | None = None
+        best_path: list[tuple[int, int]] = []
+        best_clearance = 0.0
+        best_openness = 0.0
+        for cell in candidates:
+            cell_vec = (float(cell[0] - start[0]), float(cell[1] - start[1]))
+            cell_norm = max(math.hypot(*cell_vec), 1e-9)
+            target_alignment = (
+                cell_vec[0] * target_vec[0] + cell_vec[1] * target_vec[1]
+            ) / (cell_norm * target_norm)
+            target_alignment = max(min(target_alignment, 1.0), -1.0)
+            path_cost_norm = min(max(best_cost[cell] / max_cost, 0.0), 1.0)
+            target_dist_norm = min(math.hypot(tx - cell[0], ty - cell[1]) / target_norm, 1.0)
+            openness = local_openness(cell)
+            clearance = clearance_cells(cell)
+            clearance_norm = min(max(clearance / max_clearance, 0.0), 1.0)
+            dead_end_penalty = 1.0 - openness
+            score = (
+                -0.30 * path_cost_norm
+                + 0.30 * clearance_norm
+                + 0.25 * openness
+                - 0.10 * dead_end_penalty
+                + 0.05 * target_alignment
+                - 0.05 * target_dist_norm
+            )
+            score_tuple = (
+                score,
+                clearance_norm,
+                openness,
+                target_alignment,
+                -path_cost_norm,
+                -target_dist_norm,
+            )
+            if best_score is None or score_tuple > best_score:
+                best_cell = cell
+                best_score = score_tuple
+                best_path = reconstruct(cell)
+                best_clearance = clearance
+                best_openness = openness
+
+        if best_cell is None or len(best_path) < 2:
+            return None
+
+        selected_direct_blocked = not self._grid_segment_is_traversable(traversable, start, best_cell)
+        waypoint = self._route_lookahead_cell(traversable, best_path, 0)
+        detour_needed = True
+        route = (waypoint, bool(selected_direct_blocked), bool(detour_needed))
+        return {
+            "route": route,
+            "start": start,
+            "goal": best_cell,
+            "waypoint": waypoint,
+            "path": best_path,
+            "escape_mode": True,
+            "direct_blocked": bool(selected_direct_blocked),
+            "detour_needed": bool(detour_needed),
+            "exit_clearance_cells": best_clearance,
+            "exit_openness": best_openness,
+            "target_corridor_blocked_fraction": target_corridor_blocked_fraction,
+        }
+
     def _ugv_planner_progress_rewards(
         self,
         start_pos: Tensor,
@@ -6894,7 +7222,7 @@ class WildfireSearchScenario(BaseScenario):
         direct_blocked_out = torch.zeros_like(gate, dtype=torch.bool)
         detour_needed_out = torch.zeros_like(gate, dtype=torch.bool)
         if (
-            self.ugv_planner_hint != "local_astar"
+            self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES
             or (
                 self.r_ugv_planner_progress <= 0.0
                 and not self.ugv_route_aware_reward
@@ -6911,7 +7239,7 @@ class WildfireSearchScenario(BaseScenario):
             for ground_index in range(n_ground):
                 if not bool(gate[env_index, ground_index].item()):
                     continue
-                route = self._local_astar_route_for_env(
+                route = self._ugv_planner_route_for_env(
                     env_index,
                     start_pos[env_index, ground_index],
                     target_pos[env_index, ground_index],
