@@ -271,6 +271,7 @@ def build_args(
     ugv_planner_lookahead_cells: int = 10,
     ugv_global_planner_lookahead_m: float = 20.0,
     ugv_planner_fire_mode: str = "off",
+    ugv_planner_fire_replan_policy: str = "always",
     ugv_planner_fire_cost: float = 25.0,
     ugv_planner_smoke_cost: float = 5.0,
     ugv_planner_smolder_cost: float = 3.0,
@@ -313,6 +314,9 @@ def build_args(
     ugv_planner_fire_mode = str(ugv_planner_fire_mode).replace("-", "_")
     if ugv_planner_fire_mode not in {"off", "cost", "block"}:
         raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
+    ugv_planner_fire_replan_policy = str(ugv_planner_fire_replan_policy).replace("-", "_")
+    if ugv_planner_fire_replan_policy not in {"always", "affected"}:
+        raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected")
     if uav_survivor_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -632,6 +636,7 @@ def build_args(
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "ugv_global_planner_lookahead_m": ugv_global_planner_lookahead_m,
         "ugv_planner_fire_mode": ugv_planner_fire_mode,
+        "ugv_planner_fire_replan_policy": ugv_planner_fire_replan_policy,
         "ugv_planner_fire_cost": ugv_planner_fire_cost,
         "ugv_planner_smoke_cost": ugv_planner_smoke_cost,
         "ugv_planner_smolder_cost": ugv_planner_smolder_cost,
@@ -1143,6 +1148,11 @@ def main():
                    default="off",
                    help="Fire treatment for UGV A* planners. off ignores fire; cost adds fire/smoke costs; "
                         "block treats active fire as non-traversable and uses soft smoke/buffer costs.")
+    p.add_argument("--ugv-planner-fire-replan-policy",
+                   choices=("always", "affected"),
+                   default="always",
+                   help="When fire-aware planning is enabled, always replan on fire spread or only when "
+                        "active fire/buffer touches the cached global route.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=25.0,
                    help="Additional movement cost for active fire cells in cost mode.")
     p.add_argument("--ugv-planner-smoke-cost", type=float, default=5.0,
@@ -1885,6 +1895,8 @@ def main():
     )
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_global_planner_lookahead_m: {args.ugv_global_planner_lookahead_m}")
+    print(f" ugv_planner_fire_mode: {args.ugv_planner_fire_mode}")
+    print(f" ugv_planner_fire_replan_policy: {args.ugv_planner_fire_replan_policy}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
@@ -2049,6 +2061,7 @@ def main():
         ugv_planner_lookahead_cells = args.ugv_planner_lookahead_cells,
         ugv_global_planner_lookahead_m = args.ugv_global_planner_lookahead_m,
         ugv_planner_fire_mode = args.ugv_planner_fire_mode,
+        ugv_planner_fire_replan_policy = args.ugv_planner_fire_replan_policy,
         ugv_planner_fire_cost = args.ugv_planner_fire_cost,
         ugv_planner_smoke_cost = args.ugv_planner_smoke_cost,
         ugv_planner_smolder_cost = args.ugv_planner_smolder_cost,

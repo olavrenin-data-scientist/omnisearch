@@ -299,6 +299,11 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_planner_fire_mode = str(kwargs.pop("ugv_planner_fire_mode", "off")).replace("-", "_")
         if self.ugv_planner_fire_mode not in {"off", "cost", "block"}:
             raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
+        self.ugv_planner_fire_replan_policy = str(
+            kwargs.pop("ugv_planner_fire_replan_policy", "always"),
+        ).replace("-", "_")
+        if self.ugv_planner_fire_replan_policy not in {"always", "affected"}:
+            raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected")
         self.ugv_planner_fire_cost = max(float(kwargs.pop("ugv_planner_fire_cost", 25.0)), 0.0)
         self.ugv_planner_smoke_cost = max(float(kwargs.pop("ugv_planner_smoke_cost", 5.0)), 0.0)
         self.ugv_planner_smolder_cost = max(float(kwargs.pop("ugv_planner_smolder_cost", 3.0)), 0.0)
@@ -2521,6 +2526,71 @@ class WildfireSearchScenario(BaseScenario):
             and bool(self.fire_grid[env_index].any().item())
         )
 
+    def _clear_ugv_global_route(
+        self,
+        env_index: int,
+        ground_index: int,
+        *,
+        fire_changed: bool = False,
+    ) -> None:
+        if not hasattr(self, "ugv_global_route_paths"):
+            return
+        self.ugv_global_route_target_idx[env_index, ground_index] = -1
+        self.ugv_global_route_path_index[env_index, ground_index] = 0
+        self.ugv_global_route_goal_cell[env_index, ground_index] = -1
+        self.ugv_global_route_waypoint_cell[env_index, ground_index] = -1
+        self.ugv_global_route_paths[env_index][ground_index] = []
+        if fire_changed:
+            self.ugv_global_route_fire_replan_pending[env_index, ground_index] = True
+        else:
+            self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
+        self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = False
+        self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
+
+    def _invalidate_ugv_planner_routes_for_fire_change(self) -> None:
+        if self.ugv_planner_fire_mode == "off":
+            return
+        if self.ugv_planner_fire_replan_policy == "always":
+            self._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
+            return
+        if not hasattr(self, "_ugv_planner_route_cache"):
+            self._ugv_planner_route_cache = {}
+        self._ugv_planner_route_cache.clear()
+        self._ugv_planner_terrain_cache_version = (
+            getattr(self, "_ugv_planner_terrain_cache_version", 0) + 1
+        )
+        if hasattr(self, "ugv_escape_route_active"):
+            self._reset_ugv_escape_routes()
+        if not hasattr(self, "ugv_global_route_paths"):
+            return
+
+        for env_index in range(self.world.batch_dim):
+            risk = self.fire_grid[env_index].bool()
+            if self.ugv_planner_fire_buffer_m > 0.0 and self.ugv_planner_fire_buffer_cost > 0.0:
+                risk = risk | self._ugv_planner_fire_buffer_mask(env_index)
+            if not bool(risk.any().item()):
+                continue
+            for ground_index in range(self.n_ground):
+                path = self.ugv_global_route_paths[env_index][ground_index]
+                if not path:
+                    continue
+                xs = torch.tensor(
+                    [int(x) for x, _y in path],
+                    dtype=torch.long,
+                    device=self.fire_grid.device,
+                )
+                ys = torch.tensor(
+                    [int(y) for _x, y in path],
+                    dtype=torch.long,
+                    device=self.fire_grid.device,
+                )
+                if bool(risk[ys, xs].any().item()):
+                    self._clear_ugv_global_route(
+                        env_index,
+                        ground_index,
+                        fire_changed=True,
+                    )
+
     # ------------------------------------------------------------------
     # Per-step hooks
     # ------------------------------------------------------------------
@@ -2598,7 +2668,7 @@ class WildfireSearchScenario(BaseScenario):
             torch.zeros_like(self.fire_intensity_grid),
         )
         if self.ugv_planner_fire_mode != "off":
-            self._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
+            self._invalidate_ugv_planner_routes_for_fire_change()
 
     def _directional_fire_exposure(self) -> Tensor:
         """Directional source exposure from burning cells into neighboring cells."""

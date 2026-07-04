@@ -723,6 +723,68 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertFalse(scenario.ugv_global_route_paths[0][0])
         self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
 
+    def test_fire_replan_policy_affected_keeps_unaffected_global_route(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="affected",
+            ugv_planner_fire_buffer_m=0.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        cached_path = list(scenario.ugv_global_route_paths[0][0])
+        scenario.ugv_global_route_path_index[0, 0] = 3
+        scenario.fire_grid[0, 10, 10] = True
+
+        scenario._invalidate_ugv_planner_routes_for_fire_change()
+
+        self.assertEqual(scenario.ugv_global_route_paths[0][0], cached_path)
+        self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), 0)
+        self.assertEqual(int(scenario.ugv_global_route_path_index[0, 0].item()), 3)
+        self.assertFalse(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
+    def test_fire_replan_policy_affected_clears_fire_intersecting_global_route(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="affected",
+            ugv_planner_fire_buffer_m=0.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        route_cell = scenario.ugv_global_route_paths[0][0][len(scenario.ugv_global_route_paths[0][0]) // 2]
+        scenario.fire_grid[0, route_cell[1], route_cell[0]] = True
+
+        scenario._invalidate_ugv_planner_routes_for_fire_change()
+
+        self.assertFalse(scenario.ugv_global_route_paths[0][0])
+        self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), -1)
+        self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
     def test_optimized_local_astar_route_matches_reference_cases(self):
         route_cases = (
             ("clear_direct", (64, 64), (67, 64), ()),

@@ -341,6 +341,7 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_planner_hint="global-astar",
             ugv_dense_reward_mode="planner-follow",
             ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="affected",
             ugv_planner_fire_cost=30.0,
             ugv_planner_smoke_cost=6.0,
             ugv_planner_smolder_cost=4.0,
@@ -351,6 +352,7 @@ class HappoCheckpointTests(unittest.TestCase):
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_planner_fire_mode"], "block")
+        self.assertEqual(scenario["ugv_planner_fire_replan_policy"], "affected")
         self.assertEqual(scenario["ugv_planner_fire_cost"], 30.0)
         self.assertEqual(scenario["ugv_planner_smoke_cost"], 6.0)
         self.assertEqual(scenario["ugv_planner_smolder_cost"], 4.0)

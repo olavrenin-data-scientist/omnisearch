@@ -142,6 +142,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_global_planner_lookahead_m"] = float(args.ugv_global_planner_lookahead_m)
     if args.ugv_planner_fire_mode is not None:
         scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
+    if args.ugv_planner_fire_replan_policy is not None:
+        scenario_kwargs["ugv_planner_fire_replan_policy"] = (
+            args.ugv_planner_fire_replan_policy.replace("-", "_")
+        )
     if args.ugv_planner_fire_cost is not None:
         scenario_kwargs["ugv_planner_fire_cost"] = float(args.ugv_planner_fire_cost)
     if args.ugv_planner_smoke_cost is not None:
@@ -2779,6 +2783,10 @@ def main() -> None:
                         choices=("off", "cost", "block"),
                         default=None,
                         help="Override the checkpoint's UGV planner fire mode.")
+    parser.add_argument("--ugv-planner-fire-replan-policy",
+                        choices=("always", "affected"),
+                        default=None,
+                        help="Override when fire-aware UGV global routes are replanned after fire spread.")
     parser.add_argument("--ugv-planner-fire-cost", type=float, default=None,
                         help="Override active-fire planner cost.")
     parser.add_argument("--ugv-planner-smoke-cost", type=float, default=None,

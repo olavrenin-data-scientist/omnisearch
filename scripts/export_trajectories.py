@@ -107,6 +107,10 @@ def main():
                    choices=("off", "cost", "block"),
                    default=None,
                    help="Override the UGV planner fire mode for trajectory export.")
+    p.add_argument("--ugv-planner-fire-replan-policy",
+                   choices=("always", "affected"),
+                   default=None,
+                   help="Override when fire-aware UGV global routes are replanned after fire spread.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=None)
     p.add_argument("--ugv-planner-smoke-cost", type=float, default=None)
     p.add_argument("--ugv-planner-smolder-cost", type=float, default=None)
@@ -377,6 +381,10 @@ def main():
         scenario_kwargs["disable_fire"] = False
     if args.ugv_planner_fire_mode is not None:
         scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
+    if args.ugv_planner_fire_replan_policy is not None:
+        scenario_kwargs["ugv_planner_fire_replan_policy"] = (
+            args.ugv_planner_fire_replan_policy.replace("-", "_")
+        )
     for arg_name in (
         "ugv_planner_fire_cost",
         "ugv_planner_smoke_cost",
