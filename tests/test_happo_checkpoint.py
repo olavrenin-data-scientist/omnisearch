@@ -347,6 +347,7 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_planner_smolder_cost=4.0,
             ugv_planner_fire_buffer_m=12.0,
             ugv_planner_fire_buffer_cost=9.0,
+            ugv_planner_land_cover_costs=(0.85, 1.0, 1.15, 1.35, 4.0, 8.0),
             enable_fire=True,
         )
 
@@ -358,6 +359,10 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_smolder_cost"], 4.0)
         self.assertEqual(scenario["ugv_planner_fire_buffer_m"], 12.0)
         self.assertEqual(scenario["ugv_planner_fire_buffer_cost"], 9.0)
+        self.assertEqual(
+            scenario["ugv_planner_land_cover_costs"],
+            (0.85, 1.0, 1.15, 1.35, 4.0, 8.0),
+        )
         self.assertFalse(scenario["disable_fire"])
 
     def test_ugv_known_survivor_diagnostic_build_args(self):

@@ -575,6 +575,14 @@ def export_trajectory(
             "smolder_cost": round(float(getattr(sc, "ugv_planner_smolder_cost", 3.0)), 4),
             "fire_buffer_m": round(float(getattr(sc, "ugv_planner_fire_buffer_m", 10.0)), 4),
             "fire_buffer_cost": round(float(getattr(sc, "ugv_planner_fire_buffer_cost", 8.0)), 4),
+            "land_cover_costs": (
+                None
+                if getattr(sc, "ugv_planner_land_cover_cost_values", None) is None
+                else [
+                    round(float(v), 4)
+                    for v in sc.ugv_planner_land_cover_cost_values.detach().cpu().tolist()
+                ]
+            ),
         },
         "fire_model": {
             "spread_prob": round(float(sc.fire_spread_prob), 4),

@@ -116,6 +116,8 @@ def main():
     p.add_argument("--ugv-planner-smolder-cost", type=float, default=None)
     p.add_argument("--ugv-planner-fire-buffer-m", type=float, default=None)
     p.add_argument("--ugv-planner-fire-buffer-cost", type=float, default=None)
+    p.add_argument("--ugv-planner-land-cover-costs", type=float, nargs="+", default=None,
+                   help="Override planner-only land-cover costs for road/open/brush/forest/rock[/water].")
     p.add_argument(
         "--terrain-source",
         choices=("real",),
@@ -397,6 +399,17 @@ def main():
             if value < 0.0:
                 raise SystemExit(f"--{arg_name.replace('_', '-')} must be nonnegative")
             scenario_kwargs[arg_name] = float(value)
+    if args.ugv_planner_land_cover_costs is not None:
+        if len(args.ugv_planner_land_cover_costs) not in (5, 6):
+            raise SystemExit(
+                "--ugv-planner-land-cover-costs must provide 5 or 6 values: "
+                "road open brush forest rock [water]"
+            )
+        if any(value < 0.0 for value in args.ugv_planner_land_cover_costs):
+            raise SystemExit("--ugv-planner-land-cover-costs values must be nonnegative")
+        scenario_kwargs["ugv_planner_land_cover_costs"] = tuple(
+            float(v) for v in args.ugv_planner_land_cover_costs
+        )
     cv_options = None
     if args.enable_cv:
         if scenario_kwargs.get("terrain_cache_path") is None:

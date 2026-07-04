@@ -277,6 +277,7 @@ def build_args(
     ugv_planner_smolder_cost: float = 3.0,
     ugv_planner_fire_buffer_m: float = 10.0,
     ugv_planner_fire_buffer_cost: float = 8.0,
+    ugv_planner_land_cover_costs: tuple[float, ...] | None = None,
     enable_fire: bool = False,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
@@ -665,6 +666,10 @@ def build_args(
         scenario_kwargs["slope_speed_weight"] = float(slope_speed_weight)
     if land_cover_speeds is not None:
         scenario_kwargs["land_cover_speeds"] = tuple(float(v) for v in land_cover_speeds)
+    if ugv_planner_land_cover_costs is not None:
+        scenario_kwargs["ugv_planner_land_cover_costs"] = tuple(
+            float(v) for v in ugv_planner_land_cover_costs
+        )
     if terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = terrain_cache_path
@@ -1163,6 +1168,10 @@ def main():
                    help="Physical radius around active fire that receives a soft planner cost.")
     p.add_argument("--ugv-planner-fire-buffer-cost", type=float, default=8.0,
                    help="Additional movement cost for non-burning cells inside the active-fire buffer.")
+    p.add_argument("--ugv-planner-land-cover-costs", type=float, nargs="+", default=None,
+                   help="Planner-only land-cover costs for road/open/brush/forest/rock[/water]. "
+                        "Physical UGV speeds and terrain observations are unchanged. "
+                        "Example: --ugv-planner-land-cover-costs 0.85 1.0 1.15 1.35 4.0 8.0")
     p.add_argument("--enable-fire", action="store_true",
                    help="Allow fire to run in diagnostic modes that otherwise disable it.")
     p.add_argument("--model-dir", default=None,
@@ -1442,6 +1451,16 @@ def main():
 
     if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
         p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")
+    if (
+        args.ugv_planner_land_cover_costs is not None
+        and len(args.ugv_planner_land_cover_costs) not in (5, 6)
+    ):
+        p.error("--ugv-planner-land-cover-costs must provide 5 or 6 values: road open brush forest rock [water]")
+    if (
+        args.ugv_planner_land_cover_costs is not None
+        and any(value < 0.0 for value in args.ugv_planner_land_cover_costs)
+    ):
+        p.error("--ugv-planner-land-cover-costs values must be nonnegative")
     if args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1:
         p.error("--local-map-patch-size must be a positive odd integer")
     if args.ugv_planner_patch_size < 1 or args.ugv_planner_patch_size % 2 != 1:
@@ -1897,6 +1916,7 @@ def main():
     print(f" ugv_global_planner_lookahead_m: {args.ugv_global_planner_lookahead_m}")
     print(f" ugv_planner_fire_mode: {args.ugv_planner_fire_mode}")
     print(f" ugv_planner_fire_replan_policy: {args.ugv_planner_fire_replan_policy}")
+    print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
@@ -2067,6 +2087,10 @@ def main():
         ugv_planner_smolder_cost = args.ugv_planner_smolder_cost,
         ugv_planner_fire_buffer_m = args.ugv_planner_fire_buffer_m,
         ugv_planner_fire_buffer_cost = args.ugv_planner_fire_buffer_cost,
+        ugv_planner_land_cover_costs = (
+            tuple(args.ugv_planner_land_cover_costs)
+            if args.ugv_planner_land_cover_costs is not None else None
+        ),
         enable_fire = bool(args.enable_fire),
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")

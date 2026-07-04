@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import vmas
 
-from envs.wildfire_search import WildfireSearchScenario
+from envs.wildfire_search import LAND_FOREST, WildfireSearchScenario
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -572,6 +572,21 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         torch.testing.assert_close(traversable, scenario.traversable_grid[0])
         torch.testing.assert_close(movement_cost, scenario.mobility_cost_grid[0])
+
+    def test_ugv_planner_land_cover_cost_override_is_planner_only(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_land_cover_costs=(0.85, 1.0, 1.15, 1.35, 4.0, 8.0),
+        )
+        scenario = env.scenario
+        scenario.land_cover_grid[0, 64, 64] = LAND_FOREST
+        scenario.slope_grid[0, 64, 64] = 0.0
+        scenario._refresh_mobility_layers(0)
+
+        _traversable, planner_cost = scenario._ugv_planner_layer_tensors_for_env(0)
+
+        self.assertAlmostEqual(float(scenario.mobility_cost_grid[0, 64, 64].item()), 2.2)
+        self.assertAlmostEqual(float(planner_cost[64, 64].item()), 1.35)
 
     def test_fire_mode_off_keeps_cached_global_route_after_fire_spread(self):
         env = self._diagnostic_env(

@@ -309,6 +309,14 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_planner_smolder_cost = max(float(kwargs.pop("ugv_planner_smolder_cost", 3.0)), 0.0)
         self.ugv_planner_fire_buffer_m = max(float(kwargs.pop("ugv_planner_fire_buffer_m", 10.0)), 0.0)
         self.ugv_planner_fire_buffer_cost = max(float(kwargs.pop("ugv_planner_fire_buffer_cost", 8.0)), 0.0)
+        planner_land_cover_costs_arg = kwargs.pop("ugv_planner_land_cover_costs", None)
+        planner_land_cover_costs = None
+        if planner_land_cover_costs_arg is not None:
+            planner_land_cover_costs = _land_cover_values(
+                planner_land_cover_costs_arg,
+                water_value=8.0,
+                name="ugv_planner_land_cover_costs",
+            )
         land_cover_costs = _land_cover_values(
             kwargs.pop("land_cover_costs", (0.65, 1.0, 1.5, 2.2, 4.0, 8.0)),
             water_value=8.0,
@@ -976,6 +984,10 @@ class WildfireSearchScenario(BaseScenario):
         self.mobility_cost_grid = torch.ones_like(self.elevation_grid)
         self.speed_multiplier_grid = torch.ones_like(self.elevation_grid)
         self.land_cover_cost_values = torch.tensor(land_cover_costs, dtype=torch.float, device=device)
+        self.ugv_planner_land_cover_cost_values = (
+            torch.tensor(planner_land_cover_costs, dtype=torch.float, device=device)
+            if planner_land_cover_costs is not None else None
+        )
         self.land_cover_speed_values = torch.tensor(land_cover_speeds, dtype=torch.float, device=device)
         self.land_cover_fire_fuel = torch.tensor(land_cover_fire_fuel, dtype=torch.float, device=device)
         self.land_cover_fire_burnout_min = torch.tensor(
@@ -2467,7 +2479,15 @@ class WildfireSearchScenario(BaseScenario):
 
     def _ugv_planner_layer_tensors_for_env(self, env_index: int) -> tuple[Tensor, Tensor]:
         traversable = self.traversable_grid[env_index].clone()
-        movement_cost = self.mobility_cost_grid[env_index].clone()
+        if self.ugv_planner_land_cover_cost_values is None:
+            movement_cost = self.mobility_cost_grid[env_index].clone()
+        else:
+            cover = self.land_cover_grid[env_index]
+            slope = self.slope_grid[env_index]
+            movement_cost = (
+                self.ugv_planner_land_cover_cost_values[cover]
+                * (1.0 + self.slope_cost_weight * slope)
+            )
         if self.ugv_planner_fire_mode == "off":
             return traversable, movement_cost
 

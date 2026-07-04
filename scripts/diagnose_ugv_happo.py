@@ -156,6 +156,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_fire_buffer_m"] = float(args.ugv_planner_fire_buffer_m)
     if args.ugv_planner_fire_buffer_cost is not None:
         scenario_kwargs["ugv_planner_fire_buffer_cost"] = float(args.ugv_planner_fire_buffer_cost)
+    if args.ugv_planner_land_cover_costs is not None:
+        scenario_kwargs["ugv_planner_land_cover_costs"] = tuple(
+            float(v) for v in args.ugv_planner_land_cover_costs
+        )
     if "ugv_planner_lookahead_cells" in scenario_kwargs:
         patch_size = int(scenario_kwargs.get("ugv_planner_patch_size", 11))
         scenario_kwargs["ugv_planner_lookahead_cells"] = min(
@@ -2797,6 +2801,8 @@ def main() -> None:
                         help="Override fire buffer radius in meters.")
     parser.add_argument("--ugv-planner-fire-buffer-cost", type=float, default=None,
                         help="Override fire buffer planner cost.")
+    parser.add_argument("--ugv-planner-land-cover-costs", type=float, nargs="+", default=None,
+                        help="Override planner-only land-cover costs for road/open/brush/forest/rock[/water].")
     parser.add_argument("--enable-fire", action="store_true",
                         help="Allow fire to run in the UGV diagnostic scenario.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
@@ -2837,6 +2843,16 @@ def main() -> None:
         value = getattr(args, flag_name)
         if value is not None and value < 0.0:
             parser.error(f"--{flag_name.replace('_', '-')} must be nonnegative")
+    if (
+        args.ugv_planner_land_cover_costs is not None
+        and len(args.ugv_planner_land_cover_costs) not in (5, 6)
+    ):
+        parser.error("--ugv-planner-land-cover-costs must provide 5 or 6 values: road open brush forest rock [water]")
+    if (
+        args.ugv_planner_land_cover_costs is not None
+        and any(value < 0.0 for value in args.ugv_planner_land_cover_costs)
+    ):
+        parser.error("--ugv-planner-land-cover-costs values must be nonnegative")
     if args.ugv_escape_stall_steps is not None and args.ugv_escape_stall_steps < 1:
         parser.error("--ugv-escape-stall-steps must be positive")
     if args.ugv_escape_progress_threshold_m is not None and args.ugv_escape_progress_threshold_m < 0.0:
