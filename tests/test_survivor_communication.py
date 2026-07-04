@@ -558,6 +558,96 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertNotIn((68, 64), plan["path"])
         self.assertNotEqual(plan["waypoint"][1], 64)
 
+    def test_ugv_planner_fire_mode_off_matches_terrain_only(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="off",
+        )
+        scenario = env.scenario
+        scenario.fire_grid[0, 64, 68] = True
+        scenario.smoke_grid[0, 64, 68] = 1.0
+        scenario.smolder_grid[0, 64, 68] = 1.0
+
+        traversable, movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
+
+        torch.testing.assert_close(traversable, scenario.traversable_grid[0])
+        torch.testing.assert_close(movement_cost, scenario.mobility_cost_grid[0])
+
+    def test_global_astar_fire_block_routes_around_active_fire_wall(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        scenario.fire_grid[0, 58:71, 68] = True
+        scenario.fire_intensity_grid[0, 58:71, 68] = 1.0
+        scenario._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
+
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["direct_blocked"])
+        self.assertNotIn((68, 64), plan["path"])
+
+    def test_ugv_planner_fire_costs_do_not_block_cells(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="cost",
+            ugv_planner_fire_cost=25.0,
+            ugv_planner_smoke_cost=5.0,
+            ugv_planner_smolder_cost=3.0,
+            ugv_planner_fire_buffer_m=10.0,
+            ugv_planner_fire_buffer_cost=8.0,
+        )
+        scenario = env.scenario
+        scenario.fire_grid[0, 64, 68] = True
+        scenario.smoke_grid[0, 64, 68] = 1.0
+        scenario.smolder_grid[0, 64, 68] = 1.0
+
+        traversable, movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
+
+        self.assertTrue(bool(traversable[64, 68].item()))
+        self.assertGreater(
+            float(movement_cost[64, 68].item()),
+            float(scenario.mobility_cost_grid[0, 64, 68].item()) + 30.0,
+        )
+
+    def test_fire_changed_invalidation_marks_global_route_replan(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        self.assertTrue(scenario.ugv_global_route_paths[0][0])
+
+        scenario._spread_fire()
+
+        self.assertFalse(scenario.ugv_global_route_paths[0][0])
+        self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
     def test_optimized_local_astar_route_matches_reference_cases(self):
         route_cases = (
             ("clear_direct", (64, 64), (67, 64), ()),

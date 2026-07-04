@@ -329,6 +329,35 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_global_planner_lookahead_m"], 25.0)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7)
 
+    def test_build_args_exposes_fire_aware_ugv_planner_settings(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="fire-planner",
+            ugv_known_survivor_diagnostic=True,
+            ugv_planner_hint="global-astar",
+            ugv_dense_reward_mode="planner-follow",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_cost=30.0,
+            ugv_planner_smoke_cost=6.0,
+            ugv_planner_smolder_cost=4.0,
+            ugv_planner_fire_buffer_m=12.0,
+            ugv_planner_fire_buffer_cost=9.0,
+            enable_fire=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_planner_fire_mode"], "block")
+        self.assertEqual(scenario["ugv_planner_fire_cost"], 30.0)
+        self.assertEqual(scenario["ugv_planner_smoke_cost"], 6.0)
+        self.assertEqual(scenario["ugv_planner_smolder_cost"], 4.0)
+        self.assertEqual(scenario["ugv_planner_fire_buffer_m"], 12.0)
+        self.assertEqual(scenario["ugv_planner_fire_buffer_cost"], 9.0)
+        self.assertFalse(scenario["disable_fire"])
+
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
             num_env_steps=100,

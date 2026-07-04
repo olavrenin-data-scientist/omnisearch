@@ -567,6 +567,14 @@ def export_trajectory(
         "ground_confirmation_range_m": round(float(sc.ground_confirmation_range_m), 4),
         "ground_lidar_range": round(float(sc.ground_lidar_range), 8),
         "ground_lidar_range_m": round(float(sc.ground_lidar_range_m), 4),
+        "ugv_planner_fire": {
+            "mode": str(getattr(sc, "ugv_planner_fire_mode", "off")),
+            "fire_cost": round(float(getattr(sc, "ugv_planner_fire_cost", 25.0)), 4),
+            "smoke_cost": round(float(getattr(sc, "ugv_planner_smoke_cost", 5.0)), 4),
+            "smolder_cost": round(float(getattr(sc, "ugv_planner_smolder_cost", 3.0)), 4),
+            "fire_buffer_m": round(float(getattr(sc, "ugv_planner_fire_buffer_m", 10.0)), 4),
+            "fire_buffer_cost": round(float(getattr(sc, "ugv_planner_fire_buffer_cost", 8.0)), 4),
+        },
         "fire_model": {
             "spread_prob": round(float(sc.fire_spread_prob), 4),
             "spread_variability": round(float(sc.fire_spread_variability), 4),

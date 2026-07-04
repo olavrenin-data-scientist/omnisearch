@@ -99,7 +99,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         "n_ground": 1,
         "n_survivors": 1,
         "known_survivors_at_reset": True,
-        "disable_fire": True,
+        "disable_fire": not bool(args.enable_fire),
         "comms_dropout": 0.0,
     })
     scenario_kwargs.update(distance_kwargs)
@@ -140,6 +140,18 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_lookahead_cells"] = int(args.ugv_planner_lookahead_cells)
     if args.ugv_global_planner_lookahead_m is not None:
         scenario_kwargs["ugv_global_planner_lookahead_m"] = float(args.ugv_global_planner_lookahead_m)
+    if args.ugv_planner_fire_mode is not None:
+        scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
+    if args.ugv_planner_fire_cost is not None:
+        scenario_kwargs["ugv_planner_fire_cost"] = float(args.ugv_planner_fire_cost)
+    if args.ugv_planner_smoke_cost is not None:
+        scenario_kwargs["ugv_planner_smoke_cost"] = float(args.ugv_planner_smoke_cost)
+    if args.ugv_planner_smolder_cost is not None:
+        scenario_kwargs["ugv_planner_smolder_cost"] = float(args.ugv_planner_smolder_cost)
+    if args.ugv_planner_fire_buffer_m is not None:
+        scenario_kwargs["ugv_planner_fire_buffer_m"] = float(args.ugv_planner_fire_buffer_m)
+    if args.ugv_planner_fire_buffer_cost is not None:
+        scenario_kwargs["ugv_planner_fire_buffer_cost"] = float(args.ugv_planner_fire_buffer_cost)
     if "ugv_planner_lookahead_cells" in scenario_kwargs:
         patch_size = int(scenario_kwargs.get("ugv_planner_patch_size", 11))
         scenario_kwargs["ugv_planner_lookahead_cells"] = min(
@@ -727,6 +739,13 @@ def _new_time_series() -> dict:
         "escape_route_waypoint_distance_m": [],
         "escape_route_path_index": [],
         "escape_route_path_length": [],
+        "global_route_valid": [],
+        "route_fire_cells": [],
+        "route_smoke_mean": [],
+        "route_smolder_mean": [],
+        "route_fire_buffer_cells": [],
+        "route_replanned_after_fire": [],
+        "route_fire_blocked_no_path": [],
         "shadow_astar_valid": [],
         "shadow_astar_direct_blocked": [],
         "shadow_astar_detour_needed": [],
@@ -850,6 +869,13 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "escape_route_waypoint_distance_m": _series_at(ts, "escape_route_waypoint_distance_m", i),
                 "escape_route_path_index": _series_at(ts, "escape_route_path_index", i),
                 "escape_route_path_length": _series_at(ts, "escape_route_path_length", i),
+                "global_route_valid": _series_at(ts, "global_route_valid", i),
+                "route_fire_cells": _series_at(ts, "route_fire_cells", i),
+                "route_smoke_mean": _series_at(ts, "route_smoke_mean", i),
+                "route_smolder_mean": _series_at(ts, "route_smolder_mean", i),
+                "route_fire_buffer_cells": _series_at(ts, "route_fire_buffer_cells", i),
+                "route_replanned_after_fire": _series_at(ts, "route_replanned_after_fire", i),
+                "route_fire_blocked_no_path": _series_at(ts, "route_fire_blocked_no_path", i),
                 "shadow_astar_valid": _series_at(ts, "shadow_astar_valid", i),
                 "shadow_astar_direct_blocked": _series_at(ts, "shadow_astar_direct_blocked", i),
                 "shadow_astar_detour_needed": _series_at(ts, "shadow_astar_detour_needed", i),
@@ -922,6 +948,13 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "escape_route_waypoint_distance_m",
             "escape_route_path_index",
             "escape_route_path_length",
+            "global_route_valid",
+            "route_fire_cells",
+            "route_smoke_mean",
+            "route_smolder_mean",
+            "route_fire_buffer_cells",
+            "route_replanned_after_fire",
+            "route_fire_blocked_no_path",
             "shadow_astar_valid",
             "shadow_astar_direct_blocked",
             "shadow_astar_detour_needed",
@@ -1055,6 +1088,13 @@ def _group_metric_summary(rows: list[dict]) -> dict:
         "mean_shadow_astar_exit_clearance_cells",
         "mean_shadow_astar_exit_openness",
         "mean_shadow_astar_target_corridor_blocked_fraction",
+        "global_route_valid_fraction",
+        "mean_route_fire_cells",
+        "mean_route_smoke_mean",
+        "mean_route_smolder_mean",
+        "mean_route_fire_buffer_cells",
+        "route_replanned_after_fire_rate",
+        "route_fire_blocked_no_path_fraction",
         "shadow_astar_direction_detour_fraction",
         "shadow_astar_cost_detour_fraction",
         "shadow_astar_detour_stall_fraction_lt010",
@@ -1136,6 +1176,21 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         ),
         "mean_escape_route_waypoint_distance_m": _finite_mean(
             row.get("mean_escape_route_waypoint_distance_m") for row in rows
+        ),
+        "mean_global_route_valid_fraction": _finite_mean(
+            row.get("global_route_valid_fraction") for row in rows
+        ),
+        "mean_route_fire_cells": _finite_mean(row.get("mean_route_fire_cells") for row in rows),
+        "mean_route_smoke_mean": _finite_mean(row.get("mean_route_smoke_mean") for row in rows),
+        "mean_route_smolder_mean": _finite_mean(row.get("mean_route_smolder_mean") for row in rows),
+        "mean_route_fire_buffer_cells": _finite_mean(
+            row.get("mean_route_fire_buffer_cells") for row in rows
+        ),
+        "mean_route_replanned_after_fire_rate": _finite_mean(
+            row.get("route_replanned_after_fire_rate") for row in rows
+        ),
+        "mean_route_fire_blocked_no_path_fraction": _finite_mean(
+            row.get("route_fire_blocked_no_path_fraction") for row in rows
         ),
         "mean_shadow_astar_valid_fraction": _finite_mean(
             row["shadow_astar_valid_fraction"] for row in rows
@@ -1261,7 +1316,7 @@ def _plot_ugv_diagnostics(
     import matplotlib.pyplot as plt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(8, 3, figsize=(15, 33), constrained_layout=True)
+    fig, axes = plt.subplots(9, 3, figsize=(15, 37), constrained_layout=True)
     axes = axes.reshape(-1)
 
     ax = axes[0]
@@ -1573,6 +1628,48 @@ def _plot_ugv_diagnostics(
         "Mean A*-Target Angle",
         "degrees",
     )
+
+    ax = axes[24]
+    ax.plot(x, [b["route_fire_cells"] for b in bins], marker="o", label="fire cells", color="#dc2626")
+    ax.plot(x, [b["route_fire_buffer_cells"] for b in bins], marker="o", label="buffer cells", color="#f97316")
+    ax.plot(x, [b["route_smoke_mean"] for b in bins], marker="o", label="smoke", color="#64748b")
+    ax.plot(x, [b["route_smolder_mean"] for b in bins], marker="o", label="smolder", color="#7c2d12")
+    ax.set_title("Time-Bin Route Fire Exposure")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("cells or mean intensity")
+    ax2 = ax.twinx()
+    ax2.plot(x, [b["route_replanned_after_fire"] for b in bins], marker="x", linestyle="--", label="replan", color="#2563eb")
+    ax2.plot(x, [b["route_fire_blocked_no_path"] for b in bins], marker="x", linestyle="--", label="no path", color="#111827")
+    ax2.set_ylim(0.0, 1.0)
+    ax2.set_ylabel("fraction")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=7, ncol=2)
+
+    _plot_hist_by_success(
+        axes[25],
+        rows,
+        "mean_route_fire_cells",
+        "Route Fire Exposure By Outcome",
+        "burning cells on route",
+    )
+
+    ax = axes[26]
+    route_fire_metrics = [
+        ("valid", "global_route_valid_fraction"),
+        ("replan", "route_replanned_after_fire_rate"),
+        ("no path", "route_fire_blocked_no_path_fraction"),
+        ("buffer", "mean_route_fire_buffer_cells"),
+    ]
+    ax.bar(
+        [label for label, _ in route_fire_metrics],
+        [_finite_mean(row.get(key) for row in rows) for _, key in route_fire_metrics],
+        color="#f97316",
+        alpha=0.75,
+    )
+    ax.set_title("Route Fire State")
+    ax.set_ylabel("fraction or cells")
 
     fig.suptitle(
         f"UGV HAPPO Diagnostics ({'deterministic' if deterministic else 'stochastic'}, n={len(rows)})",
@@ -1940,6 +2037,27 @@ def run_rollout(
         time_series["escape_route_path_length"].append(
             _metric_scalar(scenario, "metric_ugv_escape_route_path_length")
         )
+        time_series["global_route_valid"].append(
+            _metric_scalar(scenario, "metric_ugv_global_route_valid")
+        )
+        time_series["route_fire_cells"].append(
+            _metric_scalar(scenario, "metric_ugv_route_fire_cells")
+        )
+        time_series["route_smoke_mean"].append(
+            _metric_scalar(scenario, "metric_ugv_route_smoke_mean")
+        )
+        time_series["route_smolder_mean"].append(
+            _metric_scalar(scenario, "metric_ugv_route_smolder_mean")
+        )
+        time_series["route_fire_buffer_cells"].append(
+            _metric_scalar(scenario, "metric_ugv_route_fire_buffer_cells")
+        )
+        time_series["route_replanned_after_fire"].append(
+            _metric_scalar(scenario, "metric_ugv_route_replanned_after_fire")
+        )
+        time_series["route_fire_blocked_no_path"].append(
+            _metric_scalar(scenario, "metric_ugv_route_fire_blocked_no_path")
+        )
         time_series["shadow_astar_valid"].append(float(shadow_valid))
         time_series["shadow_astar_direct_blocked"].append(float(shadow_direct_blocked))
         time_series["shadow_astar_detour_needed"].append(float(shadow_detour_needed))
@@ -2095,6 +2213,13 @@ def run_rollout(
         ),
         "mean_escape_route_path_index": _finite_mean(time_series["escape_route_path_index"]),
         "mean_escape_route_path_length": _finite_mean(time_series["escape_route_path_length"]),
+        "global_route_valid_fraction": _finite_mean(time_series["global_route_valid"]),
+        "mean_route_fire_cells": _finite_mean(time_series["route_fire_cells"]),
+        "mean_route_smoke_mean": _finite_mean(time_series["route_smoke_mean"]),
+        "mean_route_smolder_mean": _finite_mean(time_series["route_smolder_mean"]),
+        "mean_route_fire_buffer_cells": _finite_mean(time_series["route_fire_buffer_cells"]),
+        "route_replanned_after_fire_rate": _finite_mean(time_series["route_replanned_after_fire"]),
+        "route_fire_blocked_no_path_fraction": _finite_mean(time_series["route_fire_blocked_no_path"]),
         "shadow_astar_valid_fraction": (
             float(np.mean(shadow_astar_valid)) if shadow_astar_valid else 0.0
         ),
@@ -2650,6 +2775,22 @@ def main() -> None:
                         help="Override the checkpoint's planner waypoint lookahead.")
     parser.add_argument("--ugv-global-planner-lookahead-m", type=float, default=None,
                         help="Override the checkpoint's global planner waypoint lookahead in meters.")
+    parser.add_argument("--ugv-planner-fire-mode",
+                        choices=("off", "cost", "block"),
+                        default=None,
+                        help="Override the checkpoint's UGV planner fire mode.")
+    parser.add_argument("--ugv-planner-fire-cost", type=float, default=None,
+                        help="Override active-fire planner cost.")
+    parser.add_argument("--ugv-planner-smoke-cost", type=float, default=None,
+                        help="Override smoke planner cost.")
+    parser.add_argument("--ugv-planner-smolder-cost", type=float, default=None,
+                        help="Override smolder planner cost.")
+    parser.add_argument("--ugv-planner-fire-buffer-m", type=float, default=None,
+                        help="Override fire buffer radius in meters.")
+    parser.add_argument("--ugv-planner-fire-buffer-cost", type=float, default=None,
+                        help="Override fire buffer planner cost.")
+    parser.add_argument("--enable-fire", action="store_true",
+                        help="Allow fire to run in the UGV diagnostic scenario.")
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--trace-failures", action="store_true",
                         help="Print per-step diagnostics for seeds that fail to confirm.")
@@ -2678,6 +2819,16 @@ def main() -> None:
         parser.error("--ugv-planner-lookahead-cells must be positive")
     if args.ugv_global_planner_lookahead_m is not None and args.ugv_global_planner_lookahead_m <= 0.0:
         parser.error("--ugv-global-planner-lookahead-m must be positive")
+    for flag_name in (
+        "ugv_planner_fire_cost",
+        "ugv_planner_smoke_cost",
+        "ugv_planner_smolder_cost",
+        "ugv_planner_fire_buffer_m",
+        "ugv_planner_fire_buffer_cost",
+    ):
+        value = getattr(args, flag_name)
+        if value is not None and value < 0.0:
+            parser.error(f"--{flag_name.replace('_', '-')} must be nonnegative")
     if args.ugv_escape_stall_steps is not None and args.ugv_escape_stall_steps < 1:
         parser.error("--ugv-escape-stall-steps must be positive")
     if args.ugv_escape_progress_threshold_m is not None and args.ugv_escape_progress_threshold_m < 0.0:

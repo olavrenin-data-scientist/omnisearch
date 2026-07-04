@@ -101,6 +101,17 @@ def main():
              "0.0 = perfect radio, 0.3 = visible dropouts in viewer, "
              "0.8 = mostly broken.",
     )
+    p.add_argument("--enable-fire", action="store_true",
+                   help="Enable fire in exported trajectories when the merged scenario disables it.")
+    p.add_argument("--ugv-planner-fire-mode",
+                   choices=("off", "cost", "block"),
+                   default=None,
+                   help="Override the UGV planner fire mode for trajectory export.")
+    p.add_argument("--ugv-planner-fire-cost", type=float, default=None)
+    p.add_argument("--ugv-planner-smoke-cost", type=float, default=None)
+    p.add_argument("--ugv-planner-smolder-cost", type=float, default=None)
+    p.add_argument("--ugv-planner-fire-buffer-m", type=float, default=None)
+    p.add_argument("--ugv-planner-fire-buffer-cost", type=float, default=None)
     p.add_argument(
         "--terrain-source",
         choices=("real",),
@@ -362,6 +373,22 @@ def main():
         scenario_kwargs["ground_confirm_min_m"] = max(
             args.ground_min_confirm_radius_m, 0.0,
         )
+    if args.enable_fire:
+        scenario_kwargs["disable_fire"] = False
+    if args.ugv_planner_fire_mode is not None:
+        scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
+    for arg_name in (
+        "ugv_planner_fire_cost",
+        "ugv_planner_smoke_cost",
+        "ugv_planner_smolder_cost",
+        "ugv_planner_fire_buffer_m",
+        "ugv_planner_fire_buffer_cost",
+    ):
+        value = getattr(args, arg_name)
+        if value is not None:
+            if value < 0.0:
+                raise SystemExit(f"--{arg_name.replace('_', '-')} must be nonnegative")
+            scenario_kwargs[arg_name] = float(value)
     cv_options = None
     if args.enable_cv:
         if scenario_kwargs.get("terrain_cache_path") is None:

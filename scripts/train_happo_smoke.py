@@ -270,6 +270,13 @@ def build_args(
     ugv_planner_patch_size: int = 11,
     ugv_planner_lookahead_cells: int = 10,
     ugv_global_planner_lookahead_m: float = 20.0,
+    ugv_planner_fire_mode: str = "off",
+    ugv_planner_fire_cost: float = 25.0,
+    ugv_planner_smoke_cost: float = 5.0,
+    ugv_planner_smolder_cost: float = 3.0,
+    ugv_planner_fire_buffer_m: float = 10.0,
+    ugv_planner_fire_buffer_cost: float = 8.0,
+    enable_fire: bool = False,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     ugv_local_planners = {"local_astar", "local_escape_astar"}
@@ -303,6 +310,9 @@ def build_args(
         raise ValueError("ugv_dense_reward_mode='planner_follow' requires ugv_planner_hint='global_astar'")
     if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
         raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
+    ugv_planner_fire_mode = str(ugv_planner_fire_mode).replace("-", "_")
+    if ugv_planner_fire_mode not in {"off", "cost", "block"}:
+        raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
     if uav_survivor_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -621,6 +631,12 @@ def build_args(
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "ugv_global_planner_lookahead_m": ugv_global_planner_lookahead_m,
+        "ugv_planner_fire_mode": ugv_planner_fire_mode,
+        "ugv_planner_fire_cost": ugv_planner_fire_cost,
+        "ugv_planner_smoke_cost": ugv_planner_smoke_cost,
+        "ugv_planner_smolder_cost": ugv_planner_smolder_cost,
+        "ugv_planner_fire_buffer_m": ugv_planner_fire_buffer_m,
+        "ugv_planner_fire_buffer_cost": ugv_planner_fire_buffer_cost,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
@@ -875,7 +891,7 @@ def build_args(
             "n_ground": 1,
             "n_survivors": 1,
             "known_survivors_at_reset": True,
-            "disable_fire": True,
+            "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
             "r_found_survivor": 10.0,
             "r_drone_scout": 0.0,
@@ -1122,6 +1138,23 @@ def main():
                    help="Maximum number of A* route cells to skip ahead when forming the waypoint hint.")
     p.add_argument("--ugv-global-planner-lookahead-m", type=float, default=20.0,
                    help="Physical lookahead distance for global_astar waypoint hints.")
+    p.add_argument("--ugv-planner-fire-mode",
+                   choices=("off", "cost", "block"),
+                   default="off",
+                   help="Fire treatment for UGV A* planners. off ignores fire; cost adds fire/smoke costs; "
+                        "block treats active fire as non-traversable and uses soft smoke/buffer costs.")
+    p.add_argument("--ugv-planner-fire-cost", type=float, default=25.0,
+                   help="Additional movement cost for active fire cells in cost mode.")
+    p.add_argument("--ugv-planner-smoke-cost", type=float, default=5.0,
+                   help="Additional movement cost multiplier for smoke intensity in fire-aware planner modes.")
+    p.add_argument("--ugv-planner-smolder-cost", type=float, default=3.0,
+                   help="Additional movement cost multiplier for smolder intensity in fire-aware planner modes.")
+    p.add_argument("--ugv-planner-fire-buffer-m", type=float, default=10.0,
+                   help="Physical radius around active fire that receives a soft planner cost.")
+    p.add_argument("--ugv-planner-fire-buffer-cost", type=float, default=8.0,
+                   help="Additional movement cost for non-burning cells inside the active-fire buffer.")
+    p.add_argument("--enable-fire", action="store_true",
+                   help="Allow fire to run in diagnostic modes that otherwise disable it.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -1602,6 +1635,15 @@ def main():
         p.error("--ugv-escape-max-steps must be positive")
     if args.ugv_global_planner_lookahead_m <= 0.0:
         p.error("--ugv-global-planner-lookahead-m must be positive")
+    for flag_name in (
+        "ugv_planner_fire_cost",
+        "ugv_planner_smoke_cost",
+        "ugv_planner_smolder_cost",
+        "ugv_planner_fire_buffer_m",
+        "ugv_planner_fire_buffer_cost",
+    ):
+        if getattr(args, flag_name) < 0.0:
+            p.error(f"--{flag_name.replace('_', '-')} must be nonnegative")
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -2006,6 +2048,13 @@ def main():
         ugv_planner_patch_size = args.ugv_planner_patch_size,
         ugv_planner_lookahead_cells = args.ugv_planner_lookahead_cells,
         ugv_global_planner_lookahead_m = args.ugv_global_planner_lookahead_m,
+        ugv_planner_fire_mode = args.ugv_planner_fire_mode,
+        ugv_planner_fire_cost = args.ugv_planner_fire_cost,
+        ugv_planner_smoke_cost = args.ugv_planner_smoke_cost,
+        ugv_planner_smolder_cost = args.ugv_planner_smolder_cost,
+        ugv_planner_fire_buffer_m = args.ugv_planner_fire_buffer_m,
+        ugv_planner_fire_buffer_cost = args.ugv_planner_fire_buffer_cost,
+        enable_fire = bool(args.enable_fire),
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
