@@ -2597,7 +2597,8 @@ class WildfireSearchScenario(BaseScenario):
             self.fire_intensity_grid,
             torch.zeros_like(self.fire_intensity_grid),
         )
-        self._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
+        if self.ugv_planner_fire_mode != "off":
+            self._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
 
     def _directional_fire_exposure(self) -> Tensor:
         """Directional source exposure from burning cells into neighboring cells."""

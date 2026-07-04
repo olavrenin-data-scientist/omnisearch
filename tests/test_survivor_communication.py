@@ -573,6 +573,81 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(traversable, scenario.traversable_grid[0])
         torch.testing.assert_close(movement_cost, scenario.mobility_cost_grid[0])
 
+    def test_fire_mode_off_keeps_cached_global_route_after_fire_spread(self):
+        env = self._diagnostic_env(
+            disable_fire=False,
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="off",
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        cached_path = list(scenario.ugv_global_route_paths[0][0])
+        scenario.ugv_global_route_path_index[0, 0] = 3
+
+        scenario._spread_fire()
+
+        self.assertEqual(scenario.ugv_global_route_paths[0][0], cached_path)
+        self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), 0)
+        self.assertEqual(int(scenario.ugv_global_route_path_index[0, 0].item()), 3)
+        self.assertFalse(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
+    def test_fire_mode_off_global_route_matches_no_fire_route(self):
+        env_no_fire = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="off",
+        )
+        env_fire = self._diagnostic_env(
+            disable_fire=False,
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="off",
+        )
+        no_fire = env_no_fire.scenario
+        fire = env_fire.scenario
+        ground_no_fire, survivor_no_fire = self._set_local_astar_case(
+            no_fire,
+            (64, 64),
+            (76, 64),
+        )
+        ground_fire, survivor_fire = self._set_local_astar_case(
+            fire,
+            (64, 64),
+            (76, 64),
+        )
+        fire.fire_grid[0, 64, 68] = True
+        fire.fire_intensity_grid[0, 64, 68] = 1.0
+        fire.smoke_grid[0, 64, 68] = 1.0
+        fire.smolder_grid[0, 64, 68] = 1.0
+
+        plan_no_fire = no_fire._global_astar_route_info_for_env(
+            0,
+            ground_no_fire.state.pos[0],
+            survivor_no_fire.state.pos[0],
+        )
+        plan_fire = fire._global_astar_route_info_for_env(
+            0,
+            ground_fire.state.pos[0],
+            survivor_fire.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan_no_fire)
+        self.assertIsNotNone(plan_fire)
+        self.assertEqual(plan_fire["path"], plan_no_fire["path"])
+        self.assertEqual(plan_fire["waypoint"], plan_no_fire["waypoint"])
+        self.assertEqual(plan_fire["direct_blocked"], plan_no_fire["direct_blocked"])
+        self.assertEqual(plan_fire["detour_needed"], plan_no_fire["detour_needed"])
+
     def test_global_astar_fire_block_routes_around_active_fire_wall(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",
