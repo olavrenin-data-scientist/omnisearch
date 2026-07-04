@@ -468,6 +468,19 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.50)
         self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.20)
         self.r_ugv_planner_progress = max(float(kwargs.pop("r_ugv_planner_progress", 0.0)), 0.0)
+        self.ugv_dense_reward_mode = str(kwargs.pop("ugv_dense_reward_mode", "target")).replace("-", "_")
+        if self.ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend"}:
+            raise ValueError(
+                "ugv_dense_reward_mode must be one of: target, positive_target, planner_blend"
+            )
+        if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint != "local_astar":
+            raise ValueError("ugv_dense_reward_mode='planner_blend' requires ugv_planner_hint='local_astar'")
+        if self.ugv_route_aware_reward and self.ugv_dense_reward_mode != "target":
+            raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
+        self.ugv_planner_blend_weight = min(
+            max(float(kwargs.pop("ugv_planner_blend_weight", 0.70)), 0.0),
+            1.0,
+        )
         self.r_ugv_stall_penalty = max(float(kwargs.pop("r_ugv_stall_penalty", 0.0)), 0.0)
         self.ugv_stall_displacement_threshold_m = max(
             float(kwargs.pop("ugv_stall_displacement_threshold_m", 0.05)),
@@ -2778,11 +2791,6 @@ class WildfireSearchScenario(BaseScenario):
         ground_progress_scaled = (
             ground_progress_m / self.ground_progress_scale_m
         ).clamp(min=-1.0, max=1.0)
-        ground_shaping = torch.where(
-            prev_known,
-            ground_progress_scaled * self.r_ground_shaping,
-            torch.zeros_like(curr_ground_dist_m),
-        )
         if self.n_ground > 0:
             ground_pos = agent_pos[:, self.n_drones:, :]
             target_idx_safe = curr_ground_target_idx.clamp(min=0)
@@ -2822,7 +2830,6 @@ class WildfireSearchScenario(BaseScenario):
         else:
             action_alignment = torch.zeros_like(curr_ground_dist_m)
             movement_alignment = torch.zeros_like(curr_ground_dist_m)
-        movement_alignment_reward = movement_alignment * self.r_ugv_movement_alignment
         outside_confirm_range = valid_ground_target & (
             curr_ground_dist_m >= confirm_range_m.view(-1, 1)
         )
@@ -2847,6 +2854,41 @@ class WildfireSearchScenario(BaseScenario):
             planner_active = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_direct_blocked = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_detour_needed = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+        progress_reward_basis = ground_progress_scaled
+        movement_reward_basis = movement_alignment
+        if self.ugv_dense_reward_mode == "positive_target":
+            progress_reward_basis = ground_progress_scaled.clamp(min=0.0)
+            movement_reward_basis = movement_alignment.clamp(min=0.0)
+        elif self.ugv_dense_reward_mode == "planner_blend":
+            detour_blend_active = planner_active & planner_detour_needed
+            w = float(self.ugv_planner_blend_weight)
+            target_progress = ground_progress_scaled.clamp(min=0.0)
+            target_movement = movement_alignment.clamp(min=0.0)
+            planner_progress = planner_progress_scaled.clamp(min=0.0)
+            planner_movement = (
+                planner_progress_m
+                / self.step_ugv_actual_displacement_m.to(planner_progress_m.device).clamp_min(1e-6)
+            ).clamp(min=0.0, max=1.0)
+            progress_reward_basis = torch.where(
+                detour_blend_active,
+                (1.0 - w) * target_progress + w * planner_progress,
+                target_progress,
+            )
+            movement_reward_basis = torch.where(
+                detour_blend_active,
+                (1.0 - w) * target_movement + w * planner_movement,
+                target_movement,
+            )
+        ground_shaping = torch.where(
+            prev_known,
+            progress_reward_basis * self.r_ground_shaping,
+            torch.zeros_like(curr_ground_dist_m),
+        )
+        movement_alignment_reward = torch.where(
+            prev_known,
+            movement_reward_basis * self.r_ugv_movement_alignment,
+            torch.zeros_like(curr_ground_dist_m),
+        )
         route_aware_active = (
             planner_active & planner_detour_needed
             if self.ugv_route_aware_reward
@@ -6853,7 +6895,11 @@ class WildfireSearchScenario(BaseScenario):
         detour_needed_out = torch.zeros_like(gate, dtype=torch.bool)
         if (
             self.ugv_planner_hint != "local_astar"
-            or (self.r_ugv_planner_progress <= 0.0 and not self.ugv_route_aware_reward)
+            or (
+                self.r_ugv_planner_progress <= 0.0
+                and not self.ugv_route_aware_reward
+                and self.ugv_dense_reward_mode != "planner_blend"
+            )
             or start_pos.shape[1] == 0
         ):
             return reward, progress_m, progress_scaled, active, direct_blocked_out, detour_needed_out

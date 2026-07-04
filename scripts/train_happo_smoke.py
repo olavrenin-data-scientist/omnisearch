@@ -248,6 +248,8 @@ def build_args(
     ugv_movement_alignment_reward: float = 0.20,
     ugv_planner_progress_reward: float = 0.0,
     ugv_route_aware_reward: bool = False,
+    ugv_dense_reward_mode: str = "target",
+    ugv_planner_blend_weight: float = 0.70,
     ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
     ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
     ugv_stall_penalty: float = 0.0,
@@ -270,6 +272,13 @@ def build_args(
         raise ValueError("ugv_planner_detour_obs requires ugv_planner_hint='local_astar'")
     if ugv_route_aware_reward and ugv_planner_hint != "local_astar":
         raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
+    ugv_dense_reward_mode = str(ugv_dense_reward_mode).replace("-", "_")
+    if ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend"}:
+        raise ValueError("ugv_dense_reward_mode must be one of: target, positive_target, planner_blend")
+    if ugv_dense_reward_mode == "planner_blend" and ugv_planner_hint != "local_astar":
+        raise ValueError("ugv_dense_reward_mode='planner_blend' requires ugv_planner_hint='local_astar'")
+    if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
+        raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
     if uav_survivor_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -444,6 +453,7 @@ def build_args(
         raise ValueError("ugv_planner_progress_reward requires ugv_planner_hint='local_astar'")
     if ugv_route_aware_reward and ugv_planner_hint != "local_astar":
         raise ValueError("ugv_route_aware_reward requires ugv_planner_hint='local_astar'")
+    ugv_planner_blend_weight = min(max(float(ugv_planner_blend_weight), 0.0), 1.0)
     uav_coverage_reward = float(uav_coverage_reward)
     if uav_coverage_reward < 0.0:
         raise ValueError("uav_coverage_reward must be nonnegative")
@@ -571,6 +581,8 @@ def build_args(
         "ugv_planner_hint": ugv_planner_hint,
         "ugv_planner_detour_obs": bool(ugv_planner_detour_obs),
         "ugv_route_aware_reward": bool(ugv_route_aware_reward),
+        "ugv_dense_reward_mode": ugv_dense_reward_mode,
+        "ugv_planner_blend_weight": ugv_planner_blend_weight,
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "drone_min_footprint_m": drone_min_footprint_m,
@@ -1021,6 +1033,15 @@ def main():
     p.add_argument("--ugv-route-aware-reward", action="store_true",
                    help="When local A* detects a detour, suppress direct target-distance and "
                         "movement-alignment rewards for that UGV step. Requires local_astar.")
+    p.add_argument("--ugv-dense-reward-mode",
+                   choices=("target", "positive_target", "positive-target", "planner_blend", "planner-blend"),
+                   default="target",
+                   help="How UGV dense progress/alignment rewards are shaped. target keeps legacy "
+                        "signed survivor homing; positive_target clips survivor progress/alignment "
+                        "to nonnegative; planner_blend blends nonnegative survivor and local-A* "
+                        "signals during local detours.")
+    p.add_argument("--ugv-planner-blend-weight", type=float, default=0.70,
+                   help="Planner weight used by --ugv-dense-reward-mode planner_blend during local detours.")
     p.add_argument("--ugv-planner-patch-size", type=int, default=11,
                    help="Odd local grid size used by --ugv-planner-hint local_astar.")
     p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
@@ -1479,6 +1500,12 @@ def main():
         p.error("--ugv-planner-detour-obs requires --ugv-planner-hint local_astar")
     if args.ugv_route_aware_reward and args.ugv_planner_hint != "local_astar":
         p.error("--ugv-route-aware-reward requires --ugv-planner-hint local_astar")
+    args.ugv_dense_reward_mode = args.ugv_dense_reward_mode.replace("-", "_")
+    if args.ugv_dense_reward_mode == "planner_blend" and args.ugv_planner_hint != "local_astar":
+        p.error("--ugv-dense-reward-mode planner_blend requires --ugv-planner-hint local_astar")
+    if args.ugv_route_aware_reward and args.ugv_dense_reward_mode != "target":
+        p.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
+    args.ugv_planner_blend_weight = min(max(float(args.ugv_planner_blend_weight), 0.0), 1.0)
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -1708,6 +1735,8 @@ def main():
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_detour_obs: {bool(args.ugv_planner_detour_obs)}")
     print(f" ugv_route_aware_reward: {bool(args.ugv_route_aware_reward)}")
+    print(f" ugv_dense_reward_mode: {args.ugv_dense_reward_mode}")
+    print(f" ugv_planner_blend_weight: {args.ugv_planner_blend_weight}")
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
@@ -1851,6 +1880,8 @@ def main():
         ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
         ugv_planner_progress_reward = args.ugv_planner_progress_reward,
         ugv_route_aware_reward = bool(args.ugv_route_aware_reward),
+        ugv_dense_reward_mode = args.ugv_dense_reward_mode,
+        ugv_planner_blend_weight = args.ugv_planner_blend_weight,
         ugv_approach_reward = args.ugv_approach_reward,
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,

@@ -117,6 +117,13 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_detour_obs"] = bool(args.ugv_planner_detour_obs)
     if args.ugv_route_aware_reward is not None:
         scenario_kwargs["ugv_route_aware_reward"] = bool(args.ugv_route_aware_reward)
+    if args.ugv_dense_reward_mode is not None:
+        scenario_kwargs["ugv_dense_reward_mode"] = args.ugv_dense_reward_mode.replace("-", "_")
+    if args.ugv_planner_blend_weight is not None:
+        scenario_kwargs["ugv_planner_blend_weight"] = min(
+            max(float(args.ugv_planner_blend_weight), 0.0),
+            1.0,
+        )
     if args.ugv_planner_patch_size is not None:
         scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
     if args.ugv_planner_lookahead_cells is not None:
@@ -1767,6 +1774,12 @@ def main() -> None:
                         help="Override whether local A* planner observations include detour_needed.")
     parser.add_argument("--ugv-route-aware-reward", action=argparse.BooleanOptionalAction, default=None,
                         help="Override route-aware reward switching for local A* detours.")
+    parser.add_argument("--ugv-dense-reward-mode",
+                        choices=("target", "positive_target", "positive-target", "planner_blend", "planner-blend"),
+                        default=None,
+                        help="Override UGV dense reward shaping mode for reward diagnostics.")
+    parser.add_argument("--ugv-planner-blend-weight", type=float, default=None,
+                        help="Override planner blend weight for reward diagnostics.")
     parser.add_argument("--ugv-planner-patch-size", type=int, default=None,
                         help="Override the checkpoint's local A* planner patch size.")
     parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
@@ -1811,6 +1824,16 @@ def main() -> None:
         and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
     ):
         parser.error("--ugv-route-aware-reward requires --ugv-planner-hint local_astar")
+    if (
+        scenario_kwargs.get("ugv_dense_reward_mode", "target") == "planner_blend"
+        and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
+    ):
+        parser.error("--ugv-dense-reward-mode planner_blend requires --ugv-planner-hint local_astar")
+    if (
+        bool(scenario_kwargs.get("ugv_route_aware_reward", False))
+        and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"
+    ):
+        parser.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
     print(f"checkpoint: {checkpoint_dir}")
     print(f"steps: {args.steps}")
     print(
@@ -1818,6 +1841,8 @@ def main() -> None:
         f"{scenario_kwargs.get('ugv_planner_hint', 'none')} "
         f"detour_obs={bool(scenario_kwargs.get('ugv_planner_detour_obs', False))} "
         f"route_aware={bool(scenario_kwargs.get('ugv_route_aware_reward', False))} "
+        f"dense_mode={scenario_kwargs.get('ugv_dense_reward_mode', 'target')} "
+        f"blend={float(scenario_kwargs.get('ugv_planner_blend_weight', 0.70)):.2f} "
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
         f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)}"
     )
