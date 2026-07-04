@@ -57,6 +57,14 @@ DRONE_CAMERA_FOV_DEG = 65.0
 # detection/simulation_adapter.py (survivor_width_m=2.4).
 SURVIVOR_BODY_WIDTH_M = 2.4
 
+# Oblique (side-angle) drone camera parameters.
+# When oblique_frac > 0, a fraction of training images simulate a tilted camera
+# (15-45° from nadir), producing partially foreshortened survivors that appear
+# more elongated/upright than pure top-down views.
+OBLIQUE_TILT_MIN_DEG = 15.0   # Minimum tilt from nadir (shallow angle)
+OBLIQUE_TILT_MAX_DEG = 45.0   # Maximum tilt from nadir (steep side view)
+PERSON_HEIGHT_M = 1.75         # Used for oblique foreshortening calculation
+
 
 def altitude_to_survivor_px(
     altitude_m: float,
@@ -87,6 +95,38 @@ def altitude_to_gsd(
     """Ground sample distance (meters per pixel) at a given altitude."""
     footprint_m = 2.0 * altitude_m * np.tan(np.radians(fov_deg) / 2.0)
     return footprint_m / image_size
+
+
+def oblique_survivor_size(
+    altitude_m: float,
+    tilt_deg: float,
+    image_size: int = 640,
+    fov_deg: float = DRONE_CAMERA_FOV_DEG,
+    person_height_m: float = PERSON_HEIGHT_M,
+    body_width_m: float = SURVIVOR_BODY_WIDTH_M,
+) -> tuple[float, float]:
+    """Compute survivor pixel width and height for an oblique (tilted) drone camera.
+
+    At nadir (tilt=0), the person appears as a foreshortened circle/blob.
+    At oblique angles (tilt>0), the person appears more upright — the apparent
+    height increases as the camera tilts toward the horizon.
+
+    Returns (width_px, height_px).
+    """
+    footprint_m = 2.0 * altitude_m * np.tan(np.radians(fov_deg) / 2.0)
+    px_per_m = image_size / footprint_m
+
+    # Width: same as nadir (shoulder width projected horizontally)
+    width_px = body_width_m * px_per_m
+
+    # Height: person_height projected at the tilt angle.
+    # At nadir (tilt=0): see top of head, apparent height ≈ body_width (circular blob)
+    # At tilt_deg: apparent height = person_height * sin(tilt_deg)
+    tilt_rad = np.radians(tilt_deg)
+    apparent_height_m = person_height_m * np.sin(tilt_rad) + body_width_m * np.cos(tilt_rad)
+    height_px = apparent_height_m * px_per_m
+
+    return float(width_px), float(height_px)
 
 
 def sample_altitude(rng: np.random.Generator) -> float:
@@ -418,6 +458,7 @@ def _generate_split(
     small_frac: float = 0.30,
     heavy_occlude_frac: float = 0.20,
     altitude_aware: bool = True,
+    oblique_frac: float = 0.25,
 ) -> None:
     """Generate *n* composite images into *out_dir*.
 
@@ -463,17 +504,28 @@ def _generate_split(
 
         # Sample a drone altitude for this image — drives survivor pixel size
         # and effective resolution.
+        is_oblique = altitude_aware and rng.random() < oblique_frac
+        img_tilt_deg = 0.0
         if altitude_aware:
             img_altitude_m = sample_altitude(rng)
             img_gsd = altitude_to_gsd(img_altitude_m, image_size=size)
-            # Base survivor width from the physics; add ±30% jitter for pose,
-            # body size, and orientation variation.
-            base_px = altitude_to_survivor_px(img_altitude_m, image_size=size)
+            if is_oblique:
+                img_tilt_deg = float(rng.uniform(OBLIQUE_TILT_MIN_DEG, OBLIQUE_TILT_MAX_DEG))
+                base_w_px, base_h_px = oblique_survivor_size(
+                    img_altitude_m, img_tilt_deg, image_size=size
+                )
+                base_px = max(lo, min(hi, base_w_px))
+            else:
+                # Base survivor width from the physics; add ±30% jitter for pose,
+                # body size, and orientation variation.
+                base_px = altitude_to_survivor_px(img_altitude_m, image_size=size)
+                base_h_px = base_px  # nadir: roughly square (top-down blob)
             # Clamp to the allowed range (still respect --min/max-surv-px).
             base_px = max(lo, min(hi, base_px))
         else:
             img_altitude_m = None
             img_gsd = None
+            base_h_px = None
 
         # Negative-only images: survivor-free backgrounds teach the model that
         # NAIP terrain does not automatically imply a person is present.
@@ -492,7 +544,12 @@ def _generate_split(
                     w = int(rng.integers(max(lo, 20), min(50, hi)))
                 else:
                     w = int(rng.integers(lo, hi))
-                h = int(w * asset.height / asset.width)
+                if is_oblique and base_h_px is not None:
+                    # Oblique: use physics-derived height (person appears taller)
+                    h_jitter = rng.uniform(0.8, 1.2)
+                    h = int(max(w, base_h_px * jitter * h_jitter))
+                else:
+                    h = int(w * asset.height / asset.width)
                 if rng.random() < boundary_frac:
                     x = int(rng.integers(-w // 2, max(1, size - w // 2)))
                     y = int(rng.integers(-h // 2, max(1, size - h // 2)))
@@ -570,6 +627,8 @@ def _generate_split(
                 "survivor_base_px": round(base_px, 1),
                 "n_survivors": len(placements),
                 "has_fire": has_fire,
+                "oblique": is_oblique,
+                "tilt_deg": round(img_tilt_deg, 1),
             }
             (lbl_dir / f"{i:05d}.json").write_text(
                 json.dumps(meta), encoding="utf-8",
@@ -643,6 +702,10 @@ def main() -> None:
                          "survivor pixel size + blur from camera physics. Produces a realistic "
                          "altitude-dependent size distribution. Disable with --no-altitude-aware "
                          "to use the legacy uniform random size range.")
+    ap.add_argument("--oblique-frac", type=float, default=0.25,
+                    help="Fraction of images using an oblique (side-angle) drone camera "
+                         "(15-45° tilt from nadir). Survivors appear more elongated/upright. "
+                         "Default 0.25 (25%% of images). Set 0 for pure nadir only.")
     ap.add_argument("--data-dir", default=str(ROOT / "data/cv_train/survivor"))
     ap.add_argument("--out", default=str(ROOT / "models/survivor_yolov8n.pt"))
     args = ap.parse_args()
@@ -724,7 +787,7 @@ def main() -> None:
         naip_tiles=naip_train_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
         decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
         small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
-        altitude_aware=args.altitude_aware,
+        altitude_aware=args.altitude_aware, oblique_frac=args.oblique_frac,
     )
     _generate_split(
         data_dir / "val", args.n_val, val_assets, args.size, rng, cfg,
@@ -732,7 +795,7 @@ def main() -> None:
         naip_tiles=naip_val_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
         decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
         small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
-        altitude_aware=args.altitude_aware,
+        altitude_aware=args.altitude_aware, oblique_frac=args.oblique_frac,
     )
 
     yaml = data_dir / "survivor.yaml"
