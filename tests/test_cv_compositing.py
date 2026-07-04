@@ -431,3 +431,130 @@ class TestAltitudePhysics:
             )
             json_files = list((out / "labels").glob("*.json"))
             assert len(json_files) == 0
+
+    def test_oblique_produces_taller_survivors(self):
+        """Oblique camera tilt produces survivors taller than wide (not square blobs)."""
+        from scripts.train_survivor_detector import oblique_survivor_size
+        w, h = oblique_survivor_size(altitude_m=30.0, tilt_deg=30.0)
+        assert h > w, f"Oblique survivor should be taller than wide, got w={w:.1f} h={h:.1f}"
+
+    def test_oblique_at_zero_tilt_matches_nadir(self):
+        """At 0° tilt, oblique size height should ≈ body_width (nadir-like)."""
+        from scripts.train_survivor_detector import oblique_survivor_size, SURVIVOR_BODY_WIDTH_M
+        w, h = oblique_survivor_size(altitude_m=30.0, tilt_deg=0.0)
+        # At 0° tilt: h ≈ body_width (cos(0)=1, sin(0)=0)
+        assert abs(w - h) < w * 0.1, "At 0° tilt, w and h should be approximately equal"
+
+    def test_oblique_metadata_in_sidecar(self):
+        """oblique_frac > 0 produces metadata with oblique and tilt_deg fields."""
+        rng = _rng(123)
+        cfg = WildfireEffectConfig()
+        asset = Image.new("RGBA", (10, 20), (200, 100, 80, 255))
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "test_oblique"
+            _generate_split(
+                out, n=20, assets=[asset], size=64, rng=rng, cfg=cfg,
+                fire_frac=0.0, neg_frac=0.0, decoy_frac=0.0,
+                altitude_aware=True, oblique_frac=1.0,
+            )
+            import json
+            json_files = list((out / "labels").glob("*.json"))
+            assert len(json_files) == 20
+            meta = json.loads(json_files[0].read_text())
+            assert "oblique" in meta
+            assert "tilt_deg" in meta
+            assert meta["oblique"] is True
+            assert meta["tilt_deg"] > 0
+
+
+class TestObliqueAdapter:
+    """Verify the oblique camera mode in SimulationCvAdapter."""
+
+    def _adapter(self, tilt_deg: float):
+        from detection.simulation_adapter import SimulationCvAdapter
+        det = object.__new__(SimulationCvAdapter)
+        det.image_size = 512
+        det.survivor_width_m = 2.4
+        det.survivor_height_m = 1.4
+        det.person_height_m = 1.75
+        det.camera_tilt_deg = tilt_deg
+        det.sim_units_per_meter = 0.02
+        return det
+
+    def test_nadir_box_unchanged(self):
+        """tilt=0 must reproduce the original nadir bbox exactly."""
+        nadir = self._adapter(0.0)
+        box = nadir._survivor_box(dx_world=0.0, dy_world=0.0, footprint_world=0.6)
+        assert box is not None
+        x1, y1, x2, y2 = box
+        # Nadir: height derives from survivor_height_m (1.4m) < width (2.4m)
+        assert (x2 - x1) > (y2 - y1)
+
+    def test_oblique_box_taller_than_nadir(self):
+        """Tilted camera must produce a taller bbox than nadir."""
+        nadir = self._adapter(0.0)
+        oblique = self._adapter(40.0)
+        b0 = nadir._survivor_box(dx_world=0.0, dy_world=0.0, footprint_world=0.6)
+        b1 = oblique._survivor_box(dx_world=0.0, dy_world=0.0, footprint_world=0.6)
+        assert b0 is not None and b1 is not None
+        h0 = b0[3] - b0[1]
+        h1 = b1[3] - b1[1]
+        assert h1 > h0, f"Oblique bbox height {h1} should exceed nadir {h0}"
+
+    def test_invalid_tilt_rejected(self):
+        """Tilt outside [0, 60] degrees must raise at construction."""
+        from detection.simulation_adapter import SimulationCvAdapter
+        det = object.__new__(SimulationCvAdapter)
+        with pytest.raises(ValueError, match="camera_tilt_deg"):
+            SimulationCvAdapter.__init__(
+                det, terrain_cache_path="dummy", camera_tilt_deg=90.0,
+            )
+
+
+class TestThermalRenderer:
+    """Verify thermal image rendering produces plausible outputs."""
+
+    def test_thermal_frame_basic(self):
+        from detection.thermal_renderer import render_thermal_frame
+        survivors = [{"world_xy": (0.0, 0.0)}]
+        img = render_thermal_frame(
+            image_size=64,
+            drone_xy=(0.0, 0.0),
+            footprint_world=50.0,
+            survivors=survivors,
+            seed=42,
+        )
+        assert img.mode == "L"
+        assert img.size == (64, 64)
+        arr = np.array(img)
+        # Center pixel should be brighter (survivor heat)
+        center_val = arr[32, 32]
+        corner_val = arr[0, 0]
+        assert center_val > corner_val, "Survivor at center should be warmer than ambient"
+
+    def test_thermal_no_survivors_uniform(self):
+        from detection.thermal_renderer import render_thermal_frame
+        img = render_thermal_frame(
+            image_size=64,
+            drone_xy=(0.0, 0.0),
+            footprint_world=50.0,
+            survivors=[],
+            noise_std=0.0,
+            seed=42,
+        )
+        arr = np.array(img)
+        # Without survivors or fire, image should be nearly uniform
+        assert arr.std() < 5.0, f"Empty thermal should be uniform, std={arr.std():.1f}"
+
+    def test_thermal_colormap(self):
+        from detection.thermal_renderer import render_thermal_frame, render_thermal_with_colormap
+        gray = render_thermal_frame(
+            image_size=64,
+            drone_xy=(0.0, 0.0),
+            footprint_world=50.0,
+            survivors=[{"world_xy": (0.0, 0.0)}],
+            seed=42,
+        )
+        colored = render_thermal_with_colormap(gray, colormap="iron")
+        assert colored.mode == "RGB"
+        assert colored.size == (64, 64)

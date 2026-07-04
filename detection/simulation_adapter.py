@@ -110,6 +110,9 @@ class SimulationCvAdapter:
         wildfire_effect_seed: int | None = None,
         detection_mode: str = "cv",
         thermal_seed: int | None = None,
+        thermal_detector: str = "physics",
+        camera_tilt_deg: float = 0.0,
+        person_height_m: float = 1.75,
         seed: int = 7,
         root: str | Path | None = None,
     ):
@@ -214,6 +217,23 @@ class SimulationCvAdapter:
         self._thermal_seed = int(thermal_seed if thermal_seed is not None else seed)
         self._motion_detector = None
 
+        # Thermal detector backend: "physics" (closed-form probability model,
+        # default) or "yolo" (render a simulated TIR frame and run the trained
+        # thermal YOLOv8 from scripts/generate_thermal_dataset.py on it).
+        self.thermal_detector = str(thermal_detector).lower()
+        if self.thermal_detector not in ("physics", "yolo"):
+            raise ValueError(f"thermal_detector must be 'physics' or 'yolo', got {thermal_detector!r}")
+        self._thermal_yolo = None
+        self.thermal_model_name = None
+        if self.thermal_detector == "yolo":
+            path = self.root / "models" / "thermal_yolov8n.pt"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"thermal_detector='yolo' requires trained weights at {path}. "
+                    "Generate the dataset (scripts/generate_thermal_dataset.py) and train first."
+                )
+            self.thermal_model_name = str(path)
+
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
             if "bbox" not in terrain:
@@ -313,7 +333,20 @@ class SimulationCvAdapter:
         wildfire_state: "SimWildfireState | None",
         altitude_m: float,
     ) -> list[dict]:
-        """Run simulated thermal detection on the current frame."""
+        """Run simulated thermal detection on the current frame.
+
+        Two backends:
+          - "physics" (default): closed-form probability model on sim state.
+          - "yolo": render a simulated TIR frame and run the trained thermal
+            YOLOv8 (models/thermal_yolov8n.pt) over it.
+        """
+        if self.thermal_detector == "yolo":
+            return self._run_thermal_yolo_detection(
+                drone=drone,
+                survivors=survivors,
+                wildfire_state=wildfire_state,
+                altitude_m=altitude_m,
+            )
         thermal = self._get_thermal_model()
         survivor_dicts = [
             {"index": s.index, "world_xy": s.world_xy} for s in survivors
@@ -330,6 +363,87 @@ class SimulationCvAdapter:
             sim_units_per_meter=self.sim_units_per_meter,
             grid_size=self.grid_size,
         )
+
+    def _get_thermal_yolo(self):
+        """Lazily construct the thermal-image YOLOv8 detector."""
+        if self._thermal_yolo is None:
+            from .person_detector import PersonDetector
+            self._thermal_yolo = PersonDetector(
+                model_name=self.thermal_model_name,
+                conf=self.person_conf,
+                iou=self.person_iou,
+                device=self.person_device,
+            )
+        return self._thermal_yolo
+
+    def _run_thermal_yolo_detection(
+        self,
+        *,
+        drone: "SimDrone",
+        survivors: list,
+        wildfire_state: "SimWildfireState | None",
+        altitude_m: float,
+    ) -> list[dict]:
+        """Render a simulated TIR frame and run the trained thermal YOLO on it."""
+        from .thermal_renderer import render_thermal_frame
+
+        footprint_m = 2.0 * altitude_m * math.tan(math.radians(self.fov_deg) / 2.0)
+        footprint_world = footprint_m * self.sim_units_per_meter
+        body_radius_px = max(4, int(12 * (20.0 / max(altitude_m, 1.0))))
+
+        frame = render_thermal_frame(
+            image_size=self.image_size,
+            drone_xy=drone.world_xy,
+            footprint_world=footprint_world,
+            survivors=[{"world_xy": s.world_xy} for s in survivors],
+            fire_intensity_grid=wildfire_state.fire_intensity_grid if wildfire_state else None,
+            burned_grid=wildfire_state.burned_grid if wildfire_state else None,
+            grid_size=self.grid_size,
+            body_radius_px=body_radius_px,
+            seed=self._thermal_seed,
+        ).convert("RGB")
+
+        result = self._get_thermal_yolo().detect(frame)
+
+        # Convert YOLO boxes into thermal detection records (same schema as
+        # the physics model, so fusion and export work unchanged).
+        records = []
+        matched_indices: set[int] = set()
+        match_radius_world = footprint_world * 0.08
+        for det in result.detections:
+            box = det.box
+            cx = (box[0] + box[2]) * 0.5
+            cy = (box[1] + box[3]) * 0.5
+            rel = self._pixel_center_to_relative_world((cx, cy), footprint_world=footprint_world)
+            est_world = (drone.world_xy[0] + rel[0], drone.world_xy[1] + rel[1])
+            # Match to the nearest ground-truth survivor within radius.
+            best_idx, best_dist = None, match_radius_world
+            for s in survivors:
+                d = math.hypot(s.world_xy[0] - est_world[0], s.world_xy[1] - est_world[1])
+                if d < best_dist:
+                    best_idx, best_dist = s.index, d
+            if best_idx is not None:
+                matched_indices.add(best_idx)
+            records.append({
+                "survivor_index": best_idx,
+                "detected": True,
+                "confidence": round(float(det.confidence), 4),
+                "estimated_world_xy": [round(est_world[0], 6), round(est_world[1], 6)],
+                "bbox_xyxy": [int(v) for v in box],
+                "is_false_positive": best_idx is None,
+                "sensor_backend": "thermal_yolo",
+            })
+        # Survivors the thermal YOLO missed: emit non-detections so downstream
+        # consumers see the full ground-truth accounting like the physics model.
+        for s in survivors:
+            if s.index not in matched_indices:
+                records.append({
+                    "survivor_index": s.index,
+                    "detected": False,
+                    "confidence": 0.0,
+                    "sensor_backend": "thermal_yolo",
+                })
+        return records
 
     def _get_motion_detector(self):
         """Lazily initialize the motion detector."""

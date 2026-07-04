@@ -52,6 +52,23 @@ Each image simulates a specific drone flight altitude, sampled uniformly from th
 | Max GSD | 0.099 m/px (at 50 m) |
 | Images with altitude metadata | 900 (100%) |
 
+### Oblique (Side-Angle) Drone Views
+
+In addition to nadir (straight-down) views, 25% of generated images simulate an
+**oblique camera** tilted 15–45° from nadir (`--oblique-frac`, default 0.25).
+Survivors in oblique images appear elongated/partially upright rather than as
+flat circular blobs:
+
+- Apparent height follows the projection physics:
+  `height = person_height × sin(tilt) + body_width × cos(tilt)`
+- Each image's metadata sidecar records `"oblique"` and `"tilt_deg"`.
+- The simulation adapter mirrors this with a `camera_tilt_deg` parameter
+  (`--cv-camera-tilt` in trajectory export), so oblique-trained models are
+  exercised at deployment with the same geometry.
+
+Retrained drone detector including oblique views (2,000 train / 400 val, 50
+epochs): Precision 0.863, Recall 0.778, mAP50 0.818.
+
 ---
 
 ## 4. Source Assets
@@ -465,16 +482,44 @@ Results from `scripts/compare_detection_modes.py` (100 trials per scenario, 3 su
 
 **Conclusion:** CV+Thermal is the recommended fusion for wildfire SAR. Motion detection adds negligible value because survivors are immobile. CV alone remains the strongest single modality for daytime operations.
 
+### 13.7 Generated TIR Image Dataset & Trained Thermal Detector
+
+Beyond the physics-based probability model, a **simulated thermal image
+dataset** was generated (`scripts/generate_thermal_dataset.py`) using the
+thermal renderer (`detection/thermal_renderer.py`):
+
+| Property | Value |
+|----------|-------|
+| Total images | 1,200 (1,000 train / 200 val) |
+| Format | 512×512 grayscale PNG + YOLO labels + metadata JSON |
+| Location | `data/cv_train/thermal/` |
+| Scenarios | clear, fire, burned, smoke, fire+smoke, burned+smoke |
+| Negatives | 10% (no survivors) |
+| Survivor rendering | Gaussian heat blob (310 K body vs 293 K ambient), radius scales with altitude |
+| Normalization | Scene-adaptive contrast (AGC), like a real thermal camera |
+
+A YOLOv8-nano trained on this dataset (30 epochs) reached **Precision 1.000,
+Recall 0.963, mAP50 0.965, mAP50-95 0.843** (`models/thermal_yolov8n.pt`).
+The near-perfect scores reflect the simplicity of the simulated task; real TIR
+imagery would be substantially harder.
+
+The trained detector is wired into the simulation as an alternative thermal
+backend: `SimulationCvAdapter(thermal_detector="yolo")` renders a TIR frame
+each step and runs the model on it, feeding the same `cv+thermal` fusion
+pipeline as the physics backend (`--thermal-detector yolo` in trajectory
+export).
+
 ---
 
 ## 14. Recommendations for Zenodo Publication
 
 The dataset upload should include:
-- All drone images + labels + altitude metadata JSONs (train/val) — 2,400 images
+- All drone images + labels + altitude metadata JSONs (train/val) — 2,400 images (25% oblique views)
 - All UGV front/mast images + labels + metadata JSONs (train/val) — 3,600 images
+- The simulated thermal TIR dataset (train/val) — 1,200 images
 - The 54 accepted SARD cutouts (with provenance)
 - The 500 VisDrone decoy crops
 - NAIP tiles: training set (67 tiles, Malibu), validation set (4 tiles, different area), and 3 evaluation regions (10 tiles total)
-- Both generation scripts + config JSON for full reproducibility
-- Trained model weights (drone, UGV-front, UGV-mast)
+- All generation scripts + config JSON for full reproducibility
+- Trained model weights (drone, UGV-front, UGV-mast, thermal)
 - This EDA document as a datasheet
