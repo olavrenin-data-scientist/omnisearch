@@ -586,6 +586,8 @@ const COLORS = {
   drone_footprint:     0x60a5fa,
   ground:              0x14b8a6,
   ground_dark:         0x0f4f48,
+  planner:             0xffb020,
+  planner_clear:       0x38bdf8,
   wheel:               0x1a1f2e,
   skin:                0xf0c896,
   survivor_unscouted:  0xff3838,
@@ -990,6 +992,90 @@ function headingFromHistory(xyHist, step, fallbackX, fallbackY) {
   return 0;
 }
 
+function makeFlatArrowHead(radius, color) {
+  const shape = new THREE.Shape();
+  shape.moveTo(radius * 1.25, 0);
+  shape.lineTo(-radius * 0.70, radius * 0.48);
+  shape.lineTo(-radius * 0.42, 0);
+  shape.lineTo(-radius * 0.70, -radius * 0.48);
+  shape.lineTo(radius * 1.25, 0);
+  const geom = new THREE.ShapeGeometry(shape);
+  const mat = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.95,
+    side: THREE.DoubleSide,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.renderOrder = 44;
+  return mesh;
+}
+
+function makePlannerPointer3D(state, meta, pointer, agentRadius) {
+  if (!state.elevGrid || !Number.isFinite(pointer?.waypoint_x) || !Number.isFinite(pointer?.waypoint_y)) {
+    return null;
+  }
+  const G = state.fireGridSize;
+  const x0 = Number(pointer.x);
+  const y0 = Number(pointer.y);
+  const x1 = Number(pointer.waypoint_x);
+  const y1 = Number(pointer.waypoint_y);
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist <= 1e-5) return null;
+
+  const detour = Boolean(pointer.direct_blocked || pointer.detour_needed);
+  const color = detour ? COLORS.planner : COLORS.planner_clear;
+  const group = new THREE.Group();
+  group.renderOrder = 44;
+
+  const pts = [];
+  const samples = 10;
+  for (let i = 0; i <= samples; i++) {
+    const f = i / samples;
+    const x = x0 + dx * f;
+    const y = y0 + dy * f;
+    pts.push(x, y, terrainElevAt(x, y, state.elevGrid, G) + 0.026);
+  }
+  const lineGeom = new THREE.BufferGeometry();
+  lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  const lineMat = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: detour ? 0.95 : 0.70,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const line = new THREE.Line(lineGeom, lineMat);
+  line.renderOrder = 44;
+  group.add(line);
+
+  const head = makeFlatArrowHead(Math.max(agentRadius * 0.45, 0.012), color);
+  head.position.set(x1, y1, terrainElevAt(x1, y1, state.elevGrid, G) + 0.03);
+  head.rotation.z = Math.atan2(dy, dx);
+  group.add(head);
+
+  const targetDot = new THREE.Mesh(
+    new THREE.RingGeometry(agentRadius * 0.22, agentRadius * 0.32, 20),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.78,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  targetDot.position.set(x1, y1, terrainElevAt(x1, y1, state.elevGrid, G) + 0.029);
+  targetDot.renderOrder = 43;
+  group.add(targetDot);
+
+  return group;
+}
+
 // Force an agent model to render over the terrain so ridges never hide it.
 // Disables depth-testing against the scene and lifts the render order above
 // terrain (0) and fire (5-21). depthWrite stays off so it composites cleanly.
@@ -1009,9 +1095,10 @@ function setAlwaysOnTop(obj3d, order = 40) {
   });
 }
 
-function renderAgents3D(state, meta, frame, histories) {
+function renderAgents3D(state, meta, frame, histories, showPlanner) {
   clearGroup(state.agentGroup);
   clearGroup(state.trailGroup);
+  if (state.plannerGroup) clearGroup(state.plannerGroup);
   if (!state.elevGrid) return;
 
   const G = state.fireGridSize;
@@ -1072,6 +1159,16 @@ function renderAgents3D(state, meta, frame, histories) {
       color: a.type === 'drone' ? COLORS.drone : COLORS.ground,
       transparent: true, opacity: 0.50,
     })));
+  }
+
+  if (state.plannerGroup) {
+    state.plannerGroup.visible = Boolean(showPlanner);
+    if (showPlanner) {
+      for (const pointer of (frame.ground_planner ?? [])) {
+        const arrow = makePlannerPointer3D(state, meta, pointer, agentRadius);
+        if (arrow) state.plannerGroup.add(arrow);
+      }
+    }
   }
 
   // --- Agent markers + drone altitude staff ---
@@ -1633,7 +1730,7 @@ function MetricsPanel({ meta, frame, frames, selectedDrone, setSelectedDrone, se
 // React hook — mounts the Three.js scene once and drives the RAF loop.
 // Rebuilds the terrain group whenever meta changes.
 // ---------------------------------------------------------------------
-function useThree3D(meta, frame, frames, histories, showCoverage) {
+function useThree3D(meta, frame, frames, histories, showCoverage, showPlanner) {
   const canvasRef = useRef(null);
   const stateRef  = useRef(null);
   const [agentAssetTick, setAgentAssetTick] = useState(0);
@@ -1652,6 +1749,7 @@ function useThree3D(meta, frame, frames, histories, showCoverage) {
     const fireGroup    = new THREE.Group(); scene.add(fireGroup);
     const smokeGroup   = new THREE.Group(); scene.add(smokeGroup);
     const trailGroup   = new THREE.Group(); scene.add(trailGroup);
+    const plannerGroup = new THREE.Group(); scene.add(plannerGroup);
     const survGroup    = new THREE.Group(); scene.add(survGroup);
     const agentGroup   = new THREE.Group(); scene.add(agentGroup);
 
@@ -1661,7 +1759,7 @@ function useThree3D(meta, frame, frames, histories, showCoverage) {
     stateRef.current = {
       renderer, scene, camera, controls,
       terrainGroup, obstacleGroup, burnedGroup, fireGroup, smokeGroup,
-      coverageGroup, trailGroup, survGroup, agentGroup,
+      coverageGroup, trailGroup, plannerGroup, survGroup, agentGroup,
       placeholder,
       droneModelTemplate: null, droneModelSize: 1, droneModelError: null,
       groundModelTemplate: null, groundModelSize: 1, groundModelError: null,
@@ -1857,9 +1955,9 @@ function useThree3D(meta, frame, frames, histories, showCoverage) {
     syncCoverageOverlay3D(state, meta, frame, frames);
     updateFireColumns(state, meta, frame);
     updateSmoke(state, meta, frame);
-    if (histories) renderAgents3D(state, meta, frame, histories);
+    if (histories) renderAgents3D(state, meta, frame, histories, showPlanner);
     renderSurvivors3D(state, meta, frame);
-  }, [meta, frame, frames, histories, agentAssetTick, showCoverage]);
+  }, [meta, frame, frames, histories, agentAssetTick, showCoverage, showPlanner]);
 
   return { canvasRef, stateRef };
 }
@@ -1874,6 +1972,7 @@ function App() {
   const [selectedDrone, setSelectedDrone] = useState('');
   const [selectedSurvivor, setSelectedSurvivor] = useState('');
   const [showCoverage, setShowCoverage] = useState(false);
+  const [showPlanner, setShowPlanner] = useState(true);
 
   useEffect(() => {
     setData(null); setError(null);
@@ -1905,7 +2004,7 @@ function App() {
     ? `seed ${meta.seed} · ${formatStepsAsTime(totalSteps, meta)} · ${meta.fire_grid_size}×${meta.fire_grid_size}`
     : error ? 'Load error' : 'Loading…';
 
-  const { canvasRef } = useThree3D(meta, frame, frames, histories, showCoverage);
+  const { canvasRef } = useThree3D(meta, frame, frames, histories, showCoverage, showPlanner);
 
   return h(React.Fragment, null,
     h('header', null,
@@ -1966,6 +2065,14 @@ function App() {
           onChange: e => setShowCoverage(e.target.checked),
         }),
         'coverage',
+      ),
+      h('label', { className: 'toggle' },
+        h('input', {
+          type: 'checkbox',
+          checked: showPlanner,
+          onChange: e => setShowPlanner(e.target.checked),
+        }),
+        'A* pointer',
       ),
       h('div', { className: 'speed' },
         'speed: ',

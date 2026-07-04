@@ -89,6 +89,88 @@ def _agent_record(agent, scenario, env_index: int) -> dict:
     return record
 
 
+def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
+    """Export the same local A* waypoint used by UGV planner observations."""
+    if getattr(agent, "is_drone", False):
+        return None
+    if getattr(scenario, "ugv_planner_hint", "none") != "local_astar":
+        return None
+    if getattr(scenario, "n_survivors", 0) <= 0:
+        return None
+
+    agent_idx = scenario.world.agents.index(agent)
+    ground_index = agent_idx - scenario.n_drones
+    local_known = scenario.known_survivors_by_agent[env_index, agent_idx]
+    local_confirmed = scenario.confirmed_survivors_by_agent[env_index, agent_idx]
+    targetable = local_known & ~local_confirmed
+    if not bool(targetable.any().item()):
+        return None
+
+    survivor_pos = [s.state.pos[env_index] for s in scenario._survivors]
+    survivor_stack = np.array([[float(p[X]), float(p[Y])] for p in survivor_pos], dtype=np.float64)
+    ground_pos = agent.state.pos[env_index]
+    gx = float(ground_pos[X])
+    gy = float(ground_pos[Y])
+    target_mask = targetable.detach().cpu().numpy().astype(bool)
+    dists = np.linalg.norm(survivor_stack - np.array([[gx, gy]], dtype=np.float64), axis=1)
+    dists[~target_mask] = np.inf
+    target_index = int(np.argmin(dists))
+    if not np.isfinite(dists[target_index]):
+        return None
+
+    target_pos = scenario._survivors[target_index].state.pos[env_index]
+    route = scenario._local_astar_route_for_env(
+        env_index,
+        ground_pos,
+        target_pos,
+    )
+    if route is None:
+        return None
+
+    waypoint_cell, direct_blocked, detour_needed = route
+    waypoint_pos = scenario._grid_cell_center_to_world(
+        waypoint_cell,
+        device=ground_pos.device,
+        dtype=ground_pos.dtype,
+    )
+    dx = float(waypoint_pos[X] - ground_pos[X])
+    dy = float(waypoint_pos[Y] - ground_pos[Y])
+    dist_sim = (dx * dx + dy * dy) ** 0.5
+    scale = max(float(scenario.terrain_sim_units_per_meter[env_index]), 1e-12)
+    if dist_sim <= 1e-12:
+        unit_dx = 0.0
+        unit_dy = 0.0
+    else:
+        unit_dx = dx / dist_sim
+        unit_dy = dy / dist_sim
+    return {
+        "name": agent.name,
+        "ground_index": int(ground_index),
+        "target_index": int(target_index),
+        "target_x": float(target_pos[X]),
+        "target_y": float(target_pos[Y]),
+        "x": gx,
+        "y": gy,
+        "waypoint_x": float(waypoint_pos[X]),
+        "waypoint_y": float(waypoint_pos[Y]),
+        "unit_dx": float(unit_dx),
+        "unit_dy": float(unit_dy),
+        "distance_m": float(dist_sim / scale),
+        "target_distance_m": float(dists[target_index] / scale),
+        "direct_blocked": bool(direct_blocked),
+        "detour_needed": bool(detour_needed),
+    }
+
+
+def _ground_planner_records(scenario, env_index: int) -> List[dict]:
+    records = []
+    for agent in scenario.world.agents[scenario.n_drones:]:
+        record = _ground_planner_record(agent, scenario, env_index)
+        if record is not None:
+            records.append(record)
+    return records
+
+
 def _survivor_records(scenario, env_index: int) -> List[dict]:
     scouted = scenario.scouted_survivors[env_index].cpu().tolist()
     found   = scenario.found_survivors[env_index].cpu().tolist()
@@ -512,6 +594,7 @@ def export_trajectory(
         "fire_cells": _fire_cells(sc, env_index),
         "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
         "smoke_cells": _smoke_cells(sc, env_index),
+        "ground_planner": _ground_planner_records(sc, env_index),
         "drone_perception": sc.drone_perception_debug(env_index),
         "cv_perception": _cv_perception_records(
             sc,
@@ -548,6 +631,7 @@ def export_trajectory(
             "fire_cells": _fire_cells(sc, env_index),
             "burned_cells_added": _burned_cells_added(sc, env_index, previous_burned_grid),
             "smoke_cells": _smoke_cells(sc, env_index),
+            "ground_planner": _ground_planner_records(sc, env_index),
             "drone_perception": sc.drone_perception_debug(env_index),
             "cv_perception": _cv_perception_records(
                 sc,
