@@ -250,6 +250,11 @@ def build_args(
     ugv_route_aware_reward: bool = False,
     ugv_dense_reward_mode: str = "target",
     ugv_planner_blend_weight: float = 0.70,
+    ugv_escape_stall_steps: int = 5,
+    ugv_escape_progress_threshold_m: float = 0.10,
+    ugv_escape_movement_threshold_m: float = 0.25,
+    ugv_escape_waypoint_reached_m: float = 4.0,
+    ugv_escape_max_steps: int = 15,
     ugv_approach_reward: float = DEFAULT_UGV_APPROACH_REWARD,
     ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
     ugv_stall_penalty: float = 0.0,
@@ -274,12 +279,23 @@ def build_args(
     if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_dense_reward_mode = str(ugv_dense_reward_mode).replace("-", "_")
-    if ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend", "escape_blend"}:
-        raise ValueError("ugv_dense_reward_mode must be one of: target, positive_target, planner_blend, escape_blend")
+    if ugv_dense_reward_mode not in {
+        "target",
+        "positive_target",
+        "planner_blend",
+        "escape_blend",
+        "escape_route_switch",
+    }:
+        raise ValueError(
+            "ugv_dense_reward_mode must be one of: target, positive_target, "
+            "planner_blend, escape_blend, escape_route_switch"
+        )
     if ugv_dense_reward_mode == "planner_blend" and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
     if ugv_dense_reward_mode == "escape_blend" and ugv_planner_hint != "local_escape_astar":
         raise ValueError("ugv_dense_reward_mode='escape_blend' requires ugv_planner_hint='local_escape_astar'")
+    if ugv_dense_reward_mode == "escape_route_switch" and ugv_planner_hint != "local_astar":
+        raise ValueError("ugv_dense_reward_mode='escape_route_switch' requires ugv_planner_hint='local_astar'")
     if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
         raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
     if uav_survivor_diagnostic:
@@ -457,6 +473,11 @@ def build_args(
     if ugv_route_aware_reward and ugv_planner_hint not in ugv_local_planners:
         raise ValueError("ugv_route_aware_reward requires a local UGV planner hint")
     ugv_planner_blend_weight = min(max(float(ugv_planner_blend_weight), 0.0), 1.0)
+    ugv_escape_stall_steps = max(int(ugv_escape_stall_steps), 1)
+    ugv_escape_progress_threshold_m = max(float(ugv_escape_progress_threshold_m), 0.0)
+    ugv_escape_movement_threshold_m = max(float(ugv_escape_movement_threshold_m), 0.0)
+    ugv_escape_waypoint_reached_m = max(float(ugv_escape_waypoint_reached_m), 1e-6)
+    ugv_escape_max_steps = max(int(ugv_escape_max_steps), 1)
     uav_coverage_reward = float(uav_coverage_reward)
     if uav_coverage_reward < 0.0:
         raise ValueError("uav_coverage_reward must be nonnegative")
@@ -586,6 +607,11 @@ def build_args(
         "ugv_route_aware_reward": bool(ugv_route_aware_reward),
         "ugv_dense_reward_mode": ugv_dense_reward_mode,
         "ugv_planner_blend_weight": ugv_planner_blend_weight,
+        "ugv_escape_stall_steps": ugv_escape_stall_steps,
+        "ugv_escape_progress_threshold_m": ugv_escape_progress_threshold_m,
+        "ugv_escape_movement_threshold_m": ugv_escape_movement_threshold_m,
+        "ugv_escape_waypoint_reached_m": ugv_escape_waypoint_reached_m,
+        "ugv_escape_max_steps": ugv_escape_max_steps,
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "drone_min_footprint_m": drone_min_footprint_m,
@@ -1048,15 +1074,29 @@ def main():
                        "planner-blend",
                        "escape_blend",
                        "escape-blend",
+                       "escape_route_switch",
+                       "escape-route-switch",
                    ),
                    default="target",
                    help="How UGV dense progress/alignment rewards are shaped. target keeps legacy "
                         "signed survivor homing; positive_target clips survivor progress/alignment "
                         "to nonnegative; planner_blend blends nonnegative survivor and local-A* "
                         "signals during local detours; escape_blend only blends during "
-                        "local_escape_astar escape steps.")
+                        "local_escape_astar escape steps; escape_route_switch keeps survivor "
+                        "shaping until local_astar detects sustained stalled blocked motion, then "
+                        "temporarily follows a stored escape route.")
     p.add_argument("--ugv-planner-blend-weight", type=float, default=0.70,
                    help="Planner weight used by --ugv-dense-reward-mode planner_blend during local detours.")
+    p.add_argument("--ugv-escape-stall-steps", type=int, default=5,
+                   help="Consecutive blocked/low-progress UGV steps before escape_route_switch enters escape mode.")
+    p.add_argument("--ugv-escape-progress-threshold-m", type=float, default=0.10,
+                   help="Maximum target progress per step treated as stalled for escape_route_switch.")
+    p.add_argument("--ugv-escape-movement-threshold-m", type=float, default=0.25,
+                   help="Movement below this per step can contribute to escape_route_switch stall detection.")
+    p.add_argument("--ugv-escape-waypoint-reached-m", type=float, default=4.0,
+                   help="Distance threshold for reaching escape route waypoints or final exits.")
+    p.add_argument("--ugv-escape-max-steps", type=int, default=15,
+                   help="Maximum steps to stay in one escape_route_switch episode before returning to normal mode.")
     p.add_argument("--ugv-planner-patch-size", type=int, default=11,
                    help="Odd local grid size used by local UGV planner hints.")
     p.add_argument("--ugv-planner-lookahead-cells", type=int, default=10,
@@ -1521,9 +1561,21 @@ def main():
         p.error("--ugv-dense-reward-mode planner_blend requires a local UGV planner hint")
     if args.ugv_dense_reward_mode == "escape_blend" and args.ugv_planner_hint != "local_escape_astar":
         p.error("--ugv-dense-reward-mode escape_blend requires --ugv-planner-hint local_escape_astar")
+    if args.ugv_dense_reward_mode == "escape_route_switch" and args.ugv_planner_hint != "local_astar":
+        p.error("--ugv-dense-reward-mode escape_route_switch requires --ugv-planner-hint local_astar")
     if args.ugv_route_aware_reward and args.ugv_dense_reward_mode != "target":
         p.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
     args.ugv_planner_blend_weight = min(max(float(args.ugv_planner_blend_weight), 0.0), 1.0)
+    if args.ugv_escape_stall_steps < 1:
+        p.error("--ugv-escape-stall-steps must be positive")
+    if args.ugv_escape_progress_threshold_m < 0.0:
+        p.error("--ugv-escape-progress-threshold-m must be nonnegative")
+    if args.ugv_escape_movement_threshold_m < 0.0:
+        p.error("--ugv-escape-movement-threshold-m must be nonnegative")
+    if args.ugv_escape_waypoint_reached_m <= 0.0:
+        p.error("--ugv-escape-waypoint-reached-m must be positive")
+    if args.ugv_escape_max_steps < 1:
+        p.error("--ugv-escape-max-steps must be positive")
     if args.ugv_approach_reward < 0.0:
         p.error("--ugv-approach-reward must be nonnegative")
     if hasattr(args, "ugv_approach_radius_m"):
@@ -1755,6 +1807,14 @@ def main():
     print(f" ugv_route_aware_reward: {bool(args.ugv_route_aware_reward)}")
     print(f" ugv_dense_reward_mode: {args.ugv_dense_reward_mode}")
     print(f" ugv_planner_blend_weight: {args.ugv_planner_blend_weight}")
+    print(
+        " ugv_escape_route_switch: "
+        f"stall_steps={args.ugv_escape_stall_steps} "
+        f"progress_thr={args.ugv_escape_progress_threshold_m}m "
+        f"move_thr={args.ugv_escape_movement_threshold_m}m "
+        f"reached={args.ugv_escape_waypoint_reached_m}m "
+        f"max_steps={args.ugv_escape_max_steps}"
+    )
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
@@ -1900,6 +1960,11 @@ def main():
         ugv_route_aware_reward = bool(args.ugv_route_aware_reward),
         ugv_dense_reward_mode = args.ugv_dense_reward_mode,
         ugv_planner_blend_weight = args.ugv_planner_blend_weight,
+        ugv_escape_stall_steps = args.ugv_escape_stall_steps,
+        ugv_escape_progress_threshold_m = args.ugv_escape_progress_threshold_m,
+        ugv_escape_movement_threshold_m = args.ugv_escape_movement_threshold_m,
+        ugv_escape_waypoint_reached_m = args.ugv_escape_waypoint_reached_m,
+        ugv_escape_max_steps = args.ugv_escape_max_steps,
         ugv_approach_reward = args.ugv_approach_reward,
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,

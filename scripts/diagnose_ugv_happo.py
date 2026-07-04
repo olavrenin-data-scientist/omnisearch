@@ -124,6 +124,16 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
             max(float(args.ugv_planner_blend_weight), 0.0),
             1.0,
         )
+    if args.ugv_escape_stall_steps is not None:
+        scenario_kwargs["ugv_escape_stall_steps"] = int(args.ugv_escape_stall_steps)
+    if args.ugv_escape_progress_threshold_m is not None:
+        scenario_kwargs["ugv_escape_progress_threshold_m"] = float(args.ugv_escape_progress_threshold_m)
+    if args.ugv_escape_movement_threshold_m is not None:
+        scenario_kwargs["ugv_escape_movement_threshold_m"] = float(args.ugv_escape_movement_threshold_m)
+    if args.ugv_escape_waypoint_reached_m is not None:
+        scenario_kwargs["ugv_escape_waypoint_reached_m"] = float(args.ugv_escape_waypoint_reached_m)
+    if args.ugv_escape_max_steps is not None:
+        scenario_kwargs["ugv_escape_max_steps"] = int(args.ugv_escape_max_steps)
     if args.ugv_planner_patch_size is not None:
         scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
     if args.ugv_planner_lookahead_cells is not None:
@@ -639,6 +649,15 @@ def _new_time_series() -> dict:
         "local_mobility_max": [],
         "cell_speed": [],
         "within_confirm_range": [],
+        "escape_route_active": [],
+        "escape_route_enter": [],
+        "escape_route_exit": [],
+        "escape_route_stall_counter": [],
+        "escape_route_age": [],
+        "escape_route_waypoint_progress_m": [],
+        "escape_route_waypoint_distance_m": [],
+        "escape_route_path_index": [],
+        "escape_route_path_length": [],
         "shadow_astar_valid": [],
         "shadow_astar_direct_blocked": [],
         "shadow_astar_detour_needed": [],
@@ -753,6 +772,15 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "local_mobility_max": _series_at(ts, "local_mobility_max", i),
                 "cell_speed": _series_at(ts, "cell_speed", i),
                 "within_confirm_range": _series_at(ts, "within_confirm_range", i),
+                "escape_route_active": _series_at(ts, "escape_route_active", i),
+                "escape_route_enter": _series_at(ts, "escape_route_enter", i),
+                "escape_route_exit": _series_at(ts, "escape_route_exit", i),
+                "escape_route_stall_counter": _series_at(ts, "escape_route_stall_counter", i),
+                "escape_route_age": _series_at(ts, "escape_route_age", i),
+                "escape_route_waypoint_progress_m": _series_at(ts, "escape_route_waypoint_progress_m", i),
+                "escape_route_waypoint_distance_m": _series_at(ts, "escape_route_waypoint_distance_m", i),
+                "escape_route_path_index": _series_at(ts, "escape_route_path_index", i),
+                "escape_route_path_length": _series_at(ts, "escape_route_path_length", i),
                 "shadow_astar_valid": _series_at(ts, "shadow_astar_valid", i),
                 "shadow_astar_direct_blocked": _series_at(ts, "shadow_astar_direct_blocked", i),
                 "shadow_astar_detour_needed": _series_at(ts, "shadow_astar_detour_needed", i),
@@ -816,6 +844,15 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "local_mobility_max",
             "cell_speed",
             "within_confirm_range",
+            "escape_route_active",
+            "escape_route_enter",
+            "escape_route_exit",
+            "escape_route_stall_counter",
+            "escape_route_age",
+            "escape_route_waypoint_progress_m",
+            "escape_route_waypoint_distance_m",
+            "escape_route_path_index",
+            "escape_route_path_length",
             "shadow_astar_valid",
             "shadow_astar_direct_blocked",
             "shadow_astar_detour_needed",
@@ -1010,6 +1047,27 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         ),
         "mean_frac_speed_limited": _finite_mean(row["frac_speed_limited"] for row in rows),
         "mean_motion_correction_m": _finite_mean(row["mean_motion_correction_m"] for row in rows),
+        "mean_escape_route_active_fraction": _finite_mean(
+            row.get("escape_route_active_fraction") for row in rows
+        ),
+        "mean_escape_route_enter_count": _finite_mean(
+            row.get("escape_route_enter_count") for row in rows
+        ),
+        "mean_escape_route_exit_count": _finite_mean(
+            row.get("escape_route_exit_count") for row in rows
+        ),
+        "mean_escape_route_stall_counter": _finite_mean(
+            row.get("mean_escape_route_stall_counter") for row in rows
+        ),
+        "mean_escape_route_age": _finite_mean(
+            row.get("mean_escape_route_age") for row in rows
+        ),
+        "mean_escape_route_waypoint_progress_m": _finite_mean(
+            row.get("mean_escape_route_waypoint_progress_m") for row in rows
+        ),
+        "mean_escape_route_waypoint_distance_m": _finite_mean(
+            row.get("mean_escape_route_waypoint_distance_m") for row in rows
+        ),
         "mean_shadow_astar_valid_fraction": _finite_mean(
             row["shadow_astar_valid_fraction"] for row in rows
         ),
@@ -1786,6 +1844,33 @@ def run_rollout(
         time_series["within_confirm_range"].append(
             _metric_scalar(scenario, "metric_ugv_within_confirm_range")
         )
+        time_series["escape_route_active"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_active")
+        )
+        time_series["escape_route_enter"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_enter")
+        )
+        time_series["escape_route_exit"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_exit")
+        )
+        time_series["escape_route_stall_counter"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_stall_counter")
+        )
+        time_series["escape_route_age"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_age")
+        )
+        time_series["escape_route_waypoint_progress_m"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_waypoint_progress_m")
+        )
+        time_series["escape_route_waypoint_distance_m"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_waypoint_distance_m")
+        )
+        time_series["escape_route_path_index"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_path_index")
+        )
+        time_series["escape_route_path_length"].append(
+            _metric_scalar(scenario, "metric_ugv_escape_route_path_length")
+        )
         time_series["shadow_astar_valid"].append(float(shadow_valid))
         time_series["shadow_astar_direct_blocked"].append(float(shadow_direct_blocked))
         time_series["shadow_astar_detour_needed"].append(float(shadow_detour_needed))
@@ -1928,6 +2013,19 @@ def run_rollout(
         "planner_buckets": planner_buckets,
         "shadow_planner_total_steps": shadow_planner_total_steps,
         "shadow_planner_buckets": shadow_planner_buckets,
+        "escape_route_active_fraction": _finite_mean(time_series["escape_route_active"]),
+        "escape_route_enter_count": _finite_sum(time_series["escape_route_enter"]),
+        "escape_route_exit_count": _finite_sum(time_series["escape_route_exit"]),
+        "mean_escape_route_stall_counter": _finite_mean(time_series["escape_route_stall_counter"]),
+        "mean_escape_route_age": _finite_mean(time_series["escape_route_age"]),
+        "mean_escape_route_waypoint_progress_m": _finite_mean(
+            time_series["escape_route_waypoint_progress_m"]
+        ),
+        "mean_escape_route_waypoint_distance_m": _finite_mean(
+            time_series["escape_route_waypoint_distance_m"]
+        ),
+        "mean_escape_route_path_index": _finite_mean(time_series["escape_route_path_index"]),
+        "mean_escape_route_path_length": _finite_mean(time_series["escape_route_path_length"]),
         "shadow_astar_valid_fraction": (
             float(np.mean(shadow_astar_valid)) if shadow_astar_valid else 0.0
         ),
@@ -2450,11 +2548,23 @@ def main() -> None:
                             "planner-blend",
                             "escape_blend",
                             "escape-blend",
+                            "escape_route_switch",
+                            "escape-route-switch",
                         ),
                         default=None,
                         help="Override UGV dense reward shaping mode for reward diagnostics.")
     parser.add_argument("--ugv-planner-blend-weight", type=float, default=None,
                         help="Override planner blend weight for reward diagnostics.")
+    parser.add_argument("--ugv-escape-stall-steps", type=int, default=None,
+                        help="Override route-switch consecutive stall steps.")
+    parser.add_argument("--ugv-escape-progress-threshold-m", type=float, default=None,
+                        help="Override route-switch target-progress stall threshold.")
+    parser.add_argument("--ugv-escape-movement-threshold-m", type=float, default=None,
+                        help="Override route-switch low-movement threshold.")
+    parser.add_argument("--ugv-escape-waypoint-reached-m", type=float, default=None,
+                        help="Override route-switch waypoint reached radius.")
+    parser.add_argument("--ugv-escape-max-steps", type=int, default=None,
+                        help="Override route-switch maximum escape duration.")
     parser.add_argument("--ugv-planner-patch-size", type=int, default=None,
                         help="Override the checkpoint's local A* planner patch size.")
     parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
@@ -2485,6 +2595,16 @@ def main() -> None:
         parser.error("--ugv-planner-patch-size must be a positive odd integer")
     if args.ugv_planner_lookahead_cells is not None and args.ugv_planner_lookahead_cells < 1:
         parser.error("--ugv-planner-lookahead-cells must be positive")
+    if args.ugv_escape_stall_steps is not None and args.ugv_escape_stall_steps < 1:
+        parser.error("--ugv-escape-stall-steps must be positive")
+    if args.ugv_escape_progress_threshold_m is not None and args.ugv_escape_progress_threshold_m < 0.0:
+        parser.error("--ugv-escape-progress-threshold-m must be nonnegative")
+    if args.ugv_escape_movement_threshold_m is not None and args.ugv_escape_movement_threshold_m < 0.0:
+        parser.error("--ugv-escape-movement-threshold-m must be nonnegative")
+    if args.ugv_escape_waypoint_reached_m is not None and args.ugv_escape_waypoint_reached_m <= 0.0:
+        parser.error("--ugv-escape-waypoint-reached-m must be positive")
+    if args.ugv_escape_max_steps is not None and args.ugv_escape_max_steps < 1:
+        parser.error("--ugv-escape-max-steps must be positive")
     if args.ugv_planner_lookahead_cells is not None:
         patch_size = args.ugv_planner_patch_size if args.ugv_planner_patch_size is not None else 11
         args.ugv_planner_lookahead_cells = min(
@@ -2511,6 +2631,11 @@ def main() -> None:
     ):
         parser.error("--ugv-dense-reward-mode escape_blend requires --ugv-planner-hint local_escape_astar")
     if (
+        scenario_kwargs.get("ugv_dense_reward_mode", "target") == "escape_route_switch"
+        and scenario_kwargs.get("ugv_planner_hint", "none") != "local_astar"
+    ):
+        parser.error("--ugv-dense-reward-mode escape_route_switch requires --ugv-planner-hint local_astar")
+    if (
         bool(scenario_kwargs.get("ugv_route_aware_reward", False))
         and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"
     ):
@@ -2525,7 +2650,9 @@ def main() -> None:
         f"dense_mode={scenario_kwargs.get('ugv_dense_reward_mode', 'target')} "
         f"blend={float(scenario_kwargs.get('ugv_planner_blend_weight', 0.70)):.2f} "
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
-        f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)}"
+        f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)} "
+        f"escape_stall={scenario_kwargs.get('ugv_escape_stall_steps', 5)} "
+        f"escape_max={scenario_kwargs.get('ugv_escape_max_steps', 15)}"
     )
     print(f"shadow_ugv_planner: {bool(args.shadow_ugv_planner)}")
     print("-" * 72)

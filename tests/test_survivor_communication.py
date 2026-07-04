@@ -1233,6 +1233,82 @@ class SurvivorCommunicationTests(unittest.TestCase):
             places=5,
         )
 
+    def test_escape_route_switch_enters_after_stalled_blocked_step_and_rewards_route(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="local_astar",
+            ugv_dense_reward_mode="escape_route_switch",
+            ugv_escape_stall_steps=1,
+            ugv_escape_progress_threshold_m=0.2,
+            ugv_escape_movement_threshold_m=0.5,
+            ugv_escape_waypoint_reached_m=2.0,
+            ugv_escape_max_steps=10,
+            ugv_planner_patch_size=11,
+            ugv_planner_lookahead_cells=5,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            start_cell=(64, 64),
+            target_cell=(59, 59),
+            blocked_cells=tuple((62, y) for y in range(59, 70)),
+        )
+        device = ground.state.pos.device
+        dtype = ground.state.pos.dtype
+        scenario.r_ground_shaping = 0.5
+        scenario.r_ground_approach = 0.0
+        scenario.ground_approach_milestone_rewards_tensor.zero_()
+        scenario.r_ugv_movement_alignment = 0.2
+        scenario.r_ugv_planner_progress = 0.0
+        scenario.ugv_planner_progress_scale_m = 1.0
+        scenario.detection_range_by_env.zero_()
+
+        scenario._compute_step_rewards()
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        scenario.step_ugv_actual_displacement_m[0, 0] = 0.0
+        scenario._compute_step_rewards()
+
+        self.assertEqual(float(scenario.metric_ugv_escape_route_enter[0]), 1.0)
+        self.assertEqual(float(scenario.metric_ugv_escape_route_active[0]), 1.0)
+        self.assertTrue(bool(scenario.ugv_escape_route_active[0, 0]))
+
+        obs = scenario.observation(ground)
+        hint_offset = 4 + 12 + 1 + 2 * 3 * 3 + 9
+        hint = obs[0, hint_offset : hint_offset + 5]
+        self.assertEqual(float(hint[3]), 1.0)
+        self.assertEqual(float(hint[4]), 1.0)
+
+        waypoint = scenario._ugv_escape_route_waypoint_for_env(
+            0,
+            0,
+            ground.state.pos[0],
+            update_index=False,
+        )
+        self.assertIsNotNone(waypoint)
+        waypoint_pos = scenario._grid_cell_center_to_world(waypoint, device=device, dtype=dtype)
+        direction = waypoint_pos - ground.state.pos[0]
+        direction = direction / direction.norm().clamp_min(1e-9)
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+        scenario._pre_step_ground_pos[:, 0, :] = ground.state.pos
+        ground.state.pos[:] = ground.state.pos + direction.view(1, 2) * scale
+        scenario.step_ugv_actual_displacement_m[0, 0] = 1.0
+        scenario._compute_step_rewards()
+
+        self.assertGreater(float(scenario.metric_ugv_escape_route_waypoint_progress_m[0]), 0.0)
+        self.assertEqual(float(scenario.metric_reward_ugv_planner_progress[0]), 0.0)
+        expected_progress_reward = 0.5 * float(
+            scenario.metric_ugv_escape_route_waypoint_progress_scaled[0]
+        )
+        expected_alignment_reward = 0.2 * min(
+            max(float(scenario.metric_ugv_escape_route_waypoint_progress_m[0]), -1.0),
+            1.0,
+        )
+        self.assertAlmostEqual(float(scenario.metric_reward_ugv_progress[0]), expected_progress_reward, places=5)
+        self.assertAlmostEqual(
+            float(scenario.metric_reward_ugv_movement_alignment[0]),
+            expected_alignment_reward,
+            places=5,
+        )
+
     def test_info_contains_training_debug_metrics(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario

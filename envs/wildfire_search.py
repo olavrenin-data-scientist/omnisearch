@@ -470,20 +470,43 @@ class WildfireSearchScenario(BaseScenario):
         self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.20)
         self.r_ugv_planner_progress = max(float(kwargs.pop("r_ugv_planner_progress", 0.0)), 0.0)
         self.ugv_dense_reward_mode = str(kwargs.pop("ugv_dense_reward_mode", "target")).replace("-", "_")
-        if self.ugv_dense_reward_mode not in {"target", "positive_target", "planner_blend", "escape_blend"}:
+        if self.ugv_dense_reward_mode not in {
+            "target",
+            "positive_target",
+            "planner_blend",
+            "escape_blend",
+            "escape_route_switch",
+        }:
             raise ValueError(
-                "ugv_dense_reward_mode must be one of: target, positive_target, planner_blend, escape_blend"
+                "ugv_dense_reward_mode must be one of: target, positive_target, "
+                "planner_blend, escape_blend, escape_route_switch"
             )
         if self.ugv_dense_reward_mode == "planner_blend" and self.ugv_planner_hint not in UGV_PLANNER_HINT_MODES:
             raise ValueError("ugv_dense_reward_mode='planner_blend' requires a local UGV planner hint")
         if self.ugv_dense_reward_mode == "escape_blend" and self.ugv_planner_hint != "local_escape_astar":
             raise ValueError("ugv_dense_reward_mode='escape_blend' requires ugv_planner_hint='local_escape_astar'")
+        if self.ugv_dense_reward_mode == "escape_route_switch" and self.ugv_planner_hint != "local_astar":
+            raise ValueError("ugv_dense_reward_mode='escape_route_switch' requires ugv_planner_hint='local_astar'")
         if self.ugv_route_aware_reward and self.ugv_dense_reward_mode != "target":
             raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
         self.ugv_planner_blend_weight = min(
             max(float(kwargs.pop("ugv_planner_blend_weight", 0.70)), 0.0),
             1.0,
         )
+        self.ugv_escape_stall_steps = max(int(kwargs.pop("ugv_escape_stall_steps", 5)), 1)
+        self.ugv_escape_progress_threshold_m = max(
+            float(kwargs.pop("ugv_escape_progress_threshold_m", 0.10)),
+            0.0,
+        )
+        self.ugv_escape_movement_threshold_m = max(
+            float(kwargs.pop("ugv_escape_movement_threshold_m", 0.25)),
+            0.0,
+        )
+        self.ugv_escape_waypoint_reached_m = max(
+            float(kwargs.pop("ugv_escape_waypoint_reached_m", 4.0)),
+            1e-6,
+        )
+        self.ugv_escape_max_steps = max(int(kwargs.pop("ugv_escape_max_steps", 15)), 1)
         self.r_ugv_stall_penalty = max(float(kwargs.pop("r_ugv_stall_penalty", 0.0)), 0.0)
         self.ugv_stall_displacement_threshold_m = max(
             float(kwargs.pop("ugv_stall_displacement_threshold_m", 0.05)),
@@ -1030,6 +1053,52 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_terrain_cache_version = 0
         self._ugv_planner_route_cache: dict[tuple, tuple[tuple[int, int], bool, bool] | None] = {}
         self._ugv_planner_terrain_cache_version = 0
+        self.ugv_escape_route_active = torch.zeros(
+            batch_dim,
+            self.n_ground,
+            dtype=torch.bool,
+            device=device,
+        )
+        self.ugv_escape_route_age = torch.zeros(
+            batch_dim,
+            self.n_ground,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_escape_route_stall_counter = torch.zeros(
+            batch_dim,
+            self.n_ground,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_escape_route_target_idx = torch.full(
+            (batch_dim, self.n_ground),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_escape_route_path_index = torch.zeros(
+            batch_dim,
+            self.n_ground,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_escape_route_goal_cell = torch.full(
+            (batch_dim, self.n_ground, 2),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_escape_route_waypoint_cell = torch.full(
+            (batch_dim, self.n_ground, 2),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
+        self.ugv_escape_route_paths: list[list[list[tuple[int, int]]]] = [
+            [[] for _ in range(self.n_ground)]
+            for _ in range(batch_dim)
+        ]
         self.step_ugv_travel_cost = torch.zeros(batch_dim, self.n_ground, device=device)
         self.step_ugv_proposed_path_blocked = torch.zeros(
             batch_dim, self.n_ground, dtype=torch.bool, device=device,
@@ -1239,6 +1308,16 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_planner_direct_blocked = torch.zeros(batch_dim, device=device)
         self.metric_ugv_planner_detour_needed = torch.zeros(batch_dim, device=device)
         self.metric_ugv_planner_escape_mode = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_active = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_enter = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_exit = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_stall_counter = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_age = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_waypoint_progress_m = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_waypoint_progress_scaled = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_waypoint_distance_m = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_path_index = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_escape_route_path_length = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_aware_active = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
 
@@ -1364,6 +1443,16 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_planner_direct_blocked,
             self.metric_ugv_planner_detour_needed,
             self.metric_ugv_planner_escape_mode,
+            self.metric_ugv_escape_route_active,
+            self.metric_ugv_escape_route_enter,
+            self.metric_ugv_escape_route_exit,
+            self.metric_ugv_escape_route_stall_counter,
+            self.metric_ugv_escape_route_age,
+            self.metric_ugv_escape_route_waypoint_progress_m,
+            self.metric_ugv_escape_route_waypoint_progress_scaled,
+            self.metric_ugv_escape_route_waypoint_distance_m,
+            self.metric_ugv_escape_route_path_index,
+            self.metric_ugv_escape_route_path_length,
             self.metric_ugv_route_aware_active,
             self.metric_reward_ugv_stall_penalty,
         ]
@@ -1396,6 +1485,37 @@ class WildfireSearchScenario(BaseScenario):
                 buffer.fill_(1.0)
             else:
                 buffer[env_index] = 1.0
+
+    def _reset_ugv_escape_routes(self, env_index: int | None = None) -> None:
+        if not hasattr(self, "ugv_escape_route_active"):
+            return
+        tensors = (
+            self.ugv_escape_route_active,
+            self.ugv_escape_route_age,
+            self.ugv_escape_route_stall_counter,
+            self.ugv_escape_route_path_index,
+        )
+        if env_index is None:
+            for tensor in tensors:
+                tensor.zero_()
+            self.ugv_escape_route_target_idx.fill_(-1)
+            self.ugv_escape_route_goal_cell.fill_(-1)
+            self.ugv_escape_route_waypoint_cell.fill_(-1)
+            self.ugv_escape_route_paths = [
+                [[] for _ in range(self.n_ground)]
+                for _ in range(self.world.batch_dim)
+            ]
+            return
+        env_index = int(env_index)
+        for tensor in tensors:
+            tensor[env_index] = 0
+        self.ugv_escape_route_target_idx[env_index] = -1
+        self.ugv_escape_route_goal_cell[env_index] = -1
+        self.ugv_escape_route_waypoint_cell[env_index] = -1
+        if hasattr(self, "ugv_escape_route_paths"):
+            self.ugv_escape_route_paths[env_index] = [
+                [] for _ in range(self.n_ground)
+            ]
 
     def _reset_uav_cleanup_targets(self, env_index: int | None = None) -> None:
         if not hasattr(self, "uav_cleanup_target_valid"):
@@ -1479,6 +1599,7 @@ class WildfireSearchScenario(BaseScenario):
             self._reset_step_metric_buffers()
             self._reset_ground_motion_diagnostics()
             self._reset_uav_cleanup_targets()
+            self._reset_ugv_escape_routes()
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.found_survivors[env_index] = False
@@ -1505,6 +1626,7 @@ class WildfireSearchScenario(BaseScenario):
             self._reset_step_metric_buffers(env_index)
             self._reset_ground_motion_diagnostics(env_index)
             self._reset_uav_cleanup_targets(env_index)
+            self._reset_ugv_escape_routes(env_index)
             envs_to_seed = [env_index]
 
         H = W = self.fire_grid_size
@@ -2861,6 +2983,36 @@ class WildfireSearchScenario(BaseScenario):
             planner_direct_blocked = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_detour_needed = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
             planner_escape_mode = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+        if self.n_ground > 0:
+            (
+                escape_route_progress_m,
+                escape_route_progress_scaled,
+                escape_route_movement_alignment,
+                escape_route_reward_active,
+                escape_route_enter,
+                escape_route_exit,
+                escape_route_waypoint_distance_m,
+                escape_route_path_index,
+                escape_route_path_length,
+            ) = self._ugv_escape_route_switch_rewards(
+                self._pre_step_ground_pos,
+                ground_pos,
+                target_pos,
+                curr_ground_target_idx,
+                prev_known & outside_confirm_range,
+                ground_progress_m,
+                movement_alignment,
+            )
+        else:
+            escape_route_progress_m = torch.zeros_like(curr_ground_dist_m)
+            escape_route_progress_scaled = torch.zeros_like(curr_ground_dist_m)
+            escape_route_movement_alignment = torch.zeros_like(curr_ground_dist_m)
+            escape_route_reward_active = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+            escape_route_enter = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+            escape_route_exit = torch.zeros_like(curr_ground_dist_m, dtype=torch.bool)
+            escape_route_waypoint_distance_m = torch.zeros_like(curr_ground_dist_m)
+            escape_route_path_index = torch.zeros_like(curr_ground_dist_m)
+            escape_route_path_length = torch.zeros_like(curr_ground_dist_m)
         progress_reward_basis = ground_progress_scaled
         movement_reward_basis = movement_alignment
         if self.ugv_dense_reward_mode == "positive_target":
@@ -2888,6 +3040,22 @@ class WildfireSearchScenario(BaseScenario):
                 detour_blend_active,
                 (1.0 - w) * target_movement + w * planner_movement,
                 target_movement,
+            )
+        elif self.ugv_dense_reward_mode == "escape_route_switch":
+            progress_reward_basis = torch.where(
+                escape_route_reward_active,
+                escape_route_progress_scaled,
+                ground_progress_scaled,
+            )
+            movement_reward_basis = torch.where(
+                escape_route_reward_active,
+                escape_route_movement_alignment,
+                movement_alignment,
+            )
+            planner_progress_reward = torch.where(
+                escape_route_reward_active,
+                torch.zeros_like(planner_progress_reward),
+                planner_progress_reward,
             )
         ground_shaping = torch.where(
             prev_known,
@@ -3286,6 +3454,48 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_planner_direct_blocked = planner_direct_blocked.float().sum(dim=1)
         self.metric_ugv_planner_detour_needed = planner_detour_needed.float().sum(dim=1)
         self.metric_ugv_planner_escape_mode = planner_escape_mode.float().sum(dim=1)
+        self.metric_ugv_escape_route_active = (
+            self.ugv_escape_route_active.float().sum(dim=1)
+            if self.n_ground > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_ugv_escape_route_enter = escape_route_enter.float().sum(dim=1)
+        self.metric_ugv_escape_route_exit = escape_route_exit.float().sum(dim=1)
+        self.metric_ugv_escape_route_stall_counter = (
+            self.ugv_escape_route_stall_counter.float().sum(dim=1)
+            if self.n_ground > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_ugv_escape_route_age = (
+            self.ugv_escape_route_age.float().sum(dim=1)
+            if self.n_ground > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_ugv_escape_route_waypoint_progress_m = torch.where(
+            escape_route_reward_active,
+            escape_route_progress_m,
+            torch.zeros_like(escape_route_progress_m),
+        ).sum(dim=1)
+        self.metric_ugv_escape_route_waypoint_progress_scaled = torch.where(
+            escape_route_reward_active,
+            escape_route_progress_scaled,
+            torch.zeros_like(escape_route_progress_scaled),
+        ).sum(dim=1)
+        self.metric_ugv_escape_route_waypoint_distance_m = torch.where(
+            self.ugv_escape_route_active,
+            escape_route_waypoint_distance_m,
+            torch.zeros_like(escape_route_waypoint_distance_m),
+        ).sum(dim=1)
+        self.metric_ugv_escape_route_path_index = torch.where(
+            self.ugv_escape_route_active,
+            escape_route_path_index,
+            torch.zeros_like(escape_route_path_index),
+        ).sum(dim=1)
+        self.metric_ugv_escape_route_path_length = torch.where(
+            self.ugv_escape_route_active,
+            escape_route_path_length,
+            torch.zeros_like(escape_route_path_length),
+        ).sum(dim=1)
         self.metric_ugv_route_aware_active = route_aware_active.float().sum(dim=1)
         self.metric_ugv_action_alignment = action_alignment.sum(dim=1)
         self.metric_ugv_movement_alignment = movement_alignment.sum(dim=1)
@@ -3496,6 +3706,8 @@ class WildfireSearchScenario(BaseScenario):
             self._ugv_planner_terrain_cache_version = (
                 getattr(self, "_ugv_planner_terrain_cache_version", 0) + 1
             )
+            if hasattr(self, "ugv_escape_route_active"):
+                self._reset_ugv_escape_routes(env_index)
         if env_index is None:
             self._ugv_planner_route_cache.clear()
             return
@@ -6509,17 +6721,56 @@ class WildfireSearchScenario(BaseScenario):
         pos: Tensor,
         target_pos: Tensor,
     ) -> Tensor:
-        device = pos.device
-        hint = torch.zeros(self._ugv_planner_hint_dim(), device=device)
+        if (
+            self.ugv_dense_reward_mode == "escape_route_switch"
+            and ground_index is not None
+            and hasattr(self, "ugv_escape_route_active")
+            and bool(self.ugv_escape_route_active[env_index, ground_index].item())
+        ):
+            waypoint = self._ugv_escape_route_waypoint_for_env(
+                env_index,
+                ground_index,
+                pos,
+                update_index=True,
+            )
+            if waypoint is not None:
+                return self._ugv_planner_hint_from_waypoint(
+                    env_index,
+                    pos,
+                    waypoint,
+                    direct_blocked=True,
+                    detour_needed=True,
+                )
+
         route = self._ugv_planner_route_for_env(
             env_index,
             pos,
             target_pos,
             ground_index=ground_index,
         )
+        hint = torch.zeros(self._ugv_planner_hint_dim(), device=pos.device)
         if route is None:
             return hint
         waypoint, direct_blocked, detour_needed = route
+        return self._ugv_planner_hint_from_waypoint(
+            env_index,
+            pos,
+            waypoint,
+            direct_blocked=direct_blocked,
+            detour_needed=detour_needed,
+        )
+
+    def _ugv_planner_hint_from_waypoint(
+        self,
+        env_index: int,
+        pos: Tensor,
+        waypoint: tuple[int, int],
+        *,
+        direct_blocked: bool,
+        detour_needed: bool,
+    ) -> Tensor:
+        device = pos.device
+        hint = torch.zeros(self._ugv_planner_hint_dim(), device=device)
         waypoint_pos = self._grid_cell_center_to_world(waypoint, device=device, dtype=pos.dtype)
         delta = waypoint_pos - pos
         dist = torch.linalg.norm(delta)
@@ -6542,6 +6793,49 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_planner_detour_obs:
             hint[5] = 1.0 if detour_needed else 0.0
         return hint
+
+    def _ugv_escape_route_waypoint_for_env(
+        self,
+        env_index: int,
+        ground_index: int,
+        pos: Tensor,
+        *,
+        update_index: bool,
+    ) -> tuple[int, int] | None:
+        if not hasattr(self, "ugv_escape_route_paths"):
+            return None
+        if not bool(self.ugv_escape_route_active[env_index, ground_index].item()):
+            return None
+        path = self.ugv_escape_route_paths[env_index][ground_index]
+        if len(path) < 2:
+            return None
+        pos_cell = self._single_position_to_grid_cell(pos)
+        start_idx = int(self.ugv_escape_route_path_index[env_index, ground_index].item())
+        start_idx = max(0, min(start_idx, len(path) - 1))
+        nearest_offset, _nearest_cell = min(
+            enumerate(path[start_idx:]),
+            key=lambda item: (
+                item[1][0] - pos_cell[0]
+            ) ** 2 + (
+                item[1][1] - pos_cell[1]
+            ) ** 2,
+        )
+        nearest_idx = start_idx + int(nearest_offset)
+        waypoint = self._route_lookahead_cell(
+            self.traversable_grid[env_index],
+            path,
+            nearest_idx,
+        )
+        waypoint_idx = nearest_idx
+        for idx in range(nearest_idx, len(path)):
+            if path[idx] == waypoint:
+                waypoint_idx = idx
+                break
+        if update_index:
+            self.ugv_escape_route_path_index[env_index, ground_index] = nearest_idx
+            self.ugv_escape_route_waypoint_cell[env_index, ground_index, 0] = int(waypoint[0])
+            self.ugv_escape_route_waypoint_cell[env_index, ground_index, 1] = int(waypoint[1])
+        return path[waypoint_idx]
 
     def _ugv_planner_route_for_env(
         self,
@@ -7244,6 +7538,233 @@ class WildfireSearchScenario(BaseScenario):
             "target_corridor_blocked_fraction": target_corridor_blocked_fraction,
         }
 
+    def _clear_ugv_escape_route_for_env(self, env_index: int, ground_index: int) -> None:
+        self.ugv_escape_route_active[env_index, ground_index] = False
+        self.ugv_escape_route_age[env_index, ground_index] = 0
+        self.ugv_escape_route_path_index[env_index, ground_index] = 0
+        self.ugv_escape_route_target_idx[env_index, ground_index] = -1
+        self.ugv_escape_route_goal_cell[env_index, ground_index] = -1
+        self.ugv_escape_route_waypoint_cell[env_index, ground_index] = -1
+        self.ugv_escape_route_paths[env_index][ground_index] = []
+
+    def _start_ugv_escape_route_for_env(
+        self,
+        env_index: int,
+        ground_index: int,
+        target_idx: int,
+        path: list[tuple[int, int]],
+    ) -> bool:
+        if len(path) < 2:
+            return False
+        self.ugv_escape_route_active[env_index, ground_index] = True
+        self.ugv_escape_route_age[env_index, ground_index] = 0
+        self.ugv_escape_route_stall_counter[env_index, ground_index] = 0
+        self.ugv_escape_route_target_idx[env_index, ground_index] = int(target_idx)
+        self.ugv_escape_route_path_index[env_index, ground_index] = 0
+        self.ugv_escape_route_paths[env_index][ground_index] = list(path)
+        self.ugv_escape_route_goal_cell[env_index, ground_index, 0] = int(path[-1][0])
+        self.ugv_escape_route_goal_cell[env_index, ground_index, 1] = int(path[-1][1])
+        waypoint = self._route_lookahead_cell(self.traversable_grid[env_index], path, 0)
+        self.ugv_escape_route_waypoint_cell[env_index, ground_index, 0] = int(waypoint[0])
+        self.ugv_escape_route_waypoint_cell[env_index, ground_index, 1] = int(waypoint[1])
+        return True
+
+    def _ugv_escape_route_switch_rewards(
+        self,
+        start_pos: Tensor,
+        end_pos: Tensor,
+        target_pos: Tensor,
+        target_idx: Tensor,
+        gate: Tensor,
+        ground_progress_m: Tensor,
+        movement_alignment: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        progress_m = torch.zeros_like(gate, dtype=start_pos.dtype)
+        progress_scaled = torch.zeros_like(progress_m)
+        route_movement_alignment = torch.zeros_like(progress_m)
+        reward_active = torch.zeros_like(gate, dtype=torch.bool)
+        entered = torch.zeros_like(gate, dtype=torch.bool)
+        exited = torch.zeros_like(gate, dtype=torch.bool)
+        waypoint_distance_m = torch.zeros_like(progress_m)
+        path_index = torch.zeros_like(progress_m)
+        path_length = torch.zeros_like(progress_m)
+        if self.ugv_dense_reward_mode != "escape_route_switch" or start_pos.shape[1] == 0:
+            return (
+                progress_m,
+                progress_scaled,
+                route_movement_alignment,
+                reward_active,
+                entered,
+                exited,
+                waypoint_distance_m,
+                path_index,
+                path_length,
+            )
+
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(start_pos.device).clamp_min(1e-9)
+        batch_dim, n_ground, _ = start_pos.shape
+        for env_index in range(batch_dim):
+            scale = sim_units_per_meter[env_index]
+            for ground_index in range(n_ground):
+                target_valid = bool(gate[env_index, ground_index].item())
+                current_target_idx = int(target_idx[env_index, ground_index].item())
+                was_active = bool(self.ugv_escape_route_active[env_index, ground_index].item())
+                if was_active and (
+                    not target_valid
+                    or current_target_idx < 0
+                    or int(self.ugv_escape_route_target_idx[env_index, ground_index].item()) != current_target_idx
+                ):
+                    self._clear_ugv_escape_route_for_env(env_index, ground_index)
+                    exited[env_index, ground_index] = True
+                    was_active = False
+
+                if was_active:
+                    waypoint = self._ugv_escape_route_waypoint_for_env(
+                        env_index,
+                        ground_index,
+                        start_pos[env_index, ground_index],
+                        update_index=False,
+                    )
+                    if waypoint is None:
+                        self._clear_ugv_escape_route_for_env(env_index, ground_index)
+                        exited[env_index, ground_index] = True
+                        continue
+
+                    waypoint_pos = self._grid_cell_center_to_world(
+                        waypoint,
+                        device=start_pos.device,
+                        dtype=start_pos.dtype,
+                    )
+                    before_m = torch.linalg.norm(waypoint_pos - start_pos[env_index, ground_index]) / scale
+                    after_m = torch.linalg.norm(waypoint_pos - end_pos[env_index, ground_index]) / scale
+                    step_progress_m = before_m - after_m
+                    progress_m[env_index, ground_index] = step_progress_m
+                    progress_scaled[env_index, ground_index] = (
+                        step_progress_m / self.ugv_planner_progress_scale_m
+                    ).clamp(-1.0, 1.0)
+                    route_movement_alignment[env_index, ground_index] = (
+                        step_progress_m
+                        / self.step_ugv_actual_displacement_m[env_index, ground_index].clamp_min(1e-6)
+                    ).clamp(-1.0, 1.0)
+                    waypoint_distance_m[env_index, ground_index] = after_m
+                    reward_active[env_index, ground_index] = True
+
+                    self._ugv_escape_route_waypoint_for_env(
+                        env_index,
+                        ground_index,
+                        end_pos[env_index, ground_index],
+                        update_index=True,
+                    )
+                    route_path = self.ugv_escape_route_paths[env_index][ground_index]
+                    final_cell = route_path[-1] if route_path else waypoint
+                    final_pos = self._grid_cell_center_to_world(
+                        final_cell,
+                        device=end_pos.device,
+                        dtype=end_pos.dtype,
+                    )
+                    final_distance_m = torch.linalg.norm(
+                        final_pos - end_pos[env_index, ground_index]
+                    ) / scale
+                    normal_route = self._local_astar_route_uncached_for_env(
+                        env_index,
+                        end_pos[env_index, ground_index],
+                        target_pos[env_index, ground_index],
+                    )
+                    direct_open = normal_route is not None and not bool(normal_route[1])
+                    next_age = int(self.ugv_escape_route_age[env_index, ground_index].item()) + 1
+                    route_complete = float(final_distance_m.item()) <= self.ugv_escape_waypoint_reached_m
+                    timed_out = next_age >= self.ugv_escape_max_steps
+                    if route_complete or direct_open or timed_out:
+                        self._clear_ugv_escape_route_for_env(env_index, ground_index)
+                        exited[env_index, ground_index] = True
+                    else:
+                        self.ugv_escape_route_age[env_index, ground_index] = next_age
+                        self.ugv_escape_route_stall_counter[env_index, ground_index] = 0
+                    continue
+
+                if not target_valid or current_target_idx < 0:
+                    self.ugv_escape_route_stall_counter[env_index, ground_index] = 0
+                    continue
+
+                normal_route = self._local_astar_route_uncached_for_env(
+                    env_index,
+                    end_pos[env_index, ground_index],
+                    target_pos[env_index, ground_index],
+                )
+                direct_blocked = normal_route is None or bool(normal_route[1])
+                poor_progress = (
+                    float(ground_progress_m[env_index, ground_index].item())
+                    <= self.ugv_escape_progress_threshold_m
+                )
+                slow_or_sideways = (
+                    float(self.step_ugv_actual_displacement_m[env_index, ground_index].item())
+                    <= self.ugv_escape_movement_threshold_m
+                    or float(movement_alignment[env_index, ground_index].item()) <= 0.25
+                )
+                if direct_blocked and poor_progress and slow_or_sideways:
+                    self.ugv_escape_route_stall_counter[env_index, ground_index] += 1
+                else:
+                    self.ugv_escape_route_stall_counter[env_index, ground_index] = 0
+
+                if int(self.ugv_escape_route_stall_counter[env_index, ground_index].item()) < self.ugv_escape_stall_steps:
+                    continue
+
+                plan = self._local_escape_astar_plan_for_env(
+                    env_index,
+                    end_pos[env_index, ground_index],
+                    target_pos[env_index, ground_index],
+                    include_details=False,
+                )
+                if plan is None or not bool(plan.get("escape_mode", False)):
+                    continue
+                path = plan.get("path", [])
+                if self._start_ugv_escape_route_for_env(
+                    env_index,
+                    ground_index,
+                    current_target_idx,
+                    path,
+                ):
+                    entered[env_index, ground_index] = True
+
+        for env_index in range(batch_dim):
+            for ground_index in range(n_ground):
+                if bool(self.ugv_escape_route_active[env_index, ground_index].item()):
+                    route_path = self.ugv_escape_route_paths[env_index][ground_index]
+                    path_index[env_index, ground_index] = float(
+                        int(self.ugv_escape_route_path_index[env_index, ground_index].item())
+                    )
+                    path_length[env_index, ground_index] = float(len(route_path))
+                    if float(waypoint_distance_m[env_index, ground_index].item()) == 0.0:
+                        waypoint = self._ugv_escape_route_waypoint_for_env(
+                            env_index,
+                            ground_index,
+                            end_pos[env_index, ground_index],
+                            update_index=False,
+                        )
+                        if waypoint is not None:
+                            waypoint_pos = self._grid_cell_center_to_world(
+                                waypoint,
+                                device=end_pos.device,
+                                dtype=end_pos.dtype,
+                            )
+                            waypoint_distance_m[env_index, ground_index] = (
+                                torch.linalg.norm(
+                                    waypoint_pos - end_pos[env_index, ground_index]
+                                )
+                                / sim_units_per_meter[env_index]
+                            )
+        return (
+            progress_m,
+            progress_scaled,
+            route_movement_alignment,
+            reward_active,
+            entered,
+            exited,
+            waypoint_distance_m,
+            path_index,
+            path_length,
+        )
+
     def _ugv_planner_progress_rewards(
         self,
         start_pos: Tensor,
@@ -7769,6 +8290,22 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_planner_direct_blocked": self.metric_ugv_planner_direct_blocked,
             "diagnostic/ugv_planner_detour_needed": self.metric_ugv_planner_detour_needed,
             "diagnostic/ugv_planner_escape_mode": self.metric_ugv_planner_escape_mode,
+            "diagnostic/ugv_escape_route_active": self.metric_ugv_escape_route_active,
+            "diagnostic/ugv_escape_route_enter": self.metric_ugv_escape_route_enter,
+            "diagnostic/ugv_escape_route_exit": self.metric_ugv_escape_route_exit,
+            "diagnostic/ugv_escape_route_stall_counter": self.metric_ugv_escape_route_stall_counter,
+            "diagnostic/ugv_escape_route_age": self.metric_ugv_escape_route_age,
+            "diagnostic/ugv_escape_route_waypoint_progress_m": (
+                self.metric_ugv_escape_route_waypoint_progress_m
+            ),
+            "diagnostic/ugv_escape_route_waypoint_progress_scaled": (
+                self.metric_ugv_escape_route_waypoint_progress_scaled
+            ),
+            "diagnostic/ugv_escape_route_waypoint_distance_m": (
+                self.metric_ugv_escape_route_waypoint_distance_m
+            ),
+            "diagnostic/ugv_escape_route_path_index": self.metric_ugv_escape_route_path_index,
+            "diagnostic/ugv_escape_route_path_length": self.metric_ugv_escape_route_path_length,
             "diagnostic/ugv_route_aware_active": self.metric_ugv_route_aware_active,
             "diagnostic/ugv_action_alignment": self.metric_ugv_action_alignment,
             "diagnostic/ugv_movement_alignment": self.metric_ugv_movement_alignment,

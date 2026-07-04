@@ -280,6 +280,34 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_dense_reward_mode"], "escape_blend")
         self.assertEqual(scenario["ugv_planner_blend_weight"], 0.5)
 
+    def test_build_args_accepts_escape_route_switch_dense_reward_mode(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="escape-route-switch",
+            ugv_known_survivor_diagnostic=True,
+            local_map_patch_size=7,
+            ugv_planner_hint="local-astar",
+            ugv_dense_reward_mode="escape-route-switch",
+            ugv_escape_stall_steps=3,
+            ugv_escape_progress_threshold_m=0.2,
+            ugv_escape_movement_threshold_m=0.4,
+            ugv_escape_waypoint_reached_m=5.0,
+            ugv_escape_max_steps=12,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_planner_hint"], "local_astar")
+        self.assertEqual(scenario["ugv_dense_reward_mode"], "escape_route_switch")
+        self.assertEqual(scenario["ugv_escape_stall_steps"], 3)
+        self.assertEqual(scenario["ugv_escape_progress_threshold_m"], 0.2)
+        self.assertEqual(scenario["ugv_escape_movement_threshold_m"], 0.4)
+        self.assertEqual(scenario["ugv_escape_waypoint_reached_m"], 5.0)
+        self.assertEqual(scenario["ugv_escape_max_steps"], 12)
+
     def test_ugv_known_survivor_diagnostic_build_args(self):
         _, _, env_args = build_args(
             num_env_steps=100,
