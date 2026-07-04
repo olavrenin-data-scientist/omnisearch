@@ -762,6 +762,14 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "shadow_astar_target_angle_deg": _series_at(ts, "shadow_astar_target_angle_deg", i),
                 "shadow_astar_cost_ratio": _series_at(ts, "shadow_astar_cost_ratio", i),
                 "shadow_astar_direct_blocked_cells": _series_at(ts, "shadow_astar_direct_blocked_cells", i),
+                "shadow_astar_escape_mode": _series_at(ts, "shadow_astar_escape_mode", i),
+                "shadow_astar_exit_clearance_cells": _series_at(ts, "shadow_astar_exit_clearance_cells", i),
+                "shadow_astar_exit_openness": _series_at(ts, "shadow_astar_exit_openness", i),
+                "shadow_astar_target_corridor_blocked_fraction": _series_at(
+                    ts,
+                    "shadow_astar_target_corridor_blocked_fraction",
+                    i,
+                ),
                 "shadow_astar_waypoint_distance_m": _series_at(ts, "shadow_astar_waypoint_distance_m", i),
                 "shadow_astar_action_alignment": _series_at(ts, "shadow_astar_action_alignment", i),
                 "shadow_astar_movement_alignment": _series_at(ts, "shadow_astar_movement_alignment", i),
@@ -817,6 +825,10 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "shadow_astar_target_angle_deg",
             "shadow_astar_cost_ratio",
             "shadow_astar_direct_blocked_cells",
+            "shadow_astar_escape_mode",
+            "shadow_astar_exit_clearance_cells",
+            "shadow_astar_exit_openness",
+            "shadow_astar_target_corridor_blocked_fraction",
             "shadow_astar_waypoint_distance_m",
             "shadow_astar_action_alignment",
             "shadow_astar_movement_alignment",
@@ -1242,6 +1254,7 @@ def _plot_ugv_diagnostics(
         ("valid", "shadow_astar_valid_fraction"),
         ("direct blocked", "shadow_astar_direct_blocked_fraction"),
         ("detour", "shadow_astar_detour_needed_fraction"),
+        ("escape", "shadow_astar_escape_mode_fraction"),
     ]
     ax.bar(
         [label for label, _ in shadow_metrics],
@@ -1272,6 +1285,7 @@ def _plot_ugv_diagnostics(
     ax2.plot(x, [b["shadow_astar_valid"] for b in bins], marker="o", label="valid", color="#64748b")
     ax2.plot(x, [b["shadow_astar_direct_blocked"] for b in bins], marker="o", label="direct blocked", color="#ef4444")
     ax2.plot(x, [b["shadow_astar_detour_needed"] for b in bins], marker="o", label="detour", color="#f97316")
+    ax2.plot(x, [b["shadow_astar_escape_mode"] for b in bins], marker="o", label="escape", color="#a855f7")
     ax2.set_ylabel("fraction")
     ax.grid(True, alpha=0.25)
     lines, labels = ax.get_legend_handles_labels()

@@ -612,7 +612,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertTrue(plan["escape_mode"])
         waypoint, direct_blocked, detour_needed = plan["route"]
-        self.assertGreater(waypoint[0], 64)
+        self.assertGreaterEqual(waypoint[0], 64)
+        self.assertLess(waypoint[1], 64)
         self.assertTrue(detour_needed)
         self.assertGreaterEqual(float(plan["exit_openness"]), 0.25)
 

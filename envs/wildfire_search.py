@@ -7026,32 +7026,9 @@ class WildfireSearchScenario(BaseScenario):
                         open_count += 1
             return float(open_count) / float(max(total, 1))
 
-        blocked_cells = [
-            (x, y)
-            for y in range(y0, y1 + 1)
-            for x in range(x0, x1 + 1)
-            if not open_cell((x, y))
-        ]
-
-        def clearance_cells(cell: tuple[int, int]) -> float:
-            if not blocked_cells:
-                return float(radius + 1)
-            x, y = cell
-            return min(math.hypot(x - bx, y - by) for bx, by in blocked_cells)
-
         start = self._nearest_traversable_cell_in_bounds(env_index, sx, sy, bounds)
         if start is None:
             return None
-
-        goal_candidates = self._local_planner_goal_candidates(env_index, start, target_cell, bounds)
-        old_goal = goal_candidates[0] if goal_candidates else start
-        old_path: list[tuple[int, int]] = []
-        for candidate in goal_candidates:
-            candidate_path = self._local_astar_grid_path(env_index, start, candidate, bounds)
-            if len(candidate_path) >= 2:
-                old_goal = candidate
-                old_path = candidate_path
-                break
 
         old_route = self._local_astar_route_uncached_for_env(
             env_index,
@@ -7060,27 +7037,47 @@ class WildfireSearchScenario(BaseScenario):
             pos_cell=pos_cell,
             target_cell=target_cell,
         )
-        target_corridor_blocked_fraction = segment_blocked_fraction(start, old_goal)
-        old_direct_blocked = (
-            len(old_path) < 2
-            or not self._grid_segment_is_traversable(traversable, start, old_goal)
-        )
-        escape_mode = bool(old_direct_blocked or target_corridor_blocked_fraction >= 0.25 or old_route is None)
-        if not escape_mode and old_route is not None:
+        if old_route is not None:
             waypoint, direct_blocked, detour_needed = old_route
-            return {
-                "route": old_route,
-                "start": start,
-                "goal": old_goal,
-                "waypoint": waypoint,
-                "path": old_path,
-                "escape_mode": False,
-                "direct_blocked": bool(direct_blocked),
-                "detour_needed": bool(detour_needed),
-                "exit_clearance_cells": clearance_cells(old_goal),
-                "exit_openness": local_openness(old_goal),
-                "target_corridor_blocked_fraction": target_corridor_blocked_fraction,
-            }
+            old_waypoint_openness = local_openness(waypoint)
+            waypoint_vec = (float(waypoint[0] - start[0]), float(waypoint[1] - start[1]))
+            target_vec = (float(tx - start[0]), float(ty - start[1]))
+            waypoint_norm = max(math.hypot(*waypoint_vec), 1e-9)
+            target_norm = max(math.hypot(*target_vec), 1e-9)
+            waypoint_target_alignment = (
+                waypoint_vec[0] * target_vec[0] + waypoint_vec[1] * target_vec[1]
+            ) / (waypoint_norm * target_norm)
+            target_corridor_blocked_fraction = segment_blocked_fraction(start, waypoint)
+            trap_like = bool(
+                direct_blocked
+                and target_corridor_blocked_fraction >= 0.50
+                and old_waypoint_openness <= 0.25
+                and waypoint_target_alignment > 0.0
+            )
+            if not trap_like:
+                path = [start, waypoint] if waypoint != start else [start]
+                return {
+                    "route": old_route,
+                    "start": start,
+                    "goal": waypoint,
+                    "waypoint": waypoint,
+                    "path": path,
+                    "escape_mode": False,
+                    "direct_blocked": bool(direct_blocked),
+                    "detour_needed": bool(detour_needed),
+                    "exit_clearance_cells": None,
+                    "exit_openness": old_waypoint_openness,
+                    "target_corridor_blocked_fraction": target_corridor_blocked_fraction,
+                }
+        else:
+            target_corridor_blocked_fraction = segment_blocked_fraction(start, target_cell)
+
+        goal_candidates = self._local_planner_goal_candidates(env_index, start, target_cell, bounds)
+        old_goal = goal_candidates[0] if goal_candidates else start
+        if goal_candidates:
+            target_corridor_blocked_fraction = segment_blocked_fraction(start, old_goal)
+        else:
+            target_corridor_blocked_fraction = segment_blocked_fraction(start, target_cell)
 
         finite_cost = movement_cost[y0 : y1 + 1, x0 : x1 + 1]
         finite_mask = torch.isfinite(finite_cost)
@@ -7145,6 +7142,19 @@ class WildfireSearchScenario(BaseScenario):
         target_vec = (float(tx - start[0]), float(ty - start[1]))
         target_norm = max(math.hypot(*target_vec), 1e-9)
         max_cost = max(max(best_cost.values()), 1e-9)
+        blocked_cells = [
+            (x, y)
+            for y in range(y0, y1 + 1)
+            for x in range(x0, x1 + 1)
+            if not open_cell((x, y))
+        ]
+
+        def clearance_cells(cell: tuple[int, int]) -> float:
+            if not blocked_cells:
+                return float(radius + 1)
+            x, y = cell
+            return min(math.hypot(x - bx, y - by) for bx, by in blocked_cells)
+
         max_clearance = max(float(radius), 1.0)
         best_cell: tuple[int, int] | None = None
         best_score: tuple[float, float, float, float, float, float] | None = None
@@ -7165,12 +7175,12 @@ class WildfireSearchScenario(BaseScenario):
             clearance_norm = min(max(clearance / max_clearance, 0.0), 1.0)
             dead_end_penalty = 1.0 - openness
             score = (
-                -0.30 * path_cost_norm
-                + 0.30 * clearance_norm
-                + 0.25 * openness
+                -0.25 * path_cost_norm
+                + 0.20 * clearance_norm
+                + 0.15 * openness
                 - 0.10 * dead_end_penalty
-                + 0.05 * target_alignment
-                - 0.05 * target_dist_norm
+                + 0.35 * target_alignment
+                - 0.10 * target_dist_norm
             )
             score_tuple = (
                 score,
