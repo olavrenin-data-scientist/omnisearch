@@ -689,6 +689,34 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertTrue(plan["direct_blocked"])
         self.assertNotIn((68, 64), plan["path"])
 
+    def test_ugv_planner_fire_block_threshold_softens_weak_fire(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_cost=25.0,
+            ugv_planner_fire_block_threshold=0.6,
+            ugv_planner_smoke_cost=0.0,
+            ugv_planner_smolder_cost=0.0,
+            ugv_planner_fire_buffer_cost=0.0,
+        )
+        scenario = env.scenario
+        scenario.fire_grid[0, 64, 68] = True
+        scenario.fire_intensity_grid[0, 64, 68] = 0.4
+
+        traversable, movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
+
+        self.assertTrue(bool(traversable[64, 68].item()))
+        self.assertAlmostEqual(
+            float(movement_cost[64, 68].item()),
+            float(scenario.mobility_cost_grid[0, 64, 68].item()) + 10.0,
+            places=5,
+        )
+
+        scenario.fire_intensity_grid[0, 64, 68] = 0.8
+        traversable, _movement_cost = scenario._ugv_planner_layer_tensors_for_env(0)
+
+        self.assertFalse(bool(traversable[64, 68].item()))
+
     def test_ugv_planner_fire_costs_do_not_block_cells(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",

@@ -571,6 +571,9 @@ def export_trajectory(
             "mode": str(getattr(sc, "ugv_planner_fire_mode", "off")),
             "replan_policy": str(getattr(sc, "ugv_planner_fire_replan_policy", "always")),
             "fire_cost": round(float(getattr(sc, "ugv_planner_fire_cost", 25.0)), 4),
+            "fire_block_threshold": round(
+                float(getattr(sc, "ugv_planner_fire_block_threshold", 0.0)), 4
+            ),
             "smoke_cost": round(float(getattr(sc, "ugv_planner_smoke_cost", 5.0)), 4),
             "smolder_cost": round(float(getattr(sc, "ugv_planner_smolder_cost", 3.0)), 4),
             "fire_buffer_m": round(float(getattr(sc, "ugv_planner_fire_buffer_m", 10.0)), 4),

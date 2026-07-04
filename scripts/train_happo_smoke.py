@@ -273,6 +273,7 @@ def build_args(
     ugv_planner_fire_mode: str = "off",
     ugv_planner_fire_replan_policy: str = "always",
     ugv_planner_fire_cost: float = 25.0,
+    ugv_planner_fire_block_threshold: float = 0.0,
     ugv_planner_smoke_cost: float = 5.0,
     ugv_planner_smolder_cost: float = 3.0,
     ugv_planner_fire_buffer_m: float = 10.0,
@@ -318,6 +319,8 @@ def build_args(
     ugv_planner_fire_replan_policy = str(ugv_planner_fire_replan_policy).replace("-", "_")
     if ugv_planner_fire_replan_policy not in {"always", "affected"}:
         raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected")
+    if not 0.0 <= float(ugv_planner_fire_block_threshold) <= 1.0:
+        raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
     if uav_survivor_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -639,6 +642,7 @@ def build_args(
         "ugv_planner_fire_mode": ugv_planner_fire_mode,
         "ugv_planner_fire_replan_policy": ugv_planner_fire_replan_policy,
         "ugv_planner_fire_cost": ugv_planner_fire_cost,
+        "ugv_planner_fire_block_threshold": ugv_planner_fire_block_threshold,
         "ugv_planner_smoke_cost": ugv_planner_smoke_cost,
         "ugv_planner_smolder_cost": ugv_planner_smolder_cost,
         "ugv_planner_fire_buffer_m": ugv_planner_fire_buffer_m,
@@ -1160,6 +1164,10 @@ def main():
                         "active fire/buffer touches the cached global route.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=25.0,
                    help="Additional movement cost for active fire cells in cost mode.")
+    p.add_argument("--ugv-planner-fire-block-threshold", type=float, default=0.0,
+                   help="In block mode, only active fire cells with intensity >= this threshold "
+                        "are non-traversable. Default 0.0 preserves binary fire blocking; "
+                        "sub-threshold active fire receives soft planner fire cost.")
     p.add_argument("--ugv-planner-smoke-cost", type=float, default=5.0,
                    help="Additional movement cost multiplier for smoke intensity in fire-aware planner modes.")
     p.add_argument("--ugv-planner-smolder-cost", type=float, default=3.0,
@@ -1664,6 +1672,8 @@ def main():
         p.error("--ugv-escape-max-steps must be positive")
     if args.ugv_global_planner_lookahead_m <= 0.0:
         p.error("--ugv-global-planner-lookahead-m must be positive")
+    if not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0:
+        p.error("--ugv-planner-fire-block-threshold must be in [0, 1]")
     for flag_name in (
         "ugv_planner_fire_cost",
         "ugv_planner_smoke_cost",
@@ -1916,6 +1926,7 @@ def main():
     print(f" ugv_global_planner_lookahead_m: {args.ugv_global_planner_lookahead_m}")
     print(f" ugv_planner_fire_mode: {args.ugv_planner_fire_mode}")
     print(f" ugv_planner_fire_replan_policy: {args.ugv_planner_fire_replan_policy}")
+    print(f" ugv_planner_fire_block_threshold: {args.ugv_planner_fire_block_threshold}")
     print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
@@ -2083,6 +2094,7 @@ def main():
         ugv_planner_fire_mode = args.ugv_planner_fire_mode,
         ugv_planner_fire_replan_policy = args.ugv_planner_fire_replan_policy,
         ugv_planner_fire_cost = args.ugv_planner_fire_cost,
+        ugv_planner_fire_block_threshold = args.ugv_planner_fire_block_threshold,
         ugv_planner_smoke_cost = args.ugv_planner_smoke_cost,
         ugv_planner_smolder_cost = args.ugv_planner_smolder_cost,
         ugv_planner_fire_buffer_m = args.ugv_planner_fire_buffer_m,

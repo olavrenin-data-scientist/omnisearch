@@ -112,6 +112,8 @@ def main():
                    default=None,
                    help="Override when fire-aware UGV global routes are replanned after fire spread.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=None)
+    p.add_argument("--ugv-planner-fire-block-threshold", type=float, default=None,
+                   help="In block mode, only active fire cells with intensity >= threshold are blocked.")
     p.add_argument("--ugv-planner-smoke-cost", type=float, default=None)
     p.add_argument("--ugv-planner-smolder-cost", type=float, default=None)
     p.add_argument("--ugv-planner-fire-buffer-m", type=float, default=None)
@@ -399,6 +401,12 @@ def main():
             if value < 0.0:
                 raise SystemExit(f"--{arg_name.replace('_', '-')} must be nonnegative")
             scenario_kwargs[arg_name] = float(value)
+    if args.ugv_planner_fire_block_threshold is not None:
+        if not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0:
+            raise SystemExit("--ugv-planner-fire-block-threshold must be in [0, 1]")
+        scenario_kwargs["ugv_planner_fire_block_threshold"] = float(
+            args.ugv_planner_fire_block_threshold
+        )
     if args.ugv_planner_land_cover_costs is not None:
         if len(args.ugv_planner_land_cover_costs) not in (5, 6):
             raise SystemExit(

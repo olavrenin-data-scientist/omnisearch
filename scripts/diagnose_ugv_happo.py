@@ -148,6 +148,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         )
     if args.ugv_planner_fire_cost is not None:
         scenario_kwargs["ugv_planner_fire_cost"] = float(args.ugv_planner_fire_cost)
+    if args.ugv_planner_fire_block_threshold is not None:
+        scenario_kwargs["ugv_planner_fire_block_threshold"] = float(
+            args.ugv_planner_fire_block_threshold
+        )
     if args.ugv_planner_smoke_cost is not None:
         scenario_kwargs["ugv_planner_smoke_cost"] = float(args.ugv_planner_smoke_cost)
     if args.ugv_planner_smolder_cost is not None:
@@ -2793,6 +2797,8 @@ def main() -> None:
                         help="Override when fire-aware UGV global routes are replanned after fire spread.")
     parser.add_argument("--ugv-planner-fire-cost", type=float, default=None,
                         help="Override active-fire planner cost.")
+    parser.add_argument("--ugv-planner-fire-block-threshold", type=float, default=None,
+                        help="In block mode, only active fire cells with intensity >= threshold are blocked.")
     parser.add_argument("--ugv-planner-smoke-cost", type=float, default=None,
                         help="Override smoke planner cost.")
     parser.add_argument("--ugv-planner-smolder-cost", type=float, default=None,
@@ -2833,6 +2839,11 @@ def main() -> None:
         parser.error("--ugv-planner-lookahead-cells must be positive")
     if args.ugv_global_planner_lookahead_m is not None and args.ugv_global_planner_lookahead_m <= 0.0:
         parser.error("--ugv-global-planner-lookahead-m must be positive")
+    if (
+        args.ugv_planner_fire_block_threshold is not None
+        and not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0
+    ):
+        parser.error("--ugv-planner-fire-block-threshold must be in [0, 1]")
     for flag_name in (
         "ugv_planner_fire_cost",
         "ugv_planner_smoke_cost",

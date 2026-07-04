@@ -305,6 +305,11 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_planner_fire_replan_policy not in {"always", "affected"}:
             raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected")
         self.ugv_planner_fire_cost = max(float(kwargs.pop("ugv_planner_fire_cost", 25.0)), 0.0)
+        self.ugv_planner_fire_block_threshold = float(
+            kwargs.pop("ugv_planner_fire_block_threshold", 0.0)
+        )
+        if not 0.0 <= self.ugv_planner_fire_block_threshold <= 1.0:
+            raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
         self.ugv_planner_smoke_cost = max(float(kwargs.pop("ugv_planner_smoke_cost", 5.0)), 0.0)
         self.ugv_planner_smolder_cost = max(float(kwargs.pop("ugv_planner_smolder_cost", 3.0)), 0.0)
         self.ugv_planner_fire_buffer_m = max(float(kwargs.pop("ugv_planner_fire_buffer_m", 10.0)), 0.0)
@@ -2477,6 +2482,15 @@ class WildfireSearchScenario(BaseScenario):
             return torch.zeros_like(fire)
         return (self._local_true_count(fire, radius_cells) > 0.0) & ~fire
 
+    def _ugv_planner_blocked_fire_mask(self, env_index: int) -> Tensor:
+        fire = self.fire_grid[env_index].bool()
+        if self.ugv_planner_fire_block_threshold <= 0.0:
+            return fire
+        return fire & (
+            self.fire_intensity_grid[env_index].clamp(0.0, 1.0)
+            >= float(self.ugv_planner_fire_block_threshold)
+        )
+
     def _ugv_planner_layer_tensors_for_env(self, env_index: int) -> tuple[Tensor, Tensor]:
         traversable = self.traversable_grid[env_index].clone()
         if self.ugv_planner_land_cover_cost_values is None:
@@ -2493,7 +2507,15 @@ class WildfireSearchScenario(BaseScenario):
 
         fire = self.fire_grid[env_index].bool()
         if self.ugv_planner_fire_mode == "block":
-            traversable = traversable & ~fire
+            blocked_fire = self._ugv_planner_blocked_fire_mask(env_index)
+            traversable = traversable & ~blocked_fire
+            if self.ugv_planner_fire_cost > 0.0:
+                soft_fire = fire & ~blocked_fire
+                movement_cost = movement_cost + (
+                    soft_fire.float()
+                    * self.fire_intensity_grid[env_index].clamp(0.0, 1.0)
+                    * float(self.ugv_planner_fire_cost)
+                )
         elif self.ugv_planner_fire_cost > 0.0:
             movement_cost = movement_cost + fire.float() * float(self.ugv_planner_fire_cost)
 
@@ -2543,7 +2565,7 @@ class WildfireSearchScenario(BaseScenario):
     def _ugv_fire_blocked_no_path_active(self, env_index: int) -> bool:
         return (
             self.ugv_planner_fire_mode == "block"
-            and bool(self.fire_grid[env_index].any().item())
+            and bool(self._ugv_planner_blocked_fire_mask(env_index).any().item())
         )
 
     def _clear_ugv_global_route(

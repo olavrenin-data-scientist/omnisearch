@@ -343,6 +343,7 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_planner_fire_mode="block",
             ugv_planner_fire_replan_policy="affected",
             ugv_planner_fire_cost=30.0,
+            ugv_planner_fire_block_threshold=0.6,
             ugv_planner_smoke_cost=6.0,
             ugv_planner_smolder_cost=4.0,
             ugv_planner_fire_buffer_m=12.0,
@@ -355,6 +356,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_fire_mode"], "block")
         self.assertEqual(scenario["ugv_planner_fire_replan_policy"], "affected")
         self.assertEqual(scenario["ugv_planner_fire_cost"], 30.0)
+        self.assertEqual(scenario["ugv_planner_fire_block_threshold"], 0.6)
         self.assertEqual(scenario["ugv_planner_smoke_cost"], 6.0)
         self.assertEqual(scenario["ugv_planner_smolder_cost"], 4.0)
         self.assertEqual(scenario["ugv_planner_fire_buffer_m"], 12.0)
