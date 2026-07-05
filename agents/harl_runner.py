@@ -195,7 +195,11 @@ def default_algo_args(profile: str = "smoke") -> Dict[str, Any]:
             "use_gae": True, "gamma": 0.99, "gae_lambda": 0.95,
             "use_huber_loss": True, "use_policy_active_masks": True, "huber_delta": 10.0,
             "action_aggregation": "prod",
-            "share_param": False, "fixed_order": False,
+            "share_param": False,
+            "share_param_by_agent_class": False,
+            "share_param_groups": [],
+            "share_param_group_names": [],
+            "fixed_order": False,
         },
         "logger": {"log_dir": str(ROOT / "results" / "harl_runs")},
     }
@@ -388,6 +392,256 @@ def _build_diagnostic_happo_runner_class():
     class DiagnosticHAPPORunner(OnPolicyHARunner):
         """OnPolicyHARunner plus per-update actor advantage diagnostics."""
 
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._configure_class_shared_actors()
+
+        def _use_class_shared_policy(self) -> bool:
+            return bool(self.algo_args.get("algo", {}).get("share_param_by_agent_class", False))
+
+        def _configure_class_shared_actors(self):
+            if getattr(self, "_class_shared_policy_configured", False):
+                return
+
+            if not self._use_class_shared_policy():
+                self._policy_update_groups = [[agent_id] for agent_id in range(self.num_agents)]
+                self._policy_group_names = [f"agent{agent_id}" for agent_id in range(self.num_agents)]
+                self._policy_group_representatives = list(range(self.num_agents))
+                self._agent_to_policy_group = {
+                    agent_id: agent_id for agent_id in range(self.num_agents)
+                }
+                self._class_shared_policy_configured = True
+                return
+
+            if self.share_param:
+                raise ValueError("share_param_by_agent_class cannot be combined with share_param")
+
+            raw_groups = list(self.algo_args["algo"].get("share_param_groups", []))
+            raw_names = list(self.algo_args["algo"].get("share_param_group_names", []))
+            if len(raw_groups) != self.num_agents:
+                raise ValueError(
+                    "share_param_by_agent_class requires one share_param_groups entry "
+                    f"per agent; got {len(raw_groups)} for {self.num_agents} agents"
+                )
+
+            ordered_group_ids: list[int] = []
+            for group_id in raw_groups:
+                group_id = int(group_id)
+                if group_id not in ordered_group_ids:
+                    ordered_group_ids.append(group_id)
+
+            update_groups: list[list[int]] = []
+            group_names: list[str] = []
+            representatives: list[int] = []
+            agent_to_group: dict[int, int] = {}
+            for group_index, group_id in enumerate(ordered_group_ids):
+                members = [
+                    agent_id for agent_id, raw_group_id in enumerate(raw_groups)
+                    if int(raw_group_id) == group_id
+                ]
+                if not members:
+                    continue
+                representative = members[0]
+                for agent_id in members[1:]:
+                    if self.envs.observation_space[agent_id] != self.envs.observation_space[representative]:
+                        raise ValueError(
+                            "Agents in a class-shared policy group must have identical "
+                            f"observation spaces; group {group_id} has agents {members}"
+                        )
+                    if self.envs.action_space[agent_id] != self.envs.action_space[representative]:
+                        raise ValueError(
+                            "Agents in a class-shared policy group must have identical "
+                            f"action spaces; group {group_id} has agents {members}"
+                        )
+                    self.actor[agent_id] = self.actor[representative]
+                group_name = raw_names[group_id] if 0 <= group_id < len(raw_names) else f"group{group_id}"
+                update_groups.append(members)
+                group_names.append(str(group_name))
+                representatives.append(representative)
+                for agent_id in members:
+                    agent_to_group[agent_id] = group_index
+
+            self._policy_update_groups = update_groups
+            self._policy_group_names = group_names
+            self._policy_group_representatives = representatives
+            self._agent_to_policy_group = agent_to_group
+            self._class_shared_policy_configured = True
+
+        def _unique_actor_agent_ids(self) -> list[int]:
+            self._configure_class_shared_actors()
+            if self._use_class_shared_policy():
+                return list(self._policy_group_representatives)
+            if self.share_param:
+                return [0]
+            return list(range(self.num_agents))
+
+        def _evaluate_agent_actions(self, agent_id: int):
+            actor_buffer = self.actor_buffer[agent_id]
+            available_actions = (
+                None
+                if actor_buffer.available_actions is None
+                else actor_buffer.available_actions[:-1].reshape(
+                    -1, *actor_buffer.available_actions.shape[2:]
+                )
+            )
+            return self.actor[agent_id].evaluate_actions(
+                actor_buffer.obs[:-1].reshape(-1, *actor_buffer.obs.shape[2:]),
+                actor_buffer.rnn_states[0:1].reshape(
+                    -1, *actor_buffer.rnn_states.shape[2:]
+                ),
+                actor_buffer.actions.reshape(-1, *actor_buffer.actions.shape[2:]),
+                actor_buffer.masks[:-1].reshape(-1, *actor_buffer.masks.shape[2:]),
+                available_actions,
+                actor_buffer.active_masks[:-1].reshape(
+                    -1, *actor_buffer.active_masks.shape[2:]
+                ),
+            )[0]
+
+        def _agent_action_ratio(self, agent_id: int, old_actions_logprob):
+            new_actions_logprob = self._evaluate_agent_actions(agent_id)
+            return _t2n(
+                getattr(torch, self.action_aggregation)(
+                    torch.exp(new_actions_logprob - old_actions_logprob),
+                    dim=-1,
+                ).reshape(
+                    self.algo_args["train"]["episode_length"],
+                    self.algo_args["train"]["n_rollout_threads"],
+                    1,
+                )
+            )
+
+        def _group_actor_buffer(self, members: list[int], factor: np.ndarray):
+            if len(members) == 1:
+                actor_buffer = self.actor_buffer[members[0]]
+                actor_buffer.update_factor(factor)
+                return actor_buffer
+
+            buffers = [self.actor_buffer[agent_id] for agent_id in members]
+            grouped = copy.copy(buffers[0])
+            for attr in ("obs", "rnn_states", "masks", "active_masks"):
+                setattr(grouped, attr, np.concatenate([getattr(buf, attr) for buf in buffers], axis=1))
+            for attr in ("actions", "action_log_probs"):
+                setattr(grouped, attr, np.concatenate([getattr(buf, attr) for buf in buffers], axis=1))
+            if buffers[0].available_actions is None:
+                grouped.available_actions = None
+            else:
+                grouped.available_actions = np.concatenate(
+                    [buf.available_actions for buf in buffers],
+                    axis=1,
+                )
+            grouped.factor = np.concatenate([factor for _ in members], axis=1)
+            grouped.n_rollout_threads = int(grouped.actions.shape[1])
+            return grouped
+
+        def _group_advantages(self, advantages: np.ndarray, members: list[int]) -> np.ndarray:
+            if self.state_type == "EP":
+                if len(members) == 1:
+                    return advantages.copy()
+                return np.concatenate([advantages.copy() for _ in members], axis=1)
+            if self.state_type == "FP":
+                return np.concatenate(
+                    [advantages[:, :, agent_id].copy() for agent_id in members],
+                    axis=1,
+                )
+            raise ValueError(f"unsupported state_type: {self.state_type}")
+
+        def _annotate_policy_group_info(
+            self,
+            train_info: dict,
+            group_index: int,
+            representative: int,
+            group_size: int,
+        ) -> dict:
+            if not self._use_class_shared_policy():
+                return dict(train_info)
+            group_name = self._policy_group_names[group_index]
+            out = dict(train_info)
+            out["policy_group/id"] = float(group_index)
+            out["policy_group/size"] = float(group_size)
+            out["policy_group/representative"] = float(representative)
+            out["policy_group/is_uav"] = 1.0 if group_name == "uav" else 0.0
+            out["policy_group/is_ugv"] = 1.0 if group_name == "ugv" else 0.0
+            return out
+
+        def run(self):
+            """Run the training pipeline with class-shared actors decayed once."""
+            if self.algo_args["render"]["use_render"] is True:
+                self.render()
+                return
+            print("start running")
+            self.warmup()
+
+            episodes = (
+                int(self.algo_args["train"]["num_env_steps"])
+                // self.algo_args["train"]["episode_length"]
+                // self.algo_args["train"]["n_rollout_threads"]
+            )
+
+            self.logger.init(episodes)
+
+            for episode in range(1, episodes + 1):
+                if self.algo_args["train"]["use_linear_lr_decay"]:
+                    for agent_id in self._unique_actor_agent_ids():
+                        self.actor[agent_id].lr_decay(episode, episodes)
+                    self.critic.lr_decay(episode, episodes)
+
+                self.logger.episode_init(episode)
+
+                self.prep_rollout()
+                for step in range(self.algo_args["train"]["episode_length"]):
+                    (
+                        values,
+                        actions,
+                        action_log_probs,
+                        rnn_states,
+                        rnn_states_critic,
+                    ) = self.collect(step)
+                    (
+                        obs,
+                        share_obs,
+                        rewards,
+                        dones,
+                        infos,
+                        available_actions,
+                    ) = self.envs.step(actions)
+                    data = (
+                        obs,
+                        share_obs,
+                        rewards,
+                        dones,
+                        infos,
+                        available_actions,
+                        values,
+                        actions,
+                        action_log_probs,
+                        rnn_states,
+                        rnn_states_critic,
+                    )
+
+                    self.logger.per_step(data)
+                    self.insert(data)
+
+                self.compute()
+                self.prep_training()
+
+                actor_train_infos, critic_train_info = self.train()
+
+                if episode % self.algo_args["train"]["log_interval"] == 0:
+                    self.logger.episode_log(
+                        actor_train_infos,
+                        critic_train_info,
+                        self.actor_buffer,
+                        self.critic_buffer,
+                    )
+
+                if episode % self.algo_args["train"]["eval_interval"] == 0:
+                    if self.algo_args["eval"]["use_eval"]:
+                        self.prep_rollout()
+                        self.eval()
+                    self.save()
+
+                self.after_update()
+
         def restore(self):
             """Restore actors from model_dir; restore critic + value_normalizer
             only if those files exist.
@@ -399,8 +653,9 @@ def _build_diagnostic_happo_runner_class():
             """
             import os
 
+            self._configure_class_shared_actors()
             model_dir = str(self.algo_args["train"]["model_dir"])
-            for agent_id in range(self.num_agents):
+            for agent_id in self._unique_actor_agent_ids():
                 actor_path = os.path.join(model_dir, f"actor_agent{agent_id}.pt")
                 self.actor[agent_id].actor.load_state_dict(torch.load(actor_path))
 
@@ -420,7 +675,7 @@ def _build_diagnostic_happo_runner_class():
                 )
 
         def train(self):
-            actor_train_infos = []
+            actor_train_infos: list[dict | None] = [None] * self.num_agents
             factor = np.ones(
                 (
                     self.algo_args["train"]["episode_length"],
@@ -448,10 +703,16 @@ def _build_diagnostic_happo_runner_class():
                 std_advantages = np.nanstd(advantages_copy)
                 advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
 
+            self._configure_class_shared_actors()
+            update_groups = (
+                self._policy_update_groups
+                if self._use_class_shared_policy()
+                else [[agent_id] for agent_id in range(self.num_agents)]
+            )
             if self.fixed_order:
-                agent_order = list(range(self.num_agents))
+                group_order = list(range(len(update_groups)))
             else:
-                agent_order = list(torch.randperm(self.num_agents).numpy())
+                group_order = list(torch.randperm(len(update_groups)).numpy())
 
             scenario_kwargs = self.env_args.get("scenario_kwargs", {})
             n_survivors = int(scenario_kwargs.get("n_survivors", 0))
@@ -460,95 +721,51 @@ def _build_diagnostic_happo_runner_class():
                 scenario_kwargs.get("survivor_message_distance_scale_m", 100.0),
             )
 
-            for agent_id in agent_order:
-                self.actor_buffer[agent_id].update_factor(factor)
-                available_actions = (
-                    None
-                    if self.actor_buffer[agent_id].available_actions is None
-                    else self.actor_buffer[agent_id]
-                    .available_actions[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].available_actions.shape[2:])
+            for group_index in group_order:
+                members = list(update_groups[group_index])
+                representative = members[0]
+                old_actions_logprob_by_agent = {
+                    agent_id: self._evaluate_agent_actions(agent_id)
+                    for agent_id in members
+                }
+                group_buffer = self._group_actor_buffer(members, factor)
+                group_advantages = self._group_advantages(advantages, members)
+                actor_train_info = self.actor[representative].train(
+                    group_buffer,
+                    group_advantages,
+                    self.state_type,
                 )
-
-                old_actions_logprob, _, _ = self.actor[agent_id].evaluate_actions(
-                    self.actor_buffer[agent_id]
-                    .obs[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].obs.shape[2:]),
-                    self.actor_buffer[agent_id]
-                    .rnn_states[0:1]
-                    .reshape(-1, *self.actor_buffer[agent_id].rnn_states.shape[2:]),
-                    self.actor_buffer[agent_id].actions.reshape(
-                        -1, *self.actor_buffer[agent_id].actions.shape[2:]
-                    ),
-                    self.actor_buffer[agent_id]
-                    .masks[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].masks.shape[2:]),
-                    available_actions,
-                    self.actor_buffer[agent_id]
-                    .active_masks[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].active_masks.shape[2:]),
-                )
-
-                if self.state_type == "EP":
-                    agent_advantages = advantages.copy()
-                    actor_train_info = self.actor[agent_id].train(
-                        self.actor_buffer[agent_id],
-                        agent_advantages,
-                        "EP",
-                    )
-                elif self.state_type == "FP":
-                    agent_advantages = advantages[:, :, agent_id].copy()
-                    actor_train_info = self.actor[agent_id].train(
-                        self.actor_buffer[agent_id],
-                        agent_advantages,
-                        "FP",
-                    )
-                else:
-                    raise ValueError(f"unsupported state_type: {self.state_type}")
 
                 actor_train_info.update(
                     _advantage_alignment_diagnostics(
-                        self.actor_buffer[agent_id],
-                        agent_advantages,
+                        group_buffer,
+                        group_advantages,
                         n_survivors=n_survivors,
                         action_transform=action_transform,
                         survivor_message_distance_scale_m=survivor_message_distance_scale_m,
                     ),
                 )
-
-                new_actions_logprob, _, _ = self.actor[agent_id].evaluate_actions(
-                    self.actor_buffer[agent_id]
-                    .obs[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].obs.shape[2:]),
-                    self.actor_buffer[agent_id]
-                    .rnn_states[0:1]
-                    .reshape(-1, *self.actor_buffer[agent_id].rnn_states.shape[2:]),
-                    self.actor_buffer[agent_id].actions.reshape(
-                        -1, *self.actor_buffer[agent_id].actions.shape[2:]
-                    ),
-                    self.actor_buffer[agent_id]
-                    .masks[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].masks.shape[2:]),
-                    available_actions,
-                    self.actor_buffer[agent_id]
-                    .active_masks[:-1]
-                    .reshape(-1, *self.actor_buffer[agent_id].active_masks.shape[2:]),
+                annotated_info = self._annotate_policy_group_info(
+                    actor_train_info,
+                    group_index,
+                    representative,
+                    len(members),
                 )
 
-                factor = factor * _t2n(
-                    getattr(torch, self.action_aggregation)(
-                        torch.exp(new_actions_logprob - old_actions_logprob),
-                        dim=-1,
-                    ).reshape(
-                        self.algo_args["train"]["episode_length"],
-                        self.algo_args["train"]["n_rollout_threads"],
-                        1,
+                group_ratio = np.ones_like(factor)
+                for agent_id in members:
+                    group_ratio = group_ratio * self._agent_action_ratio(
+                        agent_id,
+                        old_actions_logprob_by_agent[agent_id],
                     )
-                )
-                actor_train_infos.append(actor_train_info)
+                    actor_train_infos[agent_id] = dict(annotated_info)
+                factor = factor * group_ratio
 
             critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
-            return actor_train_infos, critic_train_info
+            return [
+                info if info is not None else {}
+                for info in actor_train_infos
+            ], critic_train_info
 
     return DiagnosticHAPPORunner
 

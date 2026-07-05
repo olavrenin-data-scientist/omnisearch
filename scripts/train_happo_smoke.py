@@ -189,6 +189,7 @@ def build_args(
     critic_lr: float = 5e-4,
     linear_lr_decay: bool | None = None,
     share_param: bool | None = None,
+    share_param_by_agent_class: bool | None = None,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
     drone_min_footprint_m: float = 0.0,
@@ -463,7 +464,7 @@ def build_args(
             uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
         if uav_cleanup_target_progress_reward is None:
             uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
-        if share_param is None and uav_survivor_diagnostic:
+        if share_param is None and uav_survivor_diagnostic and not bool(share_param_by_agent_class):
             share_param = True
         if uav_start_min_separation_m is None:
             uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
@@ -501,8 +502,12 @@ def build_args(
         uav_confidence_overlap_threshold = 0.65
     if uav_cleanup_target_progress_reward is None:
         uav_cleanup_target_progress_reward = 0.0
+    if share_param_by_agent_class is None:
+        share_param_by_agent_class = bool(joint_survivor_diagnostic and not bool(share_param))
     if share_param is None:
         share_param = False
+    if bool(share_param) and bool(share_param_by_agent_class):
+        raise ValueError("share_param and share_param_by_agent_class are mutually exclusive")
     uav_confidence_reward = float(uav_confidence_reward)
     if uav_confidence_reward < 0.0:
         raise ValueError("uav_confidence_reward must be nonnegative")
@@ -708,6 +713,9 @@ def build_args(
             "huber_delta":             10.0,
             "action_aggregation":      "prod",
             "share_param":             bool(share_param),
+            "share_param_by_agent_class": bool(share_param_by_agent_class),
+            "share_param_groups":      [],
+            "share_param_group_names": [],
             "fixed_order":             False,
         },
         "logger": {
@@ -1171,6 +1179,21 @@ def build_args(
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
     n_agents = int(scenario_kwargs["n_drones"]) + int(scenario_kwargs["n_ground"])
+    if share_param_by_agent_class:
+        share_param_groups: list[int] = []
+        share_param_group_names: list[str] = []
+        n_drones = int(scenario_kwargs["n_drones"])
+        n_ground = int(scenario_kwargs["n_ground"])
+        if n_drones > 0:
+            share_param_group_names.append("uav")
+            share_param_groups.extend([len(share_param_group_names) - 1] * n_drones)
+        if n_ground > 0:
+            share_param_group_names.append("ugv")
+            share_param_groups.extend([len(share_param_group_names) - 1] * n_ground)
+        if len(share_param_groups) != n_agents:
+            raise ValueError("share_param_by_agent_class group mapping does not match agent count")
+        algo_args["algo"]["share_param_groups"] = share_param_groups
+        algo_args["algo"]["share_param_group_names"] = share_param_group_names
     algo_args["model"]["terrain_cnn_single_obs_dim"] = wildfire_single_observation_dim(
         local_map_patch_size=int(local_map_patch_size),
         n_agents=n_agents,
@@ -1228,6 +1251,11 @@ def main():
                         "runs such as UAV-only diagnostics; mixed UAV/UGV sharing needs class-wise sharing.")
     p.add_argument("--no-share-param", dest="share_param", action="store_false",
                    help="Disable HARL global actor parameter sharing, overriding UAV diagnostic defaults.")
+    p.set_defaults(share_param_by_agent_class=None)
+    p.add_argument("--share-param-by-agent-class", dest="share_param_by_agent_class", action="store_true",
+                   help="Share actor parameters within each agent class, e.g. one UAV policy and one UGV policy.")
+    p.add_argument("--no-share-param-by-agent-class", dest="share_param_by_agent_class", action="store_false",
+                   help="Disable class-wise actor parameter sharing, overriding joint diagnostic defaults.")
     p.add_argument("--terrain-cnn-encoder", action="store_true",
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
@@ -2019,7 +2047,7 @@ def main():
             args.uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
         if args.uav_cleanup_target_progress_reward is None:
             args.uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
-        if args.share_param is None and args.uav_survivor_diagnostic:
+        if args.share_param is None and args.uav_survivor_diagnostic and not bool(args.share_param_by_agent_class):
             args.share_param = True
         if args.uav_start_min_separation_m is None:
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
@@ -2059,8 +2087,12 @@ def main():
         args.uav_confidence_overlap_threshold = 0.65
     if args.uav_cleanup_target_progress_reward is None:
         args.uav_cleanup_target_progress_reward = 0.0
+    if args.share_param_by_agent_class is None:
+        args.share_param_by_agent_class = bool(args.joint_survivor_diagnostic and not bool(args.share_param))
     if args.share_param is None:
         args.share_param = False
+    if bool(args.share_param) and bool(args.share_param_by_agent_class):
+        p.error("--share-param and --share-param-by-agent-class are mutually exclusive")
     args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
     args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
     args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
@@ -2150,6 +2182,7 @@ def main():
     print(f" critic_lr:      {args.critic_lr}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
+    print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
@@ -2253,6 +2286,7 @@ def main():
         critic_lr      = args.critic_lr,
         linear_lr_decay = args.linear_lr_decay,
         share_param    = args.share_param,
+        share_param_by_agent_class = args.share_param_by_agent_class,
         exp_name       = args.exp_name,
         n_rollout_threads = args.n_rollout_threads,
         terrain_cache_path = args.terrain_cache_path,

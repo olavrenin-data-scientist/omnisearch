@@ -185,6 +185,20 @@ class HappoCheckpointTests(unittest.TestCase):
         )
 
         self.assertTrue(algo_args["algo"]["share_param"])
+        self.assertFalse(algo_args["algo"]["share_param_by_agent_class"])
+
+    def test_build_args_rejects_global_and_class_parameter_sharing_together(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="share_conflict",
+                share_param=True,
+                share_param_by_agent_class=True,
+            )
 
     def test_build_args_exposes_terrain_cnn_encoder(self):
         _, algo_args, _ = build_args(
@@ -629,6 +643,9 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         self.assertFalse(algo_args["algo"]["share_param"])
+        self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1])
+        self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 1)
@@ -656,8 +673,25 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_confidence_overlap"], 0.06)
         self.assertTrue(scenario["uav_cleanup_target_obs"])
 
+    def test_joint_survivor_diagnostic_can_disable_class_parameter_sharing(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_no_class_share",
+            joint_survivor_diagnostic=True,
+            share_param_by_agent_class=False,
+        )
+
+        self.assertFalse(algo_args["algo"]["share_param"])
+        self.assertFalse(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertEqual(algo_args["algo"]["share_param_groups"], [])
+        self.assertEqual(algo_args["algo"]["share_param_group_names"], [])
+
     def test_joint_survivor_diagnostic_can_use_two_ugvs(self):
-        _, _, env_args = build_args(
+        _, algo_args, env_args = build_args(
             num_env_steps=100,
             episode_length=50,
             seed=1,
@@ -672,6 +706,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 2)
         self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy")
+        self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1, 1])
+        self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
 
     def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
         _, _, env_args = build_args(
