@@ -249,14 +249,21 @@ def run_rollout(
         "confirmed": int(confirm_count),
         "scout_recall": float(scout_count / max(n_survivors, 1)),
         "confirm_recall": float(confirm_count / max(n_survivors, 1)),
+        "overall_success": bool(confirm_count == n_survivors),
         "full_confirm_success": bool(confirm_count == n_survivors),
         "first_scout_steps": first_scout_steps,
         "first_confirm_steps": first_confirm_steps,
+        "scout_to_confirm_latencies_steps": latencies,
+        "scout_to_confirm_latency_count": int(len(latencies)),
         "avg_scout_to_confirm_latency_steps": _mean(latencies),
         "avg_scout_to_confirm_latency_s": _mean(latencies) * step_seconds,
         "final_coverage_fraction": float(scenario.coverage_grid[0].float().mean().item()),
         "final_confidence_mean": float(scenario.uav_confidence_grid[0].float().mean().item()),
         "uav_path_length_m": float(path_lengths_m[:n_drones].sum()) if n_drones > 0 else 0.0,
+        "uav_movement_m_per_drone_step": (
+            float(path_lengths_m[:n_drones].sum() / max(n_drones * max_steps, 1))
+            if n_drones > 0 else 0.0
+        ),
         "ugv_path_length_m": float(path_lengths_m[n_drones:].sum()) if n_ground > 0 else 0.0,
         "path_length_by_agent_m": [float(v) for v in path_lengths_m],
         "pending_target_time_mean": _mean(pending_counts),
@@ -276,7 +283,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
         "mean_final_coverage_fraction": _mean([row["final_coverage_fraction"] for row in rows]),
         "mean_final_confidence": _mean([row["final_confidence_mean"] for row in rows]),
         "mean_uav_path_length_m": _mean([row["uav_path_length_m"] for row in rows]),
+        "mean_uav_movement_m_per_drone_step": _mean([
+            row["uav_movement_m_per_drone_step"] for row in rows
+        ]),
         "mean_ugv_path_length_m": _mean([row["ugv_path_length_m"] for row in rows]),
+        "mean_scout_to_confirm_latency_count": _mean([
+            float(row["scout_to_confirm_latency_count"]) for row in rows
+        ]),
         "mean_scout_to_confirm_latency_steps": _mean([
             row["avg_scout_to_confirm_latency_steps"] for row in rows
         ]),
@@ -331,17 +344,13 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, float], output: Path) -
         row["avg_scout_to_confirm_latency_steps"] for row in rows
     ], "steps")
 
-    axes[5].bar(
-        ["UAV path", "UGV path", "pending", "dup assign"],
-        [
-            summary["mean_uav_path_length_m"],
-            summary["mean_ugv_path_length_m"],
-            summary["mean_pending_target_time_fraction"],
-            summary["mean_duplicate_ugv_assignment_rate"],
-        ],
-        color=["#60a5fa", "#f59e0b", "#10b981", "#ef4444"],
+    hist(
+        axes[5],
+        "UAV Movement",
+        [row["uav_movement_m_per_drone_step"] for row in rows],
+        "m / UAV-step",
     )
-    axes[5].set_title("Mission Efficiency")
+    axes[5].set_title("UAV Movement")
     axes[5].grid(axis="y", alpha=0.25)
 
     if rows and rows[0].get("time_bins"):
@@ -454,6 +463,7 @@ def main() -> None:
             f"cov={row['final_coverage_fraction']:.3f} "
             f"conf={row['final_confidence_mean']:.3f} "
             f"lat={row['avg_scout_to_confirm_latency_steps']:.1f} "
+            f"uav_move={row['uav_movement_m_per_drone_step']:.2f}m/step "
             f"uav_path={row['uav_path_length_m']:.1f}m "
             f"ugv_path={row['ugv_path_length_m']:.1f}m "
             f"pending={row['pending_target_time_fraction']:.2f}"
@@ -466,6 +476,7 @@ def main() -> None:
         f"success={summary['full_confirm_success_rate']:.3f} "
         f"coverage={summary['mean_final_coverage_fraction']:.3f} "
         f"confidence={summary['mean_final_confidence']:.3f} "
+        f"uav_move={summary['mean_uav_movement_m_per_drone_step']:.2f}m/step "
         f"latency={summary['mean_scout_to_confirm_latency_steps']:.1f} steps"
     )
 
