@@ -72,6 +72,27 @@ DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
 DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M = 150.0
 DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
+DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
+DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M = 30.0
+DEFAULT_UGV_DIAG_LR = 2.5e-4
+DEFAULT_UGV_DIAG_CRITIC_LR = 5.0e-4
+DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
+DEFAULT_UGV_DIAG_PLANNER_HINT = "global_astar"
+DEFAULT_UGV_DIAG_DENSE_REWARD_MODE = "planner_follow"
+DEFAULT_UGV_DIAG_GLOBAL_PLANNER_HEURISTIC = "euclidean"
+DEFAULT_UGV_DIAG_GLOBAL_PLANNER_LOOKAHEAD_M = 20.0
+DEFAULT_UGV_DIAG_PLANNER_PROGRESS_REWARD = 0.0
+DEFAULT_UGV_DIAG_ACTION_TRANSFORM = "radial_tanh"
+DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE = "block"
+DEFAULT_UGV_DIAG_PLANNER_FIRE_COST = 25.0
+DEFAULT_UGV_DIAG_PLANNER_SMOKE_COST = 5.0
+DEFAULT_UGV_DIAG_PLANNER_SMOLDER_COST = 3.0
+DEFAULT_UGV_DIAG_PLANNER_FIRE_BUFFER_M = 10.0
+DEFAULT_UGV_DIAG_PLANNER_FIRE_BUFFER_COST = 8.0
+DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY = "lazy"
+DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_INTERVAL_STEPS = 15
+DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD = 0.6
+DEFAULT_UGV_DIAG_PLANNER_LAND_COVER_COSTS = (0.85, 1.0, 1.15, 1.35, 4.0, 8.0)
 DEFAULT_UAV_FRONTIER_MODE = "sector_topk"
 DEFAULT_UAV_DIAG_FRONTIER_MODE = "local_global"
 DEFAULT_UAV_DIAG_FRONTIER_SOURCE = "confidence"
@@ -159,7 +180,7 @@ def build_args(
     exp_name:       str,
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
-    linear_lr_decay: bool = False,
+    linear_lr_decay: bool | None = None,
     share_param: bool | None = None,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
@@ -281,9 +302,61 @@ def build_args(
     ugv_planner_fire_buffer_m: float = 10.0,
     ugv_planner_fire_buffer_cost: float = 8.0,
     ugv_planner_land_cover_costs: tuple[float, ...] | None = None,
-    enable_fire: bool = False,
+    enable_fire: bool | None = None,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
+    if ugv_known_survivor_diagnostic:
+        defaulted_ugv_planner_hint = ugv_planner_hint == "none"
+        if terrain_cache_path is None:
+            terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
+        if local_map_patch_size == 3:
+            local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
+        if ugv_diagnostic_target_distance_min_m is None:
+            ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
+        if lr == 5e-4:
+            lr = DEFAULT_UGV_DIAG_LR
+        if critic_lr == 5e-4:
+            critic_lr = DEFAULT_UGV_DIAG_CRITIC_LR
+        if linear_lr_decay is None:
+            linear_lr_decay = True
+        if defaulted_ugv_planner_hint:
+            ugv_planner_hint = DEFAULT_UGV_DIAG_PLANNER_HINT
+        if defaulted_ugv_planner_hint and str(ugv_dense_reward_mode).replace("-", "_") == "target":
+            ugv_dense_reward_mode = DEFAULT_UGV_DIAG_DENSE_REWARD_MODE
+        if ugv_global_planner_heuristic == "euclidean":
+            ugv_global_planner_heuristic = DEFAULT_UGV_DIAG_GLOBAL_PLANNER_HEURISTIC
+        if ugv_global_planner_lookahead_m == 20.0:
+            ugv_global_planner_lookahead_m = DEFAULT_UGV_DIAG_GLOBAL_PLANNER_LOOKAHEAD_M
+        if ugv_planner_progress_reward == 0.0:
+            ugv_planner_progress_reward = DEFAULT_UGV_DIAG_PLANNER_PROGRESS_REWARD
+        if action_transform == "clip":
+            action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
+        if enable_fire is None:
+            enable_fire = True
+        if ugv_planner_fire_mode == "off":
+            ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
+        if ugv_planner_fire_replan_policy == "always":
+            ugv_planner_fire_replan_policy = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY
+        if ugv_planner_fire_replan_interval_steps == 15:
+            ugv_planner_fire_replan_interval_steps = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_INTERVAL_STEPS
+        if ugv_planner_fire_cost == 25.0:
+            ugv_planner_fire_cost = DEFAULT_UGV_DIAG_PLANNER_FIRE_COST
+        if ugv_planner_fire_block_threshold == 0.0:
+            ugv_planner_fire_block_threshold = DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD
+        if ugv_planner_smoke_cost == 5.0:
+            ugv_planner_smoke_cost = DEFAULT_UGV_DIAG_PLANNER_SMOKE_COST
+        if ugv_planner_smolder_cost == 3.0:
+            ugv_planner_smolder_cost = DEFAULT_UGV_DIAG_PLANNER_SMOLDER_COST
+        if ugv_planner_fire_buffer_m == 10.0:
+            ugv_planner_fire_buffer_m = DEFAULT_UGV_DIAG_PLANNER_FIRE_BUFFER_M
+        if ugv_planner_fire_buffer_cost == 8.0:
+            ugv_planner_fire_buffer_cost = DEFAULT_UGV_DIAG_PLANNER_FIRE_BUFFER_COST
+        if ugv_planner_land_cover_costs is None:
+            ugv_planner_land_cover_costs = DEFAULT_UGV_DIAG_PLANNER_LAND_COVER_COSTS
+    if linear_lr_decay is None:
+        linear_lr_decay = False
+    if enable_fire is None:
+        enable_fire = False
     ugv_local_planners = {"local_astar", "local_escape_astar"}
     ugv_planners = ugv_local_planners | {"global_astar"}
     if ugv_planner_hint not in {"none"} | ugv_planners:
@@ -1056,8 +1129,11 @@ def main():
                    help="Actor learning rate.")
     p.add_argument("--critic-lr", type=float, default=5e-4,
                    help="Critic learning rate.")
-    p.add_argument("--linear-lr-decay", action="store_true",
+    p.set_defaults(linear_lr_decay=None)
+    p.add_argument("--linear-lr-decay", dest="linear_lr_decay", action="store_true",
                    help="Linearly decay actor/critic learning rates over training.")
+    p.add_argument("--no-linear-lr-decay", dest="linear_lr_decay", action="store_false",
+                   help="Disable linear LR decay, overriding diagnostic preset defaults.")
     p.set_defaults(share_param=None)
     p.add_argument("--share-param", dest="share_param", action="store_true",
                    help="Enable HARL global actor parameter sharing. Use only for homogeneous-agent "
@@ -1197,8 +1273,11 @@ def main():
                    help="Planner-only land-cover costs for road/open/brush/forest/rock[/water]. "
                         "Physical UGV speeds and terrain observations are unchanged. "
                         "Example: --ugv-planner-land-cover-costs 0.85 1.0 1.15 1.35 4.0 8.0")
-    p.add_argument("--enable-fire", action="store_true",
+    p.set_defaults(enable_fire=None)
+    p.add_argument("--enable-fire", dest="enable_fire", action="store_true",
                    help="Allow fire to run in diagnostic modes that otherwise disable it.")
+    p.add_argument("--disable-fire", dest="enable_fire", action="store_false",
+                   help="Disable fire, overriding diagnostic preset defaults.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
     p.add_argument("--recurrent", action="store_true",
@@ -1473,6 +1552,62 @@ def main():
     args = p.parse_args()
     args.action_transform = args.action_transform.replace("-", "_")
     args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
+
+    if args.ugv_known_survivor_diagnostic:
+        defaulted_ugv_planner_hint = args.ugv_planner_hint == "none"
+        if args.terrain_cache_path is None:
+            args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
+        if args.local_map_patch_size == 3:
+            args.local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
+        if args.ugv_diagnostic_target_distance_min_m is None:
+            args.ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
+        if args.lr == 5e-4:
+            args.lr = DEFAULT_UGV_DIAG_LR
+        if args.critic_lr == 5e-4:
+            args.critic_lr = DEFAULT_UGV_DIAG_CRITIC_LR
+        if args.linear_lr_decay is None:
+            args.linear_lr_decay = True
+        if defaulted_ugv_planner_hint:
+            args.ugv_planner_hint = DEFAULT_UGV_DIAG_PLANNER_HINT
+        if defaulted_ugv_planner_hint and args.ugv_dense_reward_mode.replace("-", "_") == "target":
+            args.ugv_dense_reward_mode = DEFAULT_UGV_DIAG_DENSE_REWARD_MODE
+        if args.ugv_global_planner_heuristic == "euclidean":
+            args.ugv_global_planner_heuristic = DEFAULT_UGV_DIAG_GLOBAL_PLANNER_HEURISTIC
+        if args.ugv_global_planner_lookahead_m == 20.0:
+            args.ugv_global_planner_lookahead_m = DEFAULT_UGV_DIAG_GLOBAL_PLANNER_LOOKAHEAD_M
+        if args.ugv_planner_progress_reward == 0.0:
+            args.ugv_planner_progress_reward = DEFAULT_UGV_DIAG_PLANNER_PROGRESS_REWARD
+        if args.action_transform == "clip":
+            args.action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
+        if args.enable_fire is None:
+            args.enable_fire = True
+        if args.ugv_planner_fire_mode == "off":
+            args.ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
+        if args.ugv_planner_fire_replan_policy == "always":
+            args.ugv_planner_fire_replan_policy = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY
+        if args.ugv_planner_fire_replan_interval_steps == 15:
+            args.ugv_planner_fire_replan_interval_steps = (
+                DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_INTERVAL_STEPS
+            )
+        if args.ugv_planner_fire_cost == 25.0:
+            args.ugv_planner_fire_cost = DEFAULT_UGV_DIAG_PLANNER_FIRE_COST
+        if args.ugv_planner_fire_block_threshold == 0.0:
+            args.ugv_planner_fire_block_threshold = DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD
+        if args.ugv_planner_smoke_cost == 5.0:
+            args.ugv_planner_smoke_cost = DEFAULT_UGV_DIAG_PLANNER_SMOKE_COST
+        if args.ugv_planner_smolder_cost == 3.0:
+            args.ugv_planner_smolder_cost = DEFAULT_UGV_DIAG_PLANNER_SMOLDER_COST
+        if args.ugv_planner_fire_buffer_m == 10.0:
+            args.ugv_planner_fire_buffer_m = DEFAULT_UGV_DIAG_PLANNER_FIRE_BUFFER_M
+        if args.ugv_planner_fire_buffer_cost == 8.0:
+            args.ugv_planner_fire_buffer_cost = DEFAULT_UGV_DIAG_PLANNER_FIRE_BUFFER_COST
+        if args.ugv_planner_land_cover_costs is None:
+            args.ugv_planner_land_cover_costs = list(DEFAULT_UGV_DIAG_PLANNER_LAND_COVER_COSTS)
+
+    if args.linear_lr_decay is None:
+        args.linear_lr_decay = False
+    if args.enable_fire is None:
+        args.enable_fire = False
 
     if args.land_cover_speeds is not None and len(args.land_cover_speeds) not in (5, 6):
         p.error("--land-cover-speeds must provide 5 or 6 values: road open brush forest rock [water]")

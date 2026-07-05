@@ -204,7 +204,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(model["use_terrain_cnn_encoder"])
         self.assertEqual(model["terrain_cnn_patch_size"], 7)
         self.assertEqual(model["terrain_cnn_embed_dim"], 12)
-        self.assertEqual(model["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 2 + 4 + 7)
+        self.assertEqual(model["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 2 + 4 + 7 + 5)
 
     def test_build_args_exposes_ugv_planner_hint(self):
         _, algo_args, env_args = build_args(
@@ -388,6 +388,7 @@ class HappoCheckpointTests(unittest.TestCase):
             slope_speed_weight=0.5,
             land_cover_speeds=(1.0, 0.95, 0.8, 0.7, 0.0, 0.0),
             action_transform="tanh",
+            enable_fire=False,
         )
 
         self.assertEqual(env_args["action_transform"], "tanh")
@@ -417,6 +418,47 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
         self.assertEqual(scenario["slope_speed_weight"], 0.5)
         self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))
+
+    def test_ugv_known_survivor_diagnostic_global_fire_defaults(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="ugv_global_fire_diag",
+            ugv_known_survivor_diagnostic=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(algo_args["model"]["lr"], 0.00025)
+        self.assertEqual(algo_args["model"]["critic_lr"], 0.0005)
+        self.assertTrue(algo_args["train"]["use_linear_lr_decay"])
+        self.assertEqual(env_args["action_transform"], "radial_tanh")
+        self.assertEqual(scenario["local_map_patch_size"], 7)
+        self.assertTrue(scenario["terrain_cache_path"].endswith("malibu_creek_500m_128.npz"))
+        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
+        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
+        self.assertFalse(scenario["disable_fire"])
+        self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
+        self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
+        self.assertEqual(scenario["ugv_global_planner_heuristic"], "euclidean")
+        self.assertEqual(scenario["ugv_global_planner_lookahead_m"], 20.0)
+        self.assertEqual(scenario["r_ugv_planner_progress"], 0.0)
+        self.assertEqual(scenario["r_ground_approach"], 0.05)
+        self.assertEqual(scenario["ugv_planner_fire_mode"], "block")
+        self.assertEqual(scenario["ugv_planner_fire_cost"], 25.0)
+        self.assertEqual(scenario["ugv_planner_smoke_cost"], 5.0)
+        self.assertEqual(scenario["ugv_planner_smolder_cost"], 3.0)
+        self.assertEqual(scenario["ugv_planner_fire_buffer_m"], 10.0)
+        self.assertEqual(scenario["ugv_planner_fire_buffer_cost"], 8.0)
+        self.assertEqual(scenario["ugv_planner_fire_replan_policy"], "lazy")
+        self.assertEqual(scenario["ugv_planner_fire_replan_interval_steps"], 15)
+        self.assertEqual(scenario["ugv_planner_fire_block_threshold"], 0.6)
+        self.assertEqual(
+            scenario["ugv_planner_land_cover_costs"],
+            (0.85, 1.0, 1.15, 1.35, 4.0, 8.0),
+        )
 
     def test_uav_survivor_diagnostic_build_args(self):
         _, algo_args, env_args = build_args(
@@ -1024,7 +1066,7 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertTrue(scenario["known_survivors_at_reset"])
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
-        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
+        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
         self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
 
     def test_ugv_known_survivor_exact_distance_uses_min_equals_max(self):
