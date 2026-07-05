@@ -7516,7 +7516,26 @@ class WildfireSearchScenario(BaseScenario):
                 return None
             goals = [nearest_goal]
 
-        path = self._global_astar_grid_path(env_index, start, goals, traversable, movement_cost)
+        heuristic_goals = None
+        if self.ugv_global_planner_heuristic == "terrain":
+            static_traversable, static_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+            heuristic_goals = self._global_astar_goal_cells_for_env(
+                env_index,
+                target_pos,
+                static_traversable,
+                static_cost,
+            )
+            if not heuristic_goals:
+                heuristic_goals = goals
+
+        path = self._global_astar_grid_path(
+            env_index,
+            start,
+            goals,
+            traversable,
+            movement_cost,
+            heuristic_goals=heuristic_goals,
+        )
         if len(path) < 2:
             return None
         waypoint, nearest_idx, waypoint_idx = self._global_route_waypoint_for_env(
@@ -7696,6 +7715,8 @@ class WildfireSearchScenario(BaseScenario):
         goals: list[tuple[int, int]],
         traversable: np.ndarray,
         movement_cost: np.ndarray,
+        *,
+        heuristic_goals: list[tuple[int, int]] | None = None,
     ) -> list[tuple[int, int]]:
         if not goals:
             return []
@@ -7720,7 +7741,7 @@ class WildfireSearchScenario(BaseScenario):
             return []
         heuristic_grid = self._global_astar_heuristic_grid(
             env_index,
-            goals,
+            heuristic_goals if heuristic_goals is not None else goals,
             traversable,
             movement_cost,
         )

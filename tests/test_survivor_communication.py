@@ -696,6 +696,44 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertIs(second, first)
         self.assertEqual(len(scenario._ugv_global_heuristic_cache), cache_size)
 
+    def test_global_astar_terrain_heuristic_cache_ignores_dynamic_goal_changes(self):
+        env = self._diagnostic_env(
+            disable_fire=False,
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_heuristic="terrain",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="always",
+            ugv_planner_fire_buffer_m=0.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+
+        plan = scenario._global_astar_plan_uncached_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+        self.assertIsNotNone(plan)
+        cache_size = len(scenario._ugv_global_heuristic_cache)
+        self.assertGreater(cache_size, 0)
+
+        target_cell = scenario._single_position_to_grid_cell(survivor.state.pos[0])
+        scenario.fire_grid[0, target_cell[1], target_cell[0]] = True
+        scenario.fire_intensity_grid[0, target_cell[1], target_cell[0]] = 1.0
+        scenario._invalidate_ugv_planner_routes_for_fire_change()
+        plan_after_fire = scenario._global_astar_plan_uncached_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan_after_fire)
+        self.assertEqual(len(scenario._ugv_global_heuristic_cache), cache_size)
+
     def test_global_astar_terrain_heuristic_cache_clears_on_terrain_change(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",
