@@ -1100,6 +1100,7 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_planner_route_cache: dict[tuple, tuple[tuple[int, int], bool, bool] | None] = {}
         self._ugv_planner_terrain_cache_version = 0
         self._ugv_planner_layer_cache_version = 0
+        self._ugv_static_planner_cache_version = 0
         self._ugv_planner_fire_buffer_mask_cache = {}
         self._ugv_planner_blocked_fire_mask_cache = {}
         self._ugv_planner_layer_tensor_cache = {}
@@ -2500,6 +2501,9 @@ class WildfireSearchScenario(BaseScenario):
                 getattr(self, name).clear()
 
     def _invalidate_ugv_global_heuristic_cache(self, env_index: int | None = None) -> None:
+        self._ugv_static_planner_cache_version = (
+            getattr(self, "_ugv_static_planner_cache_version", 0) + 1
+        )
         caches = (
             "_ugv_static_planner_layer_array_cache",
             "_ugv_global_heuristic_cache",
@@ -2641,7 +2645,7 @@ class WildfireSearchScenario(BaseScenario):
         return arrays
 
     def _ugv_static_planner_layer_arrays_for_env(self, env_index: int) -> tuple[np.ndarray, np.ndarray]:
-        version = int(getattr(self, "_ugv_planner_terrain_cache_version", 0))
+        version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
         key = (int(env_index), version)
         cache = getattr(self, "_ugv_static_planner_layer_array_cache", None)
         if cache is None:
@@ -4166,7 +4170,8 @@ class WildfireSearchScenario(BaseScenario):
             self._ugv_planner_route_cache = {}
         if terrain_changed:
             self._invalidate_ugv_planner_layer_cache(env_index)
-            self._invalidate_ugv_global_heuristic_cache(env_index)
+            if not fire_changed:
+                self._invalidate_ugv_global_heuristic_cache(env_index)
             self._ugv_planner_terrain_cache_version = (
                 getattr(self, "_ugv_planner_terrain_cache_version", 0) + 1
             )
@@ -7603,7 +7608,7 @@ class WildfireSearchScenario(BaseScenario):
         goals: list[tuple[int, int]],
     ) -> np.ndarray:
         G = int(self.fire_grid_size)
-        version = int(getattr(self, "_ugv_planner_terrain_cache_version", 0))
+        version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
         goal_key = tuple((int(x), int(y)) for x, y in goals)
         key = (int(env_index), version, goal_key)
         cache = getattr(self, "_ugv_global_heuristic_cache", None)
@@ -7697,24 +7702,20 @@ class WildfireSearchScenario(BaseScenario):
         G = int(self.fire_grid_size)
         goal_set = set(goals)
 
-        def in_bounds(cell: tuple[int, int]) -> bool:
-            x, y = cell
-            return 0 <= x < G and 0 <= y < G
-
-        def open_cell(cell: tuple[int, int]) -> bool:
-            if not in_bounds(cell):
-                return False
-            x, y = cell
-            return bool(traversable[y, x]) and math.isfinite(float(movement_cost[y, x]))
-
-        if not open_cell(start):
+        valid = traversable & np.isfinite(movement_cost)
+        sx, sy = start
+        if not (0 <= sx < G and 0 <= sy < G and bool(valid[sy, sx])):
             return []
         if start in goal_set:
             return [start]
-        goals = [goal for goal in goals if open_cell(goal)]
+        goals = [
+            (int(gx), int(gy))
+            for gx, gy in goals
+            if 0 <= int(gx) < G and 0 <= int(gy) < G and bool(valid[int(gy), int(gx)])
+        ]
         if not goals:
             return []
-        finite_open_cost = movement_cost[traversable & np.isfinite(movement_cost)]
+        finite_open_cost = movement_cost[valid]
         if finite_open_cost.size == 0:
             return []
         heuristic_grid = self._global_astar_heuristic_grid(
@@ -7723,9 +7724,6 @@ class WildfireSearchScenario(BaseScenario):
             traversable,
             movement_cost,
         )
-
-        def heuristic(cell: tuple[int, int]) -> float:
-            return float(heuristic_grid[cell[1], cell[0]])
 
         neighbor_offsets = (
             (-1, 0, 1.0),
@@ -7737,33 +7735,56 @@ class WildfireSearchScenario(BaseScenario):
             (1, -1, math.sqrt(2.0)),
             (1, 1, math.sqrt(2.0)),
         )
-        open_heap = [(heuristic(start), 0.0, start)]
-        came_from: dict[tuple[int, int], tuple[int, int]] = {}
-        best_cost: dict[tuple[int, int], float] = {start: 0.0}
+
+        total_cells = G * G
+        start_idx = sy * G + sx
+        goal_mask = np.zeros(total_cells, dtype=bool)
+        for gx, gy in goals:
+            goal_mask[gy * G + gx] = True
+
+        valid_flat = valid.reshape(-1)
+        cost_flat = movement_cost.reshape(-1)
+        heuristic_flat = heuristic_grid.reshape(-1)
+        best_cost = np.full(total_cells, np.inf, dtype=np.float64)
+        predecessor = np.full(total_cells, -1, dtype=np.int32)
+        best_cost[start_idx] = 0.0
+        open_heap = [(float(heuristic_flat[start_idx]), 0.0, sx, sy, start_idx)]
         while open_heap:
-            _, cost_so_far, current = heapq.heappop(open_heap)
-            if current in goal_set:
-                return self._reconstruct_grid_path(came_from, current)
-            if cost_so_far > best_cost.get(current, float("inf")) + 1e-9:
+            _, cost_so_far, cx, cy, current_idx = heapq.heappop(open_heap)
+            if goal_mask[current_idx]:
+                path: list[tuple[int, int]] = []
+                cursor = int(current_idx)
+                while cursor >= 0:
+                    path.append((int(cursor % G), int(cursor // G)))
+                    cursor = int(predecessor[cursor])
+                path.reverse()
+                return path
+            if cost_so_far > float(best_cost[current_idx]) + 1e-9:
                 continue
-            cx, cy = current
+            current_cell_cost = float(cost_flat[current_idx])
             for ox, oy, step_len in neighbor_offsets:
-                nxt = (cx + ox, cy + oy)
-                if not open_cell(nxt):
+                nx = cx + ox
+                ny = cy + oy
+                if nx < 0 or nx >= G or ny < 0 or ny >= G:
+                    continue
+                next_idx = ny * G + nx
+                if not bool(valid_flat[next_idx]):
                     continue
                 if ox != 0 and oy != 0 and (
-                    not open_cell((cx + ox, cy)) or not open_cell((cx, cy + oy))
+                    not bool(valid[cy, nx]) or not bool(valid[ny, cx])
                 ):
                     continue
-                nx, ny = nxt
                 edge_cost = step_len * (
-                    float(movement_cost[cy, cx]) + float(movement_cost[ny, nx])
+                    current_cell_cost + float(cost_flat[next_idx])
                 ) * 0.5
                 new_cost = cost_so_far + edge_cost
-                if new_cost < best_cost.get(nxt, float("inf")):
-                    best_cost[nxt] = new_cost
-                    came_from[nxt] = current
-                    heapq.heappush(open_heap, (new_cost + heuristic(nxt), new_cost, nxt))
+                if new_cost < float(best_cost[next_idx]):
+                    best_cost[next_idx] = new_cost
+                    predecessor[next_idx] = int(current_idx)
+                    heapq.heappush(
+                        open_heap,
+                        (new_cost + float(heuristic_flat[next_idx]), new_cost, nx, ny, next_idx),
+                    )
         return []
 
     def _global_route_waypoint_for_env(
