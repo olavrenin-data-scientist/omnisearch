@@ -235,8 +235,14 @@ def build_args(
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
     joint_survivor_diagnostic: bool = False,
+    joint_schema_ugv_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
     joint_diagnostic_ugvs: int = DEFAULT_JOINT_DIAG_UGVS,
+    delayed_survivor_knowledge: bool = False,
+    survivor_reveal_schedule: str = "stratified_uniform",
+    survivor_reveal_initial_count: int = 1,
+    survivor_reveal_start_step: int = 10,
+    survivor_reveal_end_step: int = 180,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
     uav_no_global_coverage_obs: bool = False,
@@ -313,11 +319,22 @@ def build_args(
     ugv_planner_fire_buffer_cost: float = 8.0,
     ugv_planner_land_cover_costs: tuple[float, ...] | None = None,
     ugv_target_assignment_mode: str = "nearest",
+    ugv_sticky_switch_margin_m: float = 20.0,
+    ugv_sticky_switch_ratio: float = 0.80,
+    ugv_sticky_min_age_steps: int = 10,
     enable_fire: bool | None = None,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
-    uav_search_diagnostic = uav_survivor_diagnostic or joint_survivor_diagnostic
-    ugv_global_diagnostic = ugv_known_survivor_diagnostic or joint_survivor_diagnostic
+    uav_search_diagnostic = (
+        uav_survivor_diagnostic
+        or joint_survivor_diagnostic
+        or joint_schema_ugv_diagnostic
+    )
+    ugv_global_diagnostic = (
+        ugv_known_survivor_diagnostic
+        or joint_survivor_diagnostic
+        or joint_schema_ugv_diagnostic
+    )
     if ugv_global_diagnostic:
         defaulted_ugv_planner_hint = ugv_planner_hint == "none"
         if terrain_cache_path is None:
@@ -415,8 +432,23 @@ def build_args(
         raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
-    if ugv_target_assignment_mode not in {"nearest", "greedy"}:
-        raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy")
+    if ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
+        raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
+    survivor_reveal_schedule = str(survivor_reveal_schedule).replace("-", "_").lower()
+    if survivor_reveal_schedule not in {"stratified_uniform"}:
+        raise ValueError("survivor_reveal_schedule must be stratified_uniform")
+    if int(survivor_reveal_initial_count) < 0:
+        raise ValueError("survivor_reveal_initial_count must be nonnegative")
+    if int(survivor_reveal_start_step) < 0 or int(survivor_reveal_end_step) < 0:
+        raise ValueError("survivor reveal steps must be nonnegative")
+    if int(survivor_reveal_end_step) < int(survivor_reveal_start_step):
+        raise ValueError("survivor_reveal_end_step must be >= survivor_reveal_start_step")
+    if float(ugv_sticky_switch_margin_m) < 0.0:
+        raise ValueError("ugv_sticky_switch_margin_m must be nonnegative")
+    if float(ugv_sticky_switch_ratio) < 0.0:
+        raise ValueError("ugv_sticky_switch_ratio must be nonnegative")
+    if int(ugv_sticky_min_age_steps) < 0:
+        raise ValueError("ugv_sticky_min_age_steps must be nonnegative")
     if not 0.0 <= float(ugv_planner_fire_block_threshold) <= 1.0:
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
     if uav_search_diagnostic:
@@ -503,7 +535,10 @@ def build_args(
     if uav_cleanup_target_progress_reward is None:
         uav_cleanup_target_progress_reward = 0.0
     if share_param_by_agent_class is None:
-        share_param_by_agent_class = bool(joint_survivor_diagnostic and not bool(share_param))
+        share_param_by_agent_class = bool(
+            (joint_survivor_diagnostic or joint_schema_ugv_diagnostic)
+            and not bool(share_param)
+        )
     if share_param is None:
         share_param = False
     if bool(share_param) and bool(share_param_by_agent_class):
@@ -755,6 +790,14 @@ def build_args(
         "ugv_planner_fire_buffer_m": ugv_planner_fire_buffer_m,
         "ugv_planner_fire_buffer_cost": ugv_planner_fire_buffer_cost,
         "ugv_target_assignment_mode": ugv_target_assignment_mode,
+        "ugv_sticky_switch_margin_m": ugv_sticky_switch_margin_m,
+        "ugv_sticky_switch_ratio": ugv_sticky_switch_ratio,
+        "ugv_sticky_min_age_steps": ugv_sticky_min_age_steps,
+        "delayed_survivor_knowledge": bool(delayed_survivor_knowledge),
+        "survivor_reveal_schedule": survivor_reveal_schedule,
+        "survivor_reveal_initial_count": survivor_reveal_initial_count,
+        "survivor_reveal_start_step": survivor_reveal_start_step,
+        "survivor_reveal_end_step": survivor_reveal_end_step,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
@@ -985,9 +1028,10 @@ def build_args(
         bool(ugv_known_survivor_diagnostic),
         bool(uav_survivor_diagnostic),
         bool(joint_survivor_diagnostic),
+        bool(joint_schema_ugv_diagnostic),
     ]
     if sum(diagnostic_modes) > 1:
-        raise ValueError("Choose only one diagnostic mode: UGV, UAV, or joint")
+        raise ValueError("Choose only one diagnostic mode: UGV, UAV, joint, or joint-schema UGV")
 
     if ugv_known_survivor_diagnostic:
         distance_kwargs = {}
@@ -1177,6 +1221,55 @@ def build_args(
             "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
+        })
+    if joint_schema_ugv_diagnostic:
+        scenario_kwargs.update({
+            "n_drones": 0,
+            "n_ground": 2,
+            "n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
+            "obs_schema_n_ground": 2,
+            "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            "known_survivors_at_reset": False,
+            "delayed_survivor_knowledge": True,
+            "survivor_reveal_schedule": survivor_reveal_schedule,
+            "survivor_reveal_initial_count": int(survivor_reveal_initial_count),
+            "survivor_reveal_start_step": int(survivor_reveal_start_step),
+            "survivor_reveal_end_step": int(survivor_reveal_end_step),
+            "drone_can_confirm": False,
+            "disable_fire": not bool(enable_fire),
+            "comms_dropout": 0.0,
+            "ugv_target_assignment_mode": "greedy_sticky",
+            "ugv_zero_uav_search_observations": True,
+            "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
+            "r_team_scout": 0.0,
+            "r_all_survivors_found": 0.0,
+            "r_drone_scout": 0.0,
+            "r_ground_confirm": DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD,
+            "r_drone_shaping": 0.0,
+            "r_ground_shaping": 0.50,
+            "r_ground_approach": 0.0,
+            "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_ugv_planner_progress": 0.0,
+            "r_ugv_stall_penalty": ugv_stall_penalty,
+            "r_pending_penalty": DEFAULT_JOINT_DIAG_PENDING_PENALTY,
+            "r_fire_penalty": 0.0,
+            "r_ground_travel_cost": 0.0,
+            "r_drone_climb_cost": 0.0,
+            "r_time_penalty": 0.0,
+            "r_coverage": 0.0,
+            "r_uav_move_coverage": 0.0,
+            "r_uav_coverage_threshold": 0.0,
+            "r_uav_confidence": 0.0,
+            "r_uav_confidence_move": 0.0,
+            "r_uav_inefficient_move": 0.0,
+            "r_uav_frontier_alignment": 0.0,
+            "r_uav_confidence_overlap": 0.0,
+            "r_uav_cleanup_target_progress": 0.0,
+            "r_uav_astar_progress": 0.0,
+            "r_uav_overlap": 0.0,
+            "r_uav_inter_uav_overlap": 0.0,
+            "r_uav_outside_footprint": 0.0,
         })
     n_agents = int(scenario_kwargs["n_drones"]) + int(scenario_kwargs["n_ground"])
     if share_param_by_agent_class:
@@ -1389,9 +1482,15 @@ def main():
                    help="Planner-only land-cover costs for road/open/brush/forest/rock[/water]. "
                         "Physical UGV speeds and terrain observations are unchanged. "
                         "Example: --ugv-planner-land-cover-costs 0.85 1.0 1.15 1.35 4.0 8.0")
-    p.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy"),
+    p.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"),
                    default="nearest",
                    help="How UGV planner targets are selected from known, unconfirmed survivors.")
+    p.add_argument("--ugv-sticky-switch-margin-m", type=float, default=20.0,
+                   help="Sticky assignment switches only if the new target beats this absolute margin.")
+    p.add_argument("--ugv-sticky-switch-ratio", type=float, default=0.80,
+                   help="Sticky assignment switches only if new_distance < current_distance * ratio after margin.")
+    p.add_argument("--ugv-sticky-min-age-steps", type=int, default=10,
+                   help="Minimum target age before sticky assignment can switch to a better target.")
     p.set_defaults(enable_fire=None)
     p.add_argument("--enable-fire", dest="enable_fire", action="store_true",
                    help="Allow fire to run in diagnostic modes that otherwise disable it.")
@@ -1517,10 +1616,23 @@ def main():
                    help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
                    help="Train a joint task: UAVs scout unknown survivors, UGVs confirm known targets.")
+    p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
+                   help="Train 2 UGVs with delayed survivor knowledge and final joint-schema observations.")
     p.add_argument("--uav-diagnostic-drones", type=int, default=DEFAULT_UAV_DIAG_DRONES,
                    help="Number of UAVs in --uav-survivor-diagnostic mode.")
     p.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS,
                    help="Number of UGVs in --joint-survivor-diagnostic mode.")
+    p.add_argument("--delayed-survivor-knowledge", action="store_true",
+                   help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
+    p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
+                   default="stratified_uniform",
+                   help="Sampling scheme for delayed survivor knowledge reveal times.")
+    p.add_argument("--survivor-reveal-initial-count", type=int, default=1,
+                   help="Number of survivors revealed at reset under delayed survivor knowledge.")
+    p.add_argument("--survivor-reveal-start-step", type=int, default=10,
+                   help="Earliest delayed reveal step after the initial survivors.")
+    p.add_argument("--survivor-reveal-end-step", type=int, default=180,
+                   help="Latest delayed reveal step after the initial survivors.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
@@ -1675,8 +1787,14 @@ def main():
     args = p.parse_args()
     args.action_transform = args.action_transform.replace("-", "_")
     args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
+    args.ugv_target_assignment_mode = args.ugv_target_assignment_mode.replace("-", "_")
+    args.survivor_reveal_schedule = args.survivor_reveal_schedule.replace("-", "_")
 
-    if args.ugv_known_survivor_diagnostic or args.joint_survivor_diagnostic:
+    if (
+        args.ugv_known_survivor_diagnostic
+        or args.joint_survivor_diagnostic
+        or args.joint_schema_ugv_diagnostic
+    ):
         defaulted_ugv_planner_hint = args.ugv_planner_hint == "none"
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
@@ -1704,7 +1822,7 @@ def main():
             args.action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
         if args.enable_fire is None:
             args.enable_fire = bool(args.ugv_known_survivor_diagnostic)
-        if args.joint_survivor_diagnostic and args.enable_fire is False:
+        if (args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic) and args.enable_fire is False:
             args.ugv_planner_fire_mode = "off"
         if args.ugv_planner_fire_mode == "off":
             if args.enable_fire:
@@ -1978,6 +2096,18 @@ def main():
         p.error("--ugv-stall-penalty must be nonnegative")
     if args.ugv_stall_displacement_threshold_m < 0.0:
         p.error("--ugv-stall-displacement-threshold-m must be nonnegative")
+    if args.survivor_reveal_initial_count < 0:
+        p.error("--survivor-reveal-initial-count must be nonnegative")
+    if args.survivor_reveal_start_step < 0 or args.survivor_reveal_end_step < 0:
+        p.error("--survivor-reveal-start-step and --survivor-reveal-end-step must be nonnegative")
+    if args.survivor_reveal_end_step < args.survivor_reveal_start_step:
+        p.error("--survivor-reveal-end-step must be >= --survivor-reveal-start-step")
+    if args.ugv_sticky_switch_margin_m < 0.0:
+        p.error("--ugv-sticky-switch-margin-m must be nonnegative")
+    if args.ugv_sticky_switch_ratio < 0.0:
+        p.error("--ugv-sticky-switch-ratio must be nonnegative")
+    if args.ugv_sticky_min_age_steps < 0:
+        p.error("--ugv-sticky-min-age-steps must be nonnegative")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
     if sum(
@@ -1985,14 +2115,18 @@ def main():
             bool(args.ugv_known_survivor_diagnostic),
             bool(args.uav_survivor_diagnostic),
             bool(args.joint_survivor_diagnostic),
+            bool(args.joint_schema_ugv_diagnostic),
         )
     ) > 1:
         p.error(
             "Choose only one diagnostic mode: --ugv-known-survivor-diagnostic, "
-            "--uav-survivor-diagnostic, or --joint-survivor-diagnostic"
+            "--uav-survivor-diagnostic, --joint-survivor-diagnostic, or "
+            "--joint-schema-ugv-diagnostic"
         )
     if args.joint_survivor_diagnostic:
         args.ugv_target_assignment_mode = "greedy"
+    if args.joint_schema_ugv_diagnostic:
+        args.ugv_target_assignment_mode = "greedy_sticky"
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -2002,7 +2136,11 @@ def main():
             float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
         )
 
-    uav_search_diagnostic = args.uav_survivor_diagnostic or args.joint_survivor_diagnostic
+    uav_search_diagnostic = (
+        args.uav_survivor_diagnostic
+        or args.joint_survivor_diagnostic
+        or args.joint_schema_ugv_diagnostic
+    )
     if uav_search_diagnostic:
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
@@ -2057,6 +2195,20 @@ def main():
             args.action_transform = "radial_tanh"
         if args.n_rollout_threads == 1:
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
+    if args.joint_schema_ugv_diagnostic:
+        args.uav_coverage_reward = 0.0
+        args.uav_move_coverage_reward = 0.0
+        args.uav_coverage_threshold_reward = 0.0
+        args.uav_frontier_alignment_reward = 0.0
+        args.uav_confidence_reward = 0.0
+        args.uav_confidence_move_reward = 0.0
+        args.uav_inefficient_move_penalty = 0.0
+        args.uav_confidence_overlap_penalty = 0.0
+        args.uav_cleanup_target_progress_reward = 0.0
+        args.uav_astar_progress_reward = 0.0
+        args.uav_overlap_penalty = 0.0
+        args.uav_inter_uav_overlap_penalty = 0.0
+        args.uav_outside_footprint_penalty = 0.0
     if args.uav_frontier_obs is None:
         args.uav_frontier_obs = False
     if args.uav_confidence_obs_grid is None:
@@ -2088,7 +2240,10 @@ def main():
     if args.uav_cleanup_target_progress_reward is None:
         args.uav_cleanup_target_progress_reward = 0.0
     if args.share_param_by_agent_class is None:
-        args.share_param_by_agent_class = bool(args.joint_survivor_diagnostic and not bool(args.share_param))
+        args.share_param_by_agent_class = bool(
+            (args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic)
+            and not bool(args.share_param)
+        )
     if args.share_param is None:
         args.share_param = False
     if bool(args.share_param) and bool(args.share_param_by_agent_class):
@@ -2210,7 +2365,15 @@ def main():
     print(f" uav_astar_waypoint_reached_m: {args.uav_astar_waypoint_reached_m}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
     print(f" joint_survivor_diagnostic: {args.joint_survivor_diagnostic}")
+    print(f" joint_schema_ugv_diagnostic: {args.joint_schema_ugv_diagnostic}")
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
+    print(
+        " survivor_reveal: "
+        f"delayed={args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic} "
+        f"schedule={args.survivor_reveal_schedule} "
+        f"initial={args.survivor_reveal_initial_count} "
+        f"range={args.survivor_reveal_start_step}-{args.survivor_reveal_end_step}"
+    )
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_detour_obs: {bool(args.ugv_planner_detour_obs)}")
     print(f" ugv_route_aware_reward: {bool(args.ugv_route_aware_reward)}")
@@ -2233,6 +2396,12 @@ def main():
     print(f" ugv_planner_fire_block_threshold: {args.ugv_planner_fire_block_threshold}")
     print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
     print(f" ugv_target_assignment_mode: {args.ugv_target_assignment_mode}")
+    print(
+        " ugv_sticky_assignment: "
+        f"margin={args.ugv_sticky_switch_margin_m}m "
+        f"ratio={args.ugv_sticky_switch_ratio} "
+        f"min_age={args.ugv_sticky_min_age_steps}"
+    )
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
@@ -2334,8 +2503,16 @@ def main():
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
         joint_survivor_diagnostic = args.joint_survivor_diagnostic,
+        joint_schema_ugv_diagnostic = args.joint_schema_ugv_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
         joint_diagnostic_ugvs = args.joint_diagnostic_ugvs,
+        delayed_survivor_knowledge = bool(
+            args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
+        ),
+        survivor_reveal_schedule = args.survivor_reveal_schedule,
+        survivor_reveal_initial_count = args.survivor_reveal_initial_count,
+        survivor_reveal_start_step = args.survivor_reveal_start_step,
+        survivor_reveal_end_step = args.survivor_reveal_end_step,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
@@ -2414,6 +2591,9 @@ def main():
             if args.ugv_planner_land_cover_costs is not None else None
         ),
         ugv_target_assignment_mode = args.ugv_target_assignment_mode,
+        ugv_sticky_switch_margin_m = args.ugv_sticky_switch_margin_m,
+        ugv_sticky_switch_ratio = args.ugv_sticky_switch_ratio,
+        ugv_sticky_min_age_steps = args.ugv_sticky_min_age_steps,
         enable_fire = bool(args.enable_fire),
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")

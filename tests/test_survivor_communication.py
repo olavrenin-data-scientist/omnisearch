@@ -426,6 +426,57 @@ class SurvivorCommunicationTests(unittest.TestCase):
         )
         torch.testing.assert_close(duplicate_fraction, torch.tensor([0.5]))
 
+    def test_greedy_sticky_assignment_keeps_target_for_small_improvement(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=3,
+            ugv_target_assignment_mode="greedy_sticky",
+            ugv_sticky_min_age_steps=10,
+            ugv_sticky_switch_margin_m=20.0,
+            ugv_sticky_switch_ratio=0.8,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0, 1])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([20, 20])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0], [0.5, 0.0]]])
+        survivor_pos = torch.tensor([[[1.0, 0.0], [0.5, 0.5], [0.95, 0.0]]])
+        targetable = torch.ones(1, 2, 3, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(int(target_idx[0, 0].item()), 0)
+
+    def test_greedy_sticky_assignment_switches_for_clear_improvement(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=3,
+            ugv_target_assignment_mode="greedy_sticky",
+            ugv_sticky_min_age_steps=10,
+            ugv_sticky_switch_margin_m=20.0,
+            ugv_sticky_switch_ratio=0.8,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0, 1])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([20, 20])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0], [0.5, 0.0]]])
+        survivor_pos = torch.tensor([[[1.0, 0.0], [0.5, 0.5], [0.2, 0.0]]])
+        targetable = torch.ones(1, 2, 3, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(int(target_idx[0, 0].item()), 2)
+        self.assertGreater(float(scenario.metric_ugv_assignment_switches[0]), 0.0)
+
     def test_known_survivors_at_reset_initializes_ground_mission_memory(self):
         env = self._diagnostic_env()
         scenario = env.scenario
@@ -436,6 +487,65 @@ class SurvivorCommunicationTests(unittest.TestCase):
         obs = scenario.observation(env.agents[0])
         survivor_block = obs[:, -7:].view(1, 1, 7)
         self.assertEqual(float(survivor_block[0, 0, 0]), 1.0)
+
+    def test_delayed_survivor_knowledge_reveals_without_scout_reward(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=5,
+            known_survivors_at_reset=False,
+            delayed_survivor_knowledge=True,
+            survivor_reveal_initial_count=1,
+            survivor_reveal_start_step=10,
+            survivor_reveal_end_step=20,
+            r_team_scout=1.0,
+            r_drone_scout=2.0,
+            r_found_survivor=0.0,
+            r_ground_confirm=0.0,
+            r_ground_shaping=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_pending_penalty=0.0,
+        )
+        scenario = env.scenario
+
+        self.assertEqual(int(scenario.scouted_survivors[0].sum().item()), 1)
+        self.assertEqual(int(scenario.known_survivors_by_agent[0].sum().item()), 2)
+        reveal_steps = scenario.survivor_reveal_steps[0]
+        self.assertEqual(int((reveal_steps == 0).sum().item()), 1)
+        delayed_steps = reveal_steps[reveal_steps > 0]
+        self.assertTrue(bool((delayed_steps >= 10).all().item()))
+        self.assertTrue(bool((delayed_steps <= 20).all().item()))
+
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_new_scouts[0]), 0.0)
+        self.assertEqual(float(scenario.metric_reward_team_scout[0]), 0.0)
+
+        scenario.step_count[0] = 20
+        scenario._apply_delayed_survivor_reveals(0)
+        self.assertTrue(bool(scenario.scouted_survivors[0].all().item()))
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0].all().item()))
+
+    def test_joint_schema_ugv_neighbor_slots_pad_absent_uavs(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=5,
+            obs_schema_n_drones=3,
+            obs_schema_n_ground=2,
+            obs_schema_n_survivors=5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.state.pos[:] = torch.tensor([[0.1, 0.2]])
+        ugv1.state.pos[:] = torch.tensor([[0.4, 0.1]])
+        keep = torch.ones(1, 1, dtype=torch.bool)
+
+        obs0 = scenario._neighbor_observations(ugv0, keep)
+        obs1 = scenario._neighbor_observations(ugv1, keep)
+
+        self.assertEqual(obs0.shape[-1], 8)
+        torch.testing.assert_close(obs0[:, :6], torch.zeros(1, 6))
+        torch.testing.assert_close(obs0[:, 6:8], torch.tensor([[0.3, -0.1]]), atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(obs1[:, :6], torch.zeros(1, 6))
+        torch.testing.assert_close(obs1[:, 6:8], torch.tensor([[-0.3, 0.1]]), atol=1e-6, rtol=1e-6)
 
     def test_disable_fire_leaves_hazard_fields_empty_after_reset(self):
         env = self._diagnostic_env()

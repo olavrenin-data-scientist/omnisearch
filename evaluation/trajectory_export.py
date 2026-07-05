@@ -564,6 +564,17 @@ def export_trajectory(
         "n_drones":       sc.n_drones,
         "n_ground":       sc.n_ground,
         "n_survivors":    sc.n_survivors,
+        "obs_schema": {
+            "n_drones": int(getattr(sc, "obs_schema_n_drones", sc.n_drones)),
+            "n_ground": int(getattr(sc, "obs_schema_n_ground", sc.n_ground)),
+            "n_survivors": int(getattr(sc, "obs_schema_n_survivors", sc.n_survivors)),
+        },
+        "delayed_survivor_knowledge": bool(getattr(sc, "delayed_survivor_knowledge", False)),
+        "survivor_reveal_steps": (
+            sc.survivor_reveal_steps[env_index].detach().cpu().tolist()
+            if hasattr(sc, "survivor_reveal_steps")
+            else None
+        ),
         "agent_radius": round(float(sc.agent_radius_by_env[env_index]), 8),
         "agent_radius_m": round(float(sc.agent_radius_m), 4),
         "survivor_radius": round(float(sc.survivor_radius_by_env[env_index]), 8),

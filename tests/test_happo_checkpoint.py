@@ -709,6 +709,45 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1, 1])
         self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
 
+    def test_joint_schema_ugv_diagnostic_uses_delayed_joint_schema_defaults(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_diag",
+            joint_schema_ugv_diagnostic=True,
+        )
+
+        self.assertEqual(env_args["action_transform"], "radial_tanh")
+        self.assertFalse(algo_args["algo"]["share_param"])
+        self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0])
+        self.assertEqual(algo_args["algo"]["share_param_group_names"], ["ugv"])
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 0)
+        self.assertEqual(scenario["n_ground"], 2)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["obs_schema_n_drones"], 3)
+        self.assertEqual(scenario["obs_schema_n_ground"], 2)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 5)
+        self.assertFalse(scenario["known_survivors_at_reset"])
+        self.assertTrue(scenario["delayed_survivor_knowledge"])
+        self.assertEqual(scenario["survivor_reveal_initial_count"], 1)
+        self.assertEqual(scenario["survivor_reveal_start_step"], 10)
+        self.assertEqual(scenario["survivor_reveal_end_step"], 180)
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
+        self.assertTrue(scenario["ugv_zero_uav_search_observations"])
+        self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
+        self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
+        self.assertEqual(scenario["r_ground_confirm"], 10.0)
+        self.assertEqual(scenario["r_found_survivor"], 4.0)
+        self.assertEqual(scenario["r_team_scout"], 0.0)
+        self.assertEqual(scenario["r_drone_scout"], 0.0)
+        self.assertEqual(scenario["r_coverage"], 0.0)
+        self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
+
     def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
         _, _, env_args = build_args(
             num_env_steps=100,

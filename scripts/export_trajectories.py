@@ -105,10 +105,12 @@ def main():
                    help="Enable fire in exported trajectories when the merged scenario disables it.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
                    help="Export the joint UAV+UGV diagnostic scenario when not relying on a checkpoint manifest.")
+    p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
+                   help="Export the 2-UGV delayed-knowledge joint-schema curriculum scenario.")
     p.add_argument("--joint-diagnostic-ugvs", type=int, default=1,
                    help="Number of UGVs for --joint-survivor-diagnostic manual exports.")
     p.add_argument("--ugv-target-assignment-mode",
-                   choices=("nearest", "greedy"),
+                   choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"),
                    default=None,
                    help="Override UGV assignment for known, unconfirmed survivor targets.")
     p.add_argument("--ugv-planner-fire-mode",
@@ -323,6 +325,8 @@ def main():
         raise SystemExit("--grid-size must be at least 8; try 16, 32, or 64")
     if args.joint_diagnostic_ugvs < 1:
         raise SystemExit("--joint-diagnostic-ugvs must be positive")
+    if args.joint_survivor_diagnostic and args.joint_schema_ugv_diagnostic:
+        raise SystemExit("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
@@ -409,6 +413,38 @@ def main():
             "ugv_planner_hint": "global_astar",
             "ugv_dense_reward_mode": "planner_follow",
             "ugv_global_planner_lookahead_m": 20.0,
+            "disable_fire": True,
+        })
+    if args.joint_schema_ugv_diagnostic:
+        scenario_kwargs.update({
+            "n_drones": 0,
+            "n_ground": 2,
+            "n_survivors": 5,
+            "obs_schema_n_drones": 3,
+            "obs_schema_n_ground": 2,
+            "obs_schema_n_survivors": 5,
+            "known_survivors_at_reset": False,
+            "delayed_survivor_knowledge": True,
+            "survivor_reveal_schedule": "stratified_uniform",
+            "survivor_reveal_initial_count": 1,
+            "survivor_reveal_start_step": 10,
+            "survivor_reveal_end_step": 180,
+            "drone_can_confirm": False,
+            "comms_dropout": args.comms_dropout,
+            "ugv_target_assignment_mode": "greedy_sticky",
+            "ugv_planner_hint": "global_astar",
+            "ugv_dense_reward_mode": "planner_follow",
+            "ugv_global_planner_lookahead_m": 20.0,
+            "ugv_zero_uav_search_observations": True,
+            "coverage_obs_grid": 6,
+            "local_coverage_obs_grid": 9,
+            "local_coverage_obs_radius_m": 150.0,
+            "uav_confidence_obs_grid": 6,
+            "uav_frontier_obs": True,
+            "uav_frontier_obs_radius_m": 60.0,
+            "uav_frontier_mode": "local_global",
+            "uav_frontier_source": "confidence",
+            "uav_cleanup_target_obs": True,
             "disable_fire": True,
         })
     if args.enable_fire:

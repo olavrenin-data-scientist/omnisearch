@@ -58,13 +58,26 @@ def _joint_defaults() -> dict[str, Any]:
     return copy.deepcopy(env_args["scenario_kwargs"])
 
 
+def _joint_schema_ugv_defaults() -> dict[str, Any]:
+    _, _algo_args, env_args = build_args(
+        num_env_steps=100,
+        episode_length=100,
+        seed=1,
+        comms_dropout=0.0,
+        entropy_coef=0.01,
+        exp_name="joint_schema_ugv_diag_eval_defaults",
+        joint_schema_ugv_diagnostic=True,
+    )
+    return copy.deepcopy(env_args["scenario_kwargs"])
+
+
 def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_training_manifest(checkpoint_dir)
     scenario_kwargs: dict[str, Any] = {}
     if manifest is not None:
         scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
-    if args.joint_survivor_diagnostic or not scenario_kwargs:
-        defaults = _joint_defaults()
+    if args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic or not scenario_kwargs:
+        defaults = _joint_schema_ugv_defaults() if args.joint_schema_ugv_diagnostic else _joint_defaults()
         defaults.update(scenario_kwargs)
         scenario_kwargs = defaults
 
@@ -128,8 +141,10 @@ def _new_time_bins(bins: int) -> list[dict[str, float]]:
             "ugv_route_active": 0.0,
             "pending": 0.0,
             "new_scouts": 0.0,
+            "new_oracle_reveals": 0.0,
             "new_confirmations": 0.0,
             "duplicate_assignment": 0.0,
+            "assignment_switches": 0.0,
             **{f"reward_{name}": 0.0 for name, _key in REWARD_COMPONENTS},
         }
         for _ in range(bins)
@@ -171,6 +186,7 @@ def run_rollout(
     time_series = _new_time_bins(max(int(time_bins), 1))
     pending_counts: list[float] = []
     duplicate_assignment: list[float] = []
+    assignment_switches: list[float] = []
     reward_terms = {name: [] for name, _key in REWARD_COMPONENTS}
 
     prev_pos = _positions(scenario).clone()
@@ -198,7 +214,9 @@ def run_rollout(
         pending = float(np.logical_and(scouted, ~confirmed).sum())
         pending_counts.append(pending)
         duplicate = _to_float(info.get("diagnostic/ugv_duplicate_assignment_fraction"))
+        switches = _to_float(info.get("diagnostic/ugv_assignment_switches"))
         duplicate_assignment.append(duplicate)
+        assignment_switches.append(switches)
 
         bin_row = time_series[_bin_index(step, max_steps, len(time_series))]
         bin_row["count"] += 1.0
@@ -209,8 +227,10 @@ def run_rollout(
         bin_row["ugv_route_active"] += _to_float(info.get("diagnostic/ugv_global_route_active"))
         bin_row["pending"] += pending
         bin_row["new_scouts"] += _to_float(info.get("mission/new_scouts"))
+        bin_row["new_oracle_reveals"] += _to_float(info.get("mission/new_oracle_reveals"))
         bin_row["new_confirmations"] += _to_float(info.get("mission/new_confirmations"))
         bin_row["duplicate_assignment"] += duplicate
+        bin_row["assignment_switches"] += switches
         for name, key in REWARD_COMPONENTS:
             value = abs(_to_float(info.get(key)))
             reward_terms[name].append(value)
@@ -235,8 +255,10 @@ def run_rollout(
             "ugv_route_active_fraction": bucket["ugv_route_active"] / count,
             "pending_known_survivors": bucket["pending"] / count,
             "new_scouts_per_step": bucket["new_scouts"] / count,
+            "new_oracle_reveals_per_step": bucket["new_oracle_reveals"] / count,
             "new_confirmations_per_step": bucket["new_confirmations"] / count,
             "duplicate_assignment_fraction": bucket["duplicate_assignment"] / count,
+            "assignment_switches_per_step": bucket["assignment_switches"] / count,
         }
         for name, _key in REWARD_COMPONENTS:
             row[f"reward_{name}"] = bucket[f"reward_{name}"] / count
@@ -269,6 +291,7 @@ def run_rollout(
         "pending_target_time_mean": _mean(pending_counts),
         "pending_target_time_fraction": float(np.count_nonzero(np.asarray(pending_counts) > 0) / max(len(pending_counts), 1)),
         "duplicate_ugv_assignment_rate": _mean(duplicate_assignment),
+        "ugv_assignment_switches_per_episode": float(np.sum(assignment_switches)),
         "avg_reward_components_abs": {name: _mean(values) for name, values in reward_terms.items()},
         "time_bins": time_bin_rows,
     }
@@ -301,6 +324,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
         ]),
         "mean_duplicate_ugv_assignment_rate": _mean([
             row["duplicate_ugv_assignment_rate"] for row in rows
+        ]),
+        "mean_ugv_assignment_switches_per_episode": _mean([
+            row["ugv_assignment_switches_per_episode"] for row in rows
         ]),
     }
 
@@ -375,7 +401,9 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, float], output: Path) -
         ax.plot(xs, mean_series("ugv_route_progress_m_per_step"), marker="o", label="route progress")
         ax.plot(xs, mean_series("ugv_route_active_fraction"), marker="o", label="route active")
         ax.plot(xs, mean_series("pending_known_survivors"), marker="o", label="pending")
+        ax.plot(xs, mean_series("new_oracle_reveals_per_step"), marker="o", label="oracle reveal")
         ax.plot(xs, mean_series("new_confirmations_per_step"), marker="o", label="confirm events")
+        ax.plot(xs, mean_series("assignment_switches_per_step"), marker="o", label="switches")
         ax.set_title("UGV Confirmation Over Time")
         ax.set_xlabel("episode fraction")
         ax.grid(alpha=0.25)
@@ -405,13 +433,15 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", "--checkpoint", dest="checkpoint_dir", default=None)
     parser.add_argument("--joint-survivor-diagnostic", action="store_true",
                         help="Use joint diagnostic defaults when the checkpoint has no manifest.")
+    parser.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
+                        help="Use 2-UGV delayed-knowledge joint-schema curriculum defaults.")
     parser.add_argument("--joint-diagnostic-ugvs", type=int, default=1)
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1020)))
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
-    parser.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy"), default=None)
+    parser.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"), default=None)
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--time-bins", type=int, default=5)
     parser.add_argument("--json-output", default=None)
@@ -423,6 +453,8 @@ def main() -> None:
         parser.error("--time-bins must be positive")
     if args.joint_diagnostic_ugvs < 1:
         parser.error("--joint-diagnostic-ugvs must be positive")
+    if args.joint_survivor_diagnostic and args.joint_schema_ugv_diagnostic:
+        parser.error("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
