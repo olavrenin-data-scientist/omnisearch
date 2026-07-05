@@ -2501,14 +2501,14 @@ class WildfireSearchScenario(BaseScenario):
                 getattr(self, name).clear()
 
     def _invalidate_ugv_global_heuristic_cache(self, env_index: int | None = None) -> None:
-        self._ugv_static_planner_cache_version = (
-            getattr(self, "_ugv_static_planner_cache_version", 0) + 1
-        )
         caches = (
             "_ugv_static_planner_layer_array_cache",
             "_ugv_global_heuristic_cache",
         )
         if env_index is None:
+            self._ugv_static_planner_cache_version = (
+                getattr(self, "_ugv_static_planner_cache_version", 0) + 1
+            )
             for name in caches:
                 if hasattr(self, name):
                     getattr(self, name).clear()

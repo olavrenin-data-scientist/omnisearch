@@ -32,6 +32,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         )
 
     def _diagnostic_env(self, **kwargs):
+        num_envs = int(kwargs.pop("num_envs", 1))
         params = {
             "n_drones": 0,
             "n_ground": 1,
@@ -47,7 +48,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         params.update(kwargs)
         return vmas.make_env(
             scenario=WildfireSearchScenario(),
-            num_envs=1,
+            num_envs=num_envs,
             device="cpu",
             continuous_actions=True,
             seed=1,
@@ -719,6 +720,41 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._invalidate_ugv_planner_route_cache(terrain_changed=True)
 
         self.assertFalse(scenario._ugv_global_heuristic_cache)
+
+    def test_global_astar_terrain_heuristic_env_reset_keeps_other_env_cache(self):
+        env = self._diagnostic_env(
+            num_envs=2,
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_heuristic="terrain",
+        )
+        scenario = env.scenario
+        _ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        entries = []
+        for env_index in (0, 1):
+            traversable, movement_cost = scenario._ugv_planner_layer_arrays_for_env(env_index)
+            goals = scenario._global_astar_goal_cells_for_env(
+                env_index,
+                survivor.state.pos[env_index],
+                traversable,
+                movement_cost,
+            )
+            heuristic = scenario._global_astar_static_cost_to_go_for_env(env_index, goals)
+            entries.append((goals, heuristic))
+        version_before = int(scenario._ugv_static_planner_cache_version)
+
+        scenario._invalidate_ugv_planner_route_cache(0, terrain_changed=True)
+        env1_again = scenario._global_astar_static_cost_to_go_for_env(1, entries[1][0])
+
+        self.assertEqual(int(scenario._ugv_static_planner_cache_version), version_before)
+        self.assertIs(env1_again, entries[1][1])
+        self.assertEqual(
+            {int(key[0]) for key in scenario._ugv_global_heuristic_cache.keys()},
+            {1},
+        )
 
     def test_ugv_planner_fire_mode_off_matches_terrain_only(self):
         env = self._diagnostic_env(
