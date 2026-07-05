@@ -321,12 +321,14 @@ class HappoCheckpointTests(unittest.TestCase):
             ugv_planner_hint="global-astar",
             ugv_dense_reward_mode="planner-follow",
             ugv_global_planner_lookahead_m=25.0,
+            ugv_global_planner_heuristic="terrain",
         )
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
         self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
         self.assertEqual(scenario["ugv_global_planner_lookahead_m"], 25.0)
+        self.assertEqual(scenario["ugv_global_planner_heuristic"], "terrain")
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 4 + 12 + 1 + 2 * 7 * 7 + 9 + 5 + 2 + 4 + 7)
 
     def test_build_args_exposes_fire_aware_ugv_planner_settings(self):

@@ -111,6 +111,10 @@ def main():
                    choices=("always", "affected"),
                    default=None,
                    help="Override when fire-aware UGV global routes are replanned after fire spread.")
+    p.add_argument("--ugv-global-planner-heuristic",
+                   choices=("euclidean", "terrain"),
+                   default=None,
+                   help="Override the UGV global_astar heuristic.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=None)
     p.add_argument("--ugv-planner-fire-block-threshold", type=float, default=None,
                    help="In block mode, only active fire cells with intensity >= threshold are blocked.")
@@ -388,6 +392,10 @@ def main():
     if args.ugv_planner_fire_replan_policy is not None:
         scenario_kwargs["ugv_planner_fire_replan_policy"] = (
             args.ugv_planner_fire_replan_policy.replace("-", "_")
+        )
+    if args.ugv_global_planner_heuristic is not None:
+        scenario_kwargs["ugv_global_planner_heuristic"] = (
+            args.ugv_global_planner_heuristic.replace("-", "_")
         )
     for arg_name in (
         "ugv_planner_fire_cost",

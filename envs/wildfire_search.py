@@ -61,6 +61,7 @@ DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 UGV_PLANNER_HINT_DIM = 5
 UGV_LOCAL_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
 UGV_PLANNER_HINT_MODES = UGV_LOCAL_PLANNER_HINT_MODES | {"global_astar"}
+UGV_GLOBAL_PLANNER_HEURISTICS = {"euclidean", "terrain"}
 
 
 def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
@@ -296,6 +297,11 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("ugv_global_planner_lookahead_m", 20.0)),
             1e-6,
         )
+        self.ugv_global_planner_heuristic = str(
+            kwargs.pop("ugv_global_planner_heuristic", "euclidean")
+        ).replace("-", "_")
+        if self.ugv_global_planner_heuristic not in UGV_GLOBAL_PLANNER_HEURISTICS:
+            raise ValueError("ugv_global_planner_heuristic must be one of: euclidean, terrain")
         self.ugv_planner_fire_mode = str(kwargs.pop("ugv_planner_fire_mode", "off")).replace("-", "_")
         if self.ugv_planner_fire_mode not in {"off", "cost", "block"}:
             raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
@@ -1098,6 +1104,8 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_planner_blocked_fire_mask_cache = {}
         self._ugv_planner_layer_tensor_cache = {}
         self._ugv_planner_layer_array_cache = {}
+        self._ugv_static_planner_layer_array_cache = {}
+        self._ugv_global_heuristic_cache = {}
         self.ugv_escape_route_active = torch.zeros(
             batch_dim,
             self.n_ground,
@@ -2473,6 +2481,8 @@ class WildfireSearchScenario(BaseScenario):
         )
         if hasattr(self, "_ugv_planner_layer_tensor_cache"):
             self._invalidate_ugv_planner_layer_cache(env_index)
+        if hasattr(self, "_ugv_global_heuristic_cache"):
+            self._invalidate_ugv_global_heuristic_cache(env_index)
 
     def _invalidate_ugv_planner_layer_cache(self, env_index: int | None = None) -> None:
         del env_index
@@ -2488,6 +2498,25 @@ class WildfireSearchScenario(BaseScenario):
         for name in caches:
             if hasattr(self, name):
                 getattr(self, name).clear()
+
+    def _invalidate_ugv_global_heuristic_cache(self, env_index: int | None = None) -> None:
+        caches = (
+            "_ugv_static_planner_layer_array_cache",
+            "_ugv_global_heuristic_cache",
+        )
+        if env_index is None:
+            for name in caches:
+                if hasattr(self, name):
+                    getattr(self, name).clear()
+            return
+        env_index = int(env_index)
+        for name in caches:
+            if not hasattr(self, name):
+                continue
+            cache = getattr(self, name)
+            for key in list(cache.keys()):
+                if key and int(key[0]) == env_index:
+                    del cache[key]
 
     def _ugv_planner_fire_buffer_mask(self, env_index: int) -> Tensor:
         version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
@@ -2608,6 +2637,35 @@ class WildfireSearchScenario(BaseScenario):
             traversable.detach().cpu().numpy().astype(bool, copy=False),
             movement_cost.detach().cpu().numpy(),
         )
+        cache[key] = arrays
+        return arrays
+
+    def _ugv_static_planner_layer_arrays_for_env(self, env_index: int) -> tuple[np.ndarray, np.ndarray]:
+        version = int(getattr(self, "_ugv_planner_terrain_cache_version", 0))
+        key = (int(env_index), version)
+        cache = getattr(self, "_ugv_static_planner_layer_array_cache", None)
+        if cache is None:
+            self._ugv_static_planner_layer_array_cache = {}
+            cache = self._ugv_static_planner_layer_array_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        traversable = self.traversable_grid[env_index].detach().cpu().numpy().astype(bool, copy=True)
+        if self.ugv_planner_land_cover_cost_values is None:
+            movement_cost = self.mobility_cost_grid[env_index].detach().cpu().numpy().astype(
+                np.float64,
+                copy=True,
+            )
+        else:
+            cover = self.land_cover_grid[env_index]
+            slope = self.slope_grid[env_index]
+            planner_cost = (
+                self.ugv_planner_land_cover_cost_values[cover]
+                * (1.0 + self.slope_cost_weight * slope)
+            )
+            movement_cost = planner_cost.detach().cpu().numpy().astype(np.float64, copy=True)
+        arrays = (traversable, movement_cost)
         cache[key] = arrays
         return arrays
 
@@ -4108,6 +4166,7 @@ class WildfireSearchScenario(BaseScenario):
             self._ugv_planner_route_cache = {}
         if terrain_changed:
             self._invalidate_ugv_planner_layer_cache(env_index)
+            self._invalidate_ugv_global_heuristic_cache(env_index)
             self._ugv_planner_terrain_cache_version = (
                 getattr(self, "_ugv_planner_terrain_cache_version", 0) + 1
             )
@@ -7518,6 +7577,113 @@ class WildfireSearchScenario(BaseScenario):
             for i in order
         ]
 
+    def _global_astar_euclidean_heuristic_grid(
+        self,
+        goals: list[tuple[int, int]],
+        traversable: np.ndarray,
+        movement_cost: np.ndarray,
+    ) -> np.ndarray:
+        G = int(self.fire_grid_size)
+        finite_open_cost = movement_cost[traversable & np.isfinite(movement_cost)]
+        if finite_open_cost.size == 0:
+            return np.zeros((G, G), dtype=np.float64)
+        min_cost = max(float(finite_open_cost.min()), 1e-6)
+        grid_y = np.arange(G, dtype=np.float64)[:, None]
+        grid_x = np.arange(G, dtype=np.float64)[None, :]
+        heuristic_dist2 = np.full((G, G), np.inf, dtype=np.float64)
+        for gx, gy in goals:
+            dx = grid_x - float(gx)
+            dy = grid_y - float(gy)
+            heuristic_dist2 = np.minimum(heuristic_dist2, dx * dx + dy * dy)
+        return np.sqrt(heuristic_dist2) * min_cost
+
+    def _global_astar_static_cost_to_go_for_env(
+        self,
+        env_index: int,
+        goals: list[tuple[int, int]],
+    ) -> np.ndarray:
+        G = int(self.fire_grid_size)
+        version = int(getattr(self, "_ugv_planner_terrain_cache_version", 0))
+        goal_key = tuple((int(x), int(y)) for x, y in goals)
+        key = (int(env_index), version, goal_key)
+        cache = getattr(self, "_ugv_global_heuristic_cache", None)
+        if cache is None:
+            self._ugv_global_heuristic_cache = {}
+            cache = self._ugv_global_heuristic_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+
+        def in_bounds(cell: tuple[int, int]) -> bool:
+            x, y = cell
+            return 0 <= x < G and 0 <= y < G
+
+        def open_cell(cell: tuple[int, int]) -> bool:
+            if not in_bounds(cell):
+                return False
+            x, y = cell
+            return bool(traversable[y, x]) and math.isfinite(float(movement_cost[y, x]))
+
+        costs = np.full((G, G), np.inf, dtype=np.float64)
+        open_heap: list[tuple[float, tuple[int, int]]] = []
+        for goal in goal_key:
+            if not open_cell(goal):
+                continue
+            gx, gy = goal
+            if costs[gy, gx] == 0.0:
+                continue
+            costs[gy, gx] = 0.0
+            heapq.heappush(open_heap, (0.0, goal))
+
+        neighbor_offsets = (
+            (-1, 0, 1.0),
+            (1, 0, 1.0),
+            (0, -1, 1.0),
+            (0, 1, 1.0),
+            (-1, -1, math.sqrt(2.0)),
+            (-1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)),
+            (1, 1, math.sqrt(2.0)),
+        )
+        while open_heap:
+            cost_so_far, current = heapq.heappop(open_heap)
+            cx, cy = current
+            if cost_so_far > costs[cy, cx] + 1e-9:
+                continue
+            for ox, oy, step_len in neighbor_offsets:
+                nxt = (cx + ox, cy + oy)
+                if not open_cell(nxt):
+                    continue
+                if ox != 0 and oy != 0 and (
+                    not open_cell((cx + ox, cy)) or not open_cell((cx, cy + oy))
+                ):
+                    continue
+                nx, ny = nxt
+                edge_cost = step_len * (
+                    float(movement_cost[cy, cx]) + float(movement_cost[ny, nx])
+                ) * 0.5
+                new_cost = cost_so_far + edge_cost
+                if new_cost < costs[ny, nx]:
+                    costs[ny, nx] = new_cost
+                    heapq.heappush(open_heap, (new_cost, nxt))
+
+        heuristic = np.where(np.isfinite(costs), costs, 0.0)
+        cache[key] = heuristic
+        return heuristic
+
+    def _global_astar_heuristic_grid(
+        self,
+        env_index: int,
+        goals: list[tuple[int, int]],
+        traversable: np.ndarray,
+        movement_cost: np.ndarray,
+    ) -> np.ndarray:
+        if self.ugv_global_planner_heuristic == "terrain":
+            return self._global_astar_static_cost_to_go_for_env(env_index, goals)
+        return self._global_astar_euclidean_heuristic_grid(goals, traversable, movement_cost)
+
     def _global_astar_grid_path(
         self,
         env_index: int,
@@ -7526,7 +7692,6 @@ class WildfireSearchScenario(BaseScenario):
         traversable: np.ndarray,
         movement_cost: np.ndarray,
     ) -> list[tuple[int, int]]:
-        del env_index
         if not goals:
             return []
         G = int(self.fire_grid_size)
@@ -7552,15 +7717,12 @@ class WildfireSearchScenario(BaseScenario):
         finite_open_cost = movement_cost[traversable & np.isfinite(movement_cost)]
         if finite_open_cost.size == 0:
             return []
-        min_cost = max(float(finite_open_cost.min()), 1e-6)
-        grid_y = np.arange(G, dtype=np.float64)[:, None]
-        grid_x = np.arange(G, dtype=np.float64)[None, :]
-        heuristic_dist2 = np.full((G, G), np.inf, dtype=np.float64)
-        for gx, gy in goals:
-            dx = grid_x - float(gx)
-            dy = grid_y - float(gy)
-            heuristic_dist2 = np.minimum(heuristic_dist2, dx * dx + dy * dy)
-        heuristic_grid = np.sqrt(heuristic_dist2) * min_cost
+        heuristic_grid = self._global_astar_heuristic_grid(
+            env_index,
+            goals,
+            traversable,
+            movement_cost,
+        )
 
         def heuristic(cell: tuple[int, int]) -> float:
             return float(heuristic_grid[cell[1], cell[0]])

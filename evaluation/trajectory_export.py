@@ -568,6 +568,7 @@ def export_trajectory(
         "ground_lidar_range": round(float(sc.ground_lidar_range), 8),
         "ground_lidar_range_m": round(float(sc.ground_lidar_range_m), 4),
         "ugv_planner_fire": {
+            "global_heuristic": str(getattr(sc, "ugv_global_planner_heuristic", "euclidean")),
             "mode": str(getattr(sc, "ugv_planner_fire_mode", "off")),
             "replan_policy": str(getattr(sc, "ugv_planner_fire_replan_policy", "always")),
             "fire_cost": round(float(getattr(sc, "ugv_planner_fire_cost", 25.0)), 4),

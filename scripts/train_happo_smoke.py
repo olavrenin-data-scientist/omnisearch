@@ -270,6 +270,7 @@ def build_args(
     ugv_planner_patch_size: int = 11,
     ugv_planner_lookahead_cells: int = 10,
     ugv_global_planner_lookahead_m: float = 20.0,
+    ugv_global_planner_heuristic: str = "euclidean",
     ugv_planner_fire_mode: str = "off",
     ugv_planner_fire_replan_policy: str = "always",
     ugv_planner_fire_cost: float = 25.0,
@@ -313,6 +314,9 @@ def build_args(
         raise ValueError("ugv_dense_reward_mode='planner_follow' requires ugv_planner_hint='global_astar'")
     if ugv_route_aware_reward and ugv_dense_reward_mode != "target":
         raise ValueError("ugv_route_aware_reward can only be combined with ugv_dense_reward_mode='target'")
+    ugv_global_planner_heuristic = str(ugv_global_planner_heuristic).replace("-", "_")
+    if ugv_global_planner_heuristic not in {"euclidean", "terrain"}:
+        raise ValueError("ugv_global_planner_heuristic must be one of: euclidean, terrain")
     ugv_planner_fire_mode = str(ugv_planner_fire_mode).replace("-", "_")
     if ugv_planner_fire_mode not in {"off", "cost", "block"}:
         raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
@@ -639,6 +643,7 @@ def build_args(
         "ugv_planner_patch_size": ugv_planner_patch_size,
         "ugv_planner_lookahead_cells": ugv_planner_lookahead_cells,
         "ugv_global_planner_lookahead_m": ugv_global_planner_lookahead_m,
+        "ugv_global_planner_heuristic": ugv_global_planner_heuristic,
         "ugv_planner_fire_mode": ugv_planner_fire_mode,
         "ugv_planner_fire_replan_policy": ugv_planner_fire_replan_policy,
         "ugv_planner_fire_cost": ugv_planner_fire_cost,
@@ -1152,6 +1157,11 @@ def main():
                    help="Maximum number of A* route cells to skip ahead when forming the waypoint hint.")
     p.add_argument("--ugv-global-planner-lookahead-m", type=float, default=20.0,
                    help="Physical lookahead distance for global_astar waypoint hints.")
+    p.add_argument("--ugv-global-planner-heuristic",
+                   choices=("euclidean", "terrain"),
+                   default="euclidean",
+                   help="A* heuristic for global_astar. euclidean preserves legacy behavior; "
+                        "terrain uses a cached terrain-only reverse-Dijkstra lower bound.")
     p.add_argument("--ugv-planner-fire-mode",
                    choices=("off", "cost", "block"),
                    default="off",
@@ -1672,6 +1682,7 @@ def main():
         p.error("--ugv-escape-max-steps must be positive")
     if args.ugv_global_planner_lookahead_m <= 0.0:
         p.error("--ugv-global-planner-lookahead-m must be positive")
+    args.ugv_global_planner_heuristic = args.ugv_global_planner_heuristic.replace("-", "_")
     if not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0:
         p.error("--ugv-planner-fire-block-threshold must be in [0, 1]")
     for flag_name in (
@@ -1924,6 +1935,7 @@ def main():
     )
     print(f" ugv_planner_patch_size: {args.ugv_planner_patch_size}")
     print(f" ugv_global_planner_lookahead_m: {args.ugv_global_planner_lookahead_m}")
+    print(f" ugv_global_planner_heuristic: {args.ugv_global_planner_heuristic}")
     print(f" ugv_planner_fire_mode: {args.ugv_planner_fire_mode}")
     print(f" ugv_planner_fire_replan_policy: {args.ugv_planner_fire_replan_policy}")
     print(f" ugv_planner_fire_block_threshold: {args.ugv_planner_fire_block_threshold}")
@@ -2091,6 +2103,7 @@ def main():
         ugv_planner_patch_size = args.ugv_planner_patch_size,
         ugv_planner_lookahead_cells = args.ugv_planner_lookahead_cells,
         ugv_global_planner_lookahead_m = args.ugv_global_planner_lookahead_m,
+        ugv_global_planner_heuristic = args.ugv_global_planner_heuristic,
         ugv_planner_fire_mode = args.ugv_planner_fire_mode,
         ugv_planner_fire_replan_policy = args.ugv_planner_fire_replan_policy,
         ugv_planner_fire_cost = args.ugv_planner_fire_cost,

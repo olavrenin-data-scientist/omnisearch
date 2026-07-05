@@ -127,6 +127,20 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._invalidate_ugv_planner_route_cache(terrain_changed=True)
         return ground, survivor
 
+    def _global_path_cost(self, scenario, env_index, path):
+        if len(path) < 2:
+            return 0.0
+        _traversable, movement_cost = scenario._ugv_planner_layer_arrays_for_env(env_index)
+        total = 0.0
+        for current, nxt in zip(path[:-1], path[1:]):
+            cx, cy = current
+            nx, ny = nxt
+            step_len = math.sqrt(2.0) if cx != nx and cy != ny else 1.0
+            total += step_len * (
+                float(movement_cost[cy, cx]) + float(movement_cost[ny, nx])
+            ) * 0.5
+        return total
+
     def test_default_ground_speed_model_uses_spot_like_terrain_values(self):
         env = self._diagnostic_env()
         scenario = env.scenario
@@ -558,6 +572,121 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertNotIn((68, 64), plan["path"])
         self.assertNotEqual(plan["waypoint"][1], 64)
 
+    def test_global_astar_terrain_heuristic_routes_around_full_grid_wall(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_heuristic="terrain",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+            tuple((68, y) for y in range(58, 71)),
+        )
+
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["direct_blocked"])
+        self.assertTrue(plan["detour_needed"])
+        self.assertGreaterEqual(len(plan["path"]), 2)
+        self.assertNotIn((68, 64), plan["path"])
+        self.assertNotEqual(plan["waypoint"][1], 64)
+
+    def test_global_astar_terrain_heuristic_preserves_route_cost(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+            tuple((68, y) for y in range(58, 71)),
+        )
+
+        scenario.ugv_global_planner_heuristic = "euclidean"
+        euclidean = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+        scenario.ugv_global_planner_heuristic = "terrain"
+        terrain = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(euclidean)
+        self.assertIsNotNone(terrain)
+        self.assertAlmostEqual(
+            self._global_path_cost(scenario, 0, terrain["path"]),
+            self._global_path_cost(scenario, 0, euclidean["path"]),
+            places=6,
+        )
+
+    def test_global_astar_terrain_heuristic_cache_survives_fire_layer_invalidation(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_heuristic="terrain",
+        )
+        scenario = env.scenario
+        _ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        traversable, movement_cost = scenario._ugv_planner_layer_arrays_for_env(0)
+        goals = scenario._global_astar_goal_cells_for_env(
+            0,
+            survivor.state.pos[0],
+            traversable,
+            movement_cost,
+        )
+
+        first = scenario._global_astar_static_cost_to_go_for_env(0, goals)
+        cache_size = len(scenario._ugv_global_heuristic_cache)
+        scenario.fire_grid[0, 64, 68] = True
+        scenario.fire_intensity_grid[0, 64, 68] = 1.0
+        scenario._invalidate_ugv_planner_layer_cache()
+        second = scenario._global_astar_static_cost_to_go_for_env(0, goals)
+
+        self.assertIs(second, first)
+        self.assertEqual(len(scenario._ugv_global_heuristic_cache), cache_size)
+
+    def test_global_astar_terrain_heuristic_cache_clears_on_terrain_change(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_heuristic="terrain",
+        )
+        scenario = env.scenario
+        _ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        traversable, movement_cost = scenario._ugv_planner_layer_arrays_for_env(0)
+        goals = scenario._global_astar_goal_cells_for_env(
+            0,
+            survivor.state.pos[0],
+            traversable,
+            movement_cost,
+        )
+        scenario._global_astar_static_cost_to_go_for_env(0, goals)
+        self.assertTrue(scenario._ugv_global_heuristic_cache)
+
+        scenario._invalidate_ugv_planner_route_cache(terrain_changed=True)
+
+        self.assertFalse(scenario._ugv_global_heuristic_cache)
+
     def test_ugv_planner_fire_mode_off_matches_terrain_only(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",
@@ -666,6 +795,33 @@ class SurvivorCommunicationTests(unittest.TestCase):
     def test_global_astar_fire_block_routes_around_active_fire_wall(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (76, 64),
+        )
+        scenario.fire_grid[0, 58:71, 68] = True
+        scenario.fire_intensity_grid[0, 58:71, 68] = 1.0
+        scenario._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
+
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["direct_blocked"])
+        self.assertNotIn((68, 64), plan["path"])
+
+    def test_global_astar_terrain_heuristic_fire_block_routes_around_active_fire_wall(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_heuristic="terrain",
             ugv_planner_fire_mode="block",
             ugv_global_planner_lookahead_m=20.0,
         )

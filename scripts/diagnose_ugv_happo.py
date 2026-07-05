@@ -140,6 +140,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_lookahead_cells"] = int(args.ugv_planner_lookahead_cells)
     if args.ugv_global_planner_lookahead_m is not None:
         scenario_kwargs["ugv_global_planner_lookahead_m"] = float(args.ugv_global_planner_lookahead_m)
+    if args.ugv_global_planner_heuristic is not None:
+        scenario_kwargs["ugv_global_planner_heuristic"] = args.ugv_global_planner_heuristic.replace("-", "_")
     if args.ugv_planner_fire_mode is not None:
         scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
     if args.ugv_planner_fire_replan_policy is not None:
@@ -2787,6 +2789,10 @@ def main() -> None:
                         help="Override the checkpoint's planner waypoint lookahead.")
     parser.add_argument("--ugv-global-planner-lookahead-m", type=float, default=None,
                         help="Override the checkpoint's global planner waypoint lookahead in meters.")
+    parser.add_argument("--ugv-global-planner-heuristic",
+                        choices=("euclidean", "terrain"),
+                        default=None,
+                        help="Override the checkpoint's global_astar heuristic.")
     parser.add_argument("--ugv-planner-fire-mode",
                         choices=("off", "cost", "block"),
                         default=None,
@@ -2926,6 +2932,7 @@ def main() -> None:
         f"blend={float(scenario_kwargs.get('ugv_planner_blend_weight', 0.70)):.2f} "
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
         f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)} "
+        f"global_heuristic={scenario_kwargs.get('ugv_global_planner_heuristic', 'euclidean')} "
         f"escape_stall={scenario_kwargs.get('ugv_escape_stall_steps', 5)} "
         f"escape_max={scenario_kwargs.get('ugv_escape_max_steps', 15)}"
     )
