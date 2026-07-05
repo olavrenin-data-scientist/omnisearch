@@ -103,6 +103,14 @@ def main():
     )
     p.add_argument("--enable-fire", action="store_true",
                    help="Enable fire in exported trajectories when the merged scenario disables it.")
+    p.add_argument("--joint-survivor-diagnostic", action="store_true",
+                   help="Export the joint UAV+UGV diagnostic scenario when not relying on a checkpoint manifest.")
+    p.add_argument("--joint-diagnostic-ugvs", type=int, default=1,
+                   help="Number of UGVs for --joint-survivor-diagnostic manual exports.")
+    p.add_argument("--ugv-target-assignment-mode",
+                   choices=("nearest", "greedy"),
+                   default=None,
+                   help="Override UGV assignment for known, unconfirmed survivor targets.")
     p.add_argument("--ugv-planner-fire-mode",
                    choices=("off", "cost", "block"),
                    default=None,
@@ -313,6 +321,8 @@ def main():
         raise SystemExit("--steps must be at least 1")
     if args.grid_size < 8:
         raise SystemExit("--grid-size must be at least 8; try 16, 32, or 64")
+    if args.joint_diagnostic_ugvs < 1:
+        raise SystemExit("--joint-diagnostic-ugvs must be positive")
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
@@ -387,8 +397,24 @@ def main():
         scenario_kwargs["ground_confirm_min_m"] = max(
             args.ground_min_confirm_radius_m, 0.0,
         )
+    if args.joint_survivor_diagnostic:
+        scenario_kwargs.update({
+            "n_drones": 3,
+            "n_ground": max(int(args.joint_diagnostic_ugvs), 1),
+            "n_survivors": 5,
+            "known_survivors_at_reset": False,
+            "drone_can_confirm": False,
+            "comms_dropout": args.comms_dropout,
+            "ugv_target_assignment_mode": "greedy",
+            "ugv_planner_hint": "global_astar",
+            "ugv_dense_reward_mode": "planner_follow",
+            "ugv_global_planner_lookahead_m": 20.0,
+            "disable_fire": True,
+        })
     if args.enable_fire:
         scenario_kwargs["disable_fire"] = False
+    if args.ugv_target_assignment_mode is not None:
+        scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
     if args.ugv_planner_fire_mode is not None:
         scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
     if args.ugv_planner_fire_replan_policy is not None:

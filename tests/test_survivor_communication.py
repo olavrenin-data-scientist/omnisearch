@@ -337,6 +337,95 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertFalse(bool(scenario.found_survivors[0, 0]))
         self.assertFalse(bool(scenario.step_ground_confirmations[0, 0, 0]))
 
+    def test_team_scout_reward_is_shared_while_uav_keeps_individual_credit(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=1,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            drone_can_confirm=False,
+            r_team_scout=1.0,
+            r_drone_scout=2.0,
+            r_found_survivor=0.0,
+            r_ground_confirm=0.0,
+            r_drone_shaping=0.0,
+            r_ground_shaping=0.0,
+            r_ground_approach=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_coverage=0.0,
+            r_time_penalty=0.0,
+            r_pending_penalty=0.0,
+            r_ground_travel_cost=0.0,
+            r_drone_climb_cost=0.0,
+            drone_detection_quality=(1.0, 1.0, 1.0),
+            drone_cover_detection_factors=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            drone_energy_costs=(0.0, 0.0, 0.0),
+        )
+        env.reset()
+        scenario = env.scenario
+        drone, ground = env.agents
+        survivor = scenario._survivors[0]
+        drone.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ground.state.pos[:] = torch.tensor([[0.5, 0.5]])
+        survivor.state.pos[:] = torch.tensor([[0.0, 0.0]])
+
+        scenario._compute_step_rewards()
+
+        self.assertTrue(bool(scenario.scouted_survivors[0, 0]))
+        self.assertFalse(bool(scenario.found_survivors[0, 0]))
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([3.0]))
+        torch.testing.assert_close(ground.scenario_reward, torch.tensor([1.0]))
+        torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([1.0]))
+        torch.testing.assert_close(scenario.metric_reward_drone_scout, torch.tensor([2.0]))
+
+    def test_greedy_ugv_assignment_prefers_distinct_known_targets(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            ugv_target_assignment_mode="greedy",
+        )
+        scenario = env.scenario
+        ground_pos = torch.tensor([[[0.00, 0.0], [0.10, 0.0]]])
+        survivor_pos = torch.tensor([[[0.04, 0.0], [1.00, 0.0]]])
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0, 1]])
+        duplicate_fraction = scenario._ugv_duplicate_assignment_fraction(
+            target_idx,
+            target_idx >= 0,
+        )
+        torch.testing.assert_close(duplicate_fraction, torch.tensor([0.0]))
+
+    def test_nearest_ugv_assignment_preserves_shared_target_behavior(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            ugv_target_assignment_mode="nearest",
+        )
+        scenario = env.scenario
+        ground_pos = torch.tensor([[[0.00, 0.0], [0.10, 0.0]]])
+        survivor_pos = torch.tensor([[[0.04, 0.0], [1.00, 0.0]]])
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0, 0]])
+        duplicate_fraction = scenario._ugv_duplicate_assignment_fraction(
+            target_idx,
+            target_idx >= 0,
+        )
+        torch.testing.assert_close(duplicate_fraction, torch.tensor([0.5]))
+
     def test_known_survivors_at_reset_initializes_ground_mission_memory(self):
         env = self._diagnostic_env()
         scenario = env.scenario

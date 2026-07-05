@@ -503,6 +503,7 @@ class WildfireSearchScenario(BaseScenario):
         # Reward weights
         self.r_found_survivor = kwargs.pop("r_found_survivor", 10.0)
         self.r_all_survivors_found = kwargs.pop("r_all_survivors_found", 0.0)
+        self.r_team_scout = kwargs.pop("r_team_scout", 0.0)
         self.r_drone_scout    = kwargs.pop("r_drone_scout", 2.0)
         self.r_ground_confirm = kwargs.pop("r_ground_confirm", 4.0)
         self.r_time_penalty   = kwargs.pop("r_time_penalty", -0.0005)
@@ -511,6 +512,11 @@ class WildfireSearchScenario(BaseScenario):
         self.r_drone_shaping  = kwargs.pop("r_drone_shaping",  0.30)
         self.r_ground_shaping = kwargs.pop("r_ground_shaping", 0.50)
         self.r_ugv_movement_alignment = kwargs.pop("r_ugv_movement_alignment", 0.20)
+        self.ugv_target_assignment_mode = str(
+            kwargs.pop("ugv_target_assignment_mode", "nearest")
+        ).replace("-", "_").lower()
+        if self.ugv_target_assignment_mode not in {"nearest", "greedy"}:
+            raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy")
         self.r_ugv_planner_progress = max(float(kwargs.pop("r_ugv_planner_progress", 0.0)), 0.0)
         self.ugv_dense_reward_mode = str(kwargs.pop("ugv_dense_reward_mode", "target")).replace("-", "_")
         if self.ugv_dense_reward_mode not in {
@@ -1237,6 +1243,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_full_success = torch.zeros(batch_dim, device=device)
         self.metric_reward_team = torch.zeros(batch_dim, device=device)
         self.metric_reward_all_survivors_found = torch.zeros(batch_dim, device=device)
+        self.metric_reward_team_scout = torch.zeros(batch_dim, device=device)
+        self.metric_reward_pending_penalty = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_move_coverage = torch.zeros(batch_dim, device=device)
@@ -1400,6 +1408,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_prev_distance_valid = torch.zeros(batch_dim, device=device)
         self.metric_ugv_progress_gate_active = torch.zeros(batch_dim, device=device)
         self.metric_ugv_target_index = torch.full((batch_dim,), -1.0, device=device)
+        self.metric_ugv_duplicate_assignment_fraction = torch.zeros(batch_dim, device=device)
         self.metric_ugv_ground_progress_m = torch.zeros(batch_dim, device=device)
         self.metric_ugv_ground_progress_scaled = torch.zeros(batch_dim, device=device)
         self.metric_ugv_action_alignment = torch.zeros(batch_dim, device=device)
@@ -1447,6 +1456,8 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_full_success,
             self.metric_reward_team,
             self.metric_reward_all_survivors_found,
+            self.metric_reward_team_scout,
+            self.metric_reward_pending_penalty,
             self.metric_reward_drone_scout,
             self.metric_reward_drone_progress,
             self.metric_reward_uav_move_coverage,
@@ -1550,6 +1561,7 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_prev_distance_valid,
             self.metric_ugv_progress_gate_active,
             self.metric_ugv_target_index,
+            self.metric_ugv_duplicate_assignment_fraction,
             self.metric_ugv_ground_progress_m,
             self.metric_ugv_ground_progress_scaled,
             self.metric_ugv_action_alignment,
@@ -3305,6 +3317,78 @@ class WildfireSearchScenario(BaseScenario):
         occluded = ((terrain > sight + eps) & interior.view(1, 1, 1, -1)).any(dim=-1)
         return ~occluded
 
+    def _ugv_assigned_target_indices(
+        self,
+        ground_pos: Tensor,
+        survivor_pos: Tensor,
+        targetable: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Assign known, unconfirmed survivor targets to UGVs."""
+        batch_dim = ground_pos.shape[0]
+        device = ground_pos.device
+        if self.n_ground == 0 or self.n_survivors == 0:
+            return (
+                torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device),
+                torch.full((batch_dim, self.n_ground), float("inf"), device=device),
+            )
+
+        distances = torch.linalg.norm(survivor_pos.unsqueeze(1) - ground_pos.unsqueeze(2), dim=-1)
+        masked = torch.where(targetable, distances, torch.full_like(distances, float("inf")))
+        if self.ugv_target_assignment_mode == "nearest" or self.n_ground <= 1:
+            assigned_dist, assigned_idx = masked.min(dim=2)
+            assigned_idx = torch.where(
+                torch.isfinite(assigned_dist),
+                assigned_idx,
+                torch.full_like(assigned_idx, -1),
+            )
+            return assigned_idx, assigned_dist
+
+        assigned_idx = torch.full(
+            (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
+        )
+        assigned_dist = torch.full((batch_dim, self.n_ground), float("inf"), device=device)
+        for env_index in range(batch_dim):
+            best_per_ground = masked[env_index].min(dim=1).values
+            order = torch.argsort(best_per_ground)
+            used: set[int] = set()
+            for ground_index_tensor in order:
+                ground_index = int(ground_index_tensor.item())
+                valid_targets = torch.nonzero(targetable[env_index, ground_index], as_tuple=False).flatten()
+                if valid_targets.numel() == 0:
+                    continue
+                unused_targets = [
+                    int(target.item())
+                    for target in valid_targets
+                    if int(target.item()) not in used
+                ]
+                candidate_targets = (
+                    torch.tensor(unused_targets, dtype=torch.long, device=device)
+                    if unused_targets
+                    else valid_targets
+                )
+                candidate_distances = distances[env_index, ground_index, candidate_targets]
+                selected_offset = int(torch.argmin(candidate_distances).item())
+                selected = int(candidate_targets[selected_offset].item())
+                assigned_idx[env_index, ground_index] = selected
+                assigned_dist[env_index, ground_index] = distances[env_index, ground_index, selected]
+                if unused_targets:
+                    used.add(selected)
+        return assigned_idx, assigned_dist
+
+    def _ugv_duplicate_assignment_fraction(self, target_idx: Tensor, valid_target: Tensor) -> Tensor:
+        if self.n_ground <= 1:
+            return torch.zeros(target_idx.shape[0], device=target_idx.device)
+        out = torch.zeros(target_idx.shape[0], device=target_idx.device)
+        for env_index in range(target_idx.shape[0]):
+            assigned = [
+                int(idx.item())
+                for idx, valid in zip(target_idx[env_index], valid_target[env_index])
+                if bool(valid.item()) and int(idx.item()) >= 0
+            ]
+            if assigned:
+                out[env_index] = float(len(assigned) - len(set(assigned))) / float(len(assigned))
+        return out
+
     def _compute_step_rewards(self):
         device = self.fire_grid.device
 
@@ -3402,12 +3486,12 @@ class WildfireSearchScenario(BaseScenario):
         unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
         ground_known = self.known_survivors_by_agent[:, self.n_drones:, :]
         known_ground_targets = ground_known & unconfirmed_scouted.unsqueeze(1)
-        ground_d_sim = torch.where(
+        ground_pos_for_assignment = agent_pos[:, self.n_drones:, :]
+        curr_ground_target_idx, curr_ground_dist_sim = self._ugv_assigned_target_indices(
+            ground_pos_for_assignment,
+            surv_pos,
             known_ground_targets,
-            dists[:, self.n_drones:, :],
-            torch.full_like(dists[:, self.n_drones:, :], INF),
         )
-        curr_ground_dist_sim, curr_ground_target_idx = ground_d_sim.min(dim=2)
         sim_units_per_meter = self.terrain_sim_units_per_meter.to(curr_ground_dist_sim.device)
         meters_per_sim = torch.where(
             sim_units_per_meter > 1e-9,
@@ -3679,8 +3763,10 @@ class WildfireSearchScenario(BaseScenario):
         all_survivors_found_reward = (
             all_survivors_found_now.float() * self.r_all_survivors_found
         )
+        team_scout_reward = newly_scouted.float().sum(dim=1) * self.r_team_scout
         team_reward = (
-            newly_found.float().sum(dim=1) * self.r_found_survivor
+            team_scout_reward
+            + newly_found.float().sum(dim=1) * self.r_found_survivor
             + all_survivors_found_reward
             + self.r_time_penalty
         )
@@ -3699,6 +3785,7 @@ class WildfireSearchScenario(BaseScenario):
         # waiting. Applied to ground robots so idling while survivors are pending
         # is no longer a safe zero-reward option.
         n_pending = unconfirmed_scouted.float().sum(dim=1)  # [B]
+        pending_penalty_reward = n_pending * self.r_pending_penalty * float(self.n_ground)
 
         ground_agents = self.world.agents[self.n_drones:]
         ground_in_fire = self._agents_in_fire(ground_agents)  # [B, G]
@@ -3832,6 +3919,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_full_success = self.found_survivors.all(dim=1).float()
         self.metric_reward_team = team_reward
         self.metric_reward_all_survivors_found = all_survivors_found_reward
+        self.metric_reward_team_scout = team_scout_reward
+        self.metric_reward_pending_penalty = pending_penalty_reward
         self.metric_reward_drone_scout = (scout_per_drone * self.r_drone_scout).sum(dim=1)
         self.metric_reward_drone_progress = drone_shaping.sum(dim=1)
         self.metric_reward_uav_move_coverage = uav_move_coverage_reward.sum(dim=1)
@@ -3966,8 +4055,15 @@ class WildfireSearchScenario(BaseScenario):
                 curr_ground_target_idx.float().min(dim=1).values,
                 torch.full((self.world.batch_dim,), -1.0, device=device),
             )
+            self.metric_ugv_duplicate_assignment_fraction = self._ugv_duplicate_assignment_fraction(
+                curr_ground_target_idx,
+                valid_ground_target,
+            )
         else:
             self.metric_ugv_target_index = torch.full((self.world.batch_dim,), -1.0, device=device)
+            self.metric_ugv_duplicate_assignment_fraction = torch.zeros(
+                self.world.batch_dim, device=device,
+            )
         self.metric_ugv_ground_progress_m = torch.where(
             prev_known,
             ground_progress_m,
@@ -7232,19 +7328,22 @@ class WildfireSearchScenario(BaseScenario):
         if agent.is_drone or self.n_survivors == 0:
             return torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
 
-        local_known = self.known_survivors_by_agent[:, agent_idx]
-        local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
-        targetable = local_known & ~local_confirmed
+        ground_slice = slice(self.n_drones, self.n_agents)
+        ground_known = self.known_survivors_by_agent[:, ground_slice]
+        ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
+        targetable = ground_known & ~ground_confirmed
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
-        distances = torch.linalg.norm(survivor_pos - agent.state.pos.unsqueeze(1), dim=-1)
-        masked_distances = torch.where(
+        ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
+        assigned_idx, _assigned_dist = self._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
             targetable,
-            distances,
-            torch.full_like(distances, float("inf")),
         )
-        target_idx = masked_distances.argmin(dim=-1)
-        has_target = targetable.any(dim=-1)
-        target_pos = survivor_pos.gather(1, target_idx.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
+        ground_index = agent_idx - self.n_drones
+        target_idx = assigned_idx[:, ground_index]
+        has_target = target_idx >= 0
+        target_idx_safe = target_idx.clamp(min=0)
+        target_pos = survivor_pos.gather(1, target_idx_safe.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
 
         out = torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
         for env_index in range(self.world.batch_dim):
@@ -7252,7 +7351,7 @@ class WildfireSearchScenario(BaseScenario):
                 continue
             out[env_index] = self._local_astar_hint_for_env(
                 env_index,
-                agent_idx - self.n_drones,
+                ground_index,
                 agent.state.pos[env_index],
                 target_pos[env_index],
                 target_idx=int(target_idx[env_index].item()),
@@ -9334,6 +9433,8 @@ class WildfireSearchScenario(BaseScenario):
             "mission/full_success": self.metric_full_success,
             "reward/team": self.metric_reward_team,
             "reward/all_survivors_found": self.metric_reward_all_survivors_found,
+            "reward/team_scout": self.metric_reward_team_scout,
+            "reward/pending_penalty": self.metric_reward_pending_penalty,
             "reward/drone_scout": self.metric_reward_drone_scout,
             "reward/drone_progress": self.metric_reward_drone_progress,
             "reward/uav_move_coverage": self.metric_reward_uav_move_coverage,
@@ -9394,6 +9495,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_prev_distance_valid": self.metric_ugv_prev_distance_valid,
             "diagnostic/ugv_progress_gate_active": self.metric_ugv_progress_gate_active,
             "diagnostic/ugv_target_index": self.metric_ugv_target_index,
+            "diagnostic/ugv_duplicate_assignment_fraction": self.metric_ugv_duplicate_assignment_fraction,
             "diagnostic/ugv_ground_progress_m": self.metric_ugv_ground_progress_m,
             "diagnostic/ugv_ground_progress_scaled": self.metric_ugv_ground_progress_scaled,
             "diagnostic/ugv_planner_progress_m": self.metric_ugv_planner_progress_m,

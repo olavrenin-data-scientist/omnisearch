@@ -93,6 +93,13 @@ DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY = "lazy"
 DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_INTERVAL_STEPS = 15
 DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD = 0.6
 DEFAULT_UGV_DIAG_PLANNER_LAND_COVER_COSTS = (0.85, 1.0, 1.15, 1.35, 4.0, 8.0)
+DEFAULT_JOINT_DIAG_DRONES = 3
+DEFAULT_JOINT_DIAG_UGVS = 1
+DEFAULT_JOINT_DIAG_SURVIVORS = 5
+DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD = 1.0
+DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD = 4.0
+DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD = 10.0
+DEFAULT_JOINT_DIAG_PENDING_PENALTY = -0.005
 DEFAULT_UAV_FRONTIER_MODE = "sector_topk"
 DEFAULT_UAV_DIAG_FRONTIER_MODE = "local_global"
 DEFAULT_UAV_DIAG_FRONTIER_SOURCE = "confidence"
@@ -226,7 +233,9 @@ def build_args(
     uav_astar_waypoint_reached_m: float = 20.0,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
+    joint_survivor_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
+    joint_diagnostic_ugvs: int = DEFAULT_JOINT_DIAG_UGVS,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
     uav_no_global_coverage_obs: bool = False,
@@ -302,16 +311,19 @@ def build_args(
     ugv_planner_fire_buffer_m: float = 10.0,
     ugv_planner_fire_buffer_cost: float = 8.0,
     ugv_planner_land_cover_costs: tuple[float, ...] | None = None,
+    ugv_target_assignment_mode: str = "nearest",
     enable_fire: bool | None = None,
 ) -> tuple[dict, dict, dict]:
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
-    if ugv_known_survivor_diagnostic:
+    uav_search_diagnostic = uav_survivor_diagnostic or joint_survivor_diagnostic
+    ugv_global_diagnostic = ugv_known_survivor_diagnostic or joint_survivor_diagnostic
+    if ugv_global_diagnostic:
         defaulted_ugv_planner_hint = ugv_planner_hint == "none"
         if terrain_cache_path is None:
             terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
         if local_map_patch_size == 3:
             local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if ugv_diagnostic_target_distance_min_m is None:
+        if ugv_known_survivor_diagnostic and ugv_diagnostic_target_distance_min_m is None:
             ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
         if lr == 5e-4:
             lr = DEFAULT_UGV_DIAG_LR
@@ -332,9 +344,12 @@ def build_args(
         if action_transform == "clip":
             action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
         if enable_fire is None:
-            enable_fire = True
+            enable_fire = bool(ugv_known_survivor_diagnostic)
+        if joint_survivor_diagnostic and enable_fire is False:
+            ugv_planner_fire_mode = "off"
         if ugv_planner_fire_mode == "off":
-            ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
+            if enable_fire:
+                ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
         if ugv_planner_fire_replan_policy == "always":
             ugv_planner_fire_replan_policy = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY
         if ugv_planner_fire_replan_interval_steps == 15:
@@ -398,9 +413,12 @@ def build_args(
     if ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
         raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
+    ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
+    if ugv_target_assignment_mode not in {"nearest", "greedy"}:
+        raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy")
     if not 0.0 <= float(ugv_planner_fire_block_threshold) <= 1.0:
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
-    if uav_survivor_diagnostic:
+    if uav_search_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
             raise ValueError("uav_diagnostic_drones must be positive")
@@ -445,7 +463,7 @@ def build_args(
             uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
         if uav_cleanup_target_progress_reward is None:
             uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
-        if share_param is None:
+        if share_param is None and uav_survivor_diagnostic:
             share_param = True
         if uav_start_min_separation_m is None:
             uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
@@ -550,7 +568,7 @@ def build_args(
         uav_overlap_allowed,
         uav_outside_footprint_penalty,
     ) = _resolve_uav_reward_defaults(
-        uav_survivor_diagnostic=uav_survivor_diagnostic,
+        uav_survivor_diagnostic=uav_search_diagnostic,
         uav_coverage_reward=uav_coverage_reward,
         uav_move_coverage_reward=uav_move_coverage_reward,
         uav_overlap_penalty=uav_overlap_penalty,
@@ -728,9 +746,11 @@ def build_args(
         "ugv_planner_smolder_cost": ugv_planner_smolder_cost,
         "ugv_planner_fire_buffer_m": ugv_planner_fire_buffer_m,
         "ugv_planner_fire_buffer_cost": ugv_planner_fire_buffer_cost,
+        "ugv_target_assignment_mode": ugv_target_assignment_mode,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
+        "r_team_scout": 0.0,
         "r_drone_scout": 2.0,
         "r_ground_confirm": 4.0,
         "r_drone_shaping": 0.30,
@@ -953,8 +973,13 @@ def build_args(
             "ground_coverage_radius": 0.08,
         })
 
-    if ugv_known_survivor_diagnostic and uav_survivor_diagnostic:
-        raise ValueError("Choose only one diagnostic mode: UGV or UAV")
+    diagnostic_modes = [
+        bool(ugv_known_survivor_diagnostic),
+        bool(uav_survivor_diagnostic),
+        bool(joint_survivor_diagnostic),
+    ]
+    if sum(diagnostic_modes) > 1:
+        raise ValueError("Choose only one diagnostic mode: UGV, UAV, or joint")
 
     if ugv_known_survivor_diagnostic:
         distance_kwargs = {}
@@ -1074,6 +1099,69 @@ def build_args(
             "uav_confidence_eps": uav_confidence_eps,
             "uav_confidence_opportunity_eps": uav_confidence_opportunity_eps,
             "uav_frontier_source": uav_frontier_source,
+            "r_uav_overlap": uav_overlap_penalty,
+            "uav_overlap_allowed": uav_overlap_allowed,
+            "uav_overlap_penalty_normalization": uav_overlap_penalty_normalization,
+            "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
+            "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
+            "r_uav_outside_footprint": uav_outside_footprint_penalty,
+            "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
+        })
+    if joint_survivor_diagnostic:
+        joint_diagnostic_ugvs = max(int(joint_diagnostic_ugvs), 1)
+        coverage_threshold_reward = (
+            0.0
+            if uav_coverage_threshold_reward is None
+            else float(uav_coverage_threshold_reward)
+        )
+        scenario_kwargs.update({
+            "n_drones": DEFAULT_JOINT_DIAG_DRONES,
+            "n_ground": joint_diagnostic_ugvs,
+            "n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            "known_survivors_at_reset": False,
+            "drone_can_confirm": False,
+            "disable_fire": not bool(enable_fire),
+            "comms_dropout": 0.0,
+            "ugv_target_assignment_mode": "greedy",
+            "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
+            "r_team_scout": DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD,
+            "r_all_survivors_found": 0.0,
+            "r_drone_scout": 2.0,
+            "r_ground_confirm": DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD,
+            "r_drone_shaping": 0.0,
+            "r_ground_shaping": 0.50,
+            "r_ground_approach": 0.0,
+            "r_ugv_movement_alignment": ugv_movement_alignment_reward,
+            "r_ugv_planner_progress": 0.0,
+            "r_ugv_stall_penalty": ugv_stall_penalty,
+            "r_pending_penalty": DEFAULT_JOINT_DIAG_PENDING_PENALTY,
+            "r_fire_penalty": 0.0,
+            "r_ground_travel_cost": 0.0,
+            "r_drone_climb_cost": 0.0,
+            "r_time_penalty": 0.0,
+            "r_coverage": uav_coverage_reward,
+            "uav_coverage_normalization": uav_coverage_normalization,
+            "r_uav_move_coverage": uav_move_coverage_reward,
+            "uav_move_coverage_normalization": uav_move_coverage_normalization,
+            "r_uav_move_coverage_cap": uav_move_coverage_cap,
+            "r_uav_coverage_threshold": coverage_threshold_reward,
+            "uav_coverage_threshold_fraction": uav_coverage_threshold_fraction,
+            "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
+            "r_uav_confidence": uav_confidence_reward,
+            "r_uav_confidence_move": uav_confidence_move_reward,
+            "r_uav_inefficient_move": uav_inefficient_move_penalty,
+            "uav_inefficient_move_source": uav_inefficient_move_source,
+            "r_uav_confidence_overlap": uav_confidence_overlap_penalty,
+            "uav_confidence_overlap_mode": uav_confidence_overlap_mode,
+            "uav_confidence_overlap_allowed_regret": uav_confidence_overlap_allowed_regret,
+            "r_uav_cleanup_target_progress": uav_cleanup_target_progress_reward,
+            "r_uav_astar_progress": uav_astar_progress_reward,
+            "uav_cleanup_target_refresh_mode": uav_cleanup_target_refresh_mode,
+            "uav_astar_route_obs": bool(uav_astar_route_obs),
+            "uav_confidence_overlap_threshold": uav_confidence_overlap_threshold,
+            "uav_confidence_gamma": uav_confidence_gamma,
+            "uav_confidence_eps": uav_confidence_eps,
+            "uav_confidence_opportunity_eps": uav_confidence_opportunity_eps,
             "r_uav_overlap": uav_overlap_penalty,
             "uav_overlap_allowed": uav_overlap_allowed,
             "uav_overlap_penalty_normalization": uav_overlap_penalty_normalization,
@@ -1273,6 +1361,9 @@ def main():
                    help="Planner-only land-cover costs for road/open/brush/forest/rock[/water]. "
                         "Physical UGV speeds and terrain observations are unchanged. "
                         "Example: --ugv-planner-land-cover-costs 0.85 1.0 1.15 1.35 4.0 8.0")
+    p.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy"),
+                   default="nearest",
+                   help="How UGV planner targets are selected from known, unconfirmed survivors.")
     p.set_defaults(enable_fire=None)
     p.add_argument("--enable-fire", dest="enable_fire", action="store_true",
                    help="Allow fire to run in diagnostic modes that otherwise disable it.")
@@ -1396,8 +1487,12 @@ def main():
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
                    help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
+    p.add_argument("--joint-survivor-diagnostic", action="store_true",
+                   help="Train a joint task: UAVs scout unknown survivors, UGVs confirm known targets.")
     p.add_argument("--uav-diagnostic-drones", type=int, default=DEFAULT_UAV_DIAG_DRONES,
                    help="Number of UAVs in --uav-survivor-diagnostic mode.")
+    p.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS,
+                   help="Number of UGVs in --joint-survivor-diagnostic mode.")
     p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
                    help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
     p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
@@ -1553,13 +1648,13 @@ def main():
     args.action_transform = args.action_transform.replace("-", "_")
     args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
 
-    if args.ugv_known_survivor_diagnostic:
+    if args.ugv_known_survivor_diagnostic or args.joint_survivor_diagnostic:
         defaulted_ugv_planner_hint = args.ugv_planner_hint == "none"
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
         if args.local_map_patch_size == 3:
             args.local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.ugv_diagnostic_target_distance_min_m is None:
+        if args.ugv_known_survivor_diagnostic and args.ugv_diagnostic_target_distance_min_m is None:
             args.ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
         if args.lr == 5e-4:
             args.lr = DEFAULT_UGV_DIAG_LR
@@ -1580,9 +1675,12 @@ def main():
         if args.action_transform == "clip":
             args.action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
         if args.enable_fire is None:
-            args.enable_fire = True
+            args.enable_fire = bool(args.ugv_known_survivor_diagnostic)
+        if args.joint_survivor_diagnostic and args.enable_fire is False:
+            args.ugv_planner_fire_mode = "off"
         if args.ugv_planner_fire_mode == "off":
-            args.ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
+            if args.enable_fire:
+                args.ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
         if args.ugv_planner_fire_replan_policy == "always":
             args.ugv_planner_fire_replan_policy = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY
         if args.ugv_planner_fire_replan_interval_steps == 15:
@@ -1641,6 +1739,8 @@ def main():
         p.error("--critic-lr must be positive")
     if args.terrain_cnn_embed_dim <= 0:
         p.error("--terrain-cnn-embed-dim must be positive")
+    if args.joint_diagnostic_ugvs < 1:
+        p.error("--joint-diagnostic-ugvs must be positive")
     if args.coverage_obs_grid is not None and args.coverage_obs_grid < 0:
         p.error("--coverage-obs-grid must be nonnegative")
     if args.local_coverage_obs_grid is not None and (
@@ -1852,8 +1952,19 @@ def main():
         p.error("--ugv-stall-displacement-threshold-m must be nonnegative")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
-    if args.ugv_known_survivor_diagnostic and args.uav_survivor_diagnostic:
-        p.error("Choose only one diagnostic mode: --ugv-known-survivor-diagnostic or --uav-survivor-diagnostic")
+    if sum(
+        (
+            bool(args.ugv_known_survivor_diagnostic),
+            bool(args.uav_survivor_diagnostic),
+            bool(args.joint_survivor_diagnostic),
+        )
+    ) > 1:
+        p.error(
+            "Choose only one diagnostic mode: --ugv-known-survivor-diagnostic, "
+            "--uav-survivor-diagnostic, or --joint-survivor-diagnostic"
+        )
+    if args.joint_survivor_diagnostic:
+        args.ugv_target_assignment_mode = "greedy"
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -1863,7 +1974,8 @@ def main():
             float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
         )
 
-    if args.uav_survivor_diagnostic:
+    uav_search_diagnostic = args.uav_survivor_diagnostic or args.joint_survivor_diagnostic
+    if uav_search_diagnostic:
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
         if args.local_map_patch_size == 3:
@@ -1907,7 +2019,7 @@ def main():
             args.uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
         if args.uav_cleanup_target_progress_reward is None:
             args.uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
-        if args.share_param is None:
+        if args.share_param is None and args.uav_survivor_diagnostic:
             args.share_param = True
         if args.uav_start_min_separation_m is None:
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
@@ -1960,7 +2072,7 @@ def main():
         args.uav_overlap_allowed,
         args.uav_outside_footprint_penalty,
     ) = _resolve_uav_reward_defaults(
-        uav_survivor_diagnostic=args.uav_survivor_diagnostic,
+        uav_survivor_diagnostic=uav_search_diagnostic,
         uav_coverage_reward=args.uav_coverage_reward,
         uav_move_coverage_reward=args.uav_move_coverage_reward,
         uav_overlap_penalty=args.uav_overlap_penalty,
@@ -2001,7 +2113,7 @@ def main():
     if args.research:
         num_env_steps  = args.num_env_steps  or 400_000
         episode_length = args.episode_length or (1_000 if args.preset == "floor0-1km" else 500)
-    elif args.uav_survivor_diagnostic:
+    elif args.uav_survivor_diagnostic or args.joint_survivor_diagnostic:
         num_env_steps  = args.num_env_steps  or 2_000
         episode_length = args.episode_length or DEFAULT_UAV_DIAG_EPISODE_LENGTH
     elif args.preset == "floor0-1km":
@@ -2064,6 +2176,8 @@ def main():
     print(f" uav_astar_route_replan_steps: {args.uav_astar_route_replan_steps}")
     print(f" uav_astar_waypoint_reached_m: {args.uav_astar_waypoint_reached_m}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
+    print(f" joint_survivor_diagnostic: {args.joint_survivor_diagnostic}")
+    print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(f" ugv_planner_hint: {args.ugv_planner_hint}")
     print(f" ugv_planner_detour_obs: {bool(args.ugv_planner_detour_obs)}")
     print(f" ugv_route_aware_reward: {bool(args.ugv_route_aware_reward)}")
@@ -2085,6 +2199,7 @@ def main():
     print(f" ugv_planner_fire_replan_interval_steps: {args.ugv_planner_fire_replan_interval_steps}")
     print(f" ugv_planner_fire_block_threshold: {args.ugv_planner_fire_block_threshold}")
     print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
+    print(f" ugv_target_assignment_mode: {args.ugv_target_assignment_mode}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
@@ -2184,7 +2299,9 @@ def main():
         uav_astar_waypoint_reached_m = args.uav_astar_waypoint_reached_m,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
+        joint_survivor_diagnostic = args.joint_survivor_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
+        joint_diagnostic_ugvs = args.joint_diagnostic_ugvs,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
@@ -2262,6 +2379,7 @@ def main():
             tuple(args.ugv_planner_land_cover_costs)
             if args.ugv_planner_land_cover_costs is not None else None
         ),
+        ugv_target_assignment_mode = args.ugv_target_assignment_mode,
         enable_fire = bool(args.enable_fire),
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")

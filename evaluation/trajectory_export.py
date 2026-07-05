@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
+import torch
 import vmas
 
 from detection.simulation_adapter import SimDrone, SimEntity, SimWildfireState, SimulationCvAdapter
@@ -101,23 +102,27 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
 
     agent_idx = scenario.world.agents.index(agent)
     ground_index = agent_idx - scenario.n_drones
-    local_known = scenario.known_survivors_by_agent[env_index, agent_idx]
-    local_confirmed = scenario.confirmed_survivors_by_agent[env_index, agent_idx]
-    targetable = local_known & ~local_confirmed
-    if not bool(targetable.any().item()):
+    ground_slice = slice(scenario.n_drones, scenario.n_agents)
+    ground_known = scenario.known_survivors_by_agent[:, ground_slice]
+    ground_confirmed = scenario.confirmed_survivors_by_agent[:, ground_slice]
+    targetable = ground_known & ~ground_confirmed
+    survivor_pos_tensor = torch.stack([s.state.pos for s in scenario._survivors], dim=1)
+    ground_pos_tensor = torch.stack(
+        [a.state.pos for a in scenario.world.agents[ground_slice]],
+        dim=1,
+    )
+    assigned_idx, assigned_dist = scenario._ugv_assigned_target_indices(
+        ground_pos_tensor,
+        survivor_pos_tensor,
+        targetable,
+    )
+    target_index = int(assigned_idx[env_index, ground_index].item())
+    if target_index < 0:
         return None
 
-    survivor_pos = [s.state.pos[env_index] for s in scenario._survivors]
-    survivor_stack = np.array([[float(p[X]), float(p[Y])] for p in survivor_pos], dtype=np.float64)
     ground_pos = agent.state.pos[env_index]
     gx = float(ground_pos[X])
     gy = float(ground_pos[Y])
-    target_mask = targetable.detach().cpu().numpy().astype(bool)
-    dists = np.linalg.norm(survivor_stack - np.array([[gx, gy]], dtype=np.float64), axis=1)
-    dists[~target_mask] = np.inf
-    target_index = int(np.argmin(dists))
-    if not np.isfinite(dists[target_index]):
-        return None
 
     target_pos = scenario._survivors[target_index].state.pos[env_index]
     route_info = None
@@ -178,7 +183,7 @@ def _ground_planner_record(agent, scenario, env_index: int) -> dict | None:
         "unit_dx": float(unit_dx),
         "unit_dy": float(unit_dy),
         "distance_m": float(dist_sim / scale),
-        "target_distance_m": float(dists[target_index] / scale),
+        "target_distance_m": float(assigned_dist[env_index, ground_index] / scale),
         "direct_blocked": bool(direct_blocked),
         "detour_needed": bool(detour_needed),
         "planner_mode": planner_mode,
