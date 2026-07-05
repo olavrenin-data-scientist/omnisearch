@@ -148,6 +148,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_planner_fire_replan_policy"] = (
             args.ugv_planner_fire_replan_policy.replace("-", "_")
         )
+    if args.ugv_planner_fire_replan_interval_steps is not None:
+        scenario_kwargs["ugv_planner_fire_replan_interval_steps"] = int(
+            args.ugv_planner_fire_replan_interval_steps
+        )
     if args.ugv_planner_fire_cost is not None:
         scenario_kwargs["ugv_planner_fire_cost"] = float(args.ugv_planner_fire_cost)
     if args.ugv_planner_fire_block_threshold is not None:
@@ -2798,9 +2802,11 @@ def main() -> None:
                         default=None,
                         help="Override the checkpoint's UGV planner fire mode.")
     parser.add_argument("--ugv-planner-fire-replan-policy",
-                        choices=("always", "affected"),
+                        choices=("always", "affected", "lazy"),
                         default=None,
                         help="Override when fire-aware UGV global routes are replanned after fire spread.")
+    parser.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=None,
+                        help="Override lazy fire-aware global route replan interval.")
     parser.add_argument("--ugv-planner-fire-cost", type=float, default=None,
                         help="Override active-fire planner cost.")
     parser.add_argument("--ugv-planner-fire-block-threshold", type=float, default=None,
@@ -2845,6 +2851,11 @@ def main() -> None:
         parser.error("--ugv-planner-lookahead-cells must be positive")
     if args.ugv_global_planner_lookahead_m is not None and args.ugv_global_planner_lookahead_m <= 0.0:
         parser.error("--ugv-global-planner-lookahead-m must be positive")
+    if (
+        args.ugv_planner_fire_replan_interval_steps is not None
+        and args.ugv_planner_fire_replan_interval_steps < 1
+    ):
+        parser.error("--ugv-planner-fire-replan-interval-steps must be positive")
     if (
         args.ugv_planner_fire_block_threshold is not None
         and not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0
@@ -2929,6 +2940,8 @@ def main() -> None:
         f"detour_obs={bool(scenario_kwargs.get('ugv_planner_detour_obs', False))} "
         f"route_aware={bool(scenario_kwargs.get('ugv_route_aware_reward', False))} "
         f"dense_mode={scenario_kwargs.get('ugv_dense_reward_mode', 'target')} "
+        f"fire_replan={scenario_kwargs.get('ugv_planner_fire_replan_policy', 'always')} "
+        f"fire_interval={scenario_kwargs.get('ugv_planner_fire_replan_interval_steps', 15)} "
         f"blend={float(scenario_kwargs.get('ugv_planner_blend_weight', 0.70)):.2f} "
         f"patch={scenario_kwargs.get('ugv_planner_patch_size', 11)} "
         f"lookahead={scenario_kwargs.get('ugv_planner_lookahead_cells', 10)} "

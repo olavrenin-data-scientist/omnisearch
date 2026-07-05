@@ -1094,6 +1094,105 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), -1)
         self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
 
+    def test_fire_replan_policy_lazy_keeps_far_route_fire_before_interval(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="lazy",
+            ugv_planner_fire_replan_interval_steps=15,
+            ugv_planner_fire_buffer_m=0.0,
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        cached_path = list(scenario.ugv_global_route_paths[0][0])
+        far_cell = cached_path[-2]
+        scenario.step_count[0] = 5
+        scenario.fire_grid[0, far_cell[1], far_cell[0]] = True
+
+        scenario._invalidate_ugv_planner_routes_for_fire_change()
+
+        self.assertEqual(scenario.ugv_global_route_paths[0][0], cached_path)
+        self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), 0)
+        self.assertFalse(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
+    def test_fire_replan_policy_lazy_clears_near_route_fire(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="lazy",
+            ugv_planner_fire_replan_interval_steps=15,
+            ugv_planner_fire_buffer_m=0.0,
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        near_cell = scenario.ugv_global_route_paths[0][0][1]
+        scenario.step_count[0] = 5
+        scenario.fire_grid[0, near_cell[1], near_cell[0]] = True
+
+        scenario._invalidate_ugv_planner_routes_for_fire_change()
+
+        self.assertFalse(scenario.ugv_global_route_paths[0][0])
+        self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), -1)
+        self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
+    def test_fire_replan_policy_lazy_clears_after_interval(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_fire_replan_policy="lazy",
+            ugv_planner_fire_replan_interval_steps=3,
+            ugv_planner_fire_buffer_m=0.0,
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+        plan = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+        )
+        self.assertIsNotNone(plan)
+        scenario.step_count[0] = 3
+        scenario.fire_grid[0, 10, 10] = True
+
+        scenario._invalidate_ugv_planner_routes_for_fire_change()
+
+        self.assertFalse(scenario.ugv_global_route_paths[0][0])
+        self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), -1)
+        self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
+
     def test_optimized_local_astar_route_matches_reference_cases(self):
         route_cases = (
             ("clear_direct", (64, 64), (67, 64), ()),

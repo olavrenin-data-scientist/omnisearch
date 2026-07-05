@@ -571,6 +571,7 @@ def export_trajectory(
             "global_heuristic": str(getattr(sc, "ugv_global_planner_heuristic", "euclidean")),
             "mode": str(getattr(sc, "ugv_planner_fire_mode", "off")),
             "replan_policy": str(getattr(sc, "ugv_planner_fire_replan_policy", "always")),
+            "replan_interval_steps": int(getattr(sc, "ugv_planner_fire_replan_interval_steps", 15)),
             "fire_cost": round(float(getattr(sc, "ugv_planner_fire_cost", 25.0)), 4),
             "fire_block_threshold": round(
                 float(getattr(sc, "ugv_planner_fire_block_threshold", 0.0)), 4

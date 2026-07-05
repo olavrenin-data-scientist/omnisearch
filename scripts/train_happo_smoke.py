@@ -273,6 +273,7 @@ def build_args(
     ugv_global_planner_heuristic: str = "euclidean",
     ugv_planner_fire_mode: str = "off",
     ugv_planner_fire_replan_policy: str = "always",
+    ugv_planner_fire_replan_interval_steps: int = 15,
     ugv_planner_fire_cost: float = 25.0,
     ugv_planner_fire_block_threshold: float = 0.0,
     ugv_planner_smoke_cost: float = 5.0,
@@ -321,8 +322,9 @@ def build_args(
     if ugv_planner_fire_mode not in {"off", "cost", "block"}:
         raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
     ugv_planner_fire_replan_policy = str(ugv_planner_fire_replan_policy).replace("-", "_")
-    if ugv_planner_fire_replan_policy not in {"always", "affected"}:
-        raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected")
+    if ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
+        raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
+    ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     if not 0.0 <= float(ugv_planner_fire_block_threshold) <= 1.0:
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
     if uav_survivor_diagnostic:
@@ -646,6 +648,7 @@ def build_args(
         "ugv_global_planner_heuristic": ugv_global_planner_heuristic,
         "ugv_planner_fire_mode": ugv_planner_fire_mode,
         "ugv_planner_fire_replan_policy": ugv_planner_fire_replan_policy,
+        "ugv_planner_fire_replan_interval_steps": ugv_planner_fire_replan_interval_steps,
         "ugv_planner_fire_cost": ugv_planner_fire_cost,
         "ugv_planner_fire_block_threshold": ugv_planner_fire_block_threshold,
         "ugv_planner_smoke_cost": ugv_planner_smoke_cost,
@@ -1168,10 +1171,14 @@ def main():
                    help="Fire treatment for UGV A* planners. off ignores fire; cost adds fire/smoke costs; "
                         "block treats active fire as non-traversable and uses soft smoke/buffer costs.")
     p.add_argument("--ugv-planner-fire-replan-policy",
-                   choices=("always", "affected"),
+                   choices=("always", "affected", "lazy"),
                    default="always",
                    help="When fire-aware planning is enabled, always replan on fire spread or only when "
-                        "active fire/buffer touches the cached global route.")
+                        "active fire/buffer touches the cached global route. lazy only replans when "
+                        "the near route segment is risky or the interval expires.")
+    p.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=15,
+                   help="For --ugv-planner-fire-replan-policy lazy, maximum fire-change steps "
+                        "between full global replans.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=25.0,
                    help="Additional movement cost for active fire cells in cost mode.")
     p.add_argument("--ugv-planner-fire-block-threshold", type=float, default=0.0,
@@ -1683,6 +1690,8 @@ def main():
     if args.ugv_global_planner_lookahead_m <= 0.0:
         p.error("--ugv-global-planner-lookahead-m must be positive")
     args.ugv_global_planner_heuristic = args.ugv_global_planner_heuristic.replace("-", "_")
+    if args.ugv_planner_fire_replan_interval_steps < 1:
+        p.error("--ugv-planner-fire-replan-interval-steps must be positive")
     if not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0:
         p.error("--ugv-planner-fire-block-threshold must be in [0, 1]")
     for flag_name in (
@@ -1938,6 +1947,7 @@ def main():
     print(f" ugv_global_planner_heuristic: {args.ugv_global_planner_heuristic}")
     print(f" ugv_planner_fire_mode: {args.ugv_planner_fire_mode}")
     print(f" ugv_planner_fire_replan_policy: {args.ugv_planner_fire_replan_policy}")
+    print(f" ugv_planner_fire_replan_interval_steps: {args.ugv_planner_fire_replan_interval_steps}")
     print(f" ugv_planner_fire_block_threshold: {args.ugv_planner_fire_block_threshold}")
     print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
@@ -2106,6 +2116,7 @@ def main():
         ugv_global_planner_heuristic = args.ugv_global_planner_heuristic,
         ugv_planner_fire_mode = args.ugv_planner_fire_mode,
         ugv_planner_fire_replan_policy = args.ugv_planner_fire_replan_policy,
+        ugv_planner_fire_replan_interval_steps = args.ugv_planner_fire_replan_interval_steps,
         ugv_planner_fire_cost = args.ugv_planner_fire_cost,
         ugv_planner_fire_block_threshold = args.ugv_planner_fire_block_threshold,
         ugv_planner_smoke_cost = args.ugv_planner_smoke_cost,

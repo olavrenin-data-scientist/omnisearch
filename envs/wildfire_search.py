@@ -308,8 +308,12 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_planner_fire_replan_policy = str(
             kwargs.pop("ugv_planner_fire_replan_policy", "always"),
         ).replace("-", "_")
-        if self.ugv_planner_fire_replan_policy not in {"always", "affected"}:
-            raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected")
+        if self.ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
+            raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
+        self.ugv_planner_fire_replan_interval_steps = max(
+            int(kwargs.pop("ugv_planner_fire_replan_interval_steps", 15)),
+            1,
+        )
         self.ugv_planner_fire_cost = max(float(kwargs.pop("ugv_planner_fire_cost", 25.0)), 0.0)
         self.ugv_planner_fire_block_threshold = float(
             kwargs.pop("ugv_planner_fire_block_threshold", 0.0)
@@ -1177,6 +1181,12 @@ class WildfireSearchScenario(BaseScenario):
             dtype=torch.long,
             device=device,
         )
+        self.ugv_global_route_last_replan_step = torch.full(
+            (batch_dim, self.n_ground),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
         self.ugv_global_route_paths: list[list[list[tuple[int, int]]]] = [
             [[] for _ in range(self.n_ground)]
             for _ in range(batch_dim)
@@ -1653,6 +1663,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_global_route_target_idx.fill_(-1)
             self.ugv_global_route_goal_cell.fill_(-1)
             self.ugv_global_route_waypoint_cell.fill_(-1)
+            self.ugv_global_route_last_replan_step.fill_(-1)
             self.ugv_global_route_fire_replan_pending.zero_()
             self.ugv_global_route_replanned_after_fire_flag.zero_()
             self.ugv_global_route_fire_blocked_no_path_flag.zero_()
@@ -1667,6 +1678,7 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_global_route_target_idx[env_index] = -1
         self.ugv_global_route_goal_cell[env_index] = -1
         self.ugv_global_route_waypoint_cell[env_index] = -1
+        self.ugv_global_route_last_replan_step[env_index] = -1
         self.ugv_global_route_fire_replan_pending[env_index] = False
         self.ugv_global_route_replanned_after_fire_flag[env_index] = False
         self.ugv_global_route_fire_blocked_no_path_flag[env_index] = False
@@ -2713,6 +2725,7 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_global_route_path_index[env_index, ground_index] = 0
         self.ugv_global_route_goal_cell[env_index, ground_index] = -1
         self.ugv_global_route_waypoint_cell[env_index, ground_index] = -1
+        self.ugv_global_route_last_replan_step[env_index, ground_index] = -1
         self.ugv_global_route_paths[env_index][ground_index] = []
         if fire_changed:
             self.ugv_global_route_fire_replan_pending[env_index, ground_index] = True
@@ -2720,6 +2733,58 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
         self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = False
         self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
+
+    def _ugv_global_route_near_risk(
+        self,
+        env_index: int,
+        ground_index: int,
+        risk: Tensor,
+    ) -> bool:
+        path = self.ugv_global_route_paths[env_index][ground_index]
+        if not path:
+            return False
+        start_idx = int(self.ugv_global_route_path_index[env_index, ground_index].item())
+        start_idx = max(0, min(start_idx, len(path) - 1))
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        cell_w_m = (2.0 * float(self.x_semidim) / float(self.fire_grid_size)) / max(scale, 1e-9)
+        cell_h_m = (2.0 * float(self.y_semidim) / float(self.fire_grid_size)) / max(scale, 1e-9)
+        accumulated_m = 0.0
+        previous = path[start_idx]
+        end_idx = start_idx
+        for idx in range(start_idx + 1, len(path)):
+            candidate = path[idx]
+            step_m = math.hypot(
+                abs(candidate[0] - previous[0]) * cell_w_m,
+                abs(candidate[1] - previous[1]) * cell_h_m,
+            )
+            next_accumulated = accumulated_m + step_m
+            if next_accumulated > self.ugv_global_planner_lookahead_m and idx > start_idx + 1:
+                break
+            end_idx = idx
+            accumulated_m = next_accumulated
+            previous = candidate
+
+        cells = path[start_idx : end_idx + 1]
+        if not cells:
+            return False
+        xs = torch.tensor(
+            [int(x) for x, _y in cells],
+            dtype=torch.long,
+            device=self.fire_grid.device,
+        )
+        ys = torch.tensor(
+            [int(y) for _x, y in cells],
+            dtype=torch.long,
+            device=self.fire_grid.device,
+        )
+        return bool(risk[ys, xs].any().item())
+
+    def _ugv_global_route_lazy_replan_due(self, env_index: int, ground_index: int) -> bool:
+        last_step = int(self.ugv_global_route_last_replan_step[env_index, ground_index].item())
+        if last_step < 0:
+            return True
+        current_step = int(self.step_count[env_index].item())
+        return (current_step - last_step) >= int(self.ugv_planner_fire_replan_interval_steps)
 
     def _invalidate_ugv_planner_routes_for_fire_change(self) -> None:
         if self.ugv_planner_fire_mode == "off":
@@ -2749,17 +2814,25 @@ class WildfireSearchScenario(BaseScenario):
                 path = self.ugv_global_route_paths[env_index][ground_index]
                 if not path:
                     continue
-                xs = torch.tensor(
-                    [int(x) for x, _y in path],
-                    dtype=torch.long,
-                    device=self.fire_grid.device,
-                )
-                ys = torch.tensor(
-                    [int(y) for _x, y in path],
-                    dtype=torch.long,
-                    device=self.fire_grid.device,
-                )
-                if bool(risk[ys, xs].any().item()):
+                if self.ugv_planner_fire_replan_policy == "lazy":
+                    should_replan = self._ugv_global_route_near_risk(
+                        env_index,
+                        ground_index,
+                        risk,
+                    ) or self._ugv_global_route_lazy_replan_due(env_index, ground_index)
+                else:
+                    xs = torch.tensor(
+                        [int(x) for x, _y in path],
+                        dtype=torch.long,
+                        device=self.fire_grid.device,
+                    )
+                    ys = torch.tensor(
+                        [int(y) for _x, y in path],
+                        dtype=torch.long,
+                        device=self.fire_grid.device,
+                    )
+                    should_replan = bool(risk[ys, xs].any().item())
+                if should_replan:
                     self._clear_ugv_global_route(
                         env_index,
                         ground_index,
@@ -7428,6 +7501,9 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_global_route_goal_cell[env_index, ground_index, 0] = int(gx)
             self.ugv_global_route_goal_cell[env_index, ground_index, 1] = int(gy)
             self.ugv_global_route_path_index[env_index, ground_index] = 0
+            self.ugv_global_route_last_replan_step[env_index, ground_index] = int(
+                self.step_count[env_index].item()
+            )
             self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
             self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = replanned_after_fire
 

@@ -108,9 +108,11 @@ def main():
                    default=None,
                    help="Override the UGV planner fire mode for trajectory export.")
     p.add_argument("--ugv-planner-fire-replan-policy",
-                   choices=("always", "affected"),
+                   choices=("always", "affected", "lazy"),
                    default=None,
                    help="Override when fire-aware UGV global routes are replanned after fire spread.")
+    p.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=None,
+                   help="Override lazy fire-aware global route replan interval.")
     p.add_argument("--ugv-global-planner-heuristic",
                    choices=("euclidean", "terrain"),
                    default=None,
@@ -392,6 +394,12 @@ def main():
     if args.ugv_planner_fire_replan_policy is not None:
         scenario_kwargs["ugv_planner_fire_replan_policy"] = (
             args.ugv_planner_fire_replan_policy.replace("-", "_")
+        )
+    if args.ugv_planner_fire_replan_interval_steps is not None:
+        if args.ugv_planner_fire_replan_interval_steps < 1:
+            raise SystemExit("--ugv-planner-fire-replan-interval-steps must be positive")
+        scenario_kwargs["ugv_planner_fire_replan_interval_steps"] = int(
+            args.ugv_planner_fire_replan_interval_steps
         )
     if args.ugv_global_planner_heuristic is not None:
         scenario_kwargs["ugv_global_planner_heuristic"] = (
