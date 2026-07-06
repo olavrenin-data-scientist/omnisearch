@@ -1239,6 +1239,7 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         "episodes": len(rows),
         "success_rate": _finite_mean(row["full_success"] for row in rows),
         "mean_confirmed": _finite_mean(row["confirmed"] for row in rows),
+        "mean_confirmation_recall": _finite_mean(row.get("confirmation_recall") for row in rows),
         "mean_initial_distance_m": _finite_mean(row["initial_distance_m"] for row in rows),
         "mean_final_distance_m": _finite_mean(row["final_distance_m"] for row in rows),
         "mean_min_distance_m": _finite_mean(row["min_distance_m"] for row in rows),
@@ -1429,7 +1430,7 @@ def _plot_ugv_diagnostics(
     import matplotlib.pyplot as plt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(9, 3, figsize=(15, 37), constrained_layout=True)
+    fig, axes = plt.subplots(10, 3, figsize=(15, 41), constrained_layout=True)
     axes = axes.reshape(-1)
 
     ax = axes[0]
@@ -1783,6 +1784,18 @@ def _plot_ugv_diagnostics(
     )
     ax.set_title("Route Fire State")
     ax.set_ylabel("fraction or cells")
+
+    _plot_hist_by_success(
+        axes[27],
+        rows,
+        "confirmation_recall",
+        "Confirmation Recall",
+        "confirmed / survivors",
+    )
+    axes[27].set_xlim(0.0, 1.0)
+
+    for ax in axes[28:]:
+        ax.axis("off")
 
     fig.suptitle(
         f"UGV HAPPO Diagnostics ({'deterministic' if deterministic else 'stochastic'}, n={len(rows)})",
@@ -2254,9 +2267,13 @@ def run_rollout(
         )
         for key, values in hyp_route_stall_penalty_abs.items()
     }
+    n_survivors = max(int(getattr(scenario, "n_survivors", 0)), 1)
+    confirmed_count = float(scenario.found_survivors[0].sum().item())
     return {
         "seed": seed,
-        "confirmed": float(scenario.found_survivors[0].sum().item()),
+        "survivors": n_survivors,
+        "confirmed": confirmed_count,
+        "confirmation_recall": confirmed_count / n_survivors,
         "full_success": float(bool(scenario.found_survivors[0].all())),
         "diagnostic_ground_agent_index": int(ground_agent_idx),
         "diagnostic_ground_index": int(ground_index),
@@ -2562,9 +2579,13 @@ def run_failure_trace(
             break
 
     _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
+    n_survivors = max(int(getattr(scenario, "n_survivors", 0)), 1)
+    confirmed_count = float(scenario.found_survivors[0].sum().item())
     return {
         "seed": seed,
-        "confirmed": float(scenario.found_survivors[0].sum().item()),
+        "survivors": n_survivors,
+        "confirmed": confirmed_count,
+        "confirmation_recall": confirmed_count / n_survivors,
         "full_success": float(bool(scenario.found_survivors[0].all())),
         "initial_distance_m": initial_distance,
         "final_distance_m": _distance_m(scenario, ground.state.pos, survivor.state.pos),
@@ -3094,6 +3115,7 @@ def main() -> None:
     for row in rows:
         print(
             f"seed {row['seed']:>4}: confirmed={row['confirmed']:.0f} "
+            f"recall={row['confirmation_recall']:.3f} "
             f"success={row['full_success']:.0f} "
             f"initial={row['initial_distance_m']:.1f}m "
             f"final={row['final_distance_m']:.1f}m "
@@ -3131,6 +3153,7 @@ def main() -> None:
     print(
         "means: "
         f"confirmed={summary['mean_confirmed']:.3f} "
+        f"recall={summary['mean_confirmation_recall']:.3f} "
         f"success={summary['success_rate']:.3f} "
         f"final={summary['mean_final_distance_m']:.1f}m "
         f"min={summary['mean_min_distance_m']:.1f}m "
