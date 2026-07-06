@@ -157,6 +157,7 @@ def run_rollout(
 
     n_survivors = int(scenario.n_survivors)
     first_scout_steps: list[int | None] = [None] * n_survivors
+    first_confirm_steps: list[int | None] = [None] * n_survivors
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     action_norms: list[float] = []
     displacement_m_values: list[float] = []
@@ -1462,13 +1463,26 @@ def run_rollout(
         for survivor_idx, is_scouted in enumerate(scouted):
             if is_scouted and first_scout_steps[survivor_idx] is None:
                 first_scout_steps[survivor_idx] = step + 1
-        if all(value is not None for value in first_scout_steps):
+        confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        for survivor_idx, is_confirmed in enumerate(confirmed):
+            if is_confirmed and first_confirm_steps[survivor_idx] is None:
+                first_confirm_steps[survivor_idx] = step + 1
+        if (
+            all(value is not None for value in first_scout_steps)
+            and all(value is not None for value in first_confirm_steps)
+        ):
             break
 
     scouted_count = sum(value is not None for value in first_scout_steps)
     missed_count = n_survivors - scouted_count
     scout_steps = [value for value in first_scout_steps if value is not None]
     all_scouted_step = max(scout_steps) if scouted_count == n_survivors and scout_steps else None
+    confirmed_count = sum(value is not None for value in first_confirm_steps)
+    unconfirmed_count = n_survivors - confirmed_count
+    confirm_steps = [value for value in first_confirm_steps if value is not None]
+    all_confirmed_step = (
+        max(confirm_steps) if confirmed_count == n_survivors and confirm_steps else None
+    )
     final_coverage_fraction = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
     path_metrics = _path_metrics(
         path_positions_sim,
@@ -1509,6 +1523,9 @@ def run_rollout(
         "scouted": scouted_count,
         "missed": missed_count,
         "recall": scouted_count / n_survivors if n_survivors else 0.0,
+        "confirmed": confirmed_count,
+        "unconfirmed": unconfirmed_count,
+        "confirmation_recall": confirmed_count / n_survivors if n_survivors else 0.0,
         "final_coverage_fraction": final_coverage_fraction,
         "final_confidence_mean": float(
             scenario.uav_confidence_grid[0].float().mean().detach().cpu().item()
@@ -1521,6 +1538,7 @@ def run_rollout(
         ),
         "final_survivor_confidence": final_survivor_confidence,
         "full_success": float(scouted_count == n_survivors),
+        "full_confirmation_success": float(confirmed_count == n_survivors),
         "avg_scout_step": float(np.mean(scout_steps)) if scout_steps else math.nan,
         "avg_scout_time_s": float(np.mean(scout_steps) * step_seconds) if scout_steps else math.nan,
         "all_scouted_step": all_scouted_step,
@@ -1529,6 +1547,17 @@ def run_rollout(
         "first_scout_times_s": [
             None if value is None else float(value * step_seconds)
             for value in first_scout_steps
+        ],
+        "avg_confirm_step": float(np.mean(confirm_steps)) if confirm_steps else math.nan,
+        "avg_confirm_time_s": float(np.mean(confirm_steps) * step_seconds) if confirm_steps else math.nan,
+        "all_confirmed_step": all_confirmed_step,
+        "all_confirmed_time_s": (
+            None if all_confirmed_step is None else float(all_confirmed_step * step_seconds)
+        ),
+        "first_confirm_steps": first_confirm_steps,
+        "first_confirm_times_s": [
+            None if value is None else float(value * step_seconds)
+            for value in first_confirm_steps
         ],
         "survivor_exposures": survivor_exposures,
         "avg_action_norm": _finite_mean(action_norms),
@@ -4423,11 +4452,19 @@ def _failure_label(row: dict[str, Any]) -> str:
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     successful = [row for row in rows if row["all_scouted_step"] is not None]
+    confirmation_successful = [
+        row for row in rows if row.get("all_confirmed_step") is not None
+    ]
     summary = {
         "episodes": float(len(rows)),
         "mean_scouted": float(np.mean([row["scouted"] for row in rows])) if rows else 0.0,
         "mean_missed": float(np.mean([row["missed"] for row in rows])) if rows else 0.0,
         "mean_recall": float(np.mean([row["recall"] for row in rows])) if rows else 0.0,
+        "mean_confirmed": float(np.mean([row.get("confirmed", 0.0) for row in rows])) if rows else 0.0,
+        "mean_unconfirmed": float(np.mean([row.get("unconfirmed", 0.0) for row in rows])) if rows else 0.0,
+        "mean_confirmation_recall": (
+            float(np.mean([row.get("confirmation_recall", 0.0) for row in rows])) if rows else 0.0
+        ),
         "mean_final_coverage_fraction": (
             float(np.mean([row["final_coverage_fraction"] for row in rows])) if rows else 0.0
         ),
@@ -4441,13 +4478,30 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             row["final_confidence_high_fraction"] for row in rows
         ]),
         "full_success_rate": float(np.mean([row["full_success"] for row in rows])) if rows else 0.0,
+        "full_confirmation_success_rate": (
+            float(np.mean([row.get("full_confirmation_success", 0.0) for row in rows])) if rows else 0.0
+        ),
         "mean_avg_scout_step": _finite_mean([row["avg_scout_step"] for row in rows]),
         "mean_avg_scout_time_s": _finite_mean([row["avg_scout_time_s"] for row in rows]),
+        "mean_avg_confirm_step": _finite_mean([
+            row.get("avg_confirm_step", math.nan) for row in rows
+        ]),
+        "mean_avg_confirm_time_s": _finite_mean([
+            row.get("avg_confirm_time_s", math.nan) for row in rows
+        ]),
         "mean_all_scouted_step_successes": (
             float(np.mean([row["all_scouted_step"] for row in successful])) if successful else math.nan
         ),
         "mean_all_scouted_time_s_successes": (
             float(np.mean([row["all_scouted_time_s"] for row in successful])) if successful else math.nan
+        ),
+        "mean_all_confirmed_step_successes": (
+            float(np.mean([row["all_confirmed_step"] for row in confirmation_successful]))
+            if confirmation_successful else math.nan
+        ),
+        "mean_all_confirmed_time_s_successes": (
+            float(np.mean([row["all_confirmed_time_s"] for row in confirmation_successful]))
+            if confirmation_successful else math.nan
         ),
         "mean_survivor_exposure_steps": _finite_mean([
             row["avg_survivor_exposure_steps"] for row in rows
@@ -5110,6 +5164,9 @@ def _summarize_outcome_splits(rows: list[dict[str, Any]]) -> list[dict[str, floa
             "group": label,
             "episodes": float(len(entries)),
             "mean_recall": _finite_mean([float(row.get("recall", math.nan)) for row in entries]),
+            "mean_confirmation_recall": _finite_mean([
+                float(row.get("confirmation_recall", math.nan)) for row in entries
+            ]),
             "mean_final_coverage_fraction": _finite_mean([
                 float(row.get("final_coverage_fraction", math.nan)) for row in entries
             ]),
@@ -5381,6 +5438,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
     metrics = {
         "recall": "recall",
+        "confirmation_recall": "confirmation_recall",
         "coverage": "final_coverage_fraction",
         "expected_recall": "expected_recall_from_exposure",
         "perception_gap": "perception_recall_gap",
@@ -6674,6 +6732,7 @@ def _write_fast_distribution_plots(
     axes_flat = axes.ravel()
     hist_panels = [
         ("Recall", "recall", (0.0, 1.0)),
+        ("Confirmation Recall", "confirmation_recall", (0.0, 1.0)),
         ("Success", "full_success", (0.0, 1.0)),
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
         ("Final Confidence", "final_confidence_mean", (0.0, 1.0)),
@@ -6684,26 +6743,27 @@ def _write_fast_distribution_plots(
     for ax, (title, key, xlim) in zip(axes_flat, hist_panels):
         _plot_hist_panel(ax, rows, title=title, key=key, xlim=xlim)
 
-    _plot_failure_labels_panel(axes_flat[7], label_counts)
+    custom_start = len(hist_panels)
+    _plot_failure_labels_panel(axes_flat[custom_start], label_counts)
     _plot_per_drone_bars(
-        axes_flat[8],
+        axes_flat[custom_start + 1],
         summary,
         "mean_path_length_m",
         "Per-Drone Path Length",
         "m",
     )
     _plot_per_drone_bars(
-        axes_flat[9],
+        axes_flat[custom_start + 2],
         summary,
         "mean_avg_excess_overlap_fraction",
         "Per-Drone Excess Overlap",
         "fraction",
     )
-    _plot_time_bins_search_efficiency(axes_flat[10], summary)
-    _plot_time_bins_reward_scale(axes_flat[11], summary)
-    _plot_time_bins_scouts(axes_flat[12], summary)
+    _plot_time_bins_search_efficiency(axes_flat[custom_start + 3], summary)
+    _plot_time_bins_reward_scale(axes_flat[custom_start + 4], summary)
+    _plot_time_bins_scouts(axes_flat[custom_start + 5], summary)
 
-    for ax in axes_flat[13:]:
+    for ax in axes_flat[custom_start + 6:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -6737,6 +6797,7 @@ def write_distribution_plots(
 
     panels = [
         ("Recall", "recall", (0.0, 1.0)),
+        ("Confirmation Recall", "confirmation_recall", (0.0, 1.0)),
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
         ("Final Confidence", "final_confidence_mean", (0.0, 1.0)),
         ("Confidence Gain / Step", "avg_confidence_gain", None),
@@ -7064,6 +7125,8 @@ def main() -> None:
                 f"scouted={row['scouted']}/{row['survivors']} "
                 f"missed={row['missed']} "
                 f"recall={row['recall']:.3f} "
+                f"confirmed={row['confirmed']}/{row['survivors']} "
+                f"confirm_recall={row['confirmation_recall']:.3f} "
                 f"coverage={row['final_coverage_fraction']:.3f} "
                 f"conf={row['final_confidence_mean']:.3f} "
                 f"move={row['avg_displacement_m']:.2f}m "
@@ -7084,6 +7147,8 @@ def main() -> None:
             f"scouted={row['scouted']}/{row['survivors']} "
             f"missed={row['missed']} "
             f"recall={row['recall']:.3f} "
+            f"confirmed={row['confirmed']}/{row['survivors']} "
+            f"confirm_recall={row['confirmation_recall']:.3f} "
             f"coverage={row['final_coverage_fraction']:.3f} "
             f"conf={row['final_confidence_mean']:.3f} "
             f"conf_gain={row['avg_confidence_gain']:.5f} "
@@ -7165,13 +7230,20 @@ def main() -> None:
         f"scouted={summary['mean_scouted']:.3f} "
         f"missed={summary['mean_missed']:.3f} "
         f"recall={summary['mean_recall']:.3f} "
+        f"confirmed={summary['mean_confirmed']:.3f} "
+        f"confirm_recall={summary['mean_confirmation_recall']:.3f} "
         f"coverage={summary['mean_final_coverage_fraction']:.3f} "
         f"confidence={summary['mean_final_confidence_mean']:.3f} "
         f"success={summary['full_success_rate']:.3f} "
+        f"confirm_success={summary['full_confirmation_success_rate']:.3f} "
         f"avg_scout={summary['mean_avg_scout_step']:.1f} steps/"
         f"{summary['mean_avg_scout_time_s']:.1f}s "
         f"all_scouted_successes={summary['mean_all_scouted_step_successes']:.1f} steps/"
-        f"{summary['mean_all_scouted_time_s_successes']:.1f}s"
+        f"{summary['mean_all_scouted_time_s_successes']:.1f}s "
+        f"avg_confirm={summary['mean_avg_confirm_step']:.1f} steps/"
+        f"{summary['mean_avg_confirm_time_s']:.1f}s "
+        f"all_confirmed_successes={summary['mean_all_confirmed_step_successes']:.1f} steps/"
+        f"{summary['mean_all_confirmed_time_s_successes']:.1f}s"
     )
     if args.diagnostic_level == "fast":
         print(
