@@ -283,7 +283,9 @@ def build_args(
     uav_boundary_soft_margin_m: float = 25.0,
     uav_start_min_separation_m: float | None = None,
     uav_start_edge_margin_m: float | None = None,
+    ugv_ground_shaping_reward: float | None = None,
     ugv_movement_alignment_reward: float = 0.20,
+    ugv_pending_penalty: float | None = None,
     ugv_planner_progress_reward: float = 0.0,
     ugv_route_aware_reward: bool = False,
     ugv_dense_reward_mode: str = "target",
@@ -1309,6 +1311,10 @@ def build_args(
             raise ValueError("share_param_by_agent_class group mapping does not match agent count")
         algo_args["algo"]["share_param_groups"] = share_param_groups
         algo_args["algo"]["share_param_group_names"] = share_param_group_names
+    if ugv_ground_shaping_reward is not None:
+        scenario_kwargs["r_ground_shaping"] = float(ugv_ground_shaping_reward)
+    if ugv_pending_penalty is not None:
+        scenario_kwargs["r_pending_penalty"] = float(ugv_pending_penalty)
     obs_dim_n_agents = int(scenario_kwargs.get("obs_schema_n_drones", scenario_kwargs["n_drones"])) + int(
         scenario_kwargs.get("obs_schema_n_ground", scenario_kwargs["n_ground"])
     )
@@ -1787,9 +1793,15 @@ def main():
     p.add_argument("--uav-start-edge-margin-m", type=float, default=None,
                    help="Minimum UAV start-center distance from each map edge in meters. In UAV "
                         "diagnostic mode, default is 50m; pass 0 to disable.")
+    p.add_argument("--ugv-ground-shaping-reward", type=float, default=None,
+                   help="Override r_ground_shaping for UGV route/target progress. "
+                        "Omit to use the diagnostic mode default.")
     p.add_argument("--ugv-movement-alignment-reward", type=float, default=0.20,
                    help="Reward scale for UGV actual-movement alignment toward a known survivor in the "
                         "diagnostic task.")
+    p.add_argument("--ugv-pending-penalty", type=float, default=None,
+                   help="Override per-UGV, per-step penalty per known unconfirmed survivor. "
+                        "Use a negative value, e.g. -0.02. Omit to use the diagnostic mode default.")
     p.add_argument("--ugv-planner-progress-reward", type=float, default=0.0,
                    help="Reward scale for actual UGV progress toward the local A* waypoint when "
                         "the planner detects a detour. Requires a local UGV planner hint.")
@@ -1978,8 +1990,12 @@ def main():
         p.error("--uav-astar-route-replan-steps must be positive")
     if args.uav_astar_waypoint_reached_m <= 0.0:
         p.error("--uav-astar-waypoint-reached-m must be positive")
+    if args.ugv_ground_shaping_reward is not None and args.ugv_ground_shaping_reward < 0.0:
+        p.error("--ugv-ground-shaping-reward must be nonnegative")
     if args.ugv_movement_alignment_reward < 0.0:
         p.error("--ugv-movement-alignment-reward must be nonnegative")
+    if args.ugv_pending_penalty is not None and args.ugv_pending_penalty > 0.0:
+        p.error("--ugv-pending-penalty must be zero or negative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
         p.error("--uav-coverage-reward must be nonnegative")
     if args.uav_found_survivor_reward is not None and args.uav_found_survivor_reward < 0.0:
@@ -2452,6 +2468,9 @@ def main():
         f"min_age={args.ugv_sticky_min_age_steps}"
     )
     print(f" ugv_planner_progress_reward: {args.ugv_planner_progress_reward}")
+    print(f" ugv_ground_shaping_reward: {args.ugv_ground_shaping_reward}")
+    print(f" ugv_movement_alignment_reward: {args.ugv_movement_alignment_reward}")
+    print(f" ugv_pending_penalty: {args.ugv_pending_penalty}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
@@ -2602,7 +2621,9 @@ def main():
         uav_boundary_soft_margin_m = args.uav_boundary_soft_margin_m,
         uav_start_min_separation_m = args.uav_start_min_separation_m,
         uav_start_edge_margin_m = args.uav_start_edge_margin_m,
+        ugv_ground_shaping_reward = args.ugv_ground_shaping_reward,
         ugv_movement_alignment_reward = args.ugv_movement_alignment_reward,
+        ugv_pending_penalty = args.ugv_pending_penalty,
         ugv_planner_progress_reward = args.ugv_planner_progress_reward,
         ugv_route_aware_reward = bool(args.ugv_route_aware_reward),
         ugv_dense_reward_mode = args.ugv_dense_reward_mode,
