@@ -169,6 +169,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.ugv_dense_reward_mode, "target")
         self.assertEqual(scenario.ugv_planner_blend_weight, 0.70)
         self.assertEqual(scenario.r_ugv_stall_penalty, 0.0)
+        self.assertEqual(scenario.r_ugv_route_progress_floor_penalty, 0.0)
+        self.assertEqual(scenario.ugv_route_progress_floor_m, 0.0)
         self.assertEqual(scenario.r_fire_penalty, -0.20)
         self.assertEqual(scenario.r_ground_travel_cost, -0.01)
         self.assertEqual(scenario.r_drone_climb_cost, -0.005)
@@ -1913,6 +1915,42 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(scenario.metric_reward_ugv_stall_penalty[0]), -0.02, places=5)
 
+    def test_ugv_route_progress_floor_penalty_uses_planner_progress_shortfall(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_dense_reward_mode="planner_follow",
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+
+        scenario.r_ugv_route_progress_floor_penalty = 0.05
+        scenario.ugv_route_progress_floor_m = 1.5
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        survivor.state.pos[:] = torch.tensor([[80.0 * scale, 0.0]])
+        ground.state.pos[:] = torch.tensor([[0.0, 0.0]])
+
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_reward_ugv_route_progress_floor_penalty[0]), 0.0)
+
+        scenario._pre_step_ground_pos[:, 0, :] = torch.tensor([[0.0, 0.0]])
+        ground.state.pos[:] = torch.tensor([[0.5 * scale, 0.0]])
+        scenario.step_ugv_actual_displacement_m[0, 0] = 0.5
+        scenario._compute_step_rewards()
+        shortfall = float(scenario.metric_ugv_route_progress_floor_shortfall_m[0])
+        self.assertGreater(shortfall, 0.0)
+        self.assertAlmostEqual(
+            float(scenario.metric_reward_ugv_route_progress_floor_penalty[0]),
+            -0.05 * shortfall,
+            places=4,
+        )
+
+        scenario.r_ugv_route_progress_floor_penalty = 0.0
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_reward_ugv_route_progress_floor_penalty[0]), 0.0)
+
     def test_ugv_planner_progress_reward_uses_astar_waypoint_when_detouring(self):
         env = self._diagnostic_env(
             ugv_planner_hint="local_astar",
@@ -2308,6 +2346,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "reward/ugv_movement_alignment",
             "reward/ugv_planner_progress",
             "reward/ugv_stall_penalty",
+            "reward/ugv_route_progress_floor_penalty",
             "reward/ground_confirm",
             "reward/coverage",
             "cost/ugv_fire_exposure",
@@ -2318,6 +2357,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "diagnostic/ugv_same_target",
             "diagnostic/ugv_prev_distance_valid",
             "diagnostic/ugv_progress_gate_active",
+            "diagnostic/ugv_route_progress_floor_shortfall_m",
             "diagnostic/ugv_target_index",
             "diagnostic/ugv_ground_progress_m",
             "diagnostic/ugv_ground_progress_scaled",

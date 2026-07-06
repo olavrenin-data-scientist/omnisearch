@@ -37,6 +37,7 @@ REWARD_COMPONENTS = (
     ("uav_cleanup", "reward/uav_cleanup_target_progress"),
     ("ugv_progress", "reward/ugv_progress"),
     ("ugv_align", "reward/ugv_movement_alignment"),
+    ("ugv_route_floor", "reward/ugv_route_progress_floor_penalty"),
     ("pending", "reward/pending_penalty"),
 )
 
@@ -410,7 +411,15 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, float], output: Path) -
         ax.legend(fontsize=8)
 
         ax = axes[8]
-        for name in ("team_scout", "drone_scout", "ground_confirm", "uav_conf", "uav_conf_overlap", "ugv_progress"):
+        for name in (
+            "team_scout",
+            "drone_scout",
+            "ground_confirm",
+            "uav_conf",
+            "uav_conf_overlap",
+            "ugv_progress",
+            "ugv_route_floor",
+        ):
             ax.plot(xs, mean_series(f"reward_{name}"), marker="o", label=name)
         ax.set_title("Reward Scale (mean abs)")
         ax.set_xlabel("episode fraction")

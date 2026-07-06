@@ -37,6 +37,7 @@ REWARD_COMPONENTS = (
     "approach",
     "planner_progress",
     "stall_penalty",
+    "route_floor_penalty",
     "travel_penalty",
 )
 ROUTE_STALL_THRESHOLDS_M = (
@@ -813,6 +814,10 @@ def _reward_components(scenario: WildfireSearchScenario) -> dict[str, float]:
         "approach": _metric_scalar(scenario, "metric_reward_ugv_approach"),
         "planner_progress": _metric_scalar(scenario, "metric_reward_ugv_planner_progress"),
         "stall_penalty": _metric_scalar(scenario, "metric_reward_ugv_stall_penalty"),
+        "route_floor_penalty": _metric_scalar(
+            scenario,
+            "metric_reward_ugv_route_progress_floor_penalty",
+        ),
         "travel_penalty": travel_penalty,
     }
 
@@ -1515,6 +1520,7 @@ def _plot_ugv_diagnostics(
         "approach": "#eab308",
         "planner_progress": "#8b5cf6",
         "stall_penalty": "#ef4444",
+        "route_floor_penalty": "#be123c",
         "travel_penalty": "#111827",
     }
     for name in REWARD_COMPONENTS:

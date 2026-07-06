@@ -604,6 +604,14 @@ class WildfireSearchScenario(BaseScenario):
             float(kwargs.pop("ugv_stall_displacement_threshold_m", 0.05)),
             0.0,
         )
+        self.r_ugv_route_progress_floor_penalty = max(
+            float(kwargs.pop("r_ugv_route_progress_floor_penalty", 0.0)),
+            0.0,
+        )
+        self.ugv_route_progress_floor_m = max(
+            float(kwargs.pop("ugv_route_progress_floor_m", 0.0)),
+            0.0,
+        )
         self.ground_progress_scale_m = max(
             float(kwargs.pop(
                 "ground_progress_scale_m",
@@ -1515,6 +1523,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_route_fire_blocked_no_path = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_aware_active = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
+        self.metric_reward_ugv_route_progress_floor_penalty = torch.zeros(batch_dim, device=device)
+        self.metric_ugv_route_progress_floor_shortfall_m = torch.zeros(batch_dim, device=device)
 
     def _reset_step_metric_buffers(self, env_index: int | None = None) -> None:
         buffers = [
@@ -1670,6 +1680,8 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_route_fire_blocked_no_path,
             self.metric_ugv_route_aware_active,
             self.metric_reward_ugv_stall_penalty,
+            self.metric_reward_ugv_route_progress_floor_penalty,
+            self.metric_ugv_route_progress_floor_shortfall_m,
         ]
         for buffer in buffers:
             if env_index is None:
@@ -3983,6 +3995,15 @@ class WildfireSearchScenario(BaseScenario):
             & (self.step_ugv_actual_displacement_m < self.ugv_stall_displacement_threshold_m)
         )
         ugv_stall_penalty = -self.r_ugv_stall_penalty * stalled_while_seeking.float()
+        route_progress_floor_shortfall_m = torch.where(
+            planner_active & prev_known & outside_confirm_range,
+            (self.ugv_route_progress_floor_m - planner_progress_m).clamp(min=0.0),
+            torch.zeros_like(planner_progress_m),
+        )
+        ugv_route_progress_floor_penalty = (
+            -self.r_ugv_route_progress_floor_penalty
+            * route_progress_floor_shortfall_m
+        )
         if (
             self.n_ground > 0
             and self.n_survivors > 0
@@ -4303,6 +4324,12 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_ugv_movement_alignment = movement_alignment_reward.sum(dim=1)
         self.metric_reward_ugv_planner_progress = planner_progress_reward.sum(dim=1)
         self.metric_reward_ugv_stall_penalty = ugv_stall_penalty.sum(dim=1)
+        self.metric_reward_ugv_route_progress_floor_penalty = (
+            ugv_route_progress_floor_penalty.sum(dim=1)
+        )
+        self.metric_ugv_route_progress_floor_shortfall_m = (
+            route_progress_floor_shortfall_m.sum(dim=1)
+        )
         self.metric_reward_ground_confirm = (
             confirm_per_ground * self.r_ground_confirm
         ).sum(dim=1)
@@ -4447,6 +4474,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + movement_alignment_reward[:, g]
                 r = r + planner_progress_reward[:, g]
                 r = r + ugv_stall_penalty[:, g]
+                r = r + ugv_route_progress_floor_penalty[:, g]
             agent.scenario_reward = r
 
     def _drone_survivor_detections(
@@ -9824,6 +9852,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/ugv_movement_alignment": self.metric_reward_ugv_movement_alignment,
             "reward/ugv_planner_progress": self.metric_reward_ugv_planner_progress,
             "reward/ugv_stall_penalty": self.metric_reward_ugv_stall_penalty,
+            "reward/ugv_route_progress_floor_penalty": self.metric_reward_ugv_route_progress_floor_penalty,
             "reward/ground_confirm": self.metric_reward_ground_confirm,
             "reward/coverage": self.metric_reward_coverage,
             "cost/ugv_fire_exposure": self.metric_cost_ugv_fire_exposure,
@@ -9869,6 +9898,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_assignment_switches": self.metric_ugv_assignment_switches,
             "diagnostic/ugv_ground_progress_m": self.metric_ugv_ground_progress_m,
             "diagnostic/ugv_ground_progress_scaled": self.metric_ugv_ground_progress_scaled,
+            "diagnostic/ugv_route_progress_floor_shortfall_m": self.metric_ugv_route_progress_floor_shortfall_m,
             "diagnostic/ugv_planner_progress_m": self.metric_ugv_planner_progress_m,
             "diagnostic/ugv_planner_progress_scaled": self.metric_ugv_planner_progress_scaled,
             "diagnostic/ugv_planner_active": self.metric_ugv_planner_active,

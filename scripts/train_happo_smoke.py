@@ -299,6 +299,8 @@ def build_args(
     ugv_approach_milestone_radii_m: tuple[float, ...] = DEFAULT_UGV_APPROACH_MILESTONE_RADII_M,
     ugv_stall_penalty: float = 0.0,
     ugv_stall_displacement_threshold_m: float = 0.05,
+    ugv_route_progress_floor_penalty: float = 0.0,
+    ugv_route_progress_floor_m: float = 0.0,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
@@ -827,6 +829,8 @@ def build_args(
         "r_ugv_planner_progress": ugv_planner_progress_reward,
         "r_ugv_stall_penalty": ugv_stall_penalty,
         "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
+        "r_ugv_route_progress_floor_penalty": ugv_route_progress_floor_penalty,
+        "ugv_route_progress_floor_m": ugv_route_progress_floor_m,
         "r_fire_penalty": -0.20,
         "r_ground_travel_cost": -0.01,
         "r_drone_climb_cost": -0.005,
@@ -1818,6 +1822,12 @@ def main():
                    help="Penalty magnitude subtracted when a UGV barely moves while seeking a known target.")
     p.add_argument("--ugv-stall-displacement-threshold-m", type=float, default=0.05,
                    help="Actual per-step movement below this distance is treated as stalled.")
+    p.add_argument("--ugv-route-progress-floor-penalty", type=float, default=0.0,
+                   help="Penalty coefficient per meter of missing planner-route progress. "
+                        "Applies only while a UGV has an active assigned route and is outside confirmation range.")
+    p.add_argument("--ugv-route-progress-floor-m", type=float, default=0.0,
+                   help="Minimum expected planner-route progress per step before "
+                        "--ugv-route-progress-floor-penalty starts.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
@@ -2145,6 +2155,10 @@ def main():
         p.error("--ugv-stall-penalty must be nonnegative")
     if args.ugv_stall_displacement_threshold_m < 0.0:
         p.error("--ugv-stall-displacement-threshold-m must be nonnegative")
+    if args.ugv_route_progress_floor_penalty < 0.0:
+        p.error("--ugv-route-progress-floor-penalty must be nonnegative")
+    if args.ugv_route_progress_floor_m < 0.0:
+        p.error("--ugv-route-progress-floor-m must be nonnegative")
     if args.survivor_reveal_initial_count < 0:
         p.error("--survivor-reveal-initial-count must be nonnegative")
     if args.survivor_reveal_start_step < 0 or args.survivor_reveal_end_step < 0:
@@ -2471,6 +2485,8 @@ def main():
     print(f" ugv_ground_shaping_reward: {args.ugv_ground_shaping_reward}")
     print(f" ugv_movement_alignment_reward: {args.ugv_movement_alignment_reward}")
     print(f" ugv_pending_penalty: {args.ugv_pending_penalty}")
+    print(f" ugv_route_progress_floor_penalty: {args.ugv_route_progress_floor_penalty}")
+    print(f" ugv_route_progress_floor_m: {args.ugv_route_progress_floor_m}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
@@ -2637,6 +2653,8 @@ def main():
         ugv_approach_milestone_radii_m = tuple(args.ugv_approach_milestone_radii_m),
         ugv_stall_penalty = args.ugv_stall_penalty,
         ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
+        ugv_route_progress_floor_penalty = args.ugv_route_progress_floor_penalty,
+        ugv_route_progress_floor_m = args.ugv_route_progress_floor_m,
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,
