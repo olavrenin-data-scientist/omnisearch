@@ -748,6 +748,32 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_coverage"], 0.0)
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
 
+    def test_joint_schema_uav_diagnostic_uses_padded_joint_observation_defaults(self):
+        _, algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="joint_schema_uav_diag",
+            joint_schema_uav_diagnostic=True,
+        )
+
+        self.assertEqual(env_args["action_transform"], "radial_tanh")
+        self.assertTrue(algo_args["algo"]["share_param"])
+        self.assertFalse(algo_args["algo"]["share_param_by_agent_class"])
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 3)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["obs_schema_n_drones"], 3)
+        self.assertEqual(scenario["obs_schema_n_ground"], 2)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 5)
+        self.assertFalse(scenario["known_survivors_at_reset"])
+        self.assertTrue(scenario["drone_can_confirm"])
+        self.assertEqual(scenario["r_drone_scout"], 2.0)
+        self.assertEqual(scenario["ugv_planner_hint"], "none")
+
     def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
         _, _, env_args = build_args(
             num_env_steps=100,

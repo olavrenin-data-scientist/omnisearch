@@ -85,10 +85,22 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
             or bool(getattr(args, "include_cleanup_target_diagnostics", False))
         ),
     })
+    joint_observation_schema = bool(
+        getattr(args, "joint_schema_uav_diagnostic", False)
+        or getattr(args, "joint_observation_schema", False)
+    )
     if args.n_drones is not None:
         scenario_kwargs["n_drones"] = int(args.n_drones)
+    elif joint_observation_schema:
+        scenario_kwargs.setdefault("n_drones", 3)
     else:
         scenario_kwargs.setdefault("n_drones", 1)
+    if joint_observation_schema:
+        scenario_kwargs.update({
+            "obs_schema_n_drones": 3,
+            "obs_schema_n_ground": 2,
+            "obs_schema_n_survivors": 5,
+        })
 
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -6925,6 +6937,10 @@ def write_distribution_plots(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint-dir", default=None, help="Path to a HARL models/ checkpoint directory.")
+    parser.add_argument("--joint-schema-uav-diagnostic", action="store_true",
+                        help="Evaluate UAV-only checkpoints trained with final joint-schema observation padding.")
+    parser.add_argument("--joint-observation-schema", action="store_true",
+                        help="Alias for --joint-schema-uav-diagnostic.")
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
@@ -6992,6 +7008,13 @@ def main() -> None:
         f"{scenario_kwargs['n_survivors']} survivors, "
         f"dt={scenario_kwargs.get('sim_step_seconds', 'scenario-default')}s"
     )
+    if args.joint_schema_uav_diagnostic or args.joint_observation_schema:
+        print(
+            "joint_observation_schema: "
+            f"obs_schema=({scenario_kwargs.get('obs_schema_n_drones')}, "
+            f"{scenario_kwargs.get('obs_schema_n_ground')}, "
+            f"{scenario_kwargs.get('obs_schema_n_survivors')})"
+        )
     print(
         "uav starts: "
         f"min_sep={scenario_kwargs.get('uav_start_min_separation_m', 0.0)}m "

@@ -234,6 +234,7 @@ def build_args(
     uav_astar_waypoint_reached_m: float = 20.0,
     ugv_known_survivor_diagnostic: bool = False,
     uav_survivor_diagnostic: bool = False,
+    joint_schema_uav_diagnostic: bool = False,
     joint_survivor_diagnostic: bool = False,
     joint_schema_ugv_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
@@ -327,6 +328,7 @@ def build_args(
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     uav_search_diagnostic = (
         uav_survivor_diagnostic
+        or joint_schema_uav_diagnostic
         or joint_survivor_diagnostic
         or joint_schema_ugv_diagnostic
     )
@@ -496,7 +498,7 @@ def build_args(
             uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
         if uav_cleanup_target_progress_reward is None:
             uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
-        if share_param is None and uav_survivor_diagnostic and not bool(share_param_by_agent_class):
+        if share_param is None and (uav_survivor_diagnostic or joint_schema_uav_diagnostic) and not bool(share_param_by_agent_class):
             share_param = True
         if uav_start_min_separation_m is None:
             uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
@@ -1027,11 +1029,12 @@ def build_args(
     diagnostic_modes = [
         bool(ugv_known_survivor_diagnostic),
         bool(uav_survivor_diagnostic),
+        bool(joint_schema_uav_diagnostic),
         bool(joint_survivor_diagnostic),
         bool(joint_schema_ugv_diagnostic),
     ]
     if sum(diagnostic_modes) > 1:
-        raise ValueError("Choose only one diagnostic mode: UGV, UAV, joint, or joint-schema UGV")
+        raise ValueError("Choose only one diagnostic mode: UGV, UAV, joint-schema UAV, joint, or joint-schema UGV")
 
     if ugv_known_survivor_diagnostic:
         distance_kwargs = {}
@@ -1083,7 +1086,7 @@ def build_args(
             "r_coverage": 0.0,
         })
         scenario_kwargs.update(distance_kwargs)
-    if uav_survivor_diagnostic:
+    if uav_survivor_diagnostic or joint_schema_uav_diagnostic:
         found_reward = 0.0
         all_survivors_reward = 0.0
         scout_reward = 0.0 if uav_coverage_only else 2.0
@@ -1159,6 +1162,12 @@ def build_args(
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
+        if joint_schema_uav_diagnostic:
+            scenario_kwargs.update({
+                "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
+                "obs_schema_n_ground": 2,
+                "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            })
     if joint_survivor_diagnostic:
         joint_diagnostic_ugvs = max(int(joint_diagnostic_ugvs), 1)
         coverage_threshold_reward = (
@@ -1287,10 +1296,16 @@ def build_args(
             raise ValueError("share_param_by_agent_class group mapping does not match agent count")
         algo_args["algo"]["share_param_groups"] = share_param_groups
         algo_args["algo"]["share_param_group_names"] = share_param_group_names
+    obs_dim_n_agents = int(scenario_kwargs.get("obs_schema_n_drones", scenario_kwargs["n_drones"])) + int(
+        scenario_kwargs.get("obs_schema_n_ground", scenario_kwargs["n_ground"])
+    )
+    obs_dim_n_survivors = int(
+        scenario_kwargs.get("obs_schema_n_survivors", scenario_kwargs["n_survivors"])
+    )
     algo_args["model"]["terrain_cnn_single_obs_dim"] = wildfire_single_observation_dim(
         local_map_patch_size=int(local_map_patch_size),
-        n_agents=n_agents,
-        n_survivors=int(scenario_kwargs["n_survivors"]),
+        n_agents=obs_dim_n_agents,
+        n_survivors=obs_dim_n_survivors,
         ugv_planner_hint=ugv_planner_hint,
         ugv_planner_detour_obs=bool(ugv_planner_detour_obs),
         coverage_obs_grid=int(coverage_obs_grid),
@@ -1614,6 +1629,8 @@ def main():
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
                    help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
+    p.add_argument("--joint-schema-uav-diagnostic", action="store_true",
+                   help="Train UAV-only search with final joint-schema observations, padding absent UGV slots.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
                    help="Train a joint task: UAVs scout unknown survivors, UGVs confirm known targets.")
     p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
@@ -2114,14 +2131,15 @@ def main():
         (
             bool(args.ugv_known_survivor_diagnostic),
             bool(args.uav_survivor_diagnostic),
+            bool(args.joint_schema_uav_diagnostic),
             bool(args.joint_survivor_diagnostic),
             bool(args.joint_schema_ugv_diagnostic),
         )
     ) > 1:
         p.error(
             "Choose only one diagnostic mode: --ugv-known-survivor-diagnostic, "
-            "--uav-survivor-diagnostic, --joint-survivor-diagnostic, or "
-            "--joint-schema-ugv-diagnostic"
+            "--uav-survivor-diagnostic, --joint-schema-uav-diagnostic, "
+            "--joint-survivor-diagnostic, or --joint-schema-ugv-diagnostic"
         )
     if args.joint_survivor_diagnostic:
         args.ugv_target_assignment_mode = "greedy"
@@ -2138,6 +2156,7 @@ def main():
 
     uav_search_diagnostic = (
         args.uav_survivor_diagnostic
+        or args.joint_schema_uav_diagnostic
         or args.joint_survivor_diagnostic
         or args.joint_schema_ugv_diagnostic
     )
@@ -2185,7 +2204,11 @@ def main():
             args.uav_confidence_overlap_threshold = DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_THRESHOLD
         if args.uav_cleanup_target_progress_reward is None:
             args.uav_cleanup_target_progress_reward = DEFAULT_UAV_DIAG_CLEANUP_TARGET_PROGRESS_REWARD
-        if args.share_param is None and args.uav_survivor_diagnostic and not bool(args.share_param_by_agent_class):
+        if (
+            args.share_param is None
+            and (args.uav_survivor_diagnostic or args.joint_schema_uav_diagnostic)
+            and not bool(args.share_param_by_agent_class)
+        ):
             args.share_param = True
         if args.uav_start_min_separation_m is None:
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
@@ -2300,7 +2323,7 @@ def main():
     if args.research:
         num_env_steps  = args.num_env_steps  or 400_000
         episode_length = args.episode_length or (1_000 if args.preset == "floor0-1km" else 500)
-    elif args.uav_survivor_diagnostic or args.joint_survivor_diagnostic:
+    elif args.uav_survivor_diagnostic or args.joint_schema_uav_diagnostic or args.joint_survivor_diagnostic:
         num_env_steps  = args.num_env_steps  or 2_000
         episode_length = args.episode_length or DEFAULT_UAV_DIAG_EPISODE_LENGTH
     elif args.preset == "floor0-1km":
@@ -2364,6 +2387,7 @@ def main():
     print(f" uav_astar_route_replan_steps: {args.uav_astar_route_replan_steps}")
     print(f" uav_astar_waypoint_reached_m: {args.uav_astar_waypoint_reached_m}")
     print(f" uav_diagnostic_drones: {args.uav_diagnostic_drones}")
+    print(f" joint_schema_uav_diagnostic: {args.joint_schema_uav_diagnostic}")
     print(f" joint_survivor_diagnostic: {args.joint_survivor_diagnostic}")
     print(f" joint_schema_ugv_diagnostic: {args.joint_schema_ugv_diagnostic}")
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
@@ -2502,6 +2526,7 @@ def main():
         uav_astar_waypoint_reached_m = args.uav_astar_waypoint_reached_m,
         ugv_known_survivor_diagnostic = args.ugv_known_survivor_diagnostic,
         uav_survivor_diagnostic = args.uav_survivor_diagnostic,
+        joint_schema_uav_diagnostic = args.joint_schema_uav_diagnostic,
         joint_survivor_diagnostic = args.joint_survivor_diagnostic,
         joint_schema_ugv_diagnostic = args.joint_schema_ugv_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
