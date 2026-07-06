@@ -320,6 +320,7 @@ def build_args(
     ugv_planner_fire_buffer_cost: float = 8.0,
     ugv_planner_land_cover_costs: tuple[float, ...] | None = None,
     ugv_target_assignment_mode: str = "nearest",
+    ugv_assigned_target_obs_only: bool | None = None,
     ugv_sticky_switch_margin_m: float = 20.0,
     ugv_sticky_switch_ratio: float = 0.80,
     ugv_sticky_min_age_steps: int = 10,
@@ -436,6 +437,9 @@ def build_args(
     ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
     if ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
         raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
+    if ugv_assigned_target_obs_only is None:
+        ugv_assigned_target_obs_only = bool(joint_survivor_diagnostic or joint_schema_ugv_diagnostic)
+    ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
     survivor_reveal_schedule = str(survivor_reveal_schedule).replace("-", "_").lower()
     if survivor_reveal_schedule not in {"stratified_uniform"}:
         raise ValueError("survivor_reveal_schedule must be stratified_uniform")
@@ -792,6 +796,7 @@ def build_args(
         "ugv_planner_fire_buffer_m": ugv_planner_fire_buffer_m,
         "ugv_planner_fire_buffer_cost": ugv_planner_fire_buffer_cost,
         "ugv_target_assignment_mode": ugv_target_assignment_mode,
+        "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
         "ugv_sticky_switch_margin_m": ugv_sticky_switch_margin_m,
         "ugv_sticky_switch_ratio": ugv_sticky_switch_ratio,
         "ugv_sticky_min_age_steps": ugv_sticky_min_age_steps,
@@ -1183,7 +1188,8 @@ def build_args(
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
-            "ugv_target_assignment_mode": "greedy",
+            "ugv_target_assignment_mode": "greedy_sticky",
+            "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
             "r_team_scout": DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD,
             "r_all_survivors_found": 0.0,
@@ -1250,6 +1256,7 @@ def build_args(
             "comms_dropout": 0.0,
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_zero_uav_search_observations": True,
+            "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
             "r_team_scout": 0.0,
             "r_all_survivors_found": 0.0,
@@ -1500,6 +1507,9 @@ def main():
     p.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"),
                    default="nearest",
                    help="How UGV planner targets are selected from known, unconfirmed survivors.")
+    p.add_argument("--ugv-assigned-target-obs-only", action=argparse.BooleanOptionalAction, default=None,
+                   help="For UGVs, zero non-assigned survivor-message slots so the policy sees only "
+                        "the current assigned goal target. Defaults on for joint UGV diagnostics.")
     p.add_argument("--ugv-sticky-switch-margin-m", type=float, default=20.0,
                    help="Sticky assignment switches only if the new target beats this absolute margin.")
     p.add_argument("--ugv-sticky-switch-ratio", type=float, default=0.80,
@@ -2142,9 +2152,13 @@ def main():
             "--joint-survivor-diagnostic, or --joint-schema-ugv-diagnostic"
         )
     if args.joint_survivor_diagnostic:
-        args.ugv_target_assignment_mode = "greedy"
+        args.ugv_target_assignment_mode = "greedy_sticky"
     if args.joint_schema_ugv_diagnostic:
         args.ugv_target_assignment_mode = "greedy_sticky"
+    if args.ugv_assigned_target_obs_only is None:
+        args.ugv_assigned_target_obs_only = bool(
+            args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
+        )
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
 
@@ -2420,6 +2434,7 @@ def main():
     print(f" ugv_planner_fire_block_threshold: {args.ugv_planner_fire_block_threshold}")
     print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
     print(f" ugv_target_assignment_mode: {args.ugv_target_assignment_mode}")
+    print(f" ugv_assigned_target_obs_only: {args.ugv_assigned_target_obs_only}")
     print(
         " ugv_sticky_assignment: "
         f"margin={args.ugv_sticky_switch_margin_m}m "
@@ -2616,6 +2631,7 @@ def main():
             if args.ugv_planner_land_cover_costs is not None else None
         ),
         ugv_target_assignment_mode = args.ugv_target_assignment_mode,
+        ugv_assigned_target_obs_only = args.ugv_assigned_target_obs_only,
         ugv_sticky_switch_margin_m = args.ugv_sticky_switch_margin_m,
         ugv_sticky_switch_ratio = args.ugv_sticky_switch_ratio,
         ugv_sticky_min_age_steps = args.ugv_sticky_min_age_steps,

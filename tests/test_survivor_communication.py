@@ -547,6 +547,44 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(obs1[:, :6], torch.zeros(1, 6))
         torch.testing.assert_close(obs1[:, 6:8], torch.tensor([[-0.3, 0.1]]), atol=1e-6, rtol=1e-6)
 
+    def test_ugv_assigned_target_observation_hides_unassigned_survivors(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=5,
+            obs_schema_n_drones=3,
+            obs_schema_n_ground=2,
+            obs_schema_n_survivors=5,
+            ugv_target_assignment_mode="greedy_sticky",
+            ugv_assigned_target_obs_only=True,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.state.pos[:] = torch.tensor([[-0.60, 0.00]])
+        ugv1.state.pos[:] = torch.tensor([[0.60, 0.00]])
+        survivor_positions = torch.tensor(
+            [[[-0.70, 0.00], [0.70, 0.00], [0.00, 0.70], [0.00, -0.70], [0.00, 0.00]]],
+            dtype=torch.float,
+        )
+        for idx, survivor in enumerate(scenario._survivors):
+            survivor.state.pos[:] = survivor_positions[:, idx]
+        scenario.known_survivors_by_agent[:, scenario.n_drones:, :] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.ugv_sticky_target_idx.fill_(-1)
+        scenario.ugv_sticky_target_age.zero_()
+        scenario._invalidate_ugv_assignment_cache()
+        keep = torch.ones(1, 1, dtype=torch.bool)
+
+        msg0 = scenario._survivor_message_observations(ugv0, keep).view(1, 5, 7)
+        msg1 = scenario._survivor_message_observations(ugv1, keep).view(1, 5, 7)
+
+        self.assertEqual(int(msg0[0, :, 0].sum().item()), 1)
+        self.assertEqual(int(msg1[0, :, 0].sum().item()), 1)
+        self.assertTrue(bool(msg0[0, 0, 0].item()))
+        self.assertTrue(bool(msg1[0, 1, 0].item()))
+        torch.testing.assert_close(msg0[0, 1:, :], torch.zeros(4, 7), atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(msg1[0, [0, 2, 3, 4], :], torch.zeros(4, 7), atol=1e-6, rtol=1e-6)
+        self.assertTrue(bool(scenario.known_survivors_by_agent[:, scenario.n_drones:, :].all().item()))
+
     def test_disable_fire_leaves_hazard_fields_empty_after_reset(self):
         env = self._diagnostic_env()
         scenario = env.scenario

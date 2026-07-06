@@ -729,6 +729,9 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_zero_uav_search_observations = bool(
             kwargs.pop("ugv_zero_uav_search_observations", False)
         )
+        self.ugv_assigned_target_obs_only = bool(
+            kwargs.pop("ugv_assigned_target_obs_only", False)
+        )
         if self.local_coverage_obs_grid < 0:
             raise ValueError("local_coverage_obs_grid must be nonnegative")
         if self.local_coverage_obs_grid > 0 and self.local_coverage_obs_grid % 2 != 1:
@@ -7554,20 +7557,51 @@ class WildfireSearchScenario(BaseScenario):
         self.known_survivors_by_agent[:, agent_idx] = local_known
         self.confirmed_survivors_by_agent[:, agent_idx] = local_confirmed
 
+        obs_known = local_known
+        obs_confirmed = local_confirmed
+        if (
+            self.ugv_assigned_target_obs_only
+            and not agent.is_drone
+            and self.n_ground > 0
+            and self.n_survivors > 0
+        ):
+            ground_index = agent_idx - self.n_drones
+            ground_slice = slice(self.n_drones, self.n_agents)
+            ground_known = self.known_survivors_by_agent[:, ground_slice]
+            ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
+            targetable = ground_known & ~ground_confirmed
+            survivor_pos_for_assignment = torch.stack([s.state.pos for s in self._survivors], dim=1)
+            ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
+            assigned_idx, _assigned_dist = self._ugv_assigned_target_indices(
+                ground_pos,
+                survivor_pos_for_assignment,
+                targetable,
+            )
+            target_idx = assigned_idx[:, ground_index]
+            target_valid = target_idx >= 0
+            assigned_mask = torch.zeros_like(obs_known)
+            assigned_mask.scatter_(
+                dim=1,
+                index=target_idx.clamp(min=0).unsqueeze(1),
+                src=target_valid.unsqueeze(1),
+            )
+            obs_known = obs_known & assigned_mask
+            obs_confirmed = obs_confirmed & assigned_mask
+
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
         relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
-        relative_pos = relative_pos * local_known.unsqueeze(-1).float()
+        relative_pos = relative_pos * obs_known.unsqueeze(-1).float()
         dist_sim = torch.linalg.norm(relative_pos, dim=-1, keepdim=True)
         unit_direction = relative_pos / dist_sim.clamp_min(1e-9)
         distance_m = dist_sim / self.terrain_sim_units_per_meter.view(-1, 1, 1).clamp_min(1e-9)
         distance_norm = distance_m / self.survivor_message_distance_scale_m
         features = torch.cat(
             [
-                local_known.unsqueeze(-1).float(),
+                obs_known.unsqueeze(-1).float(),
                 relative_pos,
                 unit_direction,
                 distance_norm,
-                local_confirmed.unsqueeze(-1).float(),
+                obs_confirmed.unsqueeze(-1).float(),
             ],
             dim=-1,
         )
