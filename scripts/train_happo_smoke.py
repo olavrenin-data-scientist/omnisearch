@@ -438,7 +438,11 @@ def build_args(
     if ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
         raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
     if ugv_assigned_target_obs_only is None:
-        ugv_assigned_target_obs_only = bool(joint_survivor_diagnostic or joint_schema_ugv_diagnostic)
+        ugv_assigned_target_obs_only = bool(
+            joint_survivor_diagnostic
+            or joint_schema_uav_diagnostic
+            or joint_schema_ugv_diagnostic
+        )
     ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
     survivor_reveal_schedule = str(survivor_reveal_schedule).replace("-", "_").lower()
     if survivor_reveal_schedule not in {"stratified_uniform"}:
@@ -510,6 +514,8 @@ def build_args(
             uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
         if action_transform == "clip":
             action_transform = "radial_tanh"
+        if joint_schema_uav_diagnostic and ugv_planner_hint == "none":
+            ugv_planner_hint = DEFAULT_UGV_DIAG_PLANNER_HINT
     if uav_frontier_obs is None:
         uav_frontier_obs = False
     if uav_confidence_obs_grid is None:
@@ -2157,7 +2163,9 @@ def main():
         args.ugv_target_assignment_mode = "greedy_sticky"
     if args.ugv_assigned_target_obs_only is None:
         args.ugv_assigned_target_obs_only = bool(
-            args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
+            args.joint_survivor_diagnostic
+            or args.joint_schema_uav_diagnostic
+            or args.joint_schema_ugv_diagnostic
         )
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
@@ -2230,6 +2238,8 @@ def main():
             args.uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
         if args.action_transform == "clip":
             args.action_transform = "radial_tanh"
+        if args.joint_schema_uav_diagnostic and args.ugv_planner_hint == "none":
+            args.ugv_planner_hint = DEFAULT_UGV_DIAG_PLANNER_HINT
         if args.n_rollout_threads == 1:
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
     if args.joint_schema_ugv_diagnostic:

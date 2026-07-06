@@ -100,6 +100,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
             "obs_schema_n_drones": 3,
             "obs_schema_n_ground": 2,
             "obs_schema_n_survivors": 5,
+            "ugv_planner_hint": "global_astar",
+            "ugv_assigned_target_obs_only": True,
         })
 
     if args.terrain_cache_path:

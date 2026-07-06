@@ -775,7 +775,9 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertFalse(scenario["known_survivors_at_reset"])
         self.assertTrue(scenario["drone_can_confirm"])
         self.assertEqual(scenario["r_drone_scout"], 2.0)
-        self.assertEqual(scenario["ugv_planner_hint"], "none")
+        self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
+        self.assertTrue(scenario["ugv_assigned_target_obs_only"])
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 345)
 
     def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
         _, _, env_args = build_args(
