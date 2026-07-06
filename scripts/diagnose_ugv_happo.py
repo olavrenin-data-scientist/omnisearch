@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 from agents.happo_checkpoint import load_training_manifest
 from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.train_happo_smoke import build_args
 
 
 REWARD_COMPONENTS = (
@@ -56,14 +57,38 @@ def _checkpoint_path(path: str | None) -> Path:
     return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
 
 
+def _joint_schema_ugv_defaults() -> dict:
+    _, _algo_args, env_args = build_args(
+        num_env_steps=100,
+        episode_length=100,
+        seed=1,
+        comms_dropout=0.0,
+        entropy_coef=0.01,
+        exp_name="ugv_diag_joint_schema_eval_defaults",
+        joint_schema_ugv_diagnostic=True,
+    )
+    return copy.deepcopy(env_args["scenario_kwargs"])
+
+
 def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
     manifest = load_training_manifest(checkpoint_dir)
     scenario_kwargs = {}
     if manifest is not None:
         scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
 
+    if args.joint_schema_ugv_diagnostic:
+        defaults = _joint_schema_ugv_defaults()
+        defaults.update(scenario_kwargs)
+        scenario_kwargs = defaults
+
     distance_kwargs = {}
-    if args.ugv_diagnostic_target_distance_min_m is None and args.ugv_diagnostic_target_distance_max_m is None:
+    if (
+        args.joint_schema_ugv_diagnostic
+        or (
+            args.ugv_diagnostic_target_distance_min_m is None
+            and args.ugv_diagnostic_target_distance_max_m is None
+        )
+    ):
         pass
     else:
         target_distance_min_m = max(
@@ -93,15 +118,29 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         ):
             scenario_kwargs.pop(key, None)
 
-    scenario_kwargs.update({
-        "max_steps": args.steps,
-        "n_drones": 0,
-        "n_ground": 1,
-        "n_survivors": 1,
-        "known_survivors_at_reset": True,
-        "disable_fire": not bool(args.enable_fire),
-        "comms_dropout": 0.0,
-    })
+    scenario_kwargs["max_steps"] = args.steps
+    scenario_kwargs["comms_dropout"] = 0.0
+    if args.joint_schema_ugv_diagnostic:
+        scenario_kwargs.setdefault("n_drones", 0)
+        scenario_kwargs.setdefault("n_ground", 2)
+        scenario_kwargs.setdefault("n_survivors", 5)
+        scenario_kwargs.setdefault("obs_schema_n_drones", 3)
+        scenario_kwargs.setdefault("obs_schema_n_ground", 2)
+        scenario_kwargs.setdefault("obs_schema_n_survivors", 5)
+        scenario_kwargs.setdefault("known_survivors_at_reset", False)
+        scenario_kwargs.setdefault("delayed_survivor_knowledge", True)
+        scenario_kwargs.setdefault("ugv_target_assignment_mode", "greedy_sticky")
+        scenario_kwargs.setdefault("ugv_zero_uav_search_observations", True)
+        if args.enable_fire:
+            scenario_kwargs["disable_fire"] = False
+    else:
+        scenario_kwargs.update({
+            "n_drones": 0,
+            "n_ground": 1,
+            "n_survivors": 1,
+            "known_survivors_at_reset": True,
+            "disable_fire": not bool(args.enable_fire),
+        })
     scenario_kwargs.update(distance_kwargs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -188,6 +227,62 @@ def _distance_m(scenario: WildfireSearchScenario, ground_pos: torch.Tensor, surv
 def _distance_sim_to_m(scenario: WildfireSearchScenario, dist_sim: torch.Tensor) -> float:
     scale = float(scenario.terrain_sim_units_per_meter[0])
     return float(dist_sim[0] / scale) if scale > 1e-9 else float(dist_sim[0])
+
+
+def _ground_agent_index(scenario: WildfireSearchScenario, ground_index: int = 0) -> int:
+    return int(getattr(scenario, "n_drones", 0)) + int(ground_index)
+
+
+def _fallback_target_index(
+    scenario: WildfireSearchScenario,
+    ground_pos: torch.Tensor,
+) -> int:
+    if int(getattr(scenario, "n_survivors", 0)) <= 0:
+        return 0
+    survivor_pos = torch.stack([survivor.state.pos for survivor in scenario._survivors], dim=1)
+    distances = torch.linalg.norm(survivor_pos[0] - ground_pos[0].view(1, 2), dim=-1)
+    unconfirmed = ~scenario.found_survivors[0]
+    if bool(unconfirmed.any().item()):
+        masked = torch.where(unconfirmed, distances, torch.full_like(distances, float("inf")))
+        return int(torch.argmin(masked).item())
+    return int(torch.argmin(distances).item())
+
+
+def _assigned_ground_target_index(
+    scenario: WildfireSearchScenario,
+    ground_index: int = 0,
+) -> int:
+    if int(getattr(scenario, "n_survivors", 0)) <= 0:
+        return 0
+    ground_agent_idx = _ground_agent_index(scenario, ground_index)
+    ground = scenario.world.agents[ground_agent_idx]
+    if int(getattr(scenario, "n_ground", 0)) <= 0:
+        return _fallback_target_index(scenario, ground.state.pos)
+
+    ground_slice = slice(int(scenario.n_drones), int(scenario.n_agents))
+    survivor_pos = torch.stack([survivor.state.pos for survivor in scenario._survivors], dim=1)
+    ground_pos = torch.stack([agent.state.pos for agent in scenario.world.agents[ground_slice]], dim=1)
+    ground_known = scenario.known_survivors_by_agent[:, ground_slice]
+    ground_confirmed = scenario.confirmed_survivors_by_agent[:, ground_slice]
+    targetable = ground_known & ~ground_confirmed
+    assigned_idx, _assigned_dist = scenario._ugv_assigned_target_indices(
+        ground_pos,
+        survivor_pos,
+        targetable,
+    )
+    if ground_index < assigned_idx.shape[1]:
+        target_idx = int(assigned_idx[0, ground_index].detach().cpu().item())
+        if target_idx >= 0:
+            return target_idx
+    return _fallback_target_index(scenario, ground.state.pos)
+
+
+def _assigned_ground_target(
+    scenario: WildfireSearchScenario,
+    ground_index: int = 0,
+):
+    target_idx = _assigned_ground_target_index(scenario, ground_index)
+    return target_idx, scenario._survivors[target_idx]
 
 
 def _cosine_alignment(a: torch.Tensor, b: torch.Tensor) -> float | None:
@@ -1717,8 +1812,11 @@ def run_rollout(
     env.reset()
     policy.reset()
     scenario = env.scenario
-    ground = env.agents[0]
-    survivor = scenario._survivors[0]
+    ground_index = 0
+    ground_agent_idx = _ground_agent_index(scenario, ground_index)
+    ground = env.agents[ground_agent_idx]
+    target_idx, survivor = _assigned_ground_target(scenario, ground_index)
+    initial_target_idx = target_idx
 
     initial_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
     min_distance = initial_distance
@@ -1792,12 +1890,13 @@ def run_rollout(
     confirmation_step: int | None = None
 
     for step in range(max_steps):
+        target_idx, survivor = _assigned_ground_target(scenario, ground_index)
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
         dist_before_m = _distance_m(scenario, pos_before, survivor_before)
         cell_before = _ground_cell_diagnostics(scenario, pos_before)
         shadow_hint = _shadow_astar_hint(scenario, pos_before, survivor_before) if shadow_planner else None
-        dist, obs_before = _actor_distribution(policy, env, agent_idx=0, return_obs=True)
+        dist, obs_before = _actor_distribution(policy, env, agent_idx=ground_agent_idx, return_obs=True)
         planner_hint = _planner_hint_from_observation(scenario, obs_before)
         raw_mean = dist.mean.detach().cpu().numpy()
         raw_std = dist.stddev.detach().cpu().numpy()
@@ -1808,19 +1907,20 @@ def run_rollout(
         raw_mean_oob.append(raw_oob)
         raw_stds.append(float(np.mean(raw_std[0])))
         actions = policy(env)
-        action_target_alignment = _action_alignment(actions[0], ground.state.pos, survivor.state.pos)
+        ground_action = actions[ground_agent_idx]
+        action_target_alignment = _action_alignment(ground_action, ground.state.pos, survivor.state.pos)
         if action_target_alignment is not None:
             alignments.append(action_target_alignment)
         action_planner_alignment = None
         if planner_hint is not None:
             planner_vec, direct_blocked = planner_hint
-            action_planner_alignment = _cosine_alignment(actions[0], planner_vec)
+            action_planner_alignment = _cosine_alignment(ground_action, planner_vec)
         action_shadow_alignment = None
         if shadow_hint and shadow_hint["valid"]:
-            action_shadow_alignment = _cosine_alignment(actions[0], shadow_hint["unit"])
-        action_norm = float(torch.linalg.norm(actions[0], dim=-1)[0])
+            action_shadow_alignment = _cosine_alignment(ground_action, shadow_hint["unit"])
+        action_norm = float(torch.linalg.norm(ground_action, dim=-1)[0])
         action_norms.append(action_norm)
-        saturated = bool((actions[0].abs() >= 0.98).any().item())
+        saturated = bool((ground_action.abs() >= 0.98).any().item())
         saturated_actions.append(saturated)
         env.step(actions)
         blocked = bool(scenario.step_ugv_proposed_path_blocked[0, 0].item())
@@ -1852,7 +1952,7 @@ def run_rollout(
         disp_alignment = _cosine_alignment(displacement, target_before)
         if disp_alignment is not None:
             displacement_target_alignments.append(disp_alignment)
-        action_disp_alignment = _cosine_alignment(actions[0], displacement)
+        action_disp_alignment = _cosine_alignment(ground_action, displacement)
         if action_disp_alignment is not None:
             action_displacement_alignments.append(action_disp_alignment)
         displacement_m = _distance_sim_to_m(scenario, torch.linalg.norm(displacement, dim=-1))
@@ -2124,11 +2224,12 @@ def run_rollout(
                     speed_mps=speed_mps,
                 )
         min_distance = min(min_distance, dist_after_m)
-        if bool(scenario.found_survivors[0, 0]):
+        if bool(scenario.found_survivors[0].all()):
             confirmation_step = step
             break
 
-    final_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
+    _target_idx, final_survivor = _assigned_ground_target(scenario, ground_index)
+    final_distance = _distance_m(scenario, ground.state.pos, final_survivor.state.pos)
     path_length_m = _finite_sum(displacement_meters)
     direct_progress_m = initial_distance - final_distance
     path_efficiency = (
@@ -2157,6 +2258,9 @@ def run_rollout(
         "seed": seed,
         "confirmed": float(scenario.found_survivors[0].sum().item()),
         "full_success": float(bool(scenario.found_survivors[0].all())),
+        "diagnostic_ground_agent_index": int(ground_agent_idx),
+        "diagnostic_ground_index": int(ground_index),
+        "diagnostic_initial_target_index": int(initial_target_idx),
         "initial_distance_m": initial_distance,
         "final_distance_m": final_distance,
         "min_distance_m": min_distance,
@@ -2334,25 +2438,28 @@ def run_failure_trace(
     env.reset()
     policy.reset()
     scenario = env.scenario
-    ground = env.agents[0]
-    survivor = scenario._survivors[0]
+    ground_index = 0
+    ground_agent_idx = _ground_agent_index(scenario, ground_index)
+    ground = env.agents[ground_agent_idx]
+    _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
 
     trace = []
     initial_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
     min_distance = initial_distance
     for step in range(scenario_kwargs["max_steps"]):
+        _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
         dist_before = _distance_m(scenario, pos_before, survivor_before)
         cell_before = _ground_cell_diagnostics(scenario, pos_before)
         shadow_hint = _shadow_astar_hint(scenario, pos_before, survivor_before)
 
-        dist = _actor_distribution(policy, env, agent_idx=0)
+        dist = _actor_distribution(policy, env, agent_idx=ground_agent_idx)
         raw_mean = dist.mean.detach().cpu().numpy()[0]
         raw_std = dist.stddev.detach().cpu().numpy()[0]
         actions = policy(env)
-        action = actions[0]
+        action = actions[ground_agent_idx]
         action_np = action[0].detach().cpu().numpy()
         action_align = _action_alignment(action, pos_before, survivor_before)
         action_shadow_align = (
@@ -2451,9 +2558,10 @@ def run_failure_trace(
             **{f"after_{k}": v for k, v in cell_after.items()},
         })
 
-        if bool(scenario.found_survivors[0, 0]):
+        if bool(scenario.found_survivors[0].all()):
             break
 
+    _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
     return {
         "seed": seed,
         "confirmed": float(scenario.found_survivors[0].sum().item()),
@@ -2488,9 +2596,15 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
             )
             env.reset()
             scenario = env.scenario
-            ground = env.agents[0]
+            ground_agent_idx = _ground_agent_index(scenario, 0)
+            ground = env.agents[ground_agent_idx]
             before = ground.state.pos.clone()
-            env.step([action.clone()])
+            actions = [
+                torch.zeros_like(action)
+                for _agent in env.agents
+            ]
+            actions[ground_agent_idx] = action.clone()
+            env.step(actions)
             displacement = torch.linalg.norm(ground.state.pos - before, dim=-1)
             distances.append(_distance_sim_to_m(scenario, displacement))
         out.append((name, float(np.mean(distances)), float(np.std(distances))))
@@ -2509,7 +2623,8 @@ def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tup
     )
     env.reset()
     scenario = env.scenario
-    ground = env.agents[0]
+    ground_agent_idx = _ground_agent_index(scenario, 0)
+    ground = env.agents[ground_agent_idx]
     survivor = scenario._survivors[0]
 
     probes = {
@@ -2526,9 +2641,9 @@ def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tup
         ground.state.pos[:] = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
         survivor.state.pos[:] = torch.tensor([offset], dtype=torch.float32)
         scenario.scouted_survivors[0, 0] = True
-        scenario.known_survivors_by_agent[0, 0, 0] = True
+        scenario.known_survivors_by_agent[0, ground_agent_idx, 0] = True
         scenario.found_survivors[0, 0] = False
-        action = policy(env)[0]
+        action = policy(env)[ground_agent_idx]
         alignment = _action_alignment(action, ground.state.pos, survivor.state.pos)
         out.append((name, action[0].cpu().numpy(), alignment))
     return out
@@ -2551,7 +2666,8 @@ def run_angle_bucket_probe(
     )
     env.reset()
     scenario = env.scenario
-    ground = env.agents[0]
+    ground_agent_idx = _ground_agent_index(scenario, 0)
+    ground = env.agents[ground_agent_idx]
     survivor = scenario._survivors[0]
     scale = float(scenario.terrain_sim_units_per_meter[0])
     radius_sim = radius_m * scale if scale > 1e-9 else radius_m
@@ -2567,13 +2683,13 @@ def run_angle_bucket_probe(
         ground.state.vel[:] = torch.zeros_like(ground.state.vel)
         survivor.state.pos[:] = torch.from_numpy(target).view(1, 2)
         scenario.scouted_survivors[0, 0] = True
-        scenario.known_survivors_by_agent[0, 0, 0] = True
+        scenario.known_survivors_by_agent[0, ground_agent_idx, 0] = True
         scenario.found_survivors[0, 0] = False
 
-        dist = _actor_distribution(policy, env, agent_idx=0)
+        dist = _actor_distribution(policy, env, agent_idx=ground_agent_idx)
         raw_mean = dist.mean.detach().cpu().numpy()[0]
         raw_std = dist.stddev.detach().cpu().numpy()[0]
-        action = policy(env)[0][0].cpu().numpy()
+        action = policy(env)[ground_agent_idx][0].cpu().numpy()
         error = _angle_error_deg(action, target)
         rows.append({
             "target_angle": float(angle),
@@ -2735,6 +2851,8 @@ def _print_failure_trace(result: dict, tail: int, stride: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint-dir", default=None, help="Path to a HARL models/ checkpoint directory.")
+    parser.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
+                        help="Evaluate a 2-UGV/5-survivor checkpoint with the padded final joint observation schema.")
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--seeds", type=int, nargs="+", default=[101, 102, 103, 104, 105])
@@ -2934,6 +3052,16 @@ def main() -> None:
         parser.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
     print(f"checkpoint: {checkpoint_dir}")
     print(f"steps: {args.steps}")
+    if args.joint_schema_ugv_diagnostic:
+        print(
+            "joint_schema_ugv_diagnostic: "
+            f"{scenario_kwargs.get('n_drones', 0)} UAVs, "
+            f"{scenario_kwargs.get('n_ground', 0)} UGVs, "
+            f"{scenario_kwargs.get('n_survivors', 0)} survivors, "
+            f"obs_schema=({scenario_kwargs.get('obs_schema_n_drones')}, "
+            f"{scenario_kwargs.get('obs_schema_n_ground')}, "
+            f"{scenario_kwargs.get('obs_schema_n_survivors')})"
+        )
     print(
         "planner_hint: "
         f"{scenario_kwargs.get('ugv_planner_hint', 'none')} "
