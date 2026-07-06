@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.baselines import AntColonyPolicy, LawnmowerPolicy
+from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
 from scripts.train_happo_smoke import build_args
 
@@ -32,9 +33,14 @@ DEFAULT_STRATEGIES = ("lawnmower_astar", "ant_colony_astar")
 class StrategySpec:
     label: str
     name: str
+    checkpoint_dir: Path | None = None
 
 
-def parse_strategy_specs(strategies: list[str] | None) -> list[StrategySpec]:
+def parse_strategy_specs(
+    strategies: list[str] | None,
+    *,
+    happo_checkpoint: str | Path | None = None,
+) -> list[StrategySpec]:
     raw = strategies or list(DEFAULT_STRATEGIES)
     expanded: list[str] = []
     for token in raw:
@@ -45,10 +51,19 @@ def parse_strategy_specs(strategies: list[str] | None) -> list[StrategySpec]:
     valid = set(DEFAULT_STRATEGIES)
     for token in expanded:
         name = token.replace("-", "_")
+        if token == "happo" or token.startswith("happo:"):
+            checkpoint = token.split(":", 1)[1] if token.startswith("happo:") else happo_checkpoint
+            label = _unique_label("happo", used)
+            specs.append(StrategySpec(
+                label=label,
+                name="happo",
+                checkpoint_dir=_resolve_happo_checkpoint(checkpoint),
+            ))
+            continue
         if name not in valid:
             raise ValueError(
                 f"unknown strategy {token!r}; available: "
-                f"{', '.join((*DEFAULT_STRATEGIES, 'all'))}"
+                f"{', '.join((*DEFAULT_STRATEGIES, 'happo', 'happo:/path/to/models', 'all'))}"
             )
         label = _unique_label(name, used)
         specs.append(StrategySpec(label=label, name=name))
@@ -67,6 +82,12 @@ def _unique_label(label: str, used: set[str]) -> str:
     unique = f"{label}_{idx}"
     used.add(unique)
     return unique
+
+
+def _resolve_happo_checkpoint(path: str | Path | None) -> Path:
+    if path:
+        return Path(path)
+    return find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
 
 
 def _joint_schema_ugv_defaults() -> dict[str, Any]:
@@ -151,11 +172,29 @@ def sync_ant_colony_oracle_knowledge(policy: AntColonyPolicy, scenario: Wildfire
     policy.known_confirmed |= confirmed.unsqueeze(1)
 
 
-def make_policy(spec: StrategySpec, env: Any) -> Callable[[Any], list[torch.Tensor]]:
+def make_policy(
+    spec: StrategySpec,
+    env: Any,
+    *,
+    happo_cache: dict[tuple[Path, bool], HappoPolicy] | None = None,
+    deterministic_happo: bool = True,
+) -> Callable[[Any], list[torch.Tensor]]:
     if spec.name == "lawnmower_astar":
         return LawnmowerPolicy(env)
     if spec.name == "ant_colony_astar":
         return MatchedRevealAntColonyPolicy(env)
+    if spec.name == "happo":
+        if spec.checkpoint_dir is None:
+            raise ValueError("HAPPO strategy requires a checkpoint directory")
+        key = (spec.checkpoint_dir, deterministic_happo)
+        if happo_cache is None:
+            return HappoPolicy.from_checkpoint(spec.checkpoint_dir, deterministic=deterministic_happo)
+        if key not in happo_cache:
+            happo_cache[key] = HappoPolicy.from_checkpoint(
+                spec.checkpoint_dir,
+                deterministic=deterministic_happo,
+            )
+        return happo_cache[key]
     raise ValueError(f"unsupported strategy {spec.name!r}")
 
 
@@ -232,6 +271,8 @@ def run_rollout(
     seed: int,
     *,
     time_bins: int = 5,
+    happo_cache: dict[tuple[Path, bool], HappoPolicy] | None = None,
+    stochastic_happo: bool = False,
 ) -> dict[str, Any]:
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
@@ -243,7 +284,14 @@ def run_rollout(
     )
     env.reset()
     scenario = env.scenario
-    policy = make_policy(spec, env)
+    policy = make_policy(
+        spec,
+        env,
+        happo_cache=happo_cache,
+        deterministic_happo=not stochastic_happo,
+    )
+    if hasattr(policy, "reset"):
+        policy.reset()
 
     n_ground = int(scenario.n_ground)
     n_agents = int(scenario.n_agents)
@@ -330,6 +378,7 @@ def run_rollout(
     row = {
         "strategy": spec.label,
         "strategy_name": spec.name,
+        "checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir),
         "seed": int(seed),
         "max_steps": max_steps,
         "survivors": n_survivors,
@@ -453,6 +502,7 @@ def write_plots(rows: list[dict[str, Any]], summary: dict[str, Any], output: Pat
     colors = {
         "lawnmower_astar": "#2563eb",
         "ant_colony_astar": "#10b981",
+        "happo": "#f97316",
     }
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
@@ -583,9 +633,21 @@ def _print_summary(summary: dict[str, Any]) -> None:
         )
 
 
+def _spec_metadata(spec: StrategySpec) -> dict[str, Any]:
+    return {
+        "label": spec.label,
+        "name": spec.name,
+        "checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir),
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--strategies", nargs="+", default=list(DEFAULT_STRATEGIES))
+    parser.add_argument("--happo-checkpoint", default=None,
+                        help="Checkpoint models/ directory used by the 'happo' strategy token.")
+    parser.add_argument("--stochastic", action="store_true",
+                        help="Sample HAPPO actions instead of using deterministic actor means.")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
     parser.add_argument("--terrain-cache-path", default=None)
@@ -647,7 +709,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     try:
-        specs = parse_strategy_specs(args.strategies)
+        specs = parse_strategy_specs(args.strategies, happo_checkpoint=args.happo_checkpoint)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -662,14 +724,25 @@ def main() -> None:
         f"{scenario_kwargs['survivor_reveal_start_step']}-{scenario_kwargs['survivor_reveal_end_step']}"
     )
     print(f"terrain: {scenario_kwargs.get('terrain_cache_path')}")
-    print("strategies: " + ", ".join(spec.label for spec in specs))
+    print("strategies: " + ", ".join(
+        spec.label if spec.checkpoint_dir is None else f"{spec.label}:{spec.checkpoint_dir}"
+        for spec in specs
+    ))
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
     print("-" * 96)
 
     rows: list[dict[str, Any]] = []
+    happo_cache: dict[tuple[Path, bool], HappoPolicy] = {}
     for spec in specs:
         for seed in args.seeds:
-            row = run_rollout(spec, scenario_kwargs, seed, time_bins=args.time_bins)
+            row = run_rollout(
+                spec,
+                scenario_kwargs,
+                seed,
+                time_bins=args.time_bins,
+                happo_cache=happo_cache,
+                stochastic_happo=args.stochastic,
+            )
             rows.append(row)
             _print_row(row)
 
@@ -677,7 +750,8 @@ def main() -> None:
     _print_summary(summary)
     payload = {
         "metadata": {
-            "strategies": [spec.__dict__ for spec in specs],
+            "strategies": [_spec_metadata(spec) for spec in specs],
+            "happo_deterministic": not args.stochastic,
             "steps": int(args.steps),
             "seeds": [int(seed) for seed in args.seeds],
             "scenario_kwargs": scenario_kwargs,

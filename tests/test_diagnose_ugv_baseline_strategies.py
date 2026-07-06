@@ -1,5 +1,6 @@
 import argparse
 import unittest
+from pathlib import Path
 
 import torch
 import vmas
@@ -53,8 +54,19 @@ class DiagnoseUgvBaselineStrategiesTests(unittest.TestCase):
         duplicate = parse_strategy_specs(["lawnmower_astar", "lawnmower_astar"])
         self.assertEqual([spec.label for spec in duplicate], ["lawnmower_astar", "lawnmower_astar_2"])
 
+        happo = parse_strategy_specs(["happo:/tmp/models"])
+        self.assertEqual(happo[0].name, "happo")
+        self.assertEqual(happo[0].label, "happo")
+        self.assertEqual(happo[0].checkpoint_dir, Path("/tmp/models"))
+
         with self.assertRaises(ValueError):
             parse_strategy_specs(["not_a_strategy"])
+
+    def test_happo_checkpoint_flag_supplies_happo_strategy(self):
+        specs = parse_strategy_specs(["happo"], happo_checkpoint="/tmp/ugv/models")
+
+        self.assertEqual(specs[0].name, "happo")
+        self.assertEqual(specs[0].checkpoint_dir, Path("/tmp/ugv/models"))
 
     def test_build_scenario_kwargs_match_joint_schema_ugv_defaults(self):
         kwargs = build_scenario_kwargs(_args())
