@@ -166,6 +166,8 @@ def default_algo_args(profile: str = "smoke") -> Dict[str, Any]:
             "use_linear_lr_decay":   is_research,
             "use_proper_time_limits": True,
             "model_dir":             None,
+            "warmstart_uav_model_dir": None,
+            "warmstart_ugv_model_dir": None,
         },
         "eval": {
             "use_eval": is_research,
@@ -395,6 +397,7 @@ def _build_diagnostic_happo_runner_class():
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._configure_class_shared_actors()
+            self._restore_class_warmstart_actors()
 
         def _use_class_shared_policy(self) -> bool:
             return bool(self.algo_args.get("algo", {}).get("share_param_by_agent_class", False))
@@ -474,6 +477,76 @@ def _build_diagnostic_happo_runner_class():
             if self.share_param:
                 return [0]
             return list(range(self.num_agents))
+
+        def _class_warmstart_model_dirs(self) -> dict[str, str]:
+            train_args = self.algo_args.get("train", {})
+            out: dict[str, str] = {}
+            uav_dir = train_args.get("warmstart_uav_model_dir")
+            ugv_dir = train_args.get("warmstart_ugv_model_dir")
+            if uav_dir:
+                out["uav"] = str(uav_dir)
+            if ugv_dir:
+                out["ugv"] = str(ugv_dir)
+            return out
+
+        def _restore_class_warmstart_actors(self) -> None:
+            """Warm-start class-shared actors from per-class checkpoint dirs.
+
+            This intentionally loads only actor weights. The joint critic and
+            value normalizer remain freshly initialized because separate UAV
+            and UGV warmup critics do not describe the joint task.
+            """
+            import os
+
+            warmstart_dirs = self._class_warmstart_model_dirs()
+            if not warmstart_dirs:
+                return
+            if self.algo_args["train"].get("model_dir") is not None:
+                raise ValueError(
+                    "class warm-start dirs cannot be combined with model_dir; "
+                    "use either --model-dir or --warmstart-*-model-dir"
+                )
+            if not self._use_class_shared_policy():
+                raise ValueError(
+                    "class warm-start dirs require share_param_by_agent_class=True"
+                )
+
+            configured_groups = set(self._policy_group_names)
+            missing_groups = sorted(set(warmstart_dirs) - configured_groups)
+            if missing_groups:
+                raise ValueError(
+                    "class warm-start requested for missing policy group(s): "
+                    + ", ".join(missing_groups)
+                )
+
+            for group_index, group_name in enumerate(self._policy_group_names):
+                model_dir = warmstart_dirs.get(group_name)
+                if model_dir is None:
+                    continue
+                actor_path = os.path.join(model_dir, "actor_agent0.pt")
+                if not os.path.isfile(actor_path):
+                    raise FileNotFoundError(
+                        f"class warm-start checkpoint for {group_name!r} is missing "
+                        f"actor_agent0.pt: {model_dir}"
+                    )
+                representative = self._policy_group_representatives[group_index]
+                try:
+                    state = torch.load(
+                        actor_path,
+                        map_location=self.device,
+                        weights_only=True,
+                    )
+                    self.actor[representative].actor.load_state_dict(state)
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"Could not warm-start {group_name!r} actor from {actor_path}. "
+                        "Check that the warmup checkpoint was trained with the same "
+                        "class observation and action shape as the joint run."
+                    ) from exc
+                print(
+                    f"[warmstart] Loaded {group_name} actor for joint agent "
+                    f"{representative} from {actor_path}; critic starts fresh."
+                )
 
         def _evaluate_agent_actions(self, agent_id: int):
             actor_buffer = self.actor_buffer[agent_id]

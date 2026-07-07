@@ -199,6 +199,8 @@ def build_args(
     reward_confirm: bool = False,
     recurrent: bool = False,
     model_dir: str | None = None,
+    warmstart_uav_model_dir: str | None = None,
+    warmstart_ugv_model_dir: str | None = None,
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
     ground_confirmation_range_m: float | None = None,
@@ -559,6 +561,10 @@ def build_args(
         share_param = False
     if bool(share_param) and bool(share_param_by_agent_class):
         raise ValueError("share_param and share_param_by_agent_class are mutually exclusive")
+    if model_dir and (warmstart_uav_model_dir or warmstart_ugv_model_dir):
+        raise ValueError("model_dir cannot be combined with class warm-start model dirs")
+    if (warmstart_uav_model_dir or warmstart_ugv_model_dir) and not bool(share_param_by_agent_class):
+        raise ValueError("class warm-start model dirs require share_param_by_agent_class=True")
     uav_confidence_reward = float(uav_confidence_reward)
     if uav_confidence_reward < 0.0:
         raise ValueError("uav_confidence_reward must be nonnegative")
@@ -711,6 +717,8 @@ def build_args(
             "use_linear_lr_decay":    linear_lr_decay,
             "use_proper_time_limits": True,
             "model_dir":              model_dir,
+            "warmstart_uav_model_dir": warmstart_uav_model_dir,
+            "warmstart_ugv_model_dir": warmstart_ugv_model_dir,
         },
         "eval": {
             "use_eval":               False,
@@ -1539,6 +1547,10 @@ def main():
                    help="Disable fire, overriding diagnostic preset defaults.")
     p.add_argument("--model-dir", default=None,
                    help="Warm-start actors from a checkpoint dir (e.g. a behaviour-cloned results/bc_happo) and RL-fine-tune.")
+    p.add_argument("--warmstart-uav-model-dir", default=None,
+                   help="Warm-start the class-shared UAV actor from actor_agent0.pt in this models/ directory.")
+    p.add_argument("--warmstart-ugv-model-dir", default=None,
+                   help="Warm-start the class-shared UGV actor from actor_agent0.pt in this models/ directory.")
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--reward-search", action="store_true",
@@ -2325,6 +2337,19 @@ def main():
         args.share_param = False
     if bool(args.share_param) and bool(args.share_param_by_agent_class):
         p.error("--share-param and --share-param-by-agent-class are mutually exclusive")
+    class_warmstart_dirs = [
+        value for value in (args.warmstart_uav_model_dir, args.warmstart_ugv_model_dir)
+        if value
+    ]
+    if class_warmstart_dirs:
+        if args.model_dir:
+            p.error("--model-dir cannot be combined with --warmstart-uav-model-dir/--warmstart-ugv-model-dir")
+        if not bool(args.share_param_by_agent_class):
+            p.error("--warmstart-uav-model-dir/--warmstart-ugv-model-dir require --share-param-by-agent-class")
+        for value in class_warmstart_dirs:
+            actor_path = Path(value) / "actor_agent0.pt"
+            if not actor_path.is_file():
+                p.error(f"class warm-start directory is missing actor_agent0.pt: {value}")
     args.uav_frontier_mode = str(args.uav_frontier_mode).replace("-", "_")
     args.uav_frontier_source = str(args.uav_frontier_source).replace("-", "_").lower()
     args.uav_cleanup_target_refresh_mode = str(args.uav_cleanup_target_refresh_mode).replace("-", "_").lower()
@@ -2521,6 +2546,8 @@ def main():
     print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
     print(f" uav_start_edge_margin_m: {args.uav_start_edge_margin_m}")
     print(f" action_transform: {args.action_transform}")
+    print(f" warmstart_uav_model_dir: {args.warmstart_uav_model_dir}")
+    print(f" warmstart_ugv_model_dir: {args.warmstart_ugv_model_dir}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
 
@@ -2551,6 +2578,8 @@ def main():
         reward_confirm = args.reward_confirm,
         recurrent = args.recurrent,
         model_dir = args.model_dir,
+        warmstart_uav_model_dir = args.warmstart_uav_model_dir,
+        warmstart_ugv_model_dir = args.warmstart_ugv_model_dir,
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
         ground_confirmation_range_m = args.ground_confirmation_range_m,

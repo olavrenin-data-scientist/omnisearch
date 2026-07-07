@@ -202,6 +202,51 @@ class HappoCheckpointTests(unittest.TestCase):
                 share_param_by_agent_class=True,
             )
 
+    def test_build_args_exposes_class_warmstart_model_dirs(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="class_warmstart",
+            joint_survivor_diagnostic=True,
+            share_param_by_agent_class=True,
+            warmstart_uav_model_dir="/tmp/uav/models",
+            warmstart_ugv_model_dir="/tmp/ugv/models",
+        )
+
+        self.assertEqual(algo_args["train"]["warmstart_uav_model_dir"], "/tmp/uav/models")
+        self.assertEqual(algo_args["train"]["warmstart_ugv_model_dir"], "/tmp/ugv/models")
+
+    def test_build_args_rejects_class_warmstart_without_class_sharing(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="class_warmstart_no_share",
+                share_param_by_agent_class=False,
+                warmstart_uav_model_dir="/tmp/uav/models",
+            )
+
+    def test_build_args_rejects_model_dir_with_class_warmstart(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="class_warmstart_conflict",
+                joint_survivor_diagnostic=True,
+                share_param_by_agent_class=True,
+                model_dir="/tmp/joint/models",
+                warmstart_ugv_model_dir="/tmp/ugv/models",
+            )
+
     def test_build_args_exposes_terrain_cnn_encoder(self):
         _, algo_args, _ = build_args(
             num_env_steps=100,
