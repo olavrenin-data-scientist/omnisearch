@@ -778,6 +778,53 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertGreater(float(edge_patch[0, -1]), 0.5)
 
+    def test_batched_local_confidence_matches_reference_local_grid(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=16)
+        scenario._world.batch_dim = 2
+        scenario.local_confidence_obs_grid = 5
+        scenario.local_confidence_obs_radius_m = 3.0
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.1, 0.2])
+        scenario.uav_confidence_grid = (
+            torch.arange(2 * 16 * 16, dtype=torch.float32).view(2, 16, 16)
+            / float(2 * 16 * 16)
+        )
+        positions = torch.tensor(
+            [
+                [[0.0, 0.0], [0.75, 0.75], [-0.85, 0.65]],
+                [[-0.5, 0.5], [0.95, 0.95], [0.2, -0.9]],
+            ],
+            dtype=torch.float32,
+        )
+        agents = [
+            types.SimpleNamespace(
+                name=f"drone_{idx}",
+                is_drone=True,
+                state=types.SimpleNamespace(pos=positions[:, idx, :]),
+            )
+            for idx in range(3)
+        ]
+        scenario._world.agents = agents
+
+        batched = scenario._batched_local_grid_observation(
+            positions,
+            scenario.uav_confidence_grid.float(),
+            K=scenario.local_confidence_obs_grid,
+            radius_m=scenario.local_confidence_obs_radius_m,
+            outside_value=1.0,
+        )
+        for idx, agent in enumerate(agents):
+            reference = scenario._local_grid_observation(
+                agent,
+                scenario.uav_confidence_grid.float(),
+                K=scenario.local_confidence_obs_grid,
+                radius_m=scenario.local_confidence_obs_radius_m,
+                outside_value=1.0,
+            )
+            torch.testing.assert_close(batched[:, idx], reference, atol=1e-6, rtol=1e-6)
+
+        cached = scenario._local_confidence_observation(agents[1])
+        torch.testing.assert_close(cached, batched[:, 1], atol=1e-6, rtol=1e-6)
+
     def test_uav_cleanup_target_high_confidence_map_is_invalid(self):
         scenario = self._coverage_scenario(grid_size=8)
         scenario.uav_cleanup_target_obs = True

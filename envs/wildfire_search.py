@@ -1181,6 +1181,7 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_stencil_direction_cache = {}
         self._uav_land_cover_factor_cache = {}
         self._uav_frontier_feature_cache = {}
+        self._uav_local_confidence_obs_cache = {}
         self._uav_cleanup_target_geometry_cache = {}
         self._uav_terrain_cache_version = 0
         self._ugv_planner_route_cache: dict[tuple, tuple[tuple[int, int], bool, bool] | None] = {}
@@ -4624,6 +4625,8 @@ class WildfireSearchScenario(BaseScenario):
     def _invalidate_uav_runtime_caches(self) -> None:
         if hasattr(self, "_uav_frontier_feature_cache"):
             self._uav_frontier_feature_cache.clear()
+        if hasattr(self, "_uav_local_confidence_obs_cache"):
+            self._uav_local_confidence_obs_cache.clear()
 
     def _invalidate_uav_terrain_caches(self) -> None:
         if hasattr(self, "_uav_land_cover_factor_cache"):
@@ -7341,6 +7344,13 @@ class WildfireSearchScenario(BaseScenario):
         observation convention that non-searchable space should not look
         unexplored.
         """
+        if getattr(agent, "is_drone", False) and self.n_drones > 0:
+            try:
+                drone_idx = int(agent.name.rsplit("_", 1)[1])
+            except (AttributeError, IndexError, ValueError):
+                drone_idx = 0
+            drone_idx = min(max(drone_idx, 0), self.n_drones - 1)
+            return self._current_uav_local_confidence_features()[:, drone_idx]
         return self._local_grid_observation(
             agent,
             self.uav_confidence_grid.float(),
@@ -7348,6 +7358,105 @@ class WildfireSearchScenario(BaseScenario):
             radius_m=self.local_confidence_obs_radius_m,
             outside_value=1.0,
         )
+
+    def _current_uav_local_confidence_features(self) -> Tensor:
+        """Batched local confidence patches for all UAVs at current positions."""
+        if self.n_drones <= 0:
+            return torch.zeros(
+                self.world.batch_dim,
+                0,
+                self.local_confidence_obs_grid * self.local_confidence_obs_grid,
+                device=self.uav_confidence_grid.device,
+                dtype=self.uav_confidence_grid.dtype,
+            )
+        drone_pos = torch.stack(
+            [drone.state.pos for drone in self.world.agents[: self.n_drones]],
+            dim=1,
+        )
+        if not hasattr(self, "_uav_local_confidence_obs_cache"):
+            self._uav_local_confidence_obs_cache = {}
+        key = (
+            getattr(self.uav_confidence_grid, "_version", 0),
+            drone_pos.device.type,
+            drone_pos.device.index,
+            str(drone_pos.dtype),
+            tuple(drone_pos.shape),
+            int(self.local_confidence_obs_grid),
+            float(self.local_confidence_obs_radius_m),
+        )
+        cached = self._uav_local_confidence_obs_cache.get(key)
+        if cached is not None:
+            return cached
+        features = self._batched_local_grid_observation(
+            drone_pos,
+            self.uav_confidence_grid.float(),
+            K=self.local_confidence_obs_grid,
+            radius_m=self.local_confidence_obs_radius_m,
+            outside_value=1.0,
+        )
+        self._uav_local_confidence_obs_cache[key] = features
+        return features
+
+    def _batched_local_grid_observation(
+        self,
+        positions: Tensor,
+        grid: Tensor,
+        *,
+        K: int,
+        radius_m: float,
+        outside_value: float,
+    ) -> Tensor:
+        """Vectorized equivalent of `_local_grid_observation` for [B, N, 2] positions."""
+        K = int(K)
+        B, N, _ = positions.shape
+        if K <= 0 or N <= 0:
+            return torch.zeros(B, N, 0, device=positions.device, dtype=positions.dtype)
+        import torch.nn.functional as F
+
+        device = positions.device
+        dtype = positions.dtype
+        G = int(self.fire_grid_size)
+        cell_width_m = 1.0 / (
+            self.terrain_sim_units_per_meter.to(device=device, dtype=dtype).clamp_min(1e-9)
+            * (float(G) / (2.0 * float(self.x_semidim)))
+        )
+        radius_cells = torch.round(float(radius_m) / cell_width_m).long().clamp_min(1)
+        max_radius = int(radius_cells.max().detach().cpu().item())
+        patch_size = 2 * max_radius + 1
+
+        values = grid.to(device=device, dtype=dtype)
+        gx, gy = self._positions_to_grid(positions)
+        offsets = torch.arange(-max_radius, max_radius + 1, device=device)
+        offset_y, offset_x = torch.meshgrid(offsets, offsets, indexing="ij")
+        patch_x = gx[..., None, None] + offset_x.view(1, 1, patch_size, patch_size)
+        patch_y = gy[..., None, None] + offset_y.view(1, 1, patch_size, patch_size)
+
+        radius = radius_cells.view(B, 1, 1, 1)
+        inside_radius = (
+            (offset_x.abs().view(1, 1, patch_size, patch_size) <= radius)
+            & (offset_y.abs().view(1, 1, patch_size, patch_size) <= radius)
+        )
+        in_bounds = (
+            inside_radius
+            & (patch_x >= 0)
+            & (patch_x < G)
+            & (patch_y >= 0)
+            & (patch_y < G)
+        )
+        safe_x = patch_x.clamp(0, G - 1)
+        safe_y = patch_y.clamp(0, G - 1)
+        batch_idx = torch.arange(B, device=device).view(B, 1, 1, 1).expand(B, N, patch_size, patch_size)
+        gathered = values[batch_idx, safe_y, safe_x]
+        patches = torch.where(
+            in_bounds,
+            gathered,
+            torch.full_like(gathered, float(outside_value)),
+        )
+        pooled = F.adaptive_avg_pool2d(
+            patches.reshape(B * N, 1, patch_size, patch_size),
+            (K, K),
+        )
+        return pooled.reshape(B, N, K * K)
 
     def _global_grid_observation(self, grid: Tensor, K: int) -> Tensor:
         if K <= 0:
