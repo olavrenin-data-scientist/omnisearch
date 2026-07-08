@@ -3026,7 +3026,6 @@ class WildfireSearchScenario(BaseScenario):
             self.step_uav_boundary_projection_norm.zero_()
             self.step_uav_boundary_projection_count.zero_()
             self.step_uav_boundary_hit.zero_()
-            self._invalidate_uav_runtime_caches()
         self.step_count += 1
         self.metric_survivor_oracle_reveals.zero_()
         self.metric_ugv_assignment_switches.zero_()
@@ -3399,7 +3398,7 @@ class WildfireSearchScenario(BaseScenario):
             self._clamp_agents_to_world()
             drone_pos = torch.stack([a.state.pos for a in drone_agents], dim=1)
             self._update_drone_altitudes(self._pre_step_drone_pos, drone_pos)
-            self._invalidate_uav_runtime_caches()
+            self._invalidate_uav_local_confidence_obs_cache()
         else:
             self._clamp_agents_to_world()
 
@@ -4622,11 +4621,17 @@ class WildfireSearchScenario(BaseScenario):
     def _device_cache_key(self, device: torch.device, dtype: torch.dtype) -> tuple:
         return (device.type, device.index, str(dtype))
 
-    def _invalidate_uav_runtime_caches(self) -> None:
+    def _invalidate_uav_frontier_feature_cache(self) -> None:
         if hasattr(self, "_uav_frontier_feature_cache"):
             self._uav_frontier_feature_cache.clear()
+
+    def _invalidate_uav_local_confidence_obs_cache(self) -> None:
         if hasattr(self, "_uav_local_confidence_obs_cache"):
             self._uav_local_confidence_obs_cache.clear()
+
+    def _invalidate_uav_runtime_caches(self) -> None:
+        self._invalidate_uav_frontier_feature_cache()
+        self._invalidate_uav_local_confidence_obs_cache()
 
     def _invalidate_uav_terrain_caches(self) -> None:
         if hasattr(self, "_uav_land_cover_factor_cache"):
@@ -6544,7 +6549,7 @@ class WildfireSearchScenario(BaseScenario):
 
     def _pre_step_uav_frontier_features(self) -> Tensor:
         return self._cached_uav_frontier_features_for_positions(
-            "pre_step",
+            "decision",
             self._pre_step_drone_pos,
         )
 
@@ -6553,7 +6558,7 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
-        return self._cached_uav_frontier_features_for_positions("current_agents", drone_pos)
+        return self._cached_uav_frontier_features_for_positions("decision", drone_pos)
 
     def _uav_frontier_centroid_features_for_positions(self, positions: Tensor) -> Tensor:
         """Direction, distance, and strength of nearby uncovered coverage mass."""

@@ -1356,6 +1356,47 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertTrue(torch.allclose(observed, raw_features))
         self.assertEqual(len(scenario._uav_frontier_feature_cache), 1)
 
+    def test_frontier_observation_and_reward_reuse_decision_cache(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=16)
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_mode = "local_global"
+        scenario.uav_frontier_source = "confidence"
+        scenario.uav_frontier_ownership = True
+        scenario.uav_confidence_grid[:] = 1.0
+        scenario.uav_confidence_grid[:, :4, :4] = 0.0
+        scenario.uav_confidence_grid[:, -4:, -4:] = 0.0
+        positions = torch.tensor(
+            [[[-0.60, -0.60], [0.60, -0.60], [0.0, 0.60]]],
+            dtype=torch.float32,
+        )
+        agents = [
+            types.SimpleNamespace(
+                name=f"drone_{idx}",
+                is_drone=True,
+                state=types.SimpleNamespace(pos=positions[:, idx]),
+            )
+            for idx in range(3)
+        ]
+        scenario._world.agents = agents
+        scenario._pre_step_drone_pos = positions.clone()
+
+        calls = 0
+        original = scenario._uav_frontier_features_for_positions
+
+        def counted(pos):
+            nonlocal calls
+            calls += 1
+            return original(pos)
+
+        scenario._uav_frontier_features_for_positions = counted
+
+        observed = scenario._current_uav_frontier_features()
+        scenario._invalidate_uav_local_confidence_obs_cache()
+        reward_side = scenario._pre_step_uav_frontier_features()
+
+        self.assertEqual(calls, 1)
+        torch.testing.assert_close(observed, reward_side, atol=1e-6, rtol=1e-6)
+
     def test_uav_confidence_move_reward_uses_best_one_step_opportunity(self):
         scenario = self._coverage_scenario(grid_size=16)
         scenario.r_uav_confidence = 0.0
