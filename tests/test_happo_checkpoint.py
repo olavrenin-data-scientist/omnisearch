@@ -693,18 +693,19 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         self.assertFalse(algo_args["algo"]["share_param"])
         self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
-        self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1])
+        self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1, 1])
         self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["n_drones"], 3)
-        self.assertEqual(scenario["n_ground"], 1)
+        self.assertEqual(scenario["n_ground"], 2)
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertFalse(scenario["known_survivors_at_reset"])
         self.assertFalse(scenario["drone_can_confirm"])
         self.assertTrue(scenario["disable_fire"])
         self.assertEqual(scenario["comms_dropout"], 0.0)
         self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
-        self.assertTrue(scenario["ugv_assigned_target_obs_only"])
+        self.assertFalse(scenario["ugv_assigned_target_obs_only"])
+        self.assertTrue(scenario["survivor_assignment_obs"])
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
         self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
         self.assertEqual(scenario["ugv_global_planner_heuristic"], "euclidean")
@@ -722,6 +723,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_confidence_move"], 0.10)
         self.assertEqual(scenario["r_uav_confidence_overlap"], 0.06)
         self.assertTrue(scenario["uav_cleanup_target_obs"])
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
 
     def test_joint_survivor_diagnostic_can_disable_class_parameter_sharing(self):
         _, algo_args, _ = build_args(
@@ -756,7 +758,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 2)
         self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
-        self.assertTrue(scenario["ugv_assigned_target_obs_only"])
+        self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1, 1])
         self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
 
@@ -790,7 +792,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["survivor_reveal_end_step"], 180)
         self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
         self.assertTrue(scenario["ugv_zero_uav_search_observations"])
-        self.assertTrue(scenario["ugv_assigned_target_obs_only"])
+        self.assertFalse(scenario["ugv_assigned_target_obs_only"])
+        self.assertTrue(scenario["survivor_assignment_obs"])
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
         self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
         self.assertEqual(scenario["r_ground_confirm"], 10.0)
@@ -799,6 +802,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
 
     def test_joint_schema_uav_diagnostic_uses_padded_joint_observation_defaults(self):
         _, algo_args, env_args = build_args(
@@ -825,8 +829,9 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(scenario["drone_can_confirm"])
         self.assertEqual(scenario["r_drone_scout"], 2.0)
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
-        self.assertTrue(scenario["ugv_assigned_target_obs_only"])
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 345)
+        self.assertFalse(scenario["ugv_assigned_target_obs_only"])
+        self.assertTrue(scenario["survivor_assignment_obs"])
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
 
     def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
         _, _, env_args = build_args(

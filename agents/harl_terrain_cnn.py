@@ -13,6 +13,8 @@ TERRAIN_CNN_OBS_OFFSET = 4 + 12 + 1
 TERRAIN_CNN_CHANNELS = 2
 UGV_PLANNER_HINT_DIM = 5
 BOUNDARY_OBS_DIM = 4
+SURVIVOR_MESSAGE_BASE_DIM = 7
+SURVIVOR_ASSIGNMENT_OBS_DIM = 2
 UAV_FRONTIER_OBS_DIM = 4
 UAV_CLEANUP_TARGET_OBS_DIM = 4
 UAV_ASTAR_ROUTE_OBS_DIM = 4
@@ -50,6 +52,7 @@ def wildfire_single_observation_dim(
     uav_frontier_top_k: int = 2,
     uav_cleanup_target_obs: bool = False,
     uav_astar_route_obs: bool = False,
+    survivor_assignment_obs: bool = False,
 ) -> int:
     """Return the per-agent wildfire observation width for the current layout."""
     patch_size = int(local_map_patch_size)
@@ -71,6 +74,9 @@ def wildfire_single_observation_dim(
     )
     uav_cleanup_target_obs_dim = UAV_CLEANUP_TARGET_OBS_DIM if bool(uav_cleanup_target_obs) else 0
     uav_astar_route_obs_dim = UAV_ASTAR_ROUTE_OBS_DIM if bool(uav_astar_route_obs) else 0
+    survivor_message_dim = SURVIVOR_MESSAGE_BASE_DIM + (
+        SURVIVOR_ASSIGNMENT_OBS_DIM if bool(survivor_assignment_obs) else 0
+    )
     return (
         4  # own pos + velocity
         + 12  # lidar or drone dummy lidar
@@ -81,7 +87,7 @@ def wildfire_single_observation_dim(
         + 2  # flight state
         + BOUNDARY_OBS_DIM  # distances to left, right, bottom, top boundary
         + max(int(n_agents) - 1, 0) * 2  # teammate relative positions
-        + max(int(n_survivors), 0) * 7  # survivor messages
+        + max(int(n_survivors), 0) * survivor_message_dim  # survivor messages
         + coverage_obs_dim  # optional downsampled team coverage map + global fraction
         + local_coverage_obs_dim  # optional pooled local coverage map around this agent
         + confidence_obs_dim  # optional downsampled UAV inspection-confidence map + global mean

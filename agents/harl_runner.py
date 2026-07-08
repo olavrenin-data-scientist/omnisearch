@@ -238,28 +238,32 @@ def _advantage_alignment_diagnostics(
     n_survivors: int,
     action_transform: str,
     survivor_message_distance_scale_m: float,
+    survivor_message_dim: int = 7,
 ) -> dict[str, float]:
     """Summarize whether target-aligned sampled actions get positive advantage.
 
-    The actor observation appends one 7-value survivor message per survivor:
-    [known, dx, dy, ux, uy, distance_norm, confirmed]. This diagnostic uses the
-    nearest known, unconfirmed survivor message and compares the sampled action
-    with that target unit vector.
+    The actor observation appends one survivor message per survivor. The base
+    7-value layout is [known, dx, dy, ux, uy, distance_norm, confirmed]. Joint
+    assignment-aware runs append [assigned_to_me, assigned_to_other_ugv].
     """
     if n_survivors <= 0:
         return {}
+    survivor_message_dim = max(int(survivor_message_dim), 7)
     obs = actor_buffer.obs[:-1]
     next_obs = actor_buffer.obs[1:]
     actions = actor_buffer.actions
-    if obs.shape[-1] < 7 * n_survivors or actions.shape[-1] < 2:
+    message_width = survivor_message_dim * n_survivors
+    if obs.shape[-1] < message_width or actions.shape[-1] < 2:
         return {}
 
     flat_obs = obs.reshape(-1, obs.shape[-1])
     flat_next_obs = next_obs.reshape(-1, next_obs.shape[-1])
     flat_actions = actions.reshape(-1, actions.shape[-1])
     flat_adv = advantages.reshape(-1)
-    survivor_messages = flat_obs[:, -7 * n_survivors:].reshape(-1, n_survivors, 7)
-    next_survivor_messages = flat_next_obs[:, -7 * n_survivors:].reshape(-1, n_survivors, 7)
+    survivor_messages = flat_obs[:, -message_width:].reshape(-1, n_survivors, survivor_message_dim)
+    next_survivor_messages = flat_next_obs[:, -message_width:].reshape(
+        -1, n_survivors, survivor_message_dim,
+    )
 
     known = survivor_messages[:, :, 0] > 0.5
     confirmed = survivor_messages[:, :, 6] > 0.5
@@ -791,8 +795,9 @@ def _build_diagnostic_happo_runner_class():
             n_survivors = int(scenario_kwargs.get("n_survivors", 0))
             action_transform = str(self.env_args.get("action_transform", "clip"))
             survivor_message_distance_scale_m = float(
-                scenario_kwargs.get("survivor_message_distance_scale_m", 100.0),
+            scenario_kwargs.get("survivor_message_distance_scale_m", 100.0),
             )
+            survivor_message_dim = 7 + 2 * bool(scenario_kwargs.get("survivor_assignment_obs", False))
 
             for group_index in group_order:
                 members = list(update_groups[group_index])
@@ -816,6 +821,7 @@ def _build_diagnostic_happo_runner_class():
                         n_survivors=n_survivors,
                         action_transform=action_transform,
                         survivor_message_distance_scale_m=survivor_message_distance_scale_m,
+                        survivor_message_dim=survivor_message_dim,
                     ),
                 )
                 annotated_info = self._annotate_policy_group_info(

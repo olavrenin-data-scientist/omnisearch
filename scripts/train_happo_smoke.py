@@ -94,7 +94,7 @@ DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_INTERVAL_STEPS = 15
 DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD = 0.6
 DEFAULT_UGV_DIAG_PLANNER_LAND_COVER_COSTS = (0.85, 1.0, 1.15, 1.35, 4.0, 8.0)
 DEFAULT_JOINT_DIAG_DRONES = 3
-DEFAULT_JOINT_DIAG_UGVS = 1
+DEFAULT_JOINT_DIAG_UGVS = 2
 DEFAULT_JOINT_DIAG_SURVIVORS = 5
 DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD = 1.0
 DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD = 4.0
@@ -246,6 +246,7 @@ def build_args(
     survivor_reveal_initial_count: int = 1,
     survivor_reveal_start_step: int = 10,
     survivor_reveal_end_step: int = 180,
+    survivor_assignment_obs: bool | None = None,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
     uav_no_global_coverage_obs: bool = False,
@@ -444,12 +445,15 @@ def build_args(
     if ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
         raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
     if ugv_assigned_target_obs_only is None:
-        ugv_assigned_target_obs_only = bool(
+        ugv_assigned_target_obs_only = False
+    ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
+    if survivor_assignment_obs is None:
+        survivor_assignment_obs = bool(
             joint_survivor_diagnostic
             or joint_schema_uav_diagnostic
             or joint_schema_ugv_diagnostic
         )
-    ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
+    survivor_assignment_obs = bool(survivor_assignment_obs)
     survivor_reveal_schedule = str(survivor_reveal_schedule).replace("-", "_").lower()
     if survivor_reveal_schedule not in {"stratified_uniform"}:
         raise ValueError("survivor_reveal_schedule must be stratified_uniform")
@@ -815,6 +819,7 @@ def build_args(
         "ugv_planner_fire_buffer_cost": ugv_planner_fire_buffer_cost,
         "ugv_target_assignment_mode": ugv_target_assignment_mode,
         "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
+        "survivor_assignment_obs": survivor_assignment_obs,
         "ugv_sticky_switch_margin_m": ugv_sticky_switch_margin_m,
         "ugv_sticky_switch_ratio": ugv_sticky_switch_ratio,
         "ugv_sticky_min_age_steps": ugv_sticky_min_age_steps,
@@ -1192,6 +1197,8 @@ def build_args(
                 "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
                 "obs_schema_n_ground": 2,
                 "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+                "ugv_assigned_target_obs_only": False,
+                "survivor_assignment_obs": True,
             })
     if joint_survivor_diagnostic:
         joint_diagnostic_ugvs = max(int(joint_diagnostic_ugvs), 1)
@@ -1210,6 +1217,7 @@ def build_args(
             "comms_dropout": 0.0,
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
+            "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
             "r_team_scout": DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD,
             "r_all_survivors_found": 0.0,
@@ -1277,6 +1285,7 @@ def build_args(
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_zero_uav_search_observations": True,
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
+            "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
             "r_team_scout": 0.0,
             "r_all_survivors_found": 0.0,
@@ -1348,6 +1357,7 @@ def build_args(
         uav_frontier_top_k=uav_frontier_top_k,
         uav_cleanup_target_obs=bool(uav_cleanup_target_obs),
         uav_astar_route_obs=bool(uav_astar_route_obs),
+        survivor_assignment_obs=bool(survivor_assignment_obs),
     )
     env_args = {
         "max_cycles":      episode_length,
@@ -1532,8 +1542,11 @@ def main():
                    default="nearest",
                    help="How UGV planner targets are selected from known, unconfirmed survivors.")
     p.add_argument("--ugv-assigned-target-obs-only", action=argparse.BooleanOptionalAction, default=None,
-                   help="For UGVs, zero non-assigned survivor-message slots so the policy sees only "
-                        "the current assigned goal target. Defaults on for joint UGV diagnostics.")
+                   help="Legacy compatibility flag. UGV survivor-message observations now keep all "
+                        "known survivor slots visible; assignment still controls planner hints/rewards.")
+    p.add_argument("--survivor-assignment-obs", action=argparse.BooleanOptionalAction, default=None,
+                   help="Append assigned_to_me and assigned_to_other_ugv flags to each survivor-message "
+                        "slot. Defaults on for joint UAV/UGV schema diagnostics.")
     p.add_argument("--ugv-sticky-switch-margin-m", type=float, default=20.0,
                    help="Sticky assignment switches only if the new target beats this absolute margin.")
     p.add_argument("--ugv-sticky-switch-ratio", type=float, default=0.80,
@@ -2204,7 +2217,9 @@ def main():
     if args.joint_schema_ugv_diagnostic:
         args.ugv_target_assignment_mode = "greedy_sticky"
     if args.ugv_assigned_target_obs_only is None:
-        args.ugv_assigned_target_obs_only = bool(
+        args.ugv_assigned_target_obs_only = False
+    if args.survivor_assignment_obs is None:
+        args.survivor_assignment_obs = bool(
             args.joint_survivor_diagnostic
             or args.joint_schema_uav_diagnostic
             or args.joint_schema_ugv_diagnostic
@@ -2500,6 +2515,7 @@ def main():
     print(f" ugv_planner_land_cover_costs: {args.ugv_planner_land_cover_costs}")
     print(f" ugv_target_assignment_mode: {args.ugv_target_assignment_mode}")
     print(f" ugv_assigned_target_obs_only: {args.ugv_assigned_target_obs_only}")
+    print(f" survivor_assignment_obs: {args.survivor_assignment_obs}")
     print(
         " ugv_sticky_assignment: "
         f"margin={args.ugv_sticky_switch_margin_m}m "
@@ -2627,6 +2643,7 @@ def main():
         survivor_reveal_initial_count = args.survivor_reveal_initial_count,
         survivor_reveal_start_step = args.survivor_reveal_start_step,
         survivor_reveal_end_step = args.survivor_reveal_end_step,
+        survivor_assignment_obs = args.survivor_assignment_obs,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,

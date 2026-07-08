@@ -101,7 +101,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
             "obs_schema_n_ground": 2,
             "obs_schema_n_survivors": 5,
             "ugv_planner_hint": "global_astar",
-            "ugv_assigned_target_obs_only": True,
+            "ugv_assigned_target_obs_only": False,
+            "survivor_assignment_obs": True,
         })
 
     if args.terrain_cache_path:
@@ -6859,7 +6860,10 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    fig, axes = plt.subplots(28, 3, figsize=(14, 84), constrained_layout=True)
+    custom_panel_count = 24
+    ncols = 3
+    nrows = math.ceil((len(panels) + custom_panel_count) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3.0 * nrows), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, (title, key, xlim) in zip(axes_flat, panels):
         values = [

@@ -740,6 +740,9 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_assigned_target_obs_only = bool(
             kwargs.pop("ugv_assigned_target_obs_only", False)
         )
+        self.survivor_assignment_obs = bool(
+            kwargs.pop("survivor_assignment_obs", False)
+        )
         if self.local_coverage_obs_grid < 0:
             raise ValueError("local_coverage_obs_grid must be nonnegative")
         if self.local_coverage_obs_grid > 0 and self.local_coverage_obs_grid % 2 != 1:
@@ -7571,7 +7574,12 @@ class WildfireSearchScenario(BaseScenario):
         return keep
 
     def _survivor_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
-        """Encode known candidates as [known, dx, dy, ux, uy, distance_norm, confirmed]."""
+        """Encode known survivor candidates.
+
+        Base feature order is [known, dx, dy, ux, uy, distance_norm, confirmed].
+        When survivor_assignment_obs is enabled, two flags are appended:
+        [assigned_to_me, assigned_to_other_ugv].
+        """
         agent_idx = self.world.agents.index(agent)
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
@@ -7587,34 +7595,45 @@ class WildfireSearchScenario(BaseScenario):
 
         obs_known = local_known
         obs_confirmed = local_confirmed
-        if (
-            self.ugv_assigned_target_obs_only
-            and not agent.is_drone
-            and self.n_ground > 0
-            and self.n_survivors > 0
-        ):
-            ground_index = agent_idx - self.n_drones
-            ground_slice = slice(self.n_drones, self.n_agents)
-            ground_known = self.known_survivors_by_agent[:, ground_slice]
-            ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
-            targetable = ground_known & ~ground_confirmed
-            survivor_pos_for_assignment = torch.stack([s.state.pos for s in self._survivors], dim=1)
-            ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
-            assigned_idx, _assigned_dist = self._ugv_assigned_target_indices(
-                ground_pos,
-                survivor_pos_for_assignment,
-                targetable,
-            )
-            target_idx = assigned_idx[:, ground_index]
-            target_valid = target_idx >= 0
-            assigned_mask = torch.zeros_like(obs_known)
-            assigned_mask.scatter_(
-                dim=1,
-                index=target_idx.clamp(min=0).unsqueeze(1),
-                src=target_valid.unsqueeze(1),
-            )
-            obs_known = obs_known & assigned_mask
-            obs_confirmed = obs_confirmed & assigned_mask
+        assigned_to_me = None
+        assigned_to_other = None
+        if self.survivor_assignment_obs:
+            assigned_to_me = torch.zeros_like(obs_known)
+            assigned_to_other = torch.zeros_like(obs_known)
+            if self.n_ground > 0 and self.n_survivors > 0:
+                ground_slice = slice(self.n_drones, self.n_agents)
+                ground_known = self.known_survivors_by_agent[:, ground_slice]
+                ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
+                targetable = ground_known & ~ground_confirmed
+                survivor_pos_for_assignment = torch.stack([s.state.pos for s in self._survivors], dim=1)
+                ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
+                assigned_idx, _assigned_dist = self._ugv_assigned_target_indices(
+                    ground_pos,
+                    survivor_pos_for_assignment,
+                    targetable,
+                )
+                assigned_valid = assigned_idx >= 0
+                assignment_mask = torch.zeros(
+                    self.world.batch_dim,
+                    self.n_ground,
+                    self.n_survivors,
+                    dtype=torch.bool,
+                    device=obs_known.device,
+                )
+                assignment_mask.scatter_(
+                    dim=2,
+                    index=assigned_idx.clamp(min=0).unsqueeze(-1),
+                    src=assigned_valid.unsqueeze(-1),
+                )
+                if not agent.is_drone:
+                    ground_index = agent_idx - self.n_drones
+                    assigned_to_me = assignment_mask[:, ground_index]
+                    if self.n_ground > 1:
+                        other_mask = assignment_mask.clone()
+                        other_mask[:, ground_index, :] = False
+                        assigned_to_other = other_mask.any(dim=1)
+                else:
+                    assigned_to_other = assignment_mask.any(dim=1)
 
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
         relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
@@ -7633,6 +7652,15 @@ class WildfireSearchScenario(BaseScenario):
             ],
             dim=-1,
         )
+        if self.survivor_assignment_obs:
+            features = torch.cat(
+                [
+                    features,
+                    assigned_to_me.unsqueeze(-1).float(),
+                    assigned_to_other.unsqueeze(-1).float(),
+                ],
+                dim=-1,
+            )
         if self.obs_schema_n_survivors > self.n_survivors:
             pad = torch.zeros(
                 self.world.batch_dim,
