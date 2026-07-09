@@ -269,6 +269,7 @@ def build_args(
     uav_coverage_opportunity_cap: float = 1.0,
     uav_frontier_alignment_reward: float | None = None,
     uav_confidence_reward: float | None = None,
+    uav_team_confidence_reward: float = 0.0,
     uav_confidence_move_reward: float | None = None,
     uav_inefficient_move_penalty: float | None = None,
     uav_inefficient_move_source: str | None = None,
@@ -591,6 +592,9 @@ def build_args(
     uav_confidence_reward = float(uav_confidence_reward)
     if uav_confidence_reward < 0.0:
         raise ValueError("uav_confidence_reward must be nonnegative")
+    uav_team_confidence_reward = float(uav_team_confidence_reward)
+    if uav_team_confidence_reward < 0.0:
+        raise ValueError("uav_team_confidence_reward must be nonnegative")
     uav_confidence_move_reward = float(uav_confidence_move_reward)
     if uav_confidence_move_reward < 0.0:
         raise ValueError("uav_confidence_move_reward must be nonnegative")
@@ -1012,6 +1016,7 @@ def build_args(
             scenario_kwargs["uav_astar_waypoint_reached_m"] = float(uav_astar_waypoint_reached_m)
     if (
         uav_confidence_reward > 0.0
+        or uav_team_confidence_reward > 0.0
         or uav_confidence_move_reward > 0.0
         or uav_confidence_overlap_penalty > 0.0
         or uav_cleanup_target_progress_reward > 0.0
@@ -1021,6 +1026,7 @@ def build_args(
     ):
         scenario_kwargs["uav_frontier_source"] = uav_frontier_source
         scenario_kwargs["r_uav_confidence"] = uav_confidence_reward
+        scenario_kwargs["r_uav_team_confidence"] = uav_team_confidence_reward
         scenario_kwargs["r_uav_confidence_move"] = uav_confidence_move_reward
         scenario_kwargs["r_uav_confidence_overlap"] = uav_confidence_overlap_penalty
         scenario_kwargs["uav_confidence_overlap_mode"] = uav_confidence_overlap_mode
@@ -1183,6 +1189,7 @@ def build_args(
             "uav_coverage_threshold_fraction": uav_coverage_threshold_fraction,
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_confidence": uav_confidence_reward,
+            "r_uav_team_confidence": uav_team_confidence_reward,
             "r_uav_confidence_move": uav_confidence_move_reward,
             "r_uav_inefficient_move": uav_inefficient_move_penalty,
             "uav_inefficient_move_source": uav_inefficient_move_source,
@@ -1268,6 +1275,7 @@ def build_args(
             "uav_coverage_threshold_fraction": uav_coverage_threshold_fraction,
             "uav_coverage_opportunity_cap": uav_coverage_opportunity_cap,
             "r_uav_confidence": uav_confidence_reward,
+            "r_uav_team_confidence": uav_team_confidence_reward,
             "r_uav_confidence_move": uav_confidence_move_reward,
             "r_uav_inefficient_move": uav_inefficient_move_penalty,
             "uav_inefficient_move_source": uav_inefficient_move_source,
@@ -1331,6 +1339,7 @@ def build_args(
             "r_uav_move_coverage": 0.0,
             "r_uav_coverage_threshold": 0.0,
             "r_uav_confidence": 0.0,
+            "r_uav_team_confidence": 0.0,
             "r_uav_confidence_move": 0.0,
             "r_uav_inefficient_move": 0.0,
             "r_uav_frontier_alignment": 0.0,
@@ -1796,6 +1805,9 @@ def main():
     p.add_argument("--uav-confidence-reward", type=float, default=None,
                    help="Optional per-UAV reward scale for marginal probabilistic inspection-confidence gain. "
                         "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-team-confidence-reward", "--team-confidence-reward",
+                   dest="uav_team_confidence_reward", type=float, default=0.0,
+                   help="Scale for adding the mean per-UAV confidence reward to every UAV reward.")
     p.add_argument("--uav-confidence-move-reward", type=float, default=None,
                    help="Optional per-UAV reward scale for movement that captures a high fraction of the "
                         "best one-step confidence-gain opportunity. Omit in UAV diagnostic mode for its "
@@ -2117,6 +2129,8 @@ def main():
         p.error("--uav-frontier-alignment-reward must be nonnegative")
     if args.uav_confidence_reward is not None and args.uav_confidence_reward < 0.0:
         p.error("--uav-confidence-reward must be nonnegative")
+    if args.uav_team_confidence_reward < 0.0:
+        p.error("--uav-team-confidence-reward must be nonnegative")
     if args.uav_confidence_move_reward is not None and args.uav_confidence_move_reward < 0.0:
         p.error("--uav-confidence-move-reward must be nonnegative")
     if args.uav_astar_progress_reward < 0.0:
@@ -2597,6 +2611,7 @@ def main():
     print(f" uav_coverage_opportunity_cap: {args.uav_coverage_opportunity_cap}")
     print(f" uav_frontier_alignment_reward: {args.uav_frontier_alignment_reward}")
     print(f" uav_confidence_reward: {args.uav_confidence_reward}")
+    print(f" uav_team_confidence_reward: {args.uav_team_confidence_reward}")
     print(f" uav_confidence_move_reward: {args.uav_confidence_move_reward}")
     print(f" uav_inefficient_move_penalty: {args.uav_inefficient_move_penalty}")
     print(f" uav_inefficient_move_source: {args.uav_inefficient_move_source}")
@@ -2723,6 +2738,7 @@ def main():
         uav_coverage_opportunity_cap = args.uav_coverage_opportunity_cap,
         uav_frontier_alignment_reward = args.uav_frontier_alignment_reward,
         uav_confidence_reward = args.uav_confidence_reward,
+        uav_team_confidence_reward = args.uav_team_confidence_reward,
         uav_confidence_move_reward = args.uav_confidence_move_reward,
         uav_inefficient_move_penalty = args.uav_inefficient_move_penalty,
         uav_inefficient_move_source = args.uav_inefficient_move_source,
