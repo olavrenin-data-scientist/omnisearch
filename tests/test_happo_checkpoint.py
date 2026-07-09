@@ -770,6 +770,56 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(schema_scenario["n_survivors"], 6)
         self.assertEqual(schema_scenario["obs_schema_n_survivors"], 6)
 
+    def test_diagnostics_can_set_agent_counts(self):
+        _, _algo_args, uav_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="uav_diag_agent_counts",
+            uav_survivor_diagnostic=True,
+            n_drones=4,
+        )
+        _, joint_algo_args, joint_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_diag_agent_counts",
+            joint_survivor_diagnostic=True,
+            n_drones=4,
+            n_ugvs=3,
+        )
+        _, schema_algo_args, schema_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_agent_counts",
+            joint_schema_ugv_diagnostic=True,
+            n_drones=4,
+            n_ugvs=3,
+        )
+
+        uav_scenario = uav_env_args["scenario_kwargs"]
+        self.assertEqual(uav_scenario["n_drones"], 4)
+        self.assertEqual(uav_scenario["n_ground"], 0)
+
+        joint_scenario = joint_env_args["scenario_kwargs"]
+        self.assertEqual(joint_scenario["n_drones"], 4)
+        self.assertEqual(joint_scenario["n_ground"], 3)
+        self.assertEqual(joint_algo_args["algo"]["share_param_groups"], [0, 0, 0, 0, 1, 1, 1])
+
+        schema_scenario = schema_env_args["scenario_kwargs"]
+        self.assertEqual(schema_scenario["n_drones"], 0)
+        self.assertEqual(schema_scenario["n_ground"], 3)
+        self.assertEqual(schema_scenario["obs_schema_n_drones"], 4)
+        self.assertEqual(schema_scenario["obs_schema_n_ground"], 3)
+        self.assertEqual(schema_algo_args["algo"]["share_param_groups"], [0, 0, 0])
+
     def test_joint_survivor_diagnostic_can_disable_class_parameter_sharing(self):
         _, algo_args, _ = build_args(
             num_env_steps=100,

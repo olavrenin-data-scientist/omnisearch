@@ -108,8 +108,9 @@ def build_scenario_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     scenario_kwargs.update({
         "max_steps": int(args.steps),
         "n_drones": 0,
-        "n_ground": 2,
+        "n_ground": int(args.n_ugvs),
         "n_survivors": 5,
+        "obs_schema_n_ground": int(args.n_ugvs),
         "known_survivors_at_reset": False,
         "delayed_survivor_knowledge": True,
         "survivor_reveal_initial_count": int(args.survivor_reveal_initial_count),
@@ -653,6 +654,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
+    parser.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=2)
     parser.add_argument("--survivor-reveal-initial-count", type=int, default=1)
     parser.add_argument("--survivor-reveal-start-step", type=int, default=10)
     parser.add_argument("--survivor-reveal-end-step", type=int, default=180)
@@ -675,6 +677,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--steps must be positive")
     if args.time_bins <= 0:
         parser.error("--time-bins must be positive")
+    if args.n_ugvs < 1:
+        parser.error("--n-ugvs must be positive")
     if not args.seeds:
         parser.error("--seeds must contain at least one seed")
     if args.enable_fire and args.disable_fire:

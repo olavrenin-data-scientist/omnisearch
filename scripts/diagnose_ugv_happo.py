@@ -142,6 +142,15 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
             "known_survivors_at_reset": True,
             "disable_fire": not bool(args.enable_fire),
         })
+    if args.n_drones is not None:
+        if args.joint_schema_ugv_diagnostic:
+            scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
+        else:
+            scenario_kwargs["n_drones"] = int(args.n_drones)
+    if args.n_ugvs is not None:
+        scenario_kwargs["n_ground"] = int(args.n_ugvs)
+        if args.joint_schema_ugv_diagnostic:
+            scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
     if args.n_survivors is not None:
         scenario_kwargs["n_survivors"] = int(args.n_survivors)
         if args.joint_schema_ugv_diagnostic:
@@ -2887,6 +2896,10 @@ def main() -> None:
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--steps", type=int, default=150)
     parser.add_argument("--seeds", type=int, nargs="+", default=[101, 102, 103, 104, 105])
+    parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
+                        help="Override UAV schema count for joint-schema UGV diagnostics.")
+    parser.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=None,
+                        help="Override UGV count. Default preserves the checkpoint manifest or diagnostic default.")
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or diagnostic default.")
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
@@ -2992,6 +3005,10 @@ def main() -> None:
     parser.add_argument("--shadow-ugv-planner", action=argparse.BooleanOptionalAction, default=True,
                         help="Compute local A* diagnostics without changing the actor observation.")
     args = parser.parse_args()
+    if args.n_drones is not None and args.n_drones < 1:
+        parser.error("--n-drones must be positive")
+    if args.n_ugvs is not None and args.n_ugvs < 1:
+        parser.error("--n-ugvs must be positive")
     if args.n_survivors is not None and args.n_survivors < 1:
         parser.error("--n-survivors must be positive")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):

@@ -115,8 +115,8 @@ def build_scenario_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     scenario_kwargs = _joint_defaults(int(args.joint_diagnostic_ugvs))
     scenario_kwargs.update({
         "max_steps": int(args.steps),
-        "n_drones": 3,
-        "n_ground": int(args.joint_diagnostic_ugvs),
+        "n_drones": int(args.n_drones),
+        "n_ground": int(args.n_ugvs if args.n_ugvs is not None else args.joint_diagnostic_ugvs),
         "n_survivors": 5,
         "known_survivors_at_reset": False,
         "delayed_survivor_knowledge": False,
@@ -676,6 +676,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
     parser.add_argument("--time-bins", type=int, default=5)
     parser.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS)
+    parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=DEFAULT_JOINT_DIAG_DRONES)
+    parser.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=None)
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
@@ -709,6 +711,10 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--time-bins must be positive")
     if args.joint_diagnostic_ugvs < 1:
         parser.error("--joint-diagnostic-ugvs must be positive")
+    if args.n_drones < 1:
+        parser.error("--n-drones must be positive")
+    if args.n_ugvs is not None and args.n_ugvs < 1:
+        parser.error("--n-ugvs must be positive")
     if not args.seeds:
         parser.error("--seeds must contain at least one seed")
     if args.enable_fire and args.disable_fire:

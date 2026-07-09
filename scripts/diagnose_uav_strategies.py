@@ -1401,7 +1401,7 @@ def main() -> None:
     parser.add_argument("--stochastic-happo", action="store_true", help="Sample HAPPO actions instead of actor means.")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
-    parser.add_argument("--n-drones", type=int, default=3)
+    parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=3)
     parser.add_argument("--n-survivors", type=int, default=5)
     parser.add_argument("--terrain-cache-path", default=str(DEFAULT_TERRAIN_CACHE_PATH))
     parser.add_argument(
