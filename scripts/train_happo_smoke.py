@@ -256,6 +256,7 @@ def build_args(
     uav_coverage_only: bool = False,
     uav_found_survivor_reward: float | None = None,
     uav_all_survivors_reward: float | None = None,
+    team_scout_reward: float | None = None,
     uav_time_penalty: float | None = None,
     uav_coverage_reward: float | None = None,
     uav_coverage_normalization: str = "map",
@@ -849,7 +850,7 @@ def build_args(
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
-        "r_team_scout": 0.0,
+        "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
         "r_drone_scout": 2.0,
         "r_ground_confirm": 4.0,
         "r_drone_shaping": 0.30,
@@ -1160,6 +1161,7 @@ def build_args(
             "comms_dropout": 0.0,
             "r_found_survivor": found_reward,
             "r_all_survivors_found": all_survivors_reward,
+            "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
             "r_drone_scout": scout_reward,
             "r_ground_confirm": 0.0,
             "r_drone_shaping": 0.0,
@@ -1238,7 +1240,11 @@ def build_args(
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
-            "r_team_scout": DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD,
+            "r_team_scout": (
+                DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD
+                if team_scout_reward is None
+                else float(team_scout_reward)
+            ),
             "r_all_survivors_found": 0.0,
             "r_drone_scout": 2.0,
             "r_ground_confirm": DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD,
@@ -1306,7 +1312,7 @@ def build_args(
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
-            "r_team_scout": 0.0,
+            "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
             "r_all_survivors_found": 0.0,
             "r_drone_scout": 0.0,
             "r_ground_confirm": DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD,
@@ -1752,6 +1758,9 @@ def main():
     p.add_argument("--uav-all-survivors-reward", type=float, default=None,
                    help="One-time team reward when the final survivor is found in UAV diagnostic mode. "
                         "Omit for 0; pass a positive value to add an explicit mission-completion bonus.")
+    p.add_argument("--team-scout-reward", "--uav-team-scout-reward", dest="team_scout_reward",
+                   type=float, default=None,
+                   help="Override r_team_scout, the team reward paid when a survivor is newly scouted.")
     p.add_argument("--uav-time-penalty", type=float, default=None,
                    help="Override r_time_penalty in UAV diagnostic mode.")
     p.add_argument("--uav-coverage-reward", type=float, default=None,
@@ -2073,6 +2082,8 @@ def main():
         p.error("--uav-found-survivor-reward must be nonnegative")
     if args.uav_all_survivors_reward is not None and args.uav_all_survivors_reward < 0.0:
         p.error("--uav-all-survivors-reward must be nonnegative")
+    if args.team_scout_reward is not None and args.team_scout_reward < 0.0:
+        p.error("--team-scout-reward must be nonnegative")
     if args.uav_move_coverage_reward is not None and args.uav_move_coverage_reward < 0.0:
         p.error("--uav-move-coverage-reward must be nonnegative")
     if args.uav_move_coverage_cap < 0.0:
@@ -2575,6 +2586,7 @@ def main():
     print(f" ugv_route_progress_floor_m: {args.ugv_route_progress_floor_m}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
+    print(f" team_scout_reward: {args.team_scout_reward}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_coverage_normalization: {args.uav_coverage_normalization}")
     print(f" uav_move_coverage_reward: {args.uav_move_coverage_reward}")
@@ -2698,6 +2710,7 @@ def main():
         uav_coverage_only = args.uav_coverage_only,
         uav_found_survivor_reward = args.uav_found_survivor_reward,
         uav_all_survivors_reward = args.uav_all_survivors_reward,
+        team_scout_reward = args.team_scout_reward,
         uav_time_penalty = args.uav_time_penalty,
         uav_coverage_reward = args.uav_coverage_reward,
         uav_coverage_normalization = args.uav_coverage_normalization,

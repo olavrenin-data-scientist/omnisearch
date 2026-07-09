@@ -1287,6 +1287,31 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_all_survivors_found"], 8.0)
         self.assertEqual(scenario["r_drone_scout"], 2.0)
 
+    def test_can_set_team_scout_reward(self):
+        _, _, uav_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_team_scout",
+            joint_schema_uav_diagnostic=True,
+            team_scout_reward=0.7,
+        )
+        _, _, joint_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="joint_team_scout",
+            joint_survivor_diagnostic=True,
+            team_scout_reward=0.25,
+        )
+
+        self.assertEqual(uav_env_args["scenario_kwargs"]["r_team_scout"], 0.7)
+        self.assertEqual(joint_env_args["scenario_kwargs"]["r_team_scout"], 0.25)
+
     def test_uav_diagnostic_can_set_coverage_threshold_reward(self):
         _, _, env_args = build_args(
             num_env_steps=100,
