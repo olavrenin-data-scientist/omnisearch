@@ -162,14 +162,18 @@ def run_rollout(
     scenario = env.scenario
     full_diagnostics = str(diagnostic_level).replace("-", "_").lower() == "full"
     start_metrics = _start_metrics(scenario)
-    coverage_geometry = _coverage_grid_geometry(scenario)
-    individual_coverage_history = np.zeros(
-        (
-            int(scenario.n_drones),
-            int(scenario.fire_grid_size),
-            int(scenario.fire_grid_size),
-        ),
-        dtype=bool,
+    coverage_geometry = _coverage_grid_geometry(scenario) if full_diagnostics else None
+    individual_coverage_history = (
+        np.zeros(
+            (
+                int(scenario.n_drones),
+                int(scenario.fire_grid_size),
+                int(scenario.fire_grid_size),
+            ),
+            dtype=bool,
+        )
+        if full_diagnostics
+        else None
     )
 
     n_survivors = int(scenario.n_survivors)
@@ -334,11 +338,16 @@ def run_rollout(
             agent.state.pos[0].detach().cpu().numpy().astype(float).copy()
             for agent in scenario.world.agents[:scenario.n_drones]
         ]
-        pre_team_coverage = scenario.coverage_grid[0].detach().cpu().numpy().astype(bool).copy()
-        pre_individual_coverage = individual_coverage_history.copy()
+        pre_team_coverage = None
+        pre_individual_coverage = None
+        if full_diagnostics:
+            pre_team_coverage = scenario.coverage_grid[0].detach().cpu().numpy().astype(bool).copy()
+            pre_individual_coverage = individual_coverage_history.copy()
         if scenario.n_drones > 0:
             pre_drone_pos_array = np.asarray(pre_drone_pos, dtype=float)
             if full_diagnostics:
+                assert coverage_geometry is not None
+                assert pre_team_coverage is not None
                 pre_drone_pos_tensor = torch.stack(
                     [agent.state.pos for agent in scenario.world.agents[:scenario.n_drones]],
                     dim=1,
@@ -709,7 +718,10 @@ def run_rollout(
             scenario,
             "metric_reward_uav_coverage_threshold",
         )
-        if scenario.n_drones > 0:
+        if full_diagnostics and scenario.n_drones > 0:
+            assert coverage_geometry is not None
+            assert pre_team_coverage is not None
+            assert pre_individual_coverage is not None
             post_drone_pos_array = np.asarray(
                 [
                     agent.state.pos[0].detach().cpu().numpy().astype(float)
@@ -738,6 +750,13 @@ def run_rollout(
             raw_new_coverage_cells = (
                 current_claims & ~pre_team_coverage.reshape(1, *pre_team_coverage.shape)
             ).sum(axis=(1, 2)).astype(float)
+        elif scenario.n_drones > 0:
+            current_claims = np.zeros(
+                (0, int(scenario.fire_grid_size), int(scenario.fire_grid_size)),
+                dtype=bool,
+            )
+            revisit = _empty_revisit_decomposition(scenario.n_drones)
+            raw_new_coverage_cells = coverage_cells.astype(float).copy()
         else:
             current_claims = np.zeros(
                 (0, int(scenario.fire_grid_size), int(scenario.fire_grid_size)),
@@ -791,6 +810,126 @@ def run_rollout(
             expected_overlap = float(expected_overlap_fraction[drone_idx])
             excess_overlap = float(excess_overlap_fraction[drone_idx])
             inter_uav_overlap = float(inter_uav_overlap_fraction[drone_idx])
+
+            if not full_diagnostics:
+                opportunity_fraction = float(coverage_opportunity_fraction[drone_idx])
+                opportunity_available_fraction = float(
+                    coverage_opportunity_available_fraction[drone_idx]
+                )
+                confidence_reward = float(confidence_reward_by_drone[drone_idx])
+                team_confidence_reward = float(team_confidence_reward_by_drone[drone_idx])
+                confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
+                confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
+                cleanup_target_progress_reward = float(
+                    cleanup_target_progress_reward_by_drone[drone_idx]
+                )
+                astar_progress_reward = float(astar_progress_reward_by_drone[drone_idx])
+                frontier_progress_frac = float(frontier_progress[drone_idx])
+                frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
+                scout_reward = float(np.count_nonzero(scout_credit[drone_idx])) * float(
+                    getattr(scenario, "r_drone_scout", 0.0)
+                )
+                reward_terms = _uav_reward_terms(
+                    scenario=scenario,
+                    new_cells=new_cells,
+                    displacement_m=displacement_m,
+                    frontier_progress=frontier_progress_frac,
+                    frontier_ratio=frontier_ratio,
+                    overlap=overlap,
+                    expected_overlap=expected_overlap,
+                    inter_uav_overlap=inter_uav_overlap,
+                    outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                    coverage_opportunity_fraction=opportunity_fraction,
+                    coverage_opportunity_available_fraction=opportunity_available_fraction,
+                    confidence_reward=confidence_reward,
+                    team_confidence_reward=team_confidence_reward,
+                    confidence_move_reward=confidence_move_reward,
+                    confidence_opportunity_fraction=float(
+                        confidence_opportunity_fraction_by_drone[drone_idx]
+                    ),
+                    confidence_overlap_penalty=confidence_overlap_penalty,
+                    cleanup_target_progress_reward=cleanup_target_progress_reward,
+                    astar_progress_reward=astar_progress_reward,
+                    scout_reward=scout_reward,
+                )
+                reward_terms["team"] = team_reward
+                reward_terms["all_survivors_found"] = all_survivors_found_reward
+                reward_terms["coverage_threshold"] = coverage_threshold_reward
+
+                overlap_values.append(overlap)
+                expected_overlap_values.append(expected_overlap)
+                excess_overlap_values.append(excess_overlap)
+                inter_uav_overlap_values.append(inter_uav_overlap)
+                outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
+                boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
+                footprint_radius_m_values.append(footprint_radius)
+                reward_uav_coverage_values.append(reward_terms["coverage"])
+                reward_uav_move_coverage_values.append(reward_terms["move_coverage"])
+                reward_uav_frontier_values.append(reward_terms["frontier"])
+                reward_uav_confidence_values.append(reward_terms["confidence"])
+                reward_uav_team_confidence_values.append(reward_terms["team_confidence"])
+                reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
+                reward_uav_cleanup_target_progress_values.append(
+                    reward_terms["cleanup_target_progress"]
+                )
+                reward_uav_astar_progress_values.append(reward_terms["astar_progress"])
+                penalty_uav_inefficient_move_values.append(reward_terms["inefficient_move_penalty"])
+                penalty_uav_confidence_overlap_values.append(reward_terms["confidence_overlap_penalty"])
+                penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
+                penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
+                penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+                reward_uav_coverage_threshold_values.append(reward_terms["coverage_threshold"])
+                reward_uav_scout_values.append(reward_terms["scout"])
+                reward_team_values.append(reward_terms["team"])
+                reward_all_survivors_found_values.append(reward_terms["all_survivors_found"])
+                reward_uav_aux_values.append(reward_terms["aux"])
+                if displacement_m > 1.0 and new_cells < 1.0:
+                    moving_no_new_coverage += 1
+                if action_norm < 0.05 and displacement_m > 1.0:
+                    low_action_high_motion += 1
+                if action_norm > 0.5 and displacement_m < 0.25:
+                    high_action_low_motion += 1
+
+                action_displacement_alignment = math.nan
+                displacement_norm_sim = float(np.linalg.norm(displacement_vec))
+                if action_norm > 1e-6 and displacement_norm_sim > 1e-9:
+                    action_displacement_alignment = float(
+                        np.dot(action_vec[:2], displacement_vec[:2]) / (action_norm * displacement_norm_sim)
+                    )
+                    action_displacement_alignment = max(min(action_displacement_alignment, 1.0), -1.0)
+                    action_displacement_alignments.append(action_displacement_alignment)
+
+                diagnostic_steps += 1
+                _append_time_bin(
+                    time_bins,
+                    step=step,
+                    max_steps=int(scenario_kwargs["max_steps"]),
+                    values={
+                        "action_norm": action_norm,
+                        "displacement_m": displacement_m,
+                        "new_coverage_cells": new_cells,
+                        "action_displacement_alignment": action_displacement_alignment,
+                        "frontier_reward": reward_terms["frontier"],
+                        "confidence_reward": reward_terms["confidence"],
+                        "team_confidence_reward": reward_terms["team_confidence"],
+                        "confidence_move_reward": reward_terms["confidence_move"],
+                        "cleanup_target_progress_reward": reward_terms["cleanup_target_progress"],
+                        "astar_progress_reward": reward_terms["astar_progress"],
+                        "inefficient_move_penalty": reward_terms["inefficient_move_penalty"],
+                        "confidence_overlap_penalty": reward_terms["confidence_overlap_penalty"],
+                        "coverage_reward": reward_terms["coverage"],
+                        "move_coverage_reward": reward_terms["move_coverage"],
+                        "overlap_penalty": reward_terms["overlap_penalty"],
+                        "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
+                        "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                        "coverage_threshold_reward": reward_terms["coverage_threshold"],
+                        "scout_reward": reward_terms["scout"],
+                        "team_reward": reward_terms["team"],
+                        "all_survivors_reward": reward_terms["all_survivors_found"],
+                    },
+                )
+                continue
+
             any_history_revisit = float(revisit["any_history"][drone_idx])
             own_history_revisit = float(revisit["own_history"][drone_idx])
             teammate_history_revisit = float(revisit["teammate_history"][drone_idx])
@@ -1483,7 +1622,7 @@ def run_rollout(
                 },
             )
 
-        if scenario.n_drones > 0:
+        if full_diagnostics and scenario.n_drones > 0 and individual_coverage_history is not None:
             individual_coverage_history |= current_claims
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
@@ -1518,15 +1657,21 @@ def run_rollout(
         footprint_radius_m_values,
         scenario,
     )
-    coverage_shape_metrics = _coverage_shape_metrics(
-        scenario.coverage_grid[0].detach().cpu().numpy().astype(bool),
-        scenario,
-        _finite_mean(footprint_radius_m_values),
+    final_coverage_grid = scenario.coverage_grid[0].detach().cpu().numpy().astype(bool)
+    coverage_shape_metrics = (
+        _coverage_shape_metrics(
+            final_coverage_grid,
+            scenario,
+            _finite_mean(footprint_radius_m_values),
+        )
+        if full_diagnostics
+        else _fast_coverage_shape_metrics(final_coverage_grid)
     )
-    per_drone = [
-        _finalize_drone_stats(stats, scenario)
-        for stats in per_drone_stats
-    ]
+    per_drone = (
+        [_finalize_drone_stats(stats, scenario) for stats in per_drone_stats]
+        if full_diagnostics
+        else []
+    )
     final_survivor_confidence = _survivor_confidence_values(scenario)
     if full_diagnostics:
         survivor_exposures = _finalize_survivor_exposure_stats(
@@ -4347,6 +4492,63 @@ def _coverage_shape_metrics(
     }
 
 
+def _fast_coverage_shape_metrics(coverage_grid: np.ndarray) -> dict[str, float]:
+    covered = np.asarray(coverage_grid, dtype=bool)
+    if covered.ndim != 2:
+        return {
+            "coverage_bbox_area_fraction": 0.0,
+            "coverage_bbox_fill_fraction": 0.0,
+            "coverage_bbox_hole_fraction": 0.0,
+            "coverage_center_fraction": 0.0,
+            "coverage_border_band_fraction": 0.0,
+            "coverage_interior_fraction": 0.0,
+            "coverage_edge_bias": 0.0,
+            "coverage_uncovered_component_count": 0.0,
+            "coverage_enclosed_uncovered_component_count": 0.0,
+            "coverage_uncovered_fraction": 0.0,
+            "coverage_enclosed_uncovered_fraction": 0.0,
+            "coverage_largest_uncovered_component_fraction": 0.0,
+            "coverage_largest_enclosed_hole_fraction": 0.0,
+            "coverage_enclosed_hole_share": 0.0,
+        }
+    height, width = covered.shape
+    total_cells = float(max(height * width, 1))
+    if not covered.any():
+        bbox_area_fraction = 0.0
+        bbox_fill = 0.0
+        bbox_hole_fraction = 0.0
+    else:
+        yy, xx = np.nonzero(covered)
+        bbox_area = float((xx.max() - xx.min() + 1) * (yy.max() - yy.min() + 1))
+        bbox_area_fraction = float(bbox_area / total_cells)
+        bbox_fill = float(covered.sum() / max(bbox_area, 1.0))
+        bbox_hole_fraction = 1.0 - bbox_fill
+    center_margin_x = width // 4
+    center_margin_y = height // 4
+    center = covered[
+        center_margin_y : height - center_margin_y,
+        center_margin_x : width - center_margin_x,
+    ]
+    center_fraction = float(center.mean()) if center.size else 0.0
+    uncovered_fraction = float((~covered).mean()) if total_cells else 0.0
+    return {
+        "coverage_bbox_area_fraction": bbox_area_fraction,
+        "coverage_bbox_fill_fraction": bbox_fill,
+        "coverage_bbox_hole_fraction": bbox_hole_fraction,
+        "coverage_center_fraction": center_fraction,
+        "coverage_border_band_fraction": 0.0,
+        "coverage_interior_fraction": 0.0,
+        "coverage_edge_bias": 0.0,
+        "coverage_uncovered_component_count": 0.0,
+        "coverage_enclosed_uncovered_component_count": 0.0,
+        "coverage_uncovered_fraction": uncovered_fraction,
+        "coverage_enclosed_uncovered_fraction": 0.0,
+        "coverage_largest_uncovered_component_fraction": 0.0,
+        "coverage_largest_enclosed_hole_fraction": 0.0,
+        "coverage_enclosed_hole_share": 0.0,
+    }
+
+
 def _uncovered_component_metrics(uncovered_grid: np.ndarray) -> dict[str, float]:
     uncovered = np.asarray(uncovered_grid, dtype=bool)
     if uncovered.ndim != 2:
@@ -4463,6 +4665,13 @@ def _failure_label(row: dict[str, Any]) -> str:
         revisit_frac = float(row.get("confidence_revisit_step_frac", 0.0))
         wasteful_frac = float(row.get("confidence_wasteful_revisit_step_frac", 0.0))
         useful_frac = float(row.get("confidence_useful_revisit_step_frac", 0.0))
+        if (
+            not math.isfinite(useful_share)
+            and revisit_frac <= 0.0
+            and wasteful_frac <= 0.0
+            and useful_frac <= 0.0
+        ):
+            return "wasteful_revisit"
         if (
             wasteful_frac > 0.20
             or (
@@ -6767,42 +6976,22 @@ def _write_fast_distribution_plots(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(5, 3, figsize=(15, 18), constrained_layout=True)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
     axes_flat = axes.ravel()
     hist_panels = [
         ("Recall", "recall", (0.0, 1.0)),
-        ("Confirmation Recall", "confirmation_recall", (0.0, 1.0)),
-        ("Success", "full_success", (0.0, 1.0)),
         ("Final Coverage", "final_coverage_fraction", (0.0, 1.0)),
         ("Final Confidence", "final_confidence_mean", (0.0, 1.0)),
         ("Movement / Step (m)", "avg_displacement_m", None),
-        ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
-        ("Edge Step Fraction", "edge_step_frac", (0.0, 1.0)),
     ]
     for ax, (title, key, xlim) in zip(axes_flat, hist_panels):
         _plot_hist_panel(ax, rows, title=title, key=key, xlim=xlim)
 
     custom_start = len(hist_panels)
     _plot_failure_labels_panel(axes_flat[custom_start], label_counts)
-    _plot_per_drone_bars(
-        axes_flat[custom_start + 1],
-        summary,
-        "mean_path_length_m",
-        "Per-Drone Path Length",
-        "m",
-    )
-    _plot_per_drone_bars(
-        axes_flat[custom_start + 2],
-        summary,
-        "mean_avg_excess_overlap_fraction",
-        "Per-Drone Excess Overlap",
-        "fraction",
-    )
-    _plot_time_bins_search_efficiency(axes_flat[custom_start + 3], summary)
-    _plot_time_bins_reward_scale(axes_flat[custom_start + 4], summary)
-    _plot_time_bins_scouts(axes_flat[custom_start + 5], summary)
+    _plot_time_bins_reward_scale(axes_flat[custom_start + 1], summary)
 
-    for ax in axes_flat[custom_start + 6:]:
+    for ax in axes_flat[custom_start + 2:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -7180,10 +7369,6 @@ def main() -> None:
                 f"coverage={row['final_coverage_fraction']:.3f} "
                 f"conf={row['final_confidence_mean']:.3f} "
                 f"move={row['avg_displacement_m']:.2f}m "
-                f"new_cells={row['avg_new_coverage_cells']:.1f} "
-                f"move_no_conf={row['moving_no_confidence_gain_frac']:.2f} "
-                f"excess_ov={row['avg_excess_overlap_fraction']:.2f} "
-                f"edge={row['edge_step_frac']:.2f} "
                 f"avg_scout={_fmt_optional(row['avg_scout_step'])} steps/"
                 f"{_fmt_optional(row['avg_scout_time_s'])}s "
                 f"all_scouted={_fmt_optional(row['all_scouted_step'])} steps/"
@@ -7299,23 +7484,8 @@ def main() -> None:
         print(
             "core search means: "
             f"move={summary['mean_displacement_m']:.2f}m "
-            f"new_cells={summary['mean_new_coverage_cells']:.1f} "
-            f"raw_new={summary['mean_raw_new_coverage_cells']:.1f} "
-            f"edge={summary['mean_edge_step_frac']:.3f} "
-            f"corner={summary['mean_corner_step_frac']:.3f} "
-            f"confidence={summary['mean_final_confidence_mean']:.3f} "
-            f"conf_gain={summary['mean_confidence_gain']:.5f} "
-            f"move_no_conf={summary['mean_moving_no_confidence_gain_frac']:.3f}"
-        )
-        print(
-            "overlap/revisit means: "
-            f"overlap={summary['mean_overlap_fraction']:.3f} "
-            f"expected_overlap={summary['mean_expected_overlap_fraction']:.3f} "
-            f"excess_overlap={summary['mean_excess_overlap_fraction']:.3f} "
-            f"inter_uav_overlap={summary['mean_inter_uav_overlap_fraction']:.3f} "
-            f"own_revisit={summary['mean_own_history_revisit_fraction']:.3f} "
-            f"teammate_revisit={summary['mean_teammate_history_revisit_fraction']:.3f} "
-            f"avoidable={summary['mean_avoidable_revisit_fraction']:.3f}"
+            f"coverage={summary['mean_final_coverage_fraction']:.3f} "
+            f"confidence={summary['mean_final_confidence_mean']:.3f}"
         )
         print(
             "uav reward-scale means: "
@@ -7335,18 +7505,6 @@ def main() -> None:
             f"team={summary['mean_reward_team']:.4f}"
         )
         print(
-            "path/edge means: "
-            f"path_len={summary['mean_path_length_m']:.1f}m "
-            f"bbox_area={summary['mean_path_bbox_area_fraction']:.3f} "
-            f"boundary_dist={summary['mean_boundary_distance_m']:.1f}m "
-            f"stall_frac={summary['mean_stalled_step_frac']:.3f} "
-            f"longest_stall={summary['mean_longest_stall_steps']:.1f} steps"
-        )
-        if summary.get("scout_time_bins"):
-            print("survivor discovery time-bins:")
-            for line in _format_scout_time_bin_summary(summary["scout_time_bins"]):
-                print(line)
-        print(
             "failure labels: "
             + ", ".join(f"{label}={count}" for label, count in label_counts.items())
         )
@@ -7354,14 +7512,12 @@ def main() -> None:
             "distribution snapshots: "
             f"coverage p25/p50/p75="
             f"{summary['coverage_p25']:.3f}/{summary['coverage_p50']:.3f}/{summary['coverage_p75']:.3f} "
-            f"overlap p25/p50/p75="
-            f"{summary['overlap_p25']:.3f}/{summary['overlap_p50']:.3f}/{summary['overlap_p75']:.3f} "
-            f"excess p25/p50/p75="
-            f"{summary['excess_overlap_p25']:.3f}/{summary['excess_overlap_p50']:.3f}/{summary['excess_overlap_p75']:.3f} "
-            f"edge p25/p50/p75="
-            f"{summary['edge_frac_p25']:.3f}/{summary['edge_frac_p50']:.3f}/{summary['edge_frac_p75']:.3f}"
+            f"confidence p25/p50/p75="
+            f"{summary['confidence_final_p25']:.3f}/{summary['confidence_final_p50']:.3f}/{summary['confidence_final_p75']:.3f} "
+            f"movement p25/p50/p75="
+            f"{summary['move_m_p25']:.2f}/{summary['move_m_p50']:.2f}/{summary['move_m_p75']:.2f}m"
         )
-        print("note: fast diagnostics skip counterfactual/frontier-usefulness/perception deep dives.")
+        print("note: fast diagnostics include only recall, final coverage/confidence, movement, failure labels, and reward-scale time bins.")
         print("note: all_scouted_successes averages only episodes that scouted every survivor.")
 
         if args.json_output:
