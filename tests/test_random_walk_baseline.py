@@ -7,7 +7,7 @@ import torch
 
 from agents.baselines import (
     BASELINES,
-    NearestCandidatePolicy,
+    RandomActionPolicy,
     RandomWalkPolicy,
     _reflect_random_walk_directions,
 )
@@ -50,40 +50,81 @@ class RandomWalkTests(unittest.TestCase):
     def test_registered_as_random_walk(self):
         self.assertIs(BASELINES["random_walk"], RandomWalkPolicy)
 
-    def test_nearest_candidate_uses_random_walk_for_uavs(self):
+    def test_nearest_candidate_removed_from_registry(self):
+        self.assertNotIn("nearest_candidate", BASELINES)
+
+    def test_random_walk_uses_random_walk_for_uavs_and_nearest_confirm_for_ugvs(self):
+        agents = [
+            SimpleNamespace(state=SimpleNamespace(pos=torch.zeros(1, 2))),
+            SimpleNamespace(state=SimpleNamespace(pos=torch.zeros(1, 2))),
+            SimpleNamespace(state=SimpleNamespace(pos=torch.zeros(1, 2))),
+        ]
         scenario = SimpleNamespace(
-            world=SimpleNamespace(batch_dim=1),
+            world=SimpleNamespace(batch_dim=1, agents=agents),
             n_drones=2,
             n_ground=1,
-            scouted_survivors=torch.tensor([[False]]),
+            n_survivors=1,
+            x_semidim=1.0,
+            y_semidim=1.0,
+            agent_radius=0.04,
+            scouted_survivors=torch.tensor([[True]]),
             found_survivors=torch.tensor([[False]]),
+            _path_is_traversable=lambda starts, endpoints: torch.ones(
+                endpoints.shape[:-1], dtype=torch.bool,
+            ),
         )
-        env = SimpleNamespace(
-            scenario=scenario,
-            get_random_actions=lambda: [
-                torch.tensor([[0.1, 0.1]]),
-                torch.tensor([[0.2, 0.2]]),
-                torch.tensor([[0.3, 0.3]]),
-            ],
-        )
-        policy = NearestCandidatePolicy.__new__(NearestCandidatePolicy)
+        policy = RandomWalkPolicy.__new__(RandomWalkPolicy)
         policy.scenario = scenario
         policy.ground_route_cache = [dict()]
+        policy.headings = torch.zeros(1, 3)
         walk_actions = [
             torch.tensor([[0.8, 0.0]]),
             torch.tensor([[0.0, 0.8]]),
             torch.tensor([[0.4, 0.4]]),
         ]
-        policy._random_walk = lambda _: walk_actions
 
         with patch(
             "agents.baselines._coordinated_ground_actions",
             return_value=[torch.tensor([[0.3, 0.3]])],
-        ):
+        ) as coordinated:
+            ground = policy._ground_actions(
+                directions=torch.stack(walk_actions, dim=1),
+                step_distance=torch.ones(1, 3, 1),
+            )
+
+        coordinated.assert_called_once()
+        torch.testing.assert_close(ground[0], torch.tensor([[0.3, 0.3]]))
+
+    def test_random_action_uses_random_for_uavs_and_nearest_confirm_for_ugvs(self):
+        scenario = SimpleNamespace(
+            world=SimpleNamespace(batch_dim=1),
+            n_drones=2,
+            n_ground=1,
+            n_survivors=1,
+            step_count=torch.zeros(1, dtype=torch.long),
+            scouted_survivors=torch.tensor([[True]]),
+            found_survivors=torch.tensor([[False]]),
+        )
+        random_actions = [
+            torch.tensor([[0.1, 0.1]]),
+            torch.tensor([[0.2, 0.2]]),
+            torch.tensor([[0.9, 0.9]]),
+        ]
+        env = SimpleNamespace(
+            scenario=scenario,
+            get_random_actions=lambda: random_actions,
+        )
+        policy = RandomActionPolicy(env)
+
+        with patch(
+            "agents.baselines._coordinated_ground_actions",
+            return_value=[torch.tensor([[0.3, 0.3]])],
+        ) as coordinated:
             actions = policy(env)
 
-        torch.testing.assert_close(actions[0], walk_actions[0])
-        torch.testing.assert_close(actions[1], walk_actions[1])
+        coordinated.assert_called_once()
+        torch.testing.assert_close(actions[0], random_actions[0])
+        torch.testing.assert_close(actions[1], random_actions[1])
         torch.testing.assert_close(actions[2], torch.tensor([[0.3, 0.3]]))
 
     @staticmethod

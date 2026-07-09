@@ -12,10 +12,9 @@ plan:
 
     Strategy              How drones decide        How ground robots decide
     --------------------  -----------------------  -------------------------
-    RandomActionPolicy    random within range      random within range
-    RandomWalkPolicy      persistent random walk   persistent random walk
+    RandomActionPolicy    random within range      random until target known, then nearest scouted
+    RandomWalkPolicy      persistent random walk   random walk until target known, then nearest scouted
     LawnmowerPolicy       sweep a serpentine path  follow nearest scouted
-    NearestCandidate      random walk              go to nearest survivor
     HighestConfidence     bias toward unscouted    go to most-recently scouted
     AntColony             avoid fresh pheromone    follow locally known survivors
 
@@ -387,25 +386,88 @@ def _coordinated_ground_actions(
     return actions
 
 
+def _scouted_unconfirmed_targets(sc: WildfireSearchScenario) -> torch.Tensor | None:
+    if sc.n_ground <= 0 or getattr(sc, "n_survivors", 0) <= 0:
+        return None
+    scouted = getattr(sc, "scouted_survivors", None)
+    found = getattr(sc, "found_survivors", None)
+    if scouted is None or found is None:
+        return None
+    return scouted & ~found
+
+
+def _coordinated_scouted_ground_actions(
+    sc: WildfireSearchScenario,
+    fallback_actions: List[torch.Tensor],
+    route_cache: List[dict] | None = None,
+) -> List[torch.Tensor]:
+    targetable = _scouted_unconfirmed_targets(sc)
+    if targetable is None:
+        return fallback_actions
+    if not bool(targetable.any().item()):
+        return fallback_actions
+    return _coordinated_ground_actions(
+        sc,
+        targetable,
+        fallback_actions,
+        route_cache=route_cache,
+    )
+
+
 # ----------------------------------------------------------------------
 # Random action
 # ----------------------------------------------------------------------
 class RandomActionPolicy:
-    """All agents take random in-range actions. The reference 'do nothing
-    smart' baseline."""
+    """Random UAV search with competent nearest-scouted UGV confirmation."""
+
+    def __init__(self, env=None):
+        self.scenario: WildfireSearchScenario | None = None
+        self.ground_route_cache: list[dict] = []
+        self.previous_step_count: torch.Tensor | None = None
+        if env is not None:
+            self.scenario = env.scenario
+            self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
+            self.previous_step_count = self.scenario.step_count.clone()
 
     def __call__(self, env) -> List[torch.Tensor]:
-        return env.get_random_actions()
+        random_actions = env.get_random_actions()
+        sc = self.scenario or getattr(env, "scenario", None)
+        if sc is None or sc.n_ground <= 0:
+            return random_actions
+        if self.scenario is None:
+            self.scenario = sc
+            self.ground_route_cache = [dict() for _ in range(sc.n_ground)]
+            self.previous_step_count = sc.step_count.clone()
+        elif (
+            self.previous_step_count is not None
+            and bool((sc.step_count < self.previous_step_count).any().item())
+        ):
+            for cache in self.ground_route_cache:
+                cache.clear()
+
+        out = list(random_actions[:sc.n_drones])
+        fallback = [
+            random_actions[sc.n_drones + gi]
+            for gi in range(sc.n_ground)
+        ]
+        out.extend(_coordinated_scouted_ground_actions(
+            sc,
+            fallback,
+            route_cache=self.ground_route_cache,
+        ))
+        self.previous_step_count = sc.step_count.clone()
+        return out
 
 
 # ----------------------------------------------------------------------
 # Persistent random walk
 # ----------------------------------------------------------------------
 class RandomWalkPolicy:
-    """Uninformed correlated search with boundary and terrain reactions.
+    """Uninformed UAV search with nearest-scouted UGV confirmation.
 
-    Each agent retains a heading whose angle follows rotational diffusion.
-    The policy does not inspect survivors, fire, coverage, or communication.
+    Agents retain headings whose angles follow rotational diffusion. UGVs use
+    that random walk while no target is known, then switch to the same
+    nearest-scouted A* confirmation rule as the structured baselines.
     """
 
     def __init__(self, env, persistence_s: float = RANDOM_WALK_PERSISTENCE_S):
@@ -420,6 +482,7 @@ class RandomWalkPolicy:
             device=sc.fire_grid.device,
         )
         self.previous_step_count = sc.step_count.clone()
+        self.ground_route_cache = [dict() for _ in range(sc.n_ground)]
         self._randomize_environments(torch.ones_like(sc.step_count, dtype=torch.bool))
 
     def __call__(self, env) -> List[torch.Tensor]:
@@ -427,6 +490,9 @@ class RandomWalkPolicy:
         sc = self.scenario
         reset = sc.step_count < self.previous_step_count
         self._randomize_environments(reset)
+        if bool(reset.any().item()):
+            for cache in self.ground_route_cache:
+                cache.clear()
 
         angular_std = math.sqrt(2.0 * float(sc.sim_step_seconds) / self.persistence_s)
         self.headings.add_(angular_std * torch.randn_like(self.headings))
@@ -521,7 +587,11 @@ class RandomWalkPolicy:
                 any_safe, selected_heading, reverse,
             )
             actions.append(action)
-        return actions
+        return _coordinated_scouted_ground_actions(
+            sc,
+            actions,
+            route_cache=self.ground_route_cache,
+        )
 
 
 # ----------------------------------------------------------------------
@@ -786,51 +856,6 @@ class LawnmowerPolicy:
             first, second = (left, right) if (idx % 2 == 0) == start_left else (right, left)
             waypoints.extend((first, second))
         return waypoints
-
-
-# ----------------------------------------------------------------------
-# Nearest-candidate (drones random walk, ground -> nearest scouted)
-# ----------------------------------------------------------------------
-class NearestCandidatePolicy:
-    """
-    Drones use persistent random walks (no map coverage strategy).
-    Ground robots head to the *nearest* survivor that has been scouted
-    by any drone but not yet confirmed.
-
-    This is the canonical "obvious heuristic" baseline that HAPPO should
-    beat — it's reactive, doesn't reason about staleness or hazard.
-    """
-
-    def __init__(self, env):
-        self.scenario: WildfireSearchScenario = env.scenario
-        self._random_walk = RandomWalkPolicy(env)
-        self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
-
-    def __call__(self, env) -> List[torch.Tensor]:
-        sc = self.scenario
-        B = sc.world.batch_dim
-        out: List[torch.Tensor] = []
-
-        # Drones: coherent but uninformed persistent random search.
-        random_walk_actions = self._random_walk(env)
-        rand_actions = env.get_random_actions()
-        for i in range(sc.n_drones):
-            out.append(random_walk_actions[i])
-
-        # Ground: split up across nearest scouted survivors
-        scouted    = sc.scouted_survivors
-        found      = sc.found_survivors
-        targetable = scouted & ~found
-        fallback = [
-            rand_actions[sc.n_drones + gi]
-            for gi in range(sc.n_ground)
-        ]
-        out.extend(_coordinated_ground_actions(
-            sc, targetable, fallback, route_cache=self.ground_route_cache,
-        ))
-
-        return out
-
 
 # ----------------------------------------------------------------------
 # Highest-confidence-first (proxy: most-recently-scouted = freshest)
@@ -1209,7 +1234,6 @@ BASELINES: dict[str, Callable] = {
     "random_action":       RandomActionPolicy,
     "random_walk":         RandomWalkPolicy,
     "lawnmower":           LawnmowerPolicy,
-    "nearest_candidate":   NearestCandidatePolicy,
     "highest_confidence":  HighestConfidencePolicy,
     "ant_colony":          AntColonyPolicy,
 }
@@ -1220,5 +1244,4 @@ def get_baseline(name: str, env) -> Callable:
     if name not in BASELINES:
         raise KeyError(f"Unknown baseline {name!r}. Available: {list(BASELINES)}")
     cls = BASELINES[name]
-    # RandomActionPolicy doesn't need env, others do
-    return cls(env) if cls is not RandomActionPolicy else cls()
+    return cls(env)
