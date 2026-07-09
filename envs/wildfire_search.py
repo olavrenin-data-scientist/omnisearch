@@ -5023,6 +5023,67 @@ class WildfireSearchScenario(BaseScenario):
         candidate_gain = (1.0 - previous).clamp(0.0, 1.0).unsqueeze(1) * probability
         return (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
 
+    def _uav_patch_fire_smoke_visibility_factor(
+        self,
+        drone_pos: Tensor,
+        cell_pos: Tensor,
+    ) -> Tensor:
+        """Fire/smoke visibility for candidate-specific footprint patch cells."""
+        B, C = drone_pos.shape[:2]
+        device = drone_pos.device
+        dtype = drone_pos.dtype
+        samples = max(int(self.drone_perception_path_samples), 2)
+        alpha = torch.linspace(0.0, 1.0, samples, device=device, dtype=dtype)
+        start = drone_pos.view(B, C, 1, 1, 1, 2)
+        end = cell_pos.unsqueeze(-2)
+        path = start + (end - start) * alpha.view(1, 1, 1, 1, samples, 1)
+        env_indices = torch.arange(B, device=device)
+        smoke_path = self._grid_values_at_positions(
+            self.smoke_grid,
+            path,
+            env_indices,
+        ).to(dtype=dtype)
+        fire_path = self._grid_values_at_positions(
+            self.fire_intensity_grid,
+            path,
+            env_indices,
+        ).to(dtype=dtype)
+
+        smoke_mean = smoke_path.mean(dim=-1)
+        target_smoke = smoke_path[..., -1]
+        smoke_load = 0.65 * smoke_mean + 0.35 * target_smoke
+        smoke_factor = torch.exp(-self.drone_smoke_extinction * smoke_load)
+        smoke_floor = torch.full_like(smoke_factor, float(self.drone_smoke_detection_factor))
+        smoke_factor = torch.maximum(smoke_factor, smoke_floor)
+
+        gx = ((cell_pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
+            1, self.fire_grid_size - 2,
+        ).long()
+        gy = ((cell_pos[..., Y] + self.y_semidim) / (2 * self.y_semidim) * self.fire_grid_size).clamp(
+            1, self.fire_grid_size - 2,
+        ).long()
+        b_idx = torch.arange(B, device=device).view(B, 1, 1, 1).expand_as(gx)
+        target_fire_density = torch.zeros_like(gx, dtype=dtype)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                target_fire_density = target_fire_density + self.fire_grid[
+                    b_idx,
+                    gy + dy,
+                    gx + dx,
+                ].to(dtype=dtype)
+        target_fire_density = target_fire_density / 9.0
+
+        fire_path_mean = fire_path.mean(dim=-1)
+        fire_path_max = fire_path.amax(dim=-1)
+        glare_load = torch.maximum(fire_path_max, target_fire_density)
+        glare_factor = 1.0 - self.drone_fire_glare_penalty * glare_load
+        heat_factor = 1.0 - self.drone_heat_distortion_penalty * fire_path_mean
+        return (
+            smoke_factor
+            * glare_factor.clamp(0.0, 1.0)
+            * heat_factor.clamp(0.0, 1.0)
+        ).clamp(0.0, 1.0)
+
     def _uav_confidence_patch_stencil_gain(
         self,
         previous: Tensor,
@@ -5062,10 +5123,25 @@ class WildfireSearchScenario(BaseScenario):
         visible = valid & (center_dist <= footprint_patch)
         normalized_distance = (center_dist / footprint_patch.clamp_min(1e-6)).clamp(0.0, 1.0)
         distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
+        if self.disable_fire:
+            fire_smoke_factor = torch.ones_like(distance_factor)
+        else:
+            patch_cell_pos = torch.stack(
+                (
+                    xs[gx].expand_as(center_dist),
+                    ys[gy].expand_as(center_dist),
+                ),
+                dim=-1,
+            )
+            fire_smoke_factor = self._uav_patch_fire_smoke_visibility_factor(
+                flat_pos.to(device=device, dtype=dtype),
+                patch_cell_pos,
+            )
         probability = (
             altitude_quality.to(device=device, dtype=dtype).view(B, C, 1, 1)
             * distance_factor
             * cover_patch
+            * fire_smoke_factor
         ).clamp(0.0, 1.0)
         probability = torch.where(visible, probability, torch.zeros_like(probability))
         weighted_gain = (
@@ -5095,7 +5171,7 @@ class WildfireSearchScenario(BaseScenario):
         rx = min(G - 1, int(math.ceil(max_footprint / max(float(cell_width), 1e-12))) + 1)
         ry = min(G - 1, int(math.ceil(max_footprint / max(float(cell_height), 1e-12))) + 1)
         patch_area = (2 * rx + 1) * (2 * ry + 1)
-        if self.disable_fire and patch_area < G * G:
+        if patch_area < G * G:
             weighted_gain = self._uav_confidence_patch_stencil_gain(
                 previous,
                 confidence_weight,
