@@ -680,7 +680,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
     parser.add_argument("--ugv-target-assignment-mode",
-                        choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"),
+                        choices=(
+                            "nearest",
+                            "greedy",
+                            "greedy_sticky",
+                            "greedy-sticky",
+                            "route_cost_sticky",
+                            "route-cost-sticky",
+                        ),
                         default=None)
     parser.add_argument("--ugv-planner-fire-mode", choices=("off", "cost", "block"), default=None)
     parser.add_argument("--ugv-planner-fire-replan-policy", choices=("always", "affected", "lazy"), default=None)

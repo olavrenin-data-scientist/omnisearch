@@ -450,7 +450,18 @@ def main() -> None:
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
-    parser.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"), default=None)
+    parser.add_argument(
+        "--ugv-target-assignment-mode",
+        choices=(
+            "nearest",
+            "greedy",
+            "greedy_sticky",
+            "greedy-sticky",
+            "route_cost_sticky",
+            "route-cost-sticky",
+        ),
+        default=None,
+    )
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--time-bins", type=int, default=5)
     parser.add_argument("--json-output", default=None)

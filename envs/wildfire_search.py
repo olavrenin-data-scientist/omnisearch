@@ -543,8 +543,12 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_target_assignment_mode = str(
             kwargs.pop("ugv_target_assignment_mode", "nearest")
         ).replace("-", "_").lower()
-        if self.ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
-            raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
+        valid_assignment_modes = {"nearest", "greedy", "greedy_sticky", "route_cost_sticky"}
+        if self.ugv_target_assignment_mode not in valid_assignment_modes:
+            raise ValueError(
+                "ugv_target_assignment_mode must be one of: nearest, greedy, "
+                "greedy_sticky, route_cost_sticky"
+            )
         self.ugv_sticky_switch_margin_m = max(
             float(kwargs.pop("ugv_sticky_switch_margin_m", 20.0)),
             0.0,
@@ -1194,6 +1198,7 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_planner_layer_array_cache = {}
         self._ugv_static_planner_layer_array_cache = {}
         self._ugv_global_heuristic_cache = {}
+        self._ugv_global_raw_cost_to_go_cache = {}
         self.ugv_escape_route_active = torch.zeros(
             batch_dim,
             self.n_ground,
@@ -2688,6 +2693,7 @@ class WildfireSearchScenario(BaseScenario):
         caches = (
             "_ugv_static_planner_layer_array_cache",
             "_ugv_global_heuristic_cache",
+            "_ugv_global_raw_cost_to_go_cache",
         )
         if env_index is None:
             self._ugv_static_planner_cache_version = (
@@ -3496,7 +3502,9 @@ class WildfireSearchScenario(BaseScenario):
 
         distances = torch.linalg.norm(survivor_pos.unsqueeze(1) - ground_pos.unsqueeze(2), dim=-1)
         masked = torch.where(targetable, distances, torch.full_like(distances, float("inf")))
-        if self.ugv_target_assignment_mode == "nearest" or self.n_ground <= 1:
+        if self.ugv_target_assignment_mode == "nearest" or (
+            self.n_ground <= 1 and self.ugv_target_assignment_mode != "route_cost_sticky"
+        ):
             assigned_dist, assigned_idx = masked.min(dim=2)
             assigned_idx = torch.where(
                 torch.isfinite(assigned_dist),
@@ -3507,6 +3515,22 @@ class WildfireSearchScenario(BaseScenario):
 
         if self.ugv_target_assignment_mode == "greedy_sticky":
             assigned_idx = self._ugv_sticky_target_indices(distances, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "route_cost_sticky":
+            route_costs_m = self._ugv_route_assignment_costs_m(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            assigned_idx = self._ugv_route_cost_sticky_target_indices(route_costs_m, targetable)
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(
@@ -3559,8 +3583,38 @@ class WildfireSearchScenario(BaseScenario):
         return assigned_idx, assigned_dist
 
     def _ugv_sticky_target_indices(self, distances: Tensor, targetable: Tensor) -> Tensor:
-        batch_dim = distances.shape[0]
-        device = distances.device
+        margin_by_env = (
+            float(self.ugv_sticky_switch_margin_m)
+            * self.terrain_sim_units_per_meter.to(device=distances.device)
+        )
+        return self._ugv_sticky_target_indices_from_scores(
+            distances,
+            targetable,
+            margin_by_env=margin_by_env,
+        )
+
+    def _ugv_route_cost_sticky_target_indices(self, route_costs_m: Tensor, targetable: Tensor) -> Tensor:
+        margin_by_env = torch.full(
+            (route_costs_m.shape[0],),
+            float(self.ugv_sticky_switch_margin_m),
+            device=route_costs_m.device,
+            dtype=route_costs_m.dtype,
+        )
+        return self._ugv_sticky_target_indices_from_scores(
+            route_costs_m,
+            targetable,
+            margin_by_env=margin_by_env,
+        )
+
+    def _ugv_sticky_target_indices_from_scores(
+        self,
+        scores: Tensor,
+        targetable: Tensor,
+        *,
+        margin_by_env: Tensor,
+    ) -> Tensor:
+        batch_dim = scores.shape[0]
+        device = scores.device
         assigned = torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device)
         if self.n_ground == 0 or self.n_survivors == 0:
             return assigned
@@ -3578,25 +3632,24 @@ class WildfireSearchScenario(BaseScenario):
                 if (
                     current >= 0
                     and bool(targetable[env_index, ground_index, current].item())
+                    and bool(torch.isfinite(scores[env_index, ground_index, current]).item())
                     and current not in reserved_current
                 ):
                     reserved_current.add(current)
 
             used: set[int] = set()
             deferred: list[int] = []
-            margin_sim = (
-                float(self.ugv_sticky_switch_margin_m)
-                * float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
-            )
 
             for ground_index in range(self.n_ground):
                 current = int(previous[ground_index].item())
                 current_valid = (
                     current >= 0
                     and bool(targetable[env_index, ground_index, current].item())
+                    and bool(torch.isfinite(scores[env_index, ground_index, current]).item())
                     and current not in used
                 )
-                valid_targets = torch.nonzero(targetable[env_index, ground_index], as_tuple=False).flatten()
+                scoreable = targetable[env_index, ground_index] & torch.isfinite(scores[env_index, ground_index])
+                valid_targets = torch.nonzero(scoreable, as_tuple=False).flatten()
                 if valid_targets.numel() == 0:
                     continue
                 unused_targets = [
@@ -3610,16 +3663,17 @@ class WildfireSearchScenario(BaseScenario):
                     if unused_targets
                     else valid_targets
                 )
-                candidate_distances = distances[env_index, ground_index, candidate_targets]
-                candidate = int(candidate_targets[int(torch.argmin(candidate_distances).item())].item())
+                candidate_scores = scores[env_index, ground_index, candidate_targets]
+                candidate = int(candidate_targets[int(torch.argmin(candidate_scores).item())].item())
                 switch = not current_valid
                 if current_valid and candidate != current:
-                    current_dist = float(distances[env_index, ground_index, current].item())
-                    candidate_dist = float(distances[env_index, ground_index, candidate].item())
+                    current_score = float(scores[env_index, ground_index, current].item())
+                    candidate_score = float(scores[env_index, ground_index, candidate].item())
+                    margin = float(margin_by_env[env_index].item())
                     age = int(self.ugv_sticky_target_age[env_index, ground_index].item())
                     switch = (
                         age >= int(self.ugv_sticky_min_age_steps)
-                        and candidate_dist + margin_sim < current_dist * float(self.ugv_sticky_switch_ratio)
+                        and candidate_score + margin < current_score * float(self.ugv_sticky_switch_ratio)
                     )
                 if current_valid and not switch:
                     assigned[env_index, ground_index] = current
@@ -3628,7 +3682,8 @@ class WildfireSearchScenario(BaseScenario):
                     deferred.append(ground_index)
 
             for ground_index in deferred:
-                valid_targets = torch.nonzero(targetable[env_index, ground_index], as_tuple=False).flatten()
+                scoreable = targetable[env_index, ground_index] & torch.isfinite(scores[env_index, ground_index])
+                valid_targets = torch.nonzero(scoreable, as_tuple=False).flatten()
                 if valid_targets.numel() == 0:
                     continue
                 unused_targets = [
@@ -3641,8 +3696,8 @@ class WildfireSearchScenario(BaseScenario):
                     if unused_targets
                     else valid_targets
                 )
-                candidate_distances = distances[env_index, ground_index, candidate_targets]
-                selected = int(candidate_targets[int(torch.argmin(candidate_distances).item())].item())
+                candidate_scores = scores[env_index, ground_index, candidate_targets]
+                selected = int(candidate_targets[int(torch.argmin(candidate_scores).item())].item())
                 assigned[env_index, ground_index] = selected
                 if unused_targets:
                     used.add(selected)
@@ -3659,6 +3714,80 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_assignment_cache_idx[env_index] = assigned[env_index]
             self.ugv_assignment_cache_step[env_index] = current_step[env_index]
         return assigned
+
+    def _ugv_route_assignment_costs_m(
+        self,
+        ground_pos: Tensor,
+        survivor_pos: Tensor,
+        targetable: Tensor,
+    ) -> Tensor:
+        """Cost UGV-target assignments by cached terrain route cost instead of straight-line distance."""
+        batch_dim, n_ground, _ = ground_pos.shape
+        costs_m = torch.full(
+            (batch_dim, n_ground, self.n_survivors),
+            float("inf"),
+            device=ground_pos.device,
+            dtype=ground_pos.dtype,
+        )
+        if n_ground == 0 or self.n_survivors == 0:
+            return costs_m
+        if self.ugv_planner_hint != "global_astar":
+            scale = self.terrain_sim_units_per_meter.to(device=ground_pos.device).view(-1, 1, 1).clamp_min(1e-9)
+            distances = torch.linalg.norm(survivor_pos.unsqueeze(1) - ground_pos.unsqueeze(2), dim=-1)
+            return torch.where(targetable, distances / scale, costs_m)
+
+        G = int(self.fire_grid_size)
+        cell_w_sim = 2.0 * float(self.x_semidim) / float(G)
+        cell_h_sim = 2.0 * float(self.y_semidim) / float(G)
+        bounds = (0, G - 1, 0, G - 1)
+        for env_index in range(batch_dim):
+            scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+            cell_m = max(cell_w_sim, cell_h_sim) / max(scale, 1e-9)
+            traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+            traversable_tensor = self.traversable_grid[env_index]
+            for survivor_index in range(self.n_survivors):
+                if not bool(targetable[env_index, :, survivor_index].any().item()):
+                    continue
+                target_pos = survivor_pos[env_index, survivor_index]
+                goals = self._global_astar_goal_cells_for_env(
+                    env_index,
+                    target_pos,
+                    traversable,
+                    movement_cost,
+                )
+                if not goals:
+                    target_cell = self._single_position_to_grid_cell(target_pos)
+                    nearest_goal = self._nearest_traversable_cell_in_bounds(
+                        env_index,
+                        target_cell[0],
+                        target_cell[1],
+                        bounds,
+                        traversable=traversable_tensor,
+                    )
+                    if nearest_goal is None:
+                        continue
+                    goals = [nearest_goal]
+                cost_to_go = self._global_astar_static_raw_cost_to_go_for_env(env_index, goals)
+                for ground_index in range(n_ground):
+                    if not bool(targetable[env_index, ground_index, survivor_index].item()):
+                        continue
+                    start_cell = self._single_position_to_grid_cell(ground_pos[env_index, ground_index])
+                    sx, sy = start_cell
+                    if not (0 <= sx < G and 0 <= sy < G and bool(traversable[sy, sx])):
+                        nearest_start = self._nearest_traversable_cell_in_bounds(
+                            env_index,
+                            sx,
+                            sy,
+                            bounds,
+                            traversable=traversable_tensor,
+                        )
+                        if nearest_start is None:
+                            continue
+                        sx, sy = nearest_start
+                    route_cost = float(cost_to_go[sy, sx])
+                    if math.isfinite(route_cost):
+                        costs_m[env_index, ground_index, survivor_index] = route_cost * cell_m
+        return costs_m
 
     def _ugv_duplicate_assignment_fraction(self, target_idx: Tensor, valid_target: Tensor) -> Tensor:
         if self.n_ground <= 1:
@@ -8315,7 +8444,6 @@ class WildfireSearchScenario(BaseScenario):
         env_index: int,
         goals: list[tuple[int, int]],
     ) -> np.ndarray:
-        G = int(self.fire_grid_size)
         version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
         goal_key = tuple((int(x), int(y)) for x, y in goals)
         key = (int(env_index), version, goal_key)
@@ -8323,6 +8451,27 @@ class WildfireSearchScenario(BaseScenario):
         if cache is None:
             self._ugv_global_heuristic_cache = {}
             cache = self._ugv_global_heuristic_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        costs = self._global_astar_static_raw_cost_to_go_for_env(env_index, goals)
+        heuristic = np.where(np.isfinite(costs), costs, 0.0)
+        cache[key] = heuristic
+        return heuristic
+
+    def _global_astar_static_raw_cost_to_go_for_env(
+        self,
+        env_index: int,
+        goals: list[tuple[int, int]],
+    ) -> np.ndarray:
+        G = int(self.fire_grid_size)
+        version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
+        goal_key = tuple((int(x), int(y)) for x, y in goals)
+        key = (int(env_index), version, goal_key)
+        cache = getattr(self, "_ugv_global_raw_cost_to_go_cache", None)
+        if cache is None:
+            self._ugv_global_raw_cost_to_go_cache = {}
+            cache = self._ugv_global_raw_cost_to_go_cache
         cached = cache.get(key)
         if cached is not None:
             return cached
@@ -8382,9 +8531,8 @@ class WildfireSearchScenario(BaseScenario):
                     costs[ny, nx] = new_cost
                     heapq.heappush(open_heap, (new_cost, nxt))
 
-        heuristic = np.where(np.isfinite(costs), costs, 0.0)
-        cache[key] = heuristic
-        return heuristic
+        cache[key] = costs
+        return costs
 
     def _global_astar_heuristic_grid(
         self,

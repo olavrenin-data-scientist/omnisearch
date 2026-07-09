@@ -442,8 +442,12 @@ def build_args(
         raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
-    if ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
-        raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
+    valid_assignment_modes = {"nearest", "greedy", "greedy_sticky", "route_cost_sticky"}
+    if ugv_target_assignment_mode not in valid_assignment_modes:
+        raise ValueError(
+            "ugv_target_assignment_mode must be one of: nearest, greedy, "
+            "greedy_sticky, route_cost_sticky"
+        )
     if ugv_assigned_target_obs_only is None:
         ugv_assigned_target_obs_only = False
     ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
@@ -1538,7 +1542,15 @@ def main():
                    help="Planner-only land-cover costs for road/open/brush/forest/rock[/water]. "
                         "Physical UGV speeds and terrain observations are unchanged. "
                         "Example: --ugv-planner-land-cover-costs 0.85 1.0 1.15 1.35 4.0 8.0")
-    p.add_argument("--ugv-target-assignment-mode", choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"),
+    p.add_argument("--ugv-target-assignment-mode",
+                   choices=(
+                       "nearest",
+                       "greedy",
+                       "greedy_sticky",
+                       "greedy-sticky",
+                       "route_cost_sticky",
+                       "route-cost-sticky",
+                   ),
                    default="nearest",
                    help="How UGV planner targets are selected from known, unconfirmed survivors.")
     p.add_argument("--ugv-assigned-target-obs-only", action=argparse.BooleanOptionalAction, default=None,

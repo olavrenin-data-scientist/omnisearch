@@ -479,6 +479,58 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(int(target_idx[0, 0].item()), 2)
         self.assertGreater(float(scenario.metric_ugv_assignment_switches[0]), 0.0)
 
+    def test_route_cost_sticky_assignment_prefers_cheaper_path_over_nearest(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_cost_sticky",
+            ugv_planner_hint="global_astar",
+            ground_confirmation_range_m=1.0,
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor0, survivor1 = scenario._survivors
+        scenario.traversable_grid.fill_(True)
+        scenario.mobility_cost_grid.fill_(1.0)
+        scenario.speed_multiplier_grid.fill_(1.0)
+        scenario.traversable_grid[0, :, 16] = False
+        scenario.traversable_grid[0, 5, 16] = True
+        scenario._invalidate_ugv_planner_layer_cache()
+        scenario._invalidate_ugv_global_heuristic_cache()
+        scenario._invalidate_ugv_assignment_cache()
+        scenario.ugv_sticky_target_idx.fill_(-1)
+        scenario.ugv_sticky_target_age.zero_()
+
+        ground.state.pos[:] = scenario._grid_cell_center_to_world(
+            (10, 64),
+            device=ground.state.pos.device,
+            dtype=ground.state.pos.dtype,
+        ).view(1, 2)
+        survivor0.state.pos[:] = scenario._grid_cell_center_to_world(
+            (20, 64),
+            device=ground.state.pos.device,
+            dtype=ground.state.pos.dtype,
+        ).view(1, 2)
+        survivor1.state.pos[:] = scenario._grid_cell_center_to_world(
+            (10, 80),
+            device=ground.state.pos.device,
+            dtype=ground.state.pos.dtype,
+        ).view(1, 2)
+        ground_pos = ground.state.pos.view(1, 1, 2)
+        survivor_pos = torch.stack([survivor0.state.pos, survivor1.state.pos], dim=1)
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        distances = torch.linalg.norm(survivor_pos.unsqueeze(1) - ground_pos.unsqueeze(2), dim=-1)
+        self.assertLess(float(distances[0, 0, 0]), float(distances[0, 0, 1]))
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[1]])
+
     def test_known_survivors_at_reset_initializes_ground_mission_memory(self):
         env = self._diagnostic_env()
         scenario = env.scenario

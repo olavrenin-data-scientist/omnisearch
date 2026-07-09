@@ -110,7 +110,14 @@ def main():
     p.add_argument("--joint-diagnostic-ugvs", type=int, default=1,
                    help="Number of UGVs for --joint-survivor-diagnostic manual exports.")
     p.add_argument("--ugv-target-assignment-mode",
-                   choices=("nearest", "greedy", "greedy_sticky", "greedy-sticky"),
+                   choices=(
+                       "nearest",
+                       "greedy",
+                       "greedy_sticky",
+                       "greedy-sticky",
+                       "route_cost_sticky",
+                       "route-cost-sticky",
+                   ),
                    default=None,
                    help="Override UGV assignment for known, unconfirmed survivor targets.")
     p.add_argument("--ugv-planner-fire-mode",
