@@ -1163,7 +1163,7 @@ def build_args(
             "n_survivors": survivor_count,
             "known_survivors_at_reset": False,
             "drone_can_confirm": True,
-            "disable_fire": True,
+            "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
             "r_found_survivor": found_reward,
             "r_all_survivors_found": all_survivors_reward,

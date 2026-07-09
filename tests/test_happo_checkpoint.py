@@ -617,6 +617,21 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_fire_penalty"], 0.0)
         self.assertEqual(scenario["r_drone_climb_cost"], 0.0)
 
+    def test_uav_survivor_diagnostic_can_enable_fire_in_training_config(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="uav_diag_fire",
+            uav_survivor_diagnostic=True,
+            enable_fire=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertFalse(scenario["disable_fire"])
+
     def test_uav_survivor_diagnostic_uses_current_defaults(self):
         _, algo_args, env_args = build_args(
             num_env_steps=100,
@@ -930,6 +945,21 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertTrue(scenario["survivor_assignment_obs"])
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
+
+    def test_joint_schema_uav_diagnostic_can_enable_fire_in_training_config(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.5,
+            entropy_coef=0.01,
+            exp_name="joint_schema_uav_diag_fire",
+            joint_schema_uav_diagnostic=True,
+            enable_fire=True,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertFalse(scenario["disable_fire"])
 
     def test_uav_survivor_diagnostic_can_use_opportunity_coverage_normalization(self):
         _, _, env_args = build_args(
