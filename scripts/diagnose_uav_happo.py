@@ -314,6 +314,13 @@ def run_rollout(
     footprint_radius_m_values: list[float] = []
     path_positions_sim: list[np.ndarray] = []
     per_drone_stats = [_new_drone_stats(drone_idx) for drone_idx in range(scenario.n_drones)]
+    fast_drone_path_lengths = np.zeros(int(scenario.n_drones), dtype=float)
+    fast_drone_displacements: list[list[float]] = [
+        [] for _ in range(int(scenario.n_drones))
+    ]
+    fast_drone_action_norms: list[list[float]] = [
+        [] for _ in range(int(scenario.n_drones))
+    ]
     low_action_high_motion = 0
     high_action_low_motion = 0
     moving_no_new_coverage = 0
@@ -820,6 +827,9 @@ def run_rollout(
                 team_confidence_reward = float(team_confidence_reward_by_drone[drone_idx])
                 confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
                 confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
+                confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
+                confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
+                confidence_overlap_regret = float(confidence_overlap_regret_by_drone[drone_idx])
                 cleanup_target_progress_reward = float(
                     cleanup_target_progress_reward_by_drone[drone_idx]
                 )
@@ -889,6 +899,24 @@ def run_rollout(
                     low_action_high_motion += 1
                 if action_norm > 0.5 and displacement_m < 0.25:
                     high_action_low_motion += 1
+                moving_no_confidence_gain_step = bool(
+                    displacement_m > 1.0
+                    and math.isfinite(confidence_weighted_gain_drone)
+                    and confidence_weighted_gain_drone <= moving_no_confidence_gain_threshold
+                )
+                if moving_no_confidence_gain_step:
+                    moving_no_confidence_gain += 1
+
+                edge_threshold = (
+                    footprint_radius
+                    if math.isfinite(footprint_radius) and footprint_radius > 0.0
+                    else 25.0
+                )
+                is_edge_step = bool(float(boundary_distance_m[drone_idx]) <= edge_threshold)
+
+                fast_drone_path_lengths[drone_idx] += displacement_m
+                fast_drone_displacements[drone_idx].append(displacement_m)
+                fast_drone_action_norms[drone_idx].append(action_norm)
 
                 action_displacement_alignment = math.nan
                 displacement_norm_sim = float(np.linalg.norm(displacement_vec))
@@ -909,6 +937,13 @@ def run_rollout(
                         "displacement_m": displacement_m,
                         "new_coverage_cells": new_cells,
                         "action_displacement_alignment": action_displacement_alignment,
+                        "overlap": overlap,
+                        "excess_overlap": excess_overlap,
+                        "edge_step": float(is_edge_step),
+                        "moving_no_new_coverage": float(displacement_m > 1.0 and new_cells < 1.0),
+                        "moving_no_confidence_gain": float(moving_no_confidence_gain_step),
+                        "confidence_overlap_fraction": confidence_overlap_fraction,
+                        "confidence_overlap_regret": confidence_overlap_regret,
                         "frontier_reward": reward_terms["frontier"],
                         "confidence_reward": reward_terms["confidence"],
                         "team_confidence_reward": reward_terms["team_confidence"],
@@ -1670,7 +1705,15 @@ def run_rollout(
     per_drone = (
         [_finalize_drone_stats(stats, scenario) for stats in per_drone_stats]
         if full_diagnostics
-        else []
+        else [
+            {
+                "drone": int(drone_idx),
+                "path_length_m": float(fast_drone_path_lengths[drone_idx]),
+                "avg_displacement_m": _finite_mean(fast_drone_displacements[drone_idx]),
+                "avg_action_norm": _finite_mean(fast_drone_action_norms[drone_idx]),
+            }
+            for drone_idx in range(int(scenario.n_drones))
+        ]
     )
     final_survivor_confidence = _survivor_confidence_values(scenario)
     if full_diagnostics:
@@ -6962,6 +7005,51 @@ def _plot_failure_labels_panel(
     ax.grid(axis="x", alpha=0.25)
 
 
+def _plot_uav_start_heatmap_panel(
+    ax: Any,
+    rows: list[dict[str, Any]],
+    *,
+    fig: Any | None = None,
+) -> None:
+    ax.clear()
+    starts = [
+        position
+        for row in rows
+        for position in row.get("start_positions_m", [])
+        if len(position) >= 2
+    ]
+    if starts:
+        start_array = np.asarray(starts, dtype=float)
+        map_width = _finite_mean([
+            float(row.get("start_map_width_m", math.nan)) for row in rows
+        ])
+        map_height = _finite_mean([
+            float(row.get("start_map_height_m", math.nan)) for row in rows
+        ])
+        if not math.isfinite(map_width):
+            map_width = max(float(np.abs(start_array[:, 0]).max()) * 2.0, 1.0)
+        if not math.isfinite(map_height):
+            map_height = max(float(np.abs(start_array[:, 1]).max()) * 2.0, 1.0)
+        heat = ax.hist2d(
+            start_array[:, 0],
+            start_array[:, 1],
+            bins=12,
+            range=[
+                [-0.5 * map_width, 0.5 * map_width],
+                [-0.5 * map_height, 0.5 * map_height],
+            ],
+            cmap="Blues",
+        )
+        if fig is not None:
+            fig.colorbar(heat[3], ax=ax, fraction=0.046, pad=0.04)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x start (m)")
+        ax.set_ylabel("y start (m)")
+    else:
+        ax.text(0.5, 0.5, "no starts", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("UAV Start Heatmap", fontsize=10)
+
+
 def _write_fast_distribution_plots(
     rows: list[dict[str, Any]],
     summary: dict[str, Any],
@@ -6976,7 +7064,7 @@ def _write_fast_distribution_plots(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    fig, axes = plt.subplots(4, 3, figsize=(15, 14), constrained_layout=True)
     axes_flat = axes.ravel()
     hist_panels = [
         ("Recall", "recall", (0.0, 1.0)),
@@ -6989,9 +7077,19 @@ def _write_fast_distribution_plots(
 
     custom_start = len(hist_panels)
     _plot_failure_labels_panel(axes_flat[custom_start], label_counts)
-    _plot_time_bins_reward_scale(axes_flat[custom_start + 1], summary)
+    _plot_per_drone_bars(
+        axes_flat[custom_start + 1],
+        summary,
+        "mean_path_length_m",
+        "Per-Drone Path Length",
+        "m",
+    )
+    _plot_uav_start_heatmap_panel(axes_flat[custom_start + 2], rows, fig=fig)
+    _plot_time_bins_scouts(axes_flat[custom_start + 3], summary)
+    _plot_time_bins_search_efficiency(axes_flat[custom_start + 4], summary)
+    _plot_time_bins_reward_scale(axes_flat[custom_start + 5], summary)
 
-    for ax in axes_flat[custom_start + 2:]:
+    for ax in axes_flat[custom_start + 6:]:
         ax.axis("off")
 
     fig.suptitle(
