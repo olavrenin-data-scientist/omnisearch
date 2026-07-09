@@ -74,7 +74,11 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     scenario_kwargs.update({
         "max_steps": args.steps,
         "n_ground": 0,
-        "n_survivors": 5,
+        "n_survivors": int(
+            args.n_survivors
+            if getattr(args, "n_survivors", None) is not None
+            else scenario_kwargs.get("n_survivors", 5)
+        ),
         "known_survivors_at_reset": False,
         "drone_can_confirm": True,
         "disable_fire": True,
@@ -99,7 +103,11 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs.update({
             "obs_schema_n_drones": 3,
             "obs_schema_n_ground": 2,
-            "obs_schema_n_survivors": 5,
+            "obs_schema_n_survivors": int(
+                args.n_survivors
+                if getattr(args, "n_survivors", None) is not None
+                else scenario_kwargs.get("obs_schema_n_survivors", scenario_kwargs.get("n_survivors", 5))
+            ),
             "ugv_planner_hint": "global_astar",
             "ugv_assigned_target_obs_only": False,
             "survivor_assignment_obs": True,
@@ -7013,6 +7021,8 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
     parser.add_argument("--n-drones", type=int, default=None,
                         help="Override UAV count for legacy checkpoints. Default preserves the checkpoint manifest.")
+    parser.add_argument("--n-survivors", type=int, default=None,
+                        help="Override survivor count. Default preserves the checkpoint manifest or uses 5.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=None)
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -7047,6 +7057,8 @@ def main() -> None:
         parser.error("--steps must be positive")
     if args.n_drones is not None and args.n_drones < 1:
         parser.error("--n-drones must be positive")
+    if args.n_survivors is not None and args.n_survivors < 1:
+        parser.error("--n-survivors must be positive")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
     if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:

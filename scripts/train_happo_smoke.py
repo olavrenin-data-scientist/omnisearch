@@ -241,6 +241,7 @@ def build_args(
     joint_schema_ugv_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
     joint_diagnostic_ugvs: int = DEFAULT_JOINT_DIAG_UGVS,
+    n_survivors: int | None = None,
     delayed_survivor_knowledge: bool = False,
     survivor_reveal_schedule: str = "stratified_uniform",
     survivor_reveal_initial_count: int = 1,
@@ -333,6 +334,11 @@ def build_args(
     ugv_sticky_min_age_steps: int = 10,
     enable_fire: bool | None = None,
 ) -> tuple[dict, dict, dict]:
+    survivor_count = (
+        DEFAULT_JOINT_DIAG_SURVIVORS
+        if n_survivors is None
+        else max(int(n_survivors), 1)
+    )
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     uav_search_diagnostic = (
         uav_survivor_diagnostic
@@ -794,7 +800,7 @@ def build_args(
         "max_steps":     episode_length,
         "n_drones":      3,
         "n_ground":      2,
-        "n_survivors":   5,
+        "n_survivors":   survivor_count,
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
@@ -1098,7 +1104,7 @@ def build_args(
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1,
-            "n_survivors": 1,
+            "n_survivors": 1 if n_survivors is None else survivor_count,
             "known_survivors_at_reset": True,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
@@ -1139,7 +1145,7 @@ def build_args(
         scenario_kwargs.update({
             "n_drones": uav_diagnostic_drones,
             "n_ground": 0,
-            "n_survivors": 5,
+            "n_survivors": survivor_count,
             "known_survivors_at_reset": False,
             "drone_can_confirm": True,
             "disable_fire": True,
@@ -1200,7 +1206,7 @@ def build_args(
             scenario_kwargs.update({
                 "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
                 "obs_schema_n_ground": 2,
-                "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+                "obs_schema_n_survivors": survivor_count,
                 "ugv_assigned_target_obs_only": False,
                 "survivor_assignment_obs": True,
             })
@@ -1214,7 +1220,7 @@ def build_args(
         scenario_kwargs.update({
             "n_drones": DEFAULT_JOINT_DIAG_DRONES,
             "n_ground": joint_diagnostic_ugvs,
-            "n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            "n_survivors": survivor_count,
             "known_survivors_at_reset": False,
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
@@ -1273,10 +1279,10 @@ def build_args(
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 2,
-            "n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            "n_survivors": survivor_count,
             "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
             "obs_schema_n_ground": 2,
-            "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+            "obs_schema_n_survivors": survivor_count,
             "known_survivors_at_reset": False,
             "delayed_survivor_knowledge": True,
             "survivor_reveal_schedule": survivor_reveal_schedule,
@@ -1691,7 +1697,7 @@ def main():
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
                    help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
-                   help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, 5 survivors, no fire; drone scouting counts as success.")
+                   help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, no fire; drone scouting counts as success.")
     p.add_argument("--joint-schema-uav-diagnostic", action="store_true",
                    help="Train UAV-only search with final joint-schema observations, padding absent UGV slots.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
@@ -1702,6 +1708,9 @@ def main():
                    help="Number of UAVs in --uav-survivor-diagnostic mode.")
     p.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS,
                    help="Number of UGVs in --joint-survivor-diagnostic mode.")
+    p.add_argument("--n-survivors", type=int, default=None,
+                   help="Override the number of survivors for training/diagnostic scenarios. "
+                        "Joint-schema modes use the same value for the survivor observation schema.")
     p.add_argument("--delayed-survivor-knowledge", action="store_true",
                    help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
     p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
@@ -2208,6 +2217,8 @@ def main():
         p.error("--ugv-sticky-switch-ratio must be nonnegative")
     if args.ugv_sticky_min_age_steps < 0:
         p.error("--ugv-sticky-min-age-steps must be nonnegative")
+    if args.n_survivors is not None and args.n_survivors < 1:
+        p.error("--n-survivors must be positive")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
     if sum(
@@ -2496,6 +2507,7 @@ def main():
     print(f" joint_schema_uav_diagnostic: {args.joint_schema_uav_diagnostic}")
     print(f" joint_survivor_diagnostic: {args.joint_survivor_diagnostic}")
     print(f" joint_schema_ugv_diagnostic: {args.joint_schema_ugv_diagnostic}")
+    print(f" n_survivors: {args.n_survivors if args.n_survivors is not None else 'default'}")
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(
         " survivor_reveal: "
@@ -2648,6 +2660,7 @@ def main():
         joint_schema_ugv_diagnostic = args.joint_schema_ugv_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
         joint_diagnostic_ugvs = args.joint_diagnostic_ugvs,
+        n_survivors = args.n_survivors,
         delayed_survivor_knowledge = bool(
             args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
         ),

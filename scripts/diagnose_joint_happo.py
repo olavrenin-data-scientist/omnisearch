@@ -86,6 +86,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     scenario_kwargs.setdefault("n_drones", 3)
     scenario_kwargs.setdefault("n_ground", int(args.joint_diagnostic_ugvs))
     scenario_kwargs.setdefault("n_survivors", 5)
+    if args.n_survivors is not None:
+        scenario_kwargs["n_survivors"] = int(args.n_survivors)
+        if args.joint_schema_ugv_diagnostic:
+            scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
     scenario_kwargs.setdefault("known_survivors_at_reset", False)
     scenario_kwargs.setdefault("drone_can_confirm", False)
     scenario_kwargs.setdefault("comms_dropout", 0.0)
@@ -445,6 +449,8 @@ def main() -> None:
     parser.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
                         help="Use 2-UGV delayed-knowledge joint-schema curriculum defaults.")
     parser.add_argument("--joint-diagnostic-ugvs", type=int, default=1)
+    parser.add_argument("--n-survivors", type=int, default=None,
+                        help="Override survivor count. Default preserves the checkpoint manifest or uses 5.")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1020)))
     parser.add_argument("--terrain-cache-path", default=None)
@@ -473,6 +479,8 @@ def main() -> None:
         parser.error("--time-bins must be positive")
     if args.joint_diagnostic_ugvs < 1:
         parser.error("--joint-diagnostic-ugvs must be positive")
+    if args.n_survivors is not None and args.n_survivors < 1:
+        parser.error("--n-survivors must be positive")
     if args.joint_survivor_diagnostic and args.joint_schema_ugv_diagnostic:
         parser.error("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():

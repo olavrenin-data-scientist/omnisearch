@@ -679,6 +679,23 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 336)
 
+    def test_uav_survivor_diagnostic_can_set_survivor_count(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="uav_diag_survivors",
+            uav_survivor_diagnostic=True,
+            n_survivors=7,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_drones"], 3)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["n_survivors"], 7)
+
     def test_joint_survivor_diagnostic_uses_uav_search_and_ugv_planner_defaults(self):
         _, algo_args, env_args = build_args(
             num_env_steps=100,
@@ -724,6 +741,34 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_confidence_overlap"], 0.06)
         self.assertTrue(scenario["uav_cleanup_target_obs"])
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
+
+    def test_joint_diagnostics_can_set_survivor_count(self):
+        _, _algo_args, joint_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_diag_survivors",
+            joint_survivor_diagnostic=True,
+            n_survivors=6,
+        )
+        _, _algo_args, schema_env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_survivors",
+            joint_schema_ugv_diagnostic=True,
+            n_survivors=6,
+        )
+
+        joint_scenario = joint_env_args["scenario_kwargs"]
+        self.assertEqual(joint_scenario["n_survivors"], 6)
+        schema_scenario = schema_env_args["scenario_kwargs"]
+        self.assertEqual(schema_scenario["n_survivors"], 6)
+        self.assertEqual(schema_scenario["obs_schema_n_survivors"], 6)
 
     def test_joint_survivor_diagnostic_can_disable_class_parameter_sharing(self):
         _, algo_args, _ = build_args(
