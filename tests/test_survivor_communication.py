@@ -428,6 +428,34 @@ class SurvivorCommunicationTests(unittest.TestCase):
         )
         torch.testing.assert_close(duplicate_fraction, torch.tensor([0.5]))
 
+    def test_route_cost_global_assignment_minimizes_total_cost(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_cost_global",
+        )
+        scenario = env.scenario
+        scores = torch.tensor([[[10.0, 11.0], [12.0, 100.0]]])
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+
+        target_idx = scenario._ugv_global_score_assignment_indices(scores, targetable)
+
+        self.assertEqual(target_idx.tolist(), [[1, 0]])
+
+    def test_route_cost_global_assignment_leaves_extra_ugv_unassigned(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            ugv_target_assignment_mode="route_cost_global",
+        )
+        scenario = env.scenario
+        scores = torch.tensor([[[20.0], [10.0]]])
+        targetable = torch.ones(1, 2, 1, dtype=torch.bool)
+
+        target_idx = scenario._ugv_global_score_assignment_indices(scores, targetable)
+
+        self.assertEqual(target_idx.tolist(), [[-1, 0]])
+
     def test_greedy_sticky_assignment_keeps_target_for_small_improvement(self):
         env = self._diagnostic_env(
             n_ground=2,

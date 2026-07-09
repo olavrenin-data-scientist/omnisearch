@@ -543,11 +543,17 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_target_assignment_mode = str(
             kwargs.pop("ugv_target_assignment_mode", "nearest")
         ).replace("-", "_").lower()
-        valid_assignment_modes = {"nearest", "greedy", "greedy_sticky", "route_cost_sticky"}
+        valid_assignment_modes = {
+            "nearest",
+            "greedy",
+            "greedy_sticky",
+            "route_cost_sticky",
+            "route_cost_global",
+        }
         if self.ugv_target_assignment_mode not in valid_assignment_modes:
             raise ValueError(
                 "ugv_target_assignment_mode must be one of: nearest, greedy, "
-                "greedy_sticky, route_cost_sticky"
+                "greedy_sticky, route_cost_sticky, route_cost_global"
             )
         self.ugv_sticky_switch_margin_m = max(
             float(kwargs.pop("ugv_sticky_switch_margin_m", 20.0)),
@@ -3508,7 +3514,9 @@ class WildfireSearchScenario(BaseScenario):
         distances = torch.linalg.norm(survivor_pos.unsqueeze(1) - ground_pos.unsqueeze(2), dim=-1)
         masked = torch.where(targetable, distances, torch.full_like(distances, float("inf")))
         if self.ugv_target_assignment_mode == "nearest" or (
-            self.n_ground <= 1 and self.ugv_target_assignment_mode != "route_cost_sticky"
+            self.n_ground <= 1
+            and self.ugv_target_assignment_mode
+            not in {"route_cost_sticky", "route_cost_global"}
         ):
             assigned_dist, assigned_idx = masked.min(dim=2)
             assigned_idx = torch.where(
@@ -3536,6 +3544,22 @@ class WildfireSearchScenario(BaseScenario):
                 targetable,
             )
             assigned_idx = self._ugv_route_cost_sticky_target_indices(route_costs_m, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "route_cost_global":
+            route_costs_m = self._ugv_route_assignment_costs_m(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            assigned_idx = self._ugv_global_score_assignment_indices(route_costs_m, targetable)
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(
@@ -3610,6 +3634,77 @@ class WildfireSearchScenario(BaseScenario):
             targetable,
             margin_by_env=margin_by_env,
         )
+
+    def _ugv_global_score_assignment_indices(self, scores: Tensor, targetable: Tensor) -> Tensor:
+        """Exact min-cost one-to-one UGV-target assignment for each environment.
+
+        The solver maximizes the number of assigned UGVs first, then minimizes
+        total score. Extra UGVs remain unassigned when there are fewer useful
+        targets than UGVs.
+        """
+        batch_dim = scores.shape[0]
+        device = scores.device
+        assigned = torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device)
+        if self.n_ground == 0 or self.n_survivors == 0:
+            return assigned
+
+        for env_index in range(batch_dim):
+            states: dict[int, tuple[int, float, tuple[int, ...]]] = {0: (0, 0.0, tuple())}
+            for ground_index in range(self.n_ground):
+                next_states: dict[int, tuple[int, float, tuple[int, ...]]] = {}
+                for mask, (count, cost, prefix) in states.items():
+                    skip = (count, cost, prefix + (-1,))
+                    self._ugv_assignment_keep_best(next_states, mask, skip)
+
+                    scoreable = (
+                        targetable[env_index, ground_index]
+                        & torch.isfinite(scores[env_index, ground_index])
+                    )
+                    valid_targets = torch.nonzero(scoreable, as_tuple=False).flatten()
+                    for target_tensor in valid_targets:
+                        target_index = int(target_tensor.item())
+                        target_bit = 1 << target_index
+                        if mask & target_bit:
+                            continue
+                        candidate = (
+                            count + 1,
+                            cost + float(scores[env_index, ground_index, target_index].item()),
+                            prefix + (target_index,),
+                        )
+                        self._ugv_assignment_keep_best(next_states, mask | target_bit, candidate)
+                states = next_states
+
+            best = max(
+                states.values(),
+                key=lambda state: (
+                    state[0],
+                    -state[1],
+                    tuple(-value for value in state[2]),
+                ),
+            )
+            assigned[env_index] = torch.tensor(best[2], dtype=torch.long, device=device)
+        return assigned
+
+    @staticmethod
+    def _ugv_assignment_keep_best(
+        states: dict[int, tuple[int, float, tuple[int, ...]]],
+        mask: int,
+        candidate: tuple[int, float, tuple[int, ...]],
+    ) -> None:
+        current = states.get(mask)
+        if current is None:
+            states[mask] = candidate
+            return
+        if candidate[0] > current[0]:
+            states[mask] = candidate
+            return
+        if candidate[0] < current[0]:
+            return
+        if candidate[1] < current[1] - 1e-9:
+            states[mask] = candidate
+            return
+        if abs(candidate[1] - current[1]) <= 1e-9 and candidate[2] < current[2]:
+            states[mask] = candidate
 
     def _ugv_sticky_target_indices_from_scores(
         self,

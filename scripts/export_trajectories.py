@@ -117,6 +117,8 @@ def main():
                        "greedy-sticky",
                        "route_cost_sticky",
                        "route-cost-sticky",
+                       "route_cost_global",
+                       "route-cost-global",
                    ),
                    default=None,
                    help="Override UGV assignment for known, unconfirmed survivor targets.")

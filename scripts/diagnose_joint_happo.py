@@ -479,6 +479,8 @@ def main() -> None:
             "greedy-sticky",
             "route_cost_sticky",
             "route-cost-sticky",
+            "route_cost_global",
+            "route-cost-global",
         ),
         default=None,
     )

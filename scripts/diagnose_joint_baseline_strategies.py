@@ -28,7 +28,11 @@ if str(ROOT) not in sys.path:
 from agents.baselines import AntColonyPolicy, LawnmowerPolicy
 from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
-from scripts.train_happo_smoke import DEFAULT_JOINT_DIAG_UGVS, build_args
+from scripts.train_happo_smoke import (
+    DEFAULT_JOINT_DIAG_DRONES,
+    DEFAULT_JOINT_DIAG_UGVS,
+    build_args,
+)
 
 
 DEFAULT_STRATEGIES = ("lawnmower_astar", "ant_colony_astar")
@@ -113,10 +117,11 @@ def _joint_defaults(joint_diagnostic_ugvs: int) -> dict[str, Any]:
 
 def build_scenario_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     scenario_kwargs = _joint_defaults(int(args.joint_diagnostic_ugvs))
+    n_ugvs = getattr(args, "n_ugvs", None)
     scenario_kwargs.update({
         "max_steps": int(args.steps),
-        "n_drones": int(args.n_drones),
-        "n_ground": int(args.n_ugvs if args.n_ugvs is not None else args.joint_diagnostic_ugvs),
+        "n_drones": int(getattr(args, "n_drones", DEFAULT_JOINT_DIAG_DRONES)),
+        "n_ground": int(n_ugvs if n_ugvs is not None else args.joint_diagnostic_ugvs),
         "n_survivors": 5,
         "known_survivors_at_reset": False,
         "delayed_survivor_knowledge": False,
@@ -689,6 +694,8 @@ def _parse_args() -> argparse.Namespace:
                             "greedy-sticky",
                             "route_cost_sticky",
                             "route-cost-sticky",
+                            "route_cost_global",
+                            "route-cost-global",
                         ),
                         default=None)
     parser.add_argument("--ugv-planner-fire-mode", choices=("off", "cost", "block"), default=None)

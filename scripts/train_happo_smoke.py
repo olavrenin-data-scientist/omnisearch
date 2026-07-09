@@ -458,11 +458,17 @@ def build_args(
         raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
-    valid_assignment_modes = {"nearest", "greedy", "greedy_sticky", "route_cost_sticky"}
+    valid_assignment_modes = {
+        "nearest",
+        "greedy",
+        "greedy_sticky",
+        "route_cost_sticky",
+        "route_cost_global",
+    }
     if ugv_target_assignment_mode not in valid_assignment_modes:
         raise ValueError(
             "ugv_target_assignment_mode must be one of: nearest, greedy, "
-            "greedy_sticky, route_cost_sticky"
+            "greedy_sticky, route_cost_sticky, route_cost_global"
         )
     if ugv_assigned_target_obs_only is None:
         ugv_assigned_target_obs_only = False
@@ -1580,6 +1586,8 @@ def main():
                        "greedy-sticky",
                        "route_cost_sticky",
                        "route-cost-sticky",
+                       "route_cost_global",
+                       "route-cost-global",
                    ),
                    default="nearest",
                    help="How UGV planner targets are selected from known, unconfirmed survivors.")
