@@ -1122,6 +1122,35 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["max_steps"], 123)
 
+    def test_uav_diagnostics_can_enable_fire(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={"scenario_kwargs": {"disable_fire": False}},
+            )
+            args = types.SimpleNamespace(
+                steps=123,
+                n_drones=None,
+                n_survivors=None,
+                terrain_cache_path=None,
+                local_map_patch_size=None,
+                drone_min_footprint_radius_m=None,
+                enable_fire=False,
+            )
+
+            default_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            args.enable_fire = True
+            fire_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+
+        self.assertTrue(default_scenario["disable_fire"])
+        self.assertFalse(fire_scenario["disable_fire"])
+
     def test_uav_diagnostics_summarizes_per_drone_metrics(self):
         rows = [
             {

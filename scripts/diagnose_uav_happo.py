@@ -81,7 +81,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         ),
         "known_survivors_at_reset": False,
         "drone_can_confirm": True,
-        "disable_fire": True,
+        "disable_fire": not bool(getattr(args, "enable_fire", False)),
         "comms_dropout": 0.0,
         "uav_confidence_diagnostics": True,
         "uav_cleanup_target_diagnostics": (
@@ -7343,6 +7343,11 @@ def main() -> None:
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or uses 5.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
+    parser.add_argument("--enable-fire", dest="enable_fire", action="store_true",
+                        help="Enable fire/smoke dynamics during UAV diagnostics. Defaults to disabled.")
+    parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
+                        help="Disable fire/smoke dynamics during UAV diagnostics.")
+    parser.set_defaults(enable_fire=False)
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=None)
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
                         help="Override checkpoint UAV start min separation in meters; pass 0 to disable.")
