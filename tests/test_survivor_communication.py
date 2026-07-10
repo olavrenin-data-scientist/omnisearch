@@ -257,6 +257,36 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(drone.scenario_reward, torch.tensor([0.0]))
         torch.testing.assert_close(scenario.metric_reward_uav_coverage_threshold, torch.tensor([0.0]))
 
+    def test_uav_team_confidence_metric_resets_single_env(self):
+        env = self._diagnostic_env(
+            num_envs=2,
+            n_drones=3,
+            n_ground=0,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            r_found_survivor=0.0,
+            r_drone_scout=0.0,
+            r_drone_shaping=0.0,
+            r_time_penalty=0.0,
+            r_coverage=0.0,
+            r_uav_confidence=1.0,
+            r_uav_team_confidence=0.1,
+            drone_energy_costs=(0.0, 0.0, 0.0),
+        )
+        env.reset()
+        scenario = env.scenario
+
+        scenario._compute_step_rewards()
+        self.assertEqual(
+            tuple(scenario.metric_reward_uav_team_confidence_by_drone.shape),
+            (2, 3),
+        )
+        scenario._reset_step_metric_buffers(0)
+        torch.testing.assert_close(
+            scenario.metric_reward_uav_team_confidence_by_drone[0],
+            torch.zeros(3),
+        )
+
     def test_ground_action_magnitude_is_normalized_before_terrain_speed(self):
         env = self._diagnostic_env()
         env.reset()

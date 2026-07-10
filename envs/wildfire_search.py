@@ -4379,7 +4379,7 @@ class WildfireSearchScenario(BaseScenario):
             team_confidence = uav_confidence_reward.mean(dim=1, keepdim=True)
             uav_team_confidence_reward = (
                 team_confidence * float(self.r_uav_team_confidence)
-            ).expand_as(uav_confidence_reward)
+            ).expand_as(uav_confidence_reward).clone()
         if self.uav_confidence_overlap_mode != "raw":
             uav_confidence_overlap_penalty = self._uav_confidence_overlap_penalty(
                 drone_pos,
