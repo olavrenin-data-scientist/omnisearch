@@ -288,6 +288,7 @@ def run_rollout(
     reward_uav_frontier_values: list[float] = []
     reward_uav_confidence_values: list[float] = []
     reward_uav_team_confidence_values: list[float] = []
+    penalty_uav_team_confidence_overlap_values: list[float] = []
     reward_uav_confidence_move_values: list[float] = []
     reward_uav_cleanup_target_progress_values: list[float] = []
     reward_uav_astar_progress_values: list[float] = []
@@ -571,6 +572,11 @@ def run_rollout(
             "metric_reward_uav_team_confidence_by_drone",
             scenario.n_drones,
         )
+        team_confidence_overlap_penalty_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_team_confidence_overlap_by_drone",
+            scenario.n_drones,
+        )
         confidence_move_reward_by_drone = _metric_array(
             scenario,
             "metric_reward_uav_confidence_move_by_drone",
@@ -825,6 +831,9 @@ def run_rollout(
                 )
                 confidence_reward = float(confidence_reward_by_drone[drone_idx])
                 team_confidence_reward = float(team_confidence_reward_by_drone[drone_idx])
+                team_confidence_overlap_penalty = float(
+                    team_confidence_overlap_penalty_by_drone[drone_idx]
+                )
                 confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
                 confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
                 confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
@@ -853,6 +862,7 @@ def run_rollout(
                     coverage_opportunity_available_fraction=opportunity_available_fraction,
                     confidence_reward=confidence_reward,
                     team_confidence_reward=team_confidence_reward,
+                    team_confidence_overlap_penalty=team_confidence_overlap_penalty,
                     confidence_move_reward=confidence_move_reward,
                     confidence_opportunity_fraction=float(
                         confidence_opportunity_fraction_by_drone[drone_idx]
@@ -878,6 +888,9 @@ def run_rollout(
                 reward_uav_frontier_values.append(reward_terms["frontier"])
                 reward_uav_confidence_values.append(reward_terms["confidence"])
                 reward_uav_team_confidence_values.append(reward_terms["team_confidence"])
+                penalty_uav_team_confidence_overlap_values.append(
+                    reward_terms["team_confidence_overlap_penalty"]
+                )
                 reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
                 reward_uav_cleanup_target_progress_values.append(
                     reward_terms["cleanup_target_progress"]
@@ -947,6 +960,9 @@ def run_rollout(
                         "frontier_reward": reward_terms["frontier"],
                         "confidence_reward": reward_terms["confidence"],
                         "team_confidence_reward": reward_terms["team_confidence"],
+                        "team_confidence_overlap_penalty": reward_terms[
+                            "team_confidence_overlap_penalty"
+                        ],
                         "confidence_move_reward": reward_terms["confidence_move"],
                         "cleanup_target_progress_reward": reward_terms["cleanup_target_progress"],
                         "astar_progress_reward": reward_terms["astar_progress"],
@@ -1056,6 +1072,9 @@ def run_rollout(
             )
             confidence_reward = float(confidence_reward_by_drone[drone_idx])
             team_confidence_reward = float(team_confidence_reward_by_drone[drone_idx])
+            team_confidence_overlap_penalty = float(
+                team_confidence_overlap_penalty_by_drone[drone_idx]
+            )
             confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
             confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
             confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
@@ -1167,6 +1186,7 @@ def run_rollout(
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
                 confidence_reward=confidence_reward,
                 team_confidence_reward=team_confidence_reward,
+                team_confidence_overlap_penalty=team_confidence_overlap_penalty,
                 confidence_move_reward=confidence_move_reward,
                 confidence_opportunity_fraction=confidence_opportunity_fraction,
                 confidence_overlap_penalty=confidence_overlap_penalty,
@@ -1296,6 +1316,9 @@ def run_rollout(
             reward_uav_frontier_values.append(reward_terms["frontier"])
             reward_uav_confidence_values.append(reward_terms["confidence"])
             reward_uav_team_confidence_values.append(reward_terms["team_confidence"])
+            penalty_uav_team_confidence_overlap_values.append(
+                reward_terms["team_confidence_overlap_penalty"]
+            )
             reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
             reward_uav_cleanup_target_progress_values.append(
                 reward_terms["cleanup_target_progress"]
@@ -1540,6 +1563,9 @@ def run_rollout(
                     "frontier_reward": reward_terms["frontier"],
                     "confidence_reward": reward_terms["confidence"],
                     "team_confidence_reward": reward_terms["team_confidence"],
+                    "team_confidence_overlap_penalty": reward_terms[
+                        "team_confidence_overlap_penalty"
+                    ],
                     "confidence_move_reward": reward_terms["confidence_move"],
                     "cleanup_target_progress_reward": reward_terms["cleanup_target_progress"],
                     "astar_progress_reward": reward_terms["astar_progress"],
@@ -1932,6 +1958,9 @@ def run_rollout(
         "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
         "avg_reward_uav_confidence": _finite_mean(reward_uav_confidence_values),
         "avg_reward_uav_team_confidence": _finite_mean(reward_uav_team_confidence_values),
+        "avg_penalty_uav_team_confidence_overlap": _finite_mean(
+            penalty_uav_team_confidence_overlap_values
+        ),
         "avg_reward_uav_confidence_move": _finite_mean(reward_uav_confidence_move_values),
         "avg_reward_uav_cleanup_target_progress": _finite_mean(
             reward_uav_cleanup_target_progress_values
@@ -3346,6 +3375,7 @@ def _uav_reward_terms(
     coverage_opportunity_available_fraction: float,
     confidence_reward: float,
     team_confidence_reward: float,
+    team_confidence_overlap_penalty: float,
     confidence_move_reward: float,
     confidence_opportunity_fraction: float,
     confidence_overlap_penalty: float,
@@ -3431,6 +3461,7 @@ def _uav_reward_terms(
         + frontier
         + confidence_reward
         + team_confidence_reward
+        + team_confidence_overlap_penalty
         + confidence_move_reward
         + cleanup_target_progress_reward
         + astar_progress_reward
@@ -3446,6 +3477,7 @@ def _uav_reward_terms(
         + abs(frontier)
         + abs(confidence_reward)
         + abs(team_confidence_reward)
+        + abs(team_confidence_overlap_penalty)
         + abs(confidence_move_reward)
         + abs(cleanup_target_progress_reward)
         + abs(astar_progress_reward)
@@ -3462,6 +3494,7 @@ def _uav_reward_terms(
         "frontier": float(frontier),
         "confidence": float(confidence_reward),
         "team_confidence": float(team_confidence_reward),
+        "team_confidence_overlap_penalty": float(team_confidence_overlap_penalty),
         "confidence_move": float(confidence_move_reward),
         "cleanup_target_progress": float(cleanup_target_progress_reward),
         "astar_progress": float(astar_progress_reward),
@@ -3943,12 +3976,13 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "move_coverage": [],
             "frontier": [],
             "confidence": [],
+            "team_confidence": [],
+            "team_confidence_overlap_penalty": [],
             "confidence_move": [],
             "cleanup_target_progress": [],
             "astar_progress": [],
             "inefficient_move_penalty": [],
             "confidence_overlap_penalty": [],
-            "team_confidence": [],
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
             "outside_footprint_penalty": [],
@@ -4228,6 +4262,9 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
         "avg_reward_uav_confidence": _finite_mean(reward_terms["confidence"]),
         "avg_reward_uav_team_confidence": _finite_mean(reward_terms["team_confidence"]),
+        "avg_penalty_uav_team_confidence_overlap": _finite_mean(
+            reward_terms["team_confidence_overlap_penalty"]
+        ),
         "avg_reward_uav_confidence_move": _finite_mean(reward_terms["confidence_move"]),
         "avg_reward_uav_cleanup_target_progress": _finite_mean(
             reward_terms["cleanup_target_progress"]
@@ -5237,6 +5274,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_reward_uav_team_confidence": _finite_mean([
             row.get("avg_reward_uav_team_confidence", math.nan) for row in rows
         ]),
+        "mean_penalty_uav_team_confidence_overlap": _finite_mean([
+            row.get("avg_penalty_uav_team_confidence_overlap", math.nan) for row in rows
+        ]),
         "mean_reward_uav_confidence_move": _finite_mean([
             row["avg_reward_uav_confidence_move"] for row in rows
         ]),
@@ -5658,6 +5698,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_reward_uav_frontier",
         "avg_reward_uav_confidence",
         "avg_reward_uav_team_confidence",
+        "avg_penalty_uav_team_confidence_overlap",
         "avg_reward_uav_confidence_move",
         "avg_reward_uav_cleanup_target_progress",
         "avg_reward_uav_astar_progress",
@@ -5821,6 +5862,7 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "action_frontier_no_new": "action_frontier_aligned_no_new_frac",
         "frontier_reward": "avg_reward_uav_frontier",
         "confidence_move_reward": "avg_reward_uav_confidence_move",
+        "team_confidence_overlap_penalty": "avg_penalty_uav_team_confidence_overlap",
         "cleanup_target_reward": "avg_reward_uav_cleanup_target_progress",
         "astar_progress_reward": "avg_reward_uav_astar_progress",
         "cleanup_target_gate": "avg_cleanup_target_frontier_gate",
@@ -6042,6 +6084,7 @@ def _format_time_bin_summary(time_bins: list[dict[str, float]]) -> list[str]:
             f"conf_move={item.get('confidence_move_reward', math.nan):.4f} "
             f"move_pen={item.get('inefficient_move_penalty', math.nan):.4f} "
             f"conf_ov={item.get('confidence_overlap_fraction', math.nan):.3f} "
+            f"team_conf_ov_pen={item.get('team_confidence_overlap_penalty', math.nan):.4f} "
             f"conf_ov_pen={item.get('confidence_overlap_penalty', math.nan):.4f}"
         )
     return lines
@@ -6285,6 +6328,7 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("frontier", "frontier_reward", "#8a5cf6", False),
         ("conf", "confidence_reward", "#0f766e", False),
         ("team conf", "team_confidence_reward", "#0891b2", False),
+        ("team conf ov", "team_confidence_overlap_penalty", "#db2777", True),
         ("conf move", "confidence_move_reward", "#14b8a6", False),
         ("cleanup", "cleanup_target_progress_reward", "#f97316", False),
         ("astar", "astar_progress_reward", "#fb7185", False),
@@ -7819,6 +7863,7 @@ def main() -> None:
         f"frontier={summary['mean_reward_uav_frontier']:.4f} "
         f"confidence={summary['mean_reward_uav_confidence']:.4f} "
         f"team_conf={summary['mean_reward_uav_team_confidence']:.4f} "
+        f"team_conf_ov_pen={summary['mean_penalty_uav_team_confidence_overlap']:.4f} "
         f"conf_move={summary['mean_reward_uav_confidence_move']:.4f} "
         f"cleanup={summary['mean_reward_uav_cleanup_target_progress']:.4f} "
         f"astar={summary['mean_reward_uav_astar_progress']:.4f} "

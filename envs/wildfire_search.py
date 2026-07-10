@@ -677,6 +677,10 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("uav_overlap_penalty_normalization must be one of: raw, opportunity")
         self.r_uav_confidence = max(float(kwargs.pop("r_uav_confidence", 0.0)), 0.0)
         self.r_uav_team_confidence = max(float(kwargs.pop("r_uav_team_confidence", 0.0)), 0.0)
+        self.r_uav_team_confidence_overlap = max(
+            float(kwargs.pop("r_uav_team_confidence_overlap", 0.0)),
+            0.0,
+        )
         self.r_uav_confidence_move = max(float(kwargs.pop("r_uav_confidence_move", 0.0)), 0.0)
         self.r_uav_inefficient_move = max(
             float(kwargs.pop("r_uav_inefficient_move", 0.0)),
@@ -1381,6 +1385,12 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_confidence_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_reward_uav_team_confidence = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_team_confidence_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_reward_uav_team_confidence_overlap = torch.zeros(batch_dim, device=device)
+        self.metric_reward_uav_team_confidence_overlap_by_drone = torch.zeros(
+            batch_dim,
+            self.n_drones,
+            device=device,
+        )
         self.metric_reward_uav_confidence_move = torch.zeros(batch_dim, device=device)
         self.metric_reward_uav_confidence_move_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_reward_uav_confidence_overlap = torch.zeros(batch_dim, device=device)
@@ -1596,6 +1606,8 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_uav_confidence_by_drone,
             self.metric_reward_uav_team_confidence,
             self.metric_reward_uav_team_confidence_by_drone,
+            self.metric_reward_uav_team_confidence_overlap,
+            self.metric_reward_uav_team_confidence_overlap_by_drone,
             self.metric_reward_uav_confidence_move,
             self.metric_reward_uav_confidence_move_by_drone,
             self.metric_reward_uav_confidence_overlap,
@@ -4351,7 +4363,10 @@ class WildfireSearchScenario(BaseScenario):
             if (
                 self.r_uav_astar_progress > 0.0
                 or (
-                    self.r_uav_confidence_overlap > 0.0
+                    (
+                        self.r_uav_confidence_overlap > 0.0
+                        or self.r_uav_team_confidence_overlap > 0.0
+                    )
                     and self.uav_confidence_overlap_mode != "raw"
                 )
             )
@@ -4385,6 +4400,25 @@ class WildfireSearchScenario(BaseScenario):
                 drone_pos,
                 visible=uav_confidence_visible,
                 previous=uav_pre_confidence_grid,
+            )
+        uav_team_confidence_overlap_penalty = torch.zeros_like(uav_confidence_overlap_penalty)
+        if self.n_drones > 0 and self.r_uav_team_confidence_overlap > 0.0:
+            overlap_terms = (
+                self.metric_uav_confidence_overlap_fraction_by_drone.to(
+                    device=device,
+                    dtype=uav_confidence_overlap_penalty.dtype,
+                ).clamp(0.0, 1.0)
+                * self.metric_uav_confidence_overlap_regret_by_drone.to(
+                    device=device,
+                    dtype=uav_confidence_overlap_penalty.dtype,
+                ).clamp(0.0, 1.0)
+            )
+            team_overlap = -float(self.r_uav_team_confidence_overlap) * overlap_terms.mean(
+                dim=1,
+                keepdim=True,
+            )
+            uav_team_confidence_overlap_penalty = (
+                team_overlap.expand_as(uav_confidence_overlap_penalty).clone()
             )
         self._update_uav_cleanup_target_step_metrics(drone_pos)
         (
@@ -4463,6 +4497,8 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_confidence_by_drone = uav_confidence_reward
         self.metric_reward_uav_team_confidence = uav_team_confidence_reward.sum(dim=1)
         self.metric_reward_uav_team_confidence_by_drone = uav_team_confidence_reward
+        self.metric_reward_uav_team_confidence_overlap = uav_team_confidence_overlap_penalty.sum(dim=1)
+        self.metric_reward_uav_team_confidence_overlap_by_drone = uav_team_confidence_overlap_penalty
         self.metric_reward_uav_confidence_move = uav_confidence_move_reward.sum(dim=1)
         self.metric_reward_uav_confidence_move_by_drone = uav_confidence_move_reward
         self.metric_reward_uav_confidence_overlap = uav_confidence_overlap_penalty.sum(dim=1)
@@ -4696,6 +4732,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + uav_frontier_alignment_reward[:, i]
                 r = r + uav_confidence_reward[:, i]
                 r = r + uav_team_confidence_reward[:, i]
+                r = r + uav_team_confidence_overlap_penalty[:, i]
                 r = r + uav_confidence_move_reward[:, i]
                 r = r + uav_confidence_overlap_penalty[:, i]
                 r = r + uav_cleanup_target_progress_reward[:, i]
@@ -5294,6 +5331,7 @@ class WildfireSearchScenario(BaseScenario):
                 and self.uav_inefficient_move_source == "confidence"
             )
             and self.r_uav_confidence_overlap <= 0.0
+            and self.r_uav_team_confidence_overlap <= 0.0
             and self.uav_frontier_source != "confidence"
             and self.uav_confidence_obs_grid <= 0
             and self.local_confidence_obs_grid <= 0
@@ -6221,7 +6259,13 @@ class WildfireSearchScenario(BaseScenario):
     ) -> Tensor:
         """Penalize spending footprint area over already high-confidence cells."""
         penalty = drone_pos.new_zeros(drone_pos.shape[0], self.n_drones)
-        if self.n_drones == 0 or self.r_uav_confidence_overlap <= 0.0:
+        if (
+            self.n_drones == 0
+            or (
+                self.r_uav_confidence_overlap <= 0.0
+                and self.r_uav_team_confidence_overlap <= 0.0
+            )
+        ):
             if self.n_drones > 0:
                 self.metric_uav_confidence_overlap_fraction_by_drone = torch.zeros_like(penalty)
                 self.metric_uav_confidence_overlap_fraction = penalty.mean(dim=1)
@@ -10316,6 +10360,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/uav_frontier_alignment": self.metric_reward_uav_frontier_alignment,
             "reward/uav_confidence": self.metric_reward_uav_confidence,
             "reward/uav_team_confidence": self.metric_reward_uav_team_confidence,
+            "reward/uav_team_confidence_overlap": self.metric_reward_uav_team_confidence_overlap,
             "reward/uav_confidence_move": self.metric_reward_uav_confidence_move,
             "reward/uav_confidence_overlap": self.metric_reward_uav_confidence_overlap,
             "reward/uav_cleanup_target_progress": self.metric_reward_uav_cleanup_target_progress,

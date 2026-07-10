@@ -271,6 +271,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             r_coverage=0.0,
             r_uav_confidence=1.0,
             r_uav_team_confidence=0.1,
+            r_uav_team_confidence_overlap=0.02,
             drone_energy_costs=(0.0, 0.0, 0.0),
         )
         env.reset()
@@ -281,9 +282,17 @@ class SurvivorCommunicationTests(unittest.TestCase):
             tuple(scenario.metric_reward_uav_team_confidence_by_drone.shape),
             (2, 3),
         )
+        self.assertEqual(
+            tuple(scenario.metric_reward_uav_team_confidence_overlap_by_drone.shape),
+            (2, 3),
+        )
         scenario._reset_step_metric_buffers(0)
         torch.testing.assert_close(
             scenario.metric_reward_uav_team_confidence_by_drone[0],
+            torch.zeros(3),
+        )
+        torch.testing.assert_close(
+            scenario.metric_reward_uav_team_confidence_overlap_by_drone[0],
             torch.zeros(3),
         )
 

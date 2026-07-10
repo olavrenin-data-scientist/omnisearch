@@ -32,6 +32,7 @@ REWARD_COMPONENTS = (
     ("ground_confirm", "reward/ground_confirm"),
     ("uav_conf", "reward/uav_confidence"),
     ("uav_team_conf", "reward/uav_team_confidence"),
+    ("uav_team_conf_ov", "reward/uav_team_confidence_overlap"),
     ("uav_conf_move", "reward/uav_confidence_move"),
     ("uav_conf_overlap", "reward/uav_confidence_overlap"),
     ("uav_frontier", "reward/uav_frontier_alignment"),

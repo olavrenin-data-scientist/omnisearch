@@ -1385,6 +1385,7 @@ class HappoCheckpointTests(unittest.TestCase):
             exp_name="uav_team_confidence",
             joint_schema_uav_diagnostic=True,
             uav_team_confidence_reward=0.4,
+            uav_team_confidence_overlap_penalty=0.03,
         )
         _, _, joint_env_args = build_args(
             num_env_steps=100,
@@ -1395,10 +1396,19 @@ class HappoCheckpointTests(unittest.TestCase):
             exp_name="joint_team_confidence",
             joint_survivor_diagnostic=True,
             uav_team_confidence_reward=0.25,
+            uav_team_confidence_overlap_penalty=0.02,
         )
 
         self.assertEqual(uav_env_args["scenario_kwargs"]["r_uav_team_confidence"], 0.4)
+        self.assertEqual(
+            uav_env_args["scenario_kwargs"]["r_uav_team_confidence_overlap"],
+            0.03,
+        )
         self.assertEqual(joint_env_args["scenario_kwargs"]["r_uav_team_confidence"], 0.25)
+        self.assertEqual(
+            joint_env_args["scenario_kwargs"]["r_uav_team_confidence_overlap"],
+            0.02,
+        )
 
     def test_rejects_negative_uav_team_confidence_reward(self):
         with self.assertRaises(ValueError):
@@ -1410,6 +1420,16 @@ class HappoCheckpointTests(unittest.TestCase):
                 entropy_coef=0.01,
                 exp_name="negative_uav_team_confidence",
                 uav_team_confidence_reward=-0.1,
+            )
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="negative_uav_team_confidence_overlap",
+                uav_team_confidence_overlap_penalty=-0.1,
             )
 
     def test_uav_diagnostic_can_set_coverage_threshold_reward(self):
