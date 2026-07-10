@@ -22,6 +22,10 @@ Run from repo root:
 
 Prerequisite: HARL must be installed in the active venv:
 
+    pip install -e ".[happo]"
+
+or, for a local editable HARL checkout:
+
     git clone https://github.com/PKU-MARL/HARL ../HARL
     pip install -e ../HARL
 """

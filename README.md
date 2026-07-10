@@ -62,7 +62,7 @@ In one sentence: **VMAS = where things happen. MAPPO / IPPO / HAPPO = how polici
 | Experiment tracking | [Weights & Biases](https://wandb.ai) | Optional; pass `loggers=["wandb"]` |
 | Deliverable (planned) | React + Three.js viewer | Strategy comparison & replay |
 
-**HAPPO is wired.** BenchMARL 1.x ships MAPPO/IPPO/MADDPG/MASAC/QMIX/VDN/IQL — *not* HAPPO. True HAPPO (Kuba 2022) is in the [HARL](https://github.com/PKU-MARL/HARL) library. We bridge HARL to our VMAS scenario via [agents/harl_env.py](agents/harl_env.py) (a HARL-shape adapter around `WildfireSearchScenario`) and run it via [scripts/train_happo_smoke.py](scripts/train_happo_smoke.py). The script monkey-patches HARL's env registry at runtime to recognise the `wildfire` env without modifying HARL source — clone HARL once next to this repo and `pip install -e ../HARL` is the whole install. MAPPO and IPPO via BenchMARL stay available for comparison.
+**HAPPO is wired.** BenchMARL 1.x ships MAPPO/IPPO/MADDPG/MASAC/QMIX/VDN/IQL — *not* HAPPO. True HAPPO (Kuba 2022) is in the [HARL](https://github.com/PKU-MARL/HARL) library. We bridge HARL to our VMAS scenario via [agents/harl_env.py](agents/harl_env.py) (a HARL-shape adapter around `WildfireSearchScenario`) and run it via [scripts/train_happo_smoke.py](scripts/train_happo_smoke.py). The script monkey-patches HARL's env registry at runtime to recognise the `wildfire` env without modifying HARL source. Install HARL either with `pip install -e ".[happo]"` or, if you want a local editable checkout of HARL itself, clone it next to this repo and run `pip install -e ../HARL`. MAPPO and IPPO via BenchMARL stay available for comparison.
 
 ---
 
@@ -78,12 +78,9 @@ git clone <repo-url> omnisearch && cd omnisearch
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install everything
+# 3. Install the project and the standard dev/notebook tools
 pip install --upgrade pip
-pip install torch torchvision
-pip install vmas torchrl benchmarl ultralytics "pettingzoo[mpe]"
-pip install wandb tensorboard tqdm hydra-core omegaconf matplotlib seaborn pandas numpy pyyaml scipy
-pip install pytest black ruff ipykernel jupyter nbformat nbconvert "moviepy<2.0.0"
+pip install -e ".[dev]"
 
 # 4. (Optional) register the kernel for Jupyter / IDE notebooks
 python -m ipykernel install --user --name omnisearch --display-name "Python (omnisearch)"
@@ -92,6 +89,28 @@ python -m ipykernel install --user --name omnisearch --display-name "Python (omn
 jupyter notebook notebooks/01_setup_and_demo.ipynb
 # Or headless:
 jupyter nbconvert --to notebook --execute --inplace notebooks/01_setup_and_demo.ipynb
+```
+
+**Additional optional packages** (only for specific workflows):
+
+```bash
+# Geospatial terrain builder + 3D terrain export
+pip install -e ".[geo]"
+
+# Asset extraction that uses OpenCV when available
+pip install -e ".[cv]"
+
+# docs/build_walkthrough.py PDF generation
+pip install -e ".[docs]"
+
+# HAPPO / HARL integration
+pip install -e ".[happo]"
+```
+
+You can also install everything declared in [pyproject.toml](pyproject.toml) in one shot:
+
+```bash
+pip install -e ".[all]"
 ```
 
 **SimFire.** SimFire's PyGame dep requires Python 3.9–3.10. On 3.11 it won't install — fire spread falls back to the in-repo cellular-automata model, which is good enough for the MARL training story. Run `python3.10 -m venv .venv` instead if you need SimFire.
@@ -107,9 +126,19 @@ wandb login
 
 Each entry point is a script in `scripts/` or a notebook in `notebooks/`. All outputs land in `results/` (gitignored).
 
+**Important:** the base MARL smoke runs do **not** need real terrain, but the
+trajectory exporter and default **3D viewer** do. If you plan to use
+`scripts/export_trajectories.py` for the 3D viewer, do the one-time terrain
+setup first: install `.[geo]`, build the terrain cache, then export.
+
 ### TL;DR — run everything end-to-end
 
-After [Setup](#setup), one copy-paste block validates the entire pipeline (~30 s of smoke + your choice of sweep budget):
+After [Setup](#setup), use one of these paths:
+
+- **Base validation only** — setup notebook + smoke training + baselines; no terrain required.
+- **Full pipeline including the default 3D viewer** — do the terrain setup first, then export trajectories.
+
+Base validation (~30 s + your choice of sweep budget):
 
 ```bash
 source .venv/bin/activate
@@ -124,15 +153,34 @@ python scripts/compare_baselines.py --seeds 3 --steps 200
 
 # Headline ablation: MAPPO × IPPO × HAPPO across 4 dropouts × N seeds
 python scripts/comms_dropout_sweep.py --seeds 3            # smoke (~7 min)
+```
 
-# Build the terrain
+Full pipeline with real terrain + 3D viewer:
+
+```bash
+source .venv/bin/activate
+
+# One-time geo install for terrain workflows
+pip install -e ".[geo]"
+
+# Build the terrain cache first
 python scripts/build_real_terrain_cache.py \
   --place "Malibu Creek State Park, California" \
-  --grid-size 128 \
+  --bbox -118.7644915764 34.0962803768 -118.7555084236 34.1037189693 \
+  --grid-size 256 \
+  --dem-resolution-m 10 \
+  --road-width-m 8.0 \
+  --building-height-m 7.0 \
+  --fuel-source derived \
+  --osm-timeout 180 \
   --landfire-email your@email.com
 
-# Export trajectory JSONs for the web viewer — ~2 s
-python scripts/export_trajectories.py
+# Then export trajectory JSONs for the web viewer — ~2 s
+python scripts/export_trajectories.py \
+  --terrain-cache-path data/terrain_cache/malibu_creek_1sqkm_256.npz \
+  --approach all \
+  --grid-size 256 \
+  --steps 300
 
 # Execute all notebooks headlessly so they have fresh embedded outputs
 for nb in notebooks/0*.ipynb; do
@@ -157,6 +205,12 @@ python scripts/tune_happo.py --research # HAPPO tuner on mission metrics (recall
 Each trains a tiny budget. The successful exit is the milestone — the policy is far from converged.
 
 For HAPPO, install HARL first (one-time):
+
+```bash
+pip install -e ".[happo]"
+```
+
+If you want a local editable HARL checkout instead of the Git dependency:
 
 ```bash
 cd .. && git clone https://github.com/PKU-MARL/HARL.git
@@ -194,7 +248,32 @@ python scripts/compare_baselines.py --seeds 5 --steps 250
 
 Runs each strategy across multiple seeds, reports mean ± std on all six mission-level metrics (survivor recall, time-to-verification, false-positive trips, hazard exposure, UGV travel cost), writes `results/baseline_comparison_*.json`. **Trained HAPPO already plugs in via the same harness** — see [agents/happo_policy.py](agents/happo_policy.py) and the `happo_trained` entry in [scripts/export_trajectories.py](scripts/export_trajectories.py). MAPPO/IPPO checkpoint loaders are still TODO.
 
-### 4. Notebooks — exploratory + visualization
+### 4. Real terrain + trajectory export
+
+If you want the default 3D viewer or real-terrain trajectory exports, do this
+one-time setup before running `scripts/export_trajectories.py`:
+
+```bash
+pip install -e ".[geo]"
+python scripts/build_real_terrain_cache.py \
+  --place "Malibu Creek State Park, California" \
+  --bbox -118.7644915764 34.0962803768 -118.7555084236 34.1037189693 \
+  --grid-size 256 \
+  --dem-resolution-m 10 \
+  --road-width-m 8.0 \
+  --building-height-m 7.0 \
+  --fuel-source derived \
+  --osm-timeout 180 \
+  --landfire-email your@email.com
+python scripts/export_trajectories.py
+```
+
+The exporter can write terrain-less JSONs, but those only support the 2D
+viewer. For the default 3D viewer, the terrain cache must exist before export.
+See [web/README.md](web/README.md) for the full geo/terrain workflow and
+troubleshooting.
+
+### 5. Notebooks — exploratory + visualization
 
 ```bash
 jupyter notebook notebooks/   # opens browser file picker
@@ -210,7 +289,7 @@ See [notebooks/README.md](notebooks/README.md) for the cell-by-cell walkthrough 
 | 04 | Closed Loop | Sim → synthetic UAV view → detection |
 | 05 | Baseline Comparison | Bar charts + winners table per metric |
 
-### 5. Web viewer — React + Three.js replay
+### 6. Web viewer — React + Three.js replay
 
 The **2D viewer** works from just `x`/`y`, so the quick path is:
 

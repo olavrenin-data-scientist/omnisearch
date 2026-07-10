@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omnisearch"
+version = "0.1.0"
+description = "Heterogeneous air-ground robotic swarms for wildfire survivor search."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = { text = "MIT" }
+dependencies = [
+  "torch",
+  "torchvision",
+  "vmas",
+  "torchrl",
+  "benchmarl",
+  "ultralytics",
+  "pettingzoo[mpe]",
+  "gymnasium",
+  "networkx",
+  "pillow",
+  "wandb",
+  "tensorboard",
+  "tqdm",
+  "hydra-core",
+  "omegaconf",
+  "matplotlib",
+  "seaborn",
+  "pandas",
+  "numpy",
+  "pyyaml",
+  "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "black",
+  "ruff",
+  "ipykernel",
+  "jupyter",
+  "nbformat",
+  "nbconvert",
+  "moviepy<2.0.0",
+]
+geo = [
+  "osmnx",
+  "rasterio",
+  "geopandas",
+  "shapely",
+  "pyproj",
+  "requests",
+]
+cv = [
+  "opencv-python",
+]
+docs = [
+  "pygments",
+  "reportlab",
+]
+happo = [
+  "harl @ git+https://github.com/PKU-MARL/HARL.git",
+]
+all = [
+  "pytest",
+  "black",
+  "ruff",
+  "ipykernel",
+  "jupyter",
+  "nbformat",
+  "nbconvert",
+  "moviepy<2.0.0",
+  "osmnx",
+  "rasterio",
+  "geopandas",
+  "shapely",
+  "pyproj",
+  "requests",
+  "opencv-python",
+  "pygments",
+  "reportlab",
+  "harl @ git+https://github.com/PKU-MARL/HARL.git",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agents*", "detection*", "envs*", "evaluation*", "terrain*"]
+namespaces = true
