@@ -525,6 +525,117 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(cached_idx, ref_idx)
         torch.testing.assert_close(cached_dist, ref_dist, atol=1e-6, rtol=1e-6)
 
+    def test_route_assignment_cost_grid_cache_matches_reference_matrix(self):
+        env = self._diagnostic_env(
+            num_envs=2,
+            n_ground=2,
+            n_survivors=5,
+            ugv_target_assignment_mode="route_cost_global",
+            ugv_planner_hint="global_astar",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+        ground_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        survivor_pos = torch.stack([s.state.pos for s in scenario._survivors], dim=1)
+        targetable = torch.ones(2, 2, 5, dtype=torch.bool)
+        targetable[0, 1, 0] = False
+        targetable[1, 0, 2] = False
+
+        reference = torch.full(
+            (2, 2, 5),
+            float("inf"),
+            device=ground_pos.device,
+            dtype=ground_pos.dtype,
+        )
+        G = int(scenario.fire_grid_size)
+        cell_w_sim = 2.0 * float(scenario.x_semidim) / float(G)
+        cell_h_sim = 2.0 * float(scenario.y_semidim) / float(G)
+        bounds = (0, G - 1, 0, G - 1)
+        for env_index in range(2):
+            scale = float(scenario.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+            cell_m = max(cell_w_sim, cell_h_sim) / max(scale, 1e-9)
+            traversable, movement_cost = scenario._ugv_static_planner_layer_arrays_for_env(env_index)
+            traversable_tensor = scenario.traversable_grid[env_index]
+            for survivor_index in range(5):
+                if not bool(targetable[env_index, :, survivor_index].any().item()):
+                    continue
+                target_pos = survivor_pos[env_index, survivor_index]
+                goals = scenario._global_astar_goal_cells_for_env(
+                    env_index,
+                    target_pos,
+                    traversable,
+                    movement_cost,
+                )
+                if not goals:
+                    target_cell = scenario._single_position_to_grid_cell(target_pos)
+                    nearest_goal = scenario._nearest_traversable_cell_in_bounds(
+                        env_index,
+                        target_cell[0],
+                        target_cell[1],
+                        bounds,
+                        traversable=traversable_tensor,
+                    )
+                    if nearest_goal is None:
+                        continue
+                    goals = [nearest_goal]
+                cost_to_go = scenario._global_astar_static_raw_cost_to_go_for_env(env_index, goals)
+                for ground_index in range(2):
+                    if not bool(targetable[env_index, ground_index, survivor_index].item()):
+                        continue
+                    start_cell = scenario._single_position_to_grid_cell(ground_pos[env_index, ground_index])
+                    sx, sy = start_cell
+                    if not (0 <= sx < G and 0 <= sy < G and bool(traversable[sy, sx])):
+                        nearest_start = scenario._nearest_traversable_cell_in_bounds(
+                            env_index,
+                            sx,
+                            sy,
+                            bounds,
+                            traversable=traversable_tensor,
+                        )
+                        if nearest_start is None:
+                            continue
+                        sx, sy = nearest_start
+                    route_cost = float(cost_to_go[sy, sx])
+                    if math.isfinite(route_cost):
+                        reference[env_index, ground_index, survivor_index] = route_cost * cell_m
+
+        scenario._invalidate_ugv_route_assignment_cost_grid_cache()
+        actual = scenario._ugv_route_assignment_costs_m(ground_pos, survivor_pos, targetable)
+
+        torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+
+    def test_route_assignment_cost_grid_cache_reuses_raw_cost_to_go(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=5,
+            ugv_target_assignment_mode="route_cost_global",
+            ugv_planner_hint="global_astar",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+        ground_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        survivor_pos = torch.stack([s.state.pos for s in scenario._survivors], dim=1)
+        targetable = torch.ones(1, 2, 5, dtype=torch.bool)
+        scenario._invalidate_ugv_route_assignment_cost_grid_cache()
+        scenario._ugv_global_raw_cost_to_go_cache.clear()
+
+        calls = 0
+        original = scenario._global_astar_static_raw_cost_to_go_for_env
+
+        def counted_raw_cost_to_go(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        scenario._global_astar_static_raw_cost_to_go_for_env = counted_raw_cost_to_go
+
+        scenario._ugv_route_assignment_costs_m(ground_pos, survivor_pos, targetable)
+        first_call_count = calls
+        scenario._ugv_route_assignment_costs_m(ground_pos, survivor_pos, targetable)
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(calls, first_call_count)
+
     def test_route_cost_assignment_cache_reuses_same_step_result(self):
         env = self._diagnostic_env(
             n_ground=2,

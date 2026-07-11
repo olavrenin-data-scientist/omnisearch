@@ -1215,6 +1215,7 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_static_planner_layer_array_cache = {}
         self._ugv_global_heuristic_cache = {}
         self._ugv_global_raw_cost_to_go_cache = {}
+        self._ugv_route_assignment_cost_grid_cache = {}
         self.ugv_escape_route_active = torch.zeros(
             batch_dim,
             self.n_ground,
@@ -1908,6 +1909,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_sticky_target_idx.fill_(-1)
             self.ugv_sticky_target_age.zero_()
             self._invalidate_ugv_assignment_cache()
+            self._invalidate_ugv_route_assignment_cost_grid_cache()
             self.ground_approach_milestones_reached.zero_()
             self._reset_step_metric_buffers()
             self._reset_ground_motion_diagnostics()
@@ -1941,6 +1943,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_sticky_target_idx[env_index] = -1
             self.ugv_sticky_target_age[env_index] = 0
             self._invalidate_ugv_assignment_cache(env_index)
+            self._invalidate_ugv_route_assignment_cost_grid_cache(env_index)
             self.ground_approach_milestones_reached[env_index] = False
             self._reset_step_metric_buffers(env_index)
             self._reset_ground_motion_diagnostics(env_index)
@@ -2729,6 +2732,7 @@ class WildfireSearchScenario(BaseScenario):
 
     def _invalidate_ugv_global_heuristic_cache(self, env_index: int | None = None) -> None:
         self._invalidate_ugv_assignment_cache(env_index)
+        self._invalidate_ugv_route_assignment_cost_grid_cache(env_index)
         caches = (
             "_ugv_static_planner_layer_array_cache",
             "_ugv_global_heuristic_cache",
@@ -2750,6 +2754,19 @@ class WildfireSearchScenario(BaseScenario):
             for key in list(cache.keys()):
                 if key and int(key[0]) == env_index:
                     del cache[key]
+
+    def _invalidate_ugv_route_assignment_cost_grid_cache(self, env_index: int | None = None) -> None:
+        if not hasattr(self, "_ugv_route_assignment_cost_grid_cache"):
+            self._ugv_route_assignment_cost_grid_cache = {}
+        if env_index is None:
+            self._ugv_route_assignment_cost_grid_cache.clear()
+            return
+        env_index = int(env_index)
+        self._ugv_route_assignment_cost_grid_cache = {
+            key: value
+            for key, value in self._ugv_route_assignment_cost_grid_cache.items()
+            if key[0] != env_index
+        }
 
     def _ugv_planner_fire_buffer_mask(self, env_index: int) -> Tensor:
         version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
@@ -3919,25 +3936,17 @@ class WildfireSearchScenario(BaseScenario):
                 if not bool(targetable[env_index, :, survivor_index].any().item()):
                     continue
                 target_pos = survivor_pos[env_index, survivor_index]
-                goals = self._global_astar_goal_cells_for_env(
+                cost_to_go = self._ugv_route_assignment_cost_grid_for_survivor(
                     env_index,
+                    survivor_index,
                     target_pos,
                     traversable,
                     movement_cost,
+                    traversable_tensor,
+                    bounds,
                 )
-                if not goals:
-                    target_cell = self._single_position_to_grid_cell(target_pos)
-                    nearest_goal = self._nearest_traversable_cell_in_bounds(
-                        env_index,
-                        target_cell[0],
-                        target_cell[1],
-                        bounds,
-                        traversable=traversable_tensor,
-                    )
-                    if nearest_goal is None:
-                        continue
-                    goals = [nearest_goal]
-                cost_to_go = self._global_astar_static_raw_cost_to_go_for_env(env_index, goals)
+                if cost_to_go is None:
+                    continue
                 for ground_index in range(n_ground):
                     if not bool(targetable[env_index, ground_index, survivor_index].item()):
                         continue
@@ -3958,6 +3967,68 @@ class WildfireSearchScenario(BaseScenario):
                     if math.isfinite(route_cost):
                         costs_m[env_index, ground_index, survivor_index] = route_cost * cell_m
         return costs_m
+
+    def _ugv_route_assignment_cost_grid_for_survivor(
+        self,
+        env_index: int,
+        survivor_index: int,
+        target_pos: Tensor,
+        traversable: np.ndarray,
+        movement_cost: np.ndarray,
+        traversable_tensor: Tensor,
+        bounds: tuple[int, int, int, int],
+    ) -> np.ndarray | None:
+        """Static route-cost grid for assigning UGVs to one survivor.
+
+        This is the same cost-to-go grid previously requested inside every
+        route-assignment call. Survivors and terrain are static within an
+        episode, so caching the grid avoids repeatedly rebuilding goal cells and
+        asking the reverse-Dijkstra cache for the same target.
+        """
+        version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        confirm_radius_sim = float(self.detection_range_by_env[env_index].detach().cpu().item())
+        if confirm_radius_sim <= 1e-9 and scale > 1e-9:
+            confirm_radius_sim = float(self.ground_confirmation_range_m) * scale
+        target_x = float(target_pos[X].detach().cpu().item())
+        target_y = float(target_pos[Y].detach().cpu().item())
+        key = (
+            int(env_index),
+            int(survivor_index),
+            version,
+            target_x,
+            target_y,
+            confirm_radius_sim,
+        )
+        cache = getattr(self, "_ugv_route_assignment_cost_grid_cache", None)
+        if cache is None:
+            self._ugv_route_assignment_cost_grid_cache = {}
+            cache = self._ugv_route_assignment_cost_grid_cache
+        if key in cache:
+            return cache[key]
+
+        goals = self._global_astar_goal_cells_for_env(
+            env_index,
+            target_pos,
+            traversable,
+            movement_cost,
+        )
+        if not goals:
+            target_cell = self._single_position_to_grid_cell(target_pos)
+            nearest_goal = self._nearest_traversable_cell_in_bounds(
+                env_index,
+                target_cell[0],
+                target_cell[1],
+                bounds,
+                traversable=traversable_tensor,
+            )
+            if nearest_goal is None:
+                cache[key] = None
+                return None
+            goals = [nearest_goal]
+        cost_to_go = self._global_astar_static_raw_cost_to_go_for_env(env_index, goals)
+        cache[key] = cost_to_go
+        return cost_to_go
 
     def _ugv_duplicate_assignment_fraction(self, target_idx: Tensor, valid_target: Tensor) -> Tensor:
         if self.n_ground <= 1:
