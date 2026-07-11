@@ -496,6 +496,69 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertEqual(target_idx.tolist(), [[-1, 0]])
 
+    def test_route_cost_assignment_cache_matches_uncached_reference(self):
+        env = self._diagnostic_env(
+            num_envs=2,
+            n_ground=2,
+            n_survivors=5,
+            ugv_target_assignment_mode="route_cost_global",
+            ugv_planner_hint="global_astar",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+        ground_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        survivor_pos = torch.stack([s.state.pos for s in scenario._survivors], dim=1)
+        targetable = torch.ones(2, 2, 5, dtype=torch.bool)
+
+        ref_idx, ref_dist = scenario._ugv_assigned_target_indices_uncached(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+        scenario._invalidate_ugv_assignment_cache()
+        cached_idx, cached_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        torch.testing.assert_close(cached_idx, ref_idx)
+        torch.testing.assert_close(cached_dist, ref_dist, atol=1e-6, rtol=1e-6)
+
+    def test_route_cost_assignment_cache_reuses_same_step_result(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=5,
+            ugv_target_assignment_mode="route_cost_global",
+            ugv_planner_hint="global_astar",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+        ground_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        survivor_pos = torch.stack([s.state.pos for s in scenario._survivors], dim=1)
+        targetable = torch.ones(1, 2, 5, dtype=torch.bool)
+
+        calls = 0
+        original = scenario._ugv_route_assignment_costs_m
+
+        def counted_route_assignment_costs(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        scenario._ugv_route_assignment_costs_m = counted_route_assignment_costs
+        scenario._invalidate_ugv_assignment_cache()
+
+        scenario._ugv_assigned_target_indices(ground_pos, survivor_pos, targetable)
+        scenario._ugv_assigned_target_indices(ground_pos, survivor_pos, targetable)
+        scenario._ugv_assigned_target_indices(ground_pos, survivor_pos, targetable)
+        self.assertEqual(calls, 1)
+
+        changed_targetable = targetable.clone()
+        changed_targetable[:, :, 0] = False
+        scenario._ugv_assigned_target_indices(ground_pos, survivor_pos, changed_targetable)
+        self.assertEqual(calls, 2)
+
     def test_greedy_sticky_assignment_keeps_target_for_small_improvement(self):
         env = self._diagnostic_env(
             n_ground=2,

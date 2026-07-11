@@ -1195,6 +1195,7 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_assignment_cache_dist = torch.full(
             (batch_dim, self.n_ground), float("inf"), device=device,
         )
+        self._ugv_assignment_result_cache = None
         self._uav_grid_geometry_cache = {}
         self._uav_sector_geometry_cache = {}
         self._uav_stencil_direction_cache = {}
@@ -2058,6 +2059,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_assignment_cache_step.fill_(-1)
         else:
             self.ugv_assignment_cache_step[env_index] = -1
+        self._ugv_assignment_result_cache = None
 
     def _place_diagnostic_survivors_near_reference_agents(self, env_index: int) -> None:
         """For diagnostic episodes, place survivors near UGV or UAV starts."""
@@ -2714,6 +2716,7 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_planner_layer_cache_version = (
             getattr(self, "_ugv_planner_layer_cache_version", 0) + 1
         )
+        self._invalidate_ugv_assignment_cache()
         caches = (
             "_ugv_planner_fire_buffer_mask_cache",
             "_ugv_planner_blocked_fire_mask_cache",
@@ -2725,6 +2728,7 @@ class WildfireSearchScenario(BaseScenario):
                 getattr(self, name).clear()
 
     def _invalidate_ugv_global_heuristic_cache(self, env_index: int | None = None) -> None:
+        self._invalidate_ugv_assignment_cache(env_index)
         caches = (
             "_ugv_static_planner_layer_array_cache",
             "_ugv_global_heuristic_cache",
@@ -3521,6 +3525,48 @@ class WildfireSearchScenario(BaseScenario):
         return ~occluded
 
     def _ugv_assigned_target_indices(
+        self,
+        ground_pos: Tensor,
+        survivor_pos: Tensor,
+        targetable: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        cached = getattr(self, "_ugv_assignment_result_cache", None)
+        step_key = tuple(int(v) for v in self.step_count.detach().cpu().reshape(-1).tolist())
+        cache_key = (
+            step_key,
+            self.ugv_target_assignment_mode,
+            int(self.n_ground),
+            int(self.n_survivors),
+            int(getattr(self, "_ugv_planner_layer_cache_version", 0)),
+            int(getattr(self, "_ugv_static_planner_cache_version", 0)),
+            int(getattr(self, "_ugv_planner_terrain_cache_version", 0)),
+            str(ground_pos.device),
+            str(ground_pos.dtype),
+        )
+        if cached is not None and cached.get("key") == cache_key:
+            if (
+                torch.equal(cached["ground_pos"], ground_pos)
+                and torch.equal(cached["survivor_pos"], survivor_pos)
+                and torch.equal(cached["targetable"], targetable)
+            ):
+                return cached["assigned_idx"], cached["assigned_dist"]
+
+        assigned_idx, assigned_dist = self._ugv_assigned_target_indices_uncached(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+        self._ugv_assignment_result_cache = {
+            "key": cache_key,
+            "ground_pos": ground_pos.detach().clone(),
+            "survivor_pos": survivor_pos.detach().clone(),
+            "targetable": targetable.detach().clone(),
+            "assigned_idx": assigned_idx,
+            "assigned_dist": assigned_dist,
+        }
+        return assigned_idx, assigned_dist
+
+    def _ugv_assigned_target_indices_uncached(
         self,
         ground_pos: Tensor,
         survivor_pos: Tensor,
