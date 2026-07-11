@@ -171,6 +171,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.r_ugv_stall_penalty, 0.0)
         self.assertEqual(scenario.r_ugv_route_progress_floor_penalty, 0.0)
         self.assertEqual(scenario.ugv_route_progress_floor_m, 0.0)
+        self.assertEqual(scenario.r_ugv_route_progress_shortfall_penalty, 0.0)
         self.assertEqual(scenario.r_fire_penalty, -0.20)
         self.assertEqual(scenario.r_ground_travel_cost, -0.01)
         self.assertEqual(scenario.r_drone_climb_cost, -0.005)
@@ -1796,7 +1797,18 @@ class SurvivorCommunicationTests(unittest.TestCase):
         gate = torch.ones(1, 1, dtype=torch.bool)
 
         target_idx = torch.zeros_like(gate, dtype=torch.long)
-        reward, progress_m, _progress_scaled, active, direct_blocked, detour_needed, escape_mode = (
+        (
+            reward,
+            progress_m,
+            _progress_scaled,
+            active,
+            direct_blocked,
+            detour_needed,
+            escape_mode,
+            _required_progress_m,
+            _shortfall_m,
+            _remaining_distance_m,
+        ) = (
             scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, target_idx, gate)
         )
         self.assertEqual(calls["count"], 1)
@@ -2104,6 +2116,42 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.r_ugv_route_progress_floor_penalty = 0.0
         scenario._compute_step_rewards()
         self.assertEqual(float(scenario.metric_reward_ugv_route_progress_floor_penalty[0]), 0.0)
+
+    def test_ugv_route_progress_shortfall_penalty_uses_remaining_time(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_dense_reward_mode="planner_follow",
+            max_steps=100,
+        )
+        scenario = env.scenario
+        ground = env.agents[0]
+        survivor = scenario._survivors[0]
+        scale = float(scenario.terrain_sim_units_per_meter[0])
+
+        scenario.r_ugv_route_progress_shortfall_penalty = 0.02
+        scenario.step_count[0] = 90
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        survivor.state.pos[:] = torch.tensor([[80.0 * scale, 0.0]])
+        ground.state.pos[:] = torch.tensor([[0.0, 0.0]])
+
+        scenario._compute_step_rewards()
+        self.assertEqual(float(scenario.metric_reward_ugv_route_progress_shortfall_penalty[0]), 0.0)
+
+        scenario._pre_step_ground_pos[:, 0, :] = torch.tensor([[0.0, 0.0]])
+        ground.state.pos[:] = torch.tensor([[0.5 * scale, 0.0]])
+        scenario.step_ugv_actual_displacement_m[0, 0] = 0.5
+        scenario._compute_step_rewards()
+
+        required = float(scenario.metric_ugv_route_progress_required_m[0])
+        shortfall = float(scenario.metric_ugv_route_progress_shortfall_m[0])
+        self.assertGreater(required, 0.5)
+        self.assertGreater(shortfall, 0.0)
+        self.assertAlmostEqual(
+            float(scenario.metric_reward_ugv_route_progress_shortfall_penalty[0]),
+            -0.02 * shortfall,
+            places=4,
+        )
 
     def test_ugv_planner_progress_reward_uses_astar_waypoint_when_detouring(self):
         env = self._diagnostic_env(
@@ -2501,6 +2549,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "reward/ugv_planner_progress",
             "reward/ugv_stall_penalty",
             "reward/ugv_route_progress_floor_penalty",
+            "reward/ugv_route_progress_shortfall_penalty",
             "reward/ground_confirm",
             "reward/coverage",
             "cost/ugv_fire_exposure",
@@ -2512,6 +2561,9 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "diagnostic/ugv_prev_distance_valid",
             "diagnostic/ugv_progress_gate_active",
             "diagnostic/ugv_route_progress_floor_shortfall_m",
+            "diagnostic/ugv_route_progress_required_m",
+            "diagnostic/ugv_route_progress_shortfall_m",
+            "diagnostic/ugv_route_remaining_distance_m",
             "diagnostic/ugv_target_index",
             "diagnostic/ugv_ground_progress_m",
             "diagnostic/ugv_ground_progress_scaled",

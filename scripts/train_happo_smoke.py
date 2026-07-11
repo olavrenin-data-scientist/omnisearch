@@ -314,6 +314,7 @@ def build_args(
     ugv_stall_displacement_threshold_m: float = 0.05,
     ugv_route_progress_floor_penalty: float = 0.0,
     ugv_route_progress_floor_m: float = 0.0,
+    ugv_route_progress_shortfall_penalty: float = 0.0,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
@@ -881,6 +882,7 @@ def build_args(
         "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
         "r_ugv_route_progress_floor_penalty": ugv_route_progress_floor_penalty,
         "ugv_route_progress_floor_m": ugv_route_progress_floor_m,
+        "r_ugv_route_progress_shortfall_penalty": ugv_route_progress_shortfall_penalty,
         "r_fire_penalty": -0.20,
         "r_ground_travel_cost": -0.01,
         "r_drone_climb_cost": -0.005,
@@ -1936,6 +1938,9 @@ def main():
     p.add_argument("--ugv-route-progress-floor-m", type=float, default=0.0,
                    help="Minimum expected planner-route progress per step before "
                         "--ugv-route-progress-floor-penalty starts.")
+    p.add_argument("--ugv-route-progress-shortfall-penalty", type=float, default=0.0,
+                   help="Penalty coefficient per meter that planner-route progress falls short of "
+                        "remaining_route_distance / remaining_episode_steps. Default 0 disables.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
@@ -2277,6 +2282,8 @@ def main():
         p.error("--ugv-route-progress-floor-penalty must be nonnegative")
     if args.ugv_route_progress_floor_m < 0.0:
         p.error("--ugv-route-progress-floor-m must be nonnegative")
+    if args.ugv_route_progress_shortfall_penalty < 0.0:
+        p.error("--ugv-route-progress-shortfall-penalty must be nonnegative")
     if args.survivor_reveal_initial_count < 0:
         p.error("--survivor-reveal-initial-count must be nonnegative")
     if args.survivor_reveal_start_step < 0 or args.survivor_reveal_end_step < 0:
@@ -2626,6 +2633,7 @@ def main():
     print(f" ugv_pending_penalty: {args.ugv_pending_penalty}")
     print(f" ugv_route_progress_floor_penalty: {args.ugv_route_progress_floor_penalty}")
     print(f" ugv_route_progress_floor_m: {args.ugv_route_progress_floor_m}")
+    print(f" ugv_route_progress_shortfall_penalty: {args.ugv_route_progress_shortfall_penalty}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
     print(f" team_scout_reward: {args.team_scout_reward}")
@@ -2808,6 +2816,7 @@ def main():
         ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
         ugv_route_progress_floor_penalty = args.ugv_route_progress_floor_penalty,
         ugv_route_progress_floor_m = args.ugv_route_progress_floor_m,
+        ugv_route_progress_shortfall_penalty = args.ugv_route_progress_shortfall_penalty,
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,

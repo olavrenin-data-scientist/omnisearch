@@ -145,6 +145,7 @@ class HappoCheckpointTests(unittest.TestCase):
             "r_ugv_stall_penalty": 0.0,
             "r_ugv_route_progress_floor_penalty": 0.0,
             "ugv_route_progress_floor_m": 0.0,
+            "r_ugv_route_progress_shortfall_penalty": 0.0,
             "r_fire_penalty": -0.20,
             "r_ground_travel_cost": -0.01,
             "r_drone_climb_cost": -0.005,
@@ -478,6 +479,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_stall_displacement_threshold_m"], 0.05)
         self.assertEqual(scenario["r_ugv_route_progress_floor_penalty"], 0.0)
         self.assertEqual(scenario["ugv_route_progress_floor_m"], 0.0)
+        self.assertEqual(scenario["r_ugv_route_progress_shortfall_penalty"], 0.0)
         self.assertEqual(scenario["ground_confirm_min_m"], 20.0)
         self.assertEqual(scenario["slope_speed_weight"], 0.5)
         self.assertEqual(scenario["land_cover_speeds"], (1.0, 0.95, 0.8, 0.7, 0.0, 0.0))

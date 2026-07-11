@@ -38,6 +38,7 @@ REWARD_COMPONENTS = (
     "planner_progress",
     "stall_penalty",
     "route_floor_penalty",
+    "route_shortfall_penalty",
     "travel_penalty",
 )
 ROUTE_STALL_THRESHOLDS_M = (
@@ -187,6 +188,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["ugv_escape_waypoint_reached_m"] = float(args.ugv_escape_waypoint_reached_m)
     if args.ugv_escape_max_steps is not None:
         scenario_kwargs["ugv_escape_max_steps"] = int(args.ugv_escape_max_steps)
+    if args.ugv_route_progress_shortfall_penalty is not None:
+        scenario_kwargs["r_ugv_route_progress_shortfall_penalty"] = float(
+            args.ugv_route_progress_shortfall_penalty
+        )
     if args.ugv_planner_patch_size is not None:
         scenario_kwargs["ugv_planner_patch_size"] = int(args.ugv_planner_patch_size)
     if args.ugv_planner_lookahead_cells is not None:
@@ -830,6 +835,10 @@ def _reward_components(scenario: WildfireSearchScenario) -> dict[str, float]:
         "route_floor_penalty": _metric_scalar(
             scenario,
             "metric_reward_ugv_route_progress_floor_penalty",
+        ),
+        "route_shortfall_penalty": _metric_scalar(
+            scenario,
+            "metric_reward_ugv_route_progress_shortfall_penalty",
         ),
         "travel_penalty": travel_penalty,
     }
@@ -1534,6 +1543,7 @@ def _plot_ugv_diagnostics(
         "planner_progress": "#8b5cf6",
         "stall_penalty": "#ef4444",
         "route_floor_penalty": "#be123c",
+        "route_shortfall_penalty": "#7f1d1d",
         "travel_penalty": "#111827",
     }
     for name in REWARD_COMPONENTS:
@@ -2951,6 +2961,8 @@ def main() -> None:
                         help="Override route-switch waypoint reached radius.")
     parser.add_argument("--ugv-escape-max-steps", type=int, default=None,
                         help="Override route-switch maximum escape duration.")
+    parser.add_argument("--ugv-route-progress-shortfall-penalty", type=float, default=None,
+                        help="Override route-progress schedule shortfall penalty coefficient.")
     parser.add_argument("--ugv-planner-patch-size", type=int, default=None,
                         help="Override the checkpoint's local A* planner patch size.")
     parser.add_argument("--ugv-planner-lookahead-cells", type=int, default=None,
@@ -3061,6 +3073,11 @@ def main() -> None:
         parser.error("--ugv-escape-waypoint-reached-m must be positive")
     if args.ugv_escape_max_steps is not None and args.ugv_escape_max_steps < 1:
         parser.error("--ugv-escape-max-steps must be positive")
+    if (
+        args.ugv_route_progress_shortfall_penalty is not None
+        and args.ugv_route_progress_shortfall_penalty < 0.0
+    ):
+        parser.error("--ugv-route-progress-shortfall-penalty must be nonnegative")
     if args.ugv_planner_lookahead_cells is not None:
         patch_size = args.ugv_planner_patch_size if args.ugv_planner_patch_size is not None else 11
         args.ugv_planner_lookahead_cells = min(
@@ -3120,6 +3137,7 @@ def main() -> None:
         f"detour_obs={bool(scenario_kwargs.get('ugv_planner_detour_obs', False))} "
         f"route_aware={bool(scenario_kwargs.get('ugv_route_aware_reward', False))} "
         f"dense_mode={scenario_kwargs.get('ugv_dense_reward_mode', 'target')} "
+        f"route_shortfall={float(scenario_kwargs.get('r_ugv_route_progress_shortfall_penalty', 0.0)):.3f} "
         f"fire_replan={scenario_kwargs.get('ugv_planner_fire_replan_policy', 'always')} "
         f"fire_interval={scenario_kwargs.get('ugv_planner_fire_replan_interval_steps', 15)} "
         f"blend={float(scenario_kwargs.get('ugv_planner_blend_weight', 0.70)):.2f} "
