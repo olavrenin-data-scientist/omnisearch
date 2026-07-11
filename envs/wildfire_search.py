@@ -547,13 +547,14 @@ class WildfireSearchScenario(BaseScenario):
             "nearest",
             "greedy",
             "greedy_sticky",
+            "route_cost_greedy",
             "route_cost_sticky",
             "route_cost_global",
         }
         if self.ugv_target_assignment_mode not in valid_assignment_modes:
             raise ValueError(
                 "ugv_target_assignment_mode must be one of: nearest, greedy, "
-                "greedy_sticky, route_cost_sticky, route_cost_global"
+                "greedy_sticky, route_cost_greedy, route_cost_sticky, route_cost_global"
             )
         self.ugv_sticky_switch_margin_m = max(
             float(kwargs.pop("ugv_sticky_switch_margin_m", 20.0)),
@@ -3603,7 +3604,7 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_target_assignment_mode == "nearest" or (
             self.n_ground <= 1
             and self.ugv_target_assignment_mode
-            not in {"route_cost_sticky", "route_cost_global"}
+            not in {"route_cost_greedy", "route_cost_sticky", "route_cost_global"}
         ):
             assigned_dist, assigned_idx = masked.min(dim=2)
             assigned_idx = torch.where(
@@ -3615,6 +3616,26 @@ class WildfireSearchScenario(BaseScenario):
 
         if self.ugv_target_assignment_mode == "greedy_sticky":
             assigned_idx = self._ugv_sticky_target_indices(distances, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "route_cost_greedy":
+            route_costs_m = self._ugv_route_assignment_costs_m(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            scoreable = targetable & torch.isfinite(route_costs_m)
+            assigned_idx, _assigned_score = self._ugv_greedy_assigned_target_indices(
+                route_costs_m,
+                scoreable,
+            )
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(

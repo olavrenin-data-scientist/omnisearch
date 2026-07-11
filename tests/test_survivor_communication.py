@@ -496,6 +496,55 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertEqual(target_idx.tolist(), [[-1, 0]])
 
+    def test_route_cost_greedy_assignment_uses_route_cost_for_single_ugv(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_cost_greedy",
+        )
+        scenario = env.scenario
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[0.1, 0.0], [1.0, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        def route_costs(_ground_pos, _survivor_pos, _targetable):
+            return torch.tensor([[[100.0, 10.0]]])
+
+        scenario._ugv_route_assignment_costs_m = route_costs
+        scenario._invalidate_ugv_assignment_cache()
+        target_idx, target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[1]])
+        torch.testing.assert_close(target_dist, torch.tensor([[1.0]]))
+
+    def test_route_cost_greedy_assignment_is_not_global_optimizer(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_cost_greedy",
+        )
+        scenario = env.scenario
+        ground_pos = torch.tensor([[[0.0, 0.0], [0.1, 0.0]]])
+        survivor_pos = torch.tensor([[[0.2, 0.0], [1.0, 0.0]]])
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+
+        def route_costs(_ground_pos, _survivor_pos, _targetable):
+            return torch.tensor([[[10.0, 11.0], [12.0, 100.0]]])
+
+        scenario._ugv_route_assignment_costs_m = route_costs
+        scenario._invalidate_ugv_assignment_cache()
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0, 1]])
+
     def test_route_cost_assignment_cache_matches_uncached_reference(self):
         env = self._diagnostic_env(
             num_envs=2,

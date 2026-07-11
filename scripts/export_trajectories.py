@@ -115,6 +115,8 @@ def main():
                        "greedy",
                        "greedy_sticky",
                        "greedy-sticky",
+                       "route_cost_greedy",
+                       "route-cost-greedy",
                        "route_cost_sticky",
                        "route-cost-sticky",
                        "route_cost_global",
