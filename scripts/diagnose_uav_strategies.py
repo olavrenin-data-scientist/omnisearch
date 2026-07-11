@@ -1490,6 +1490,7 @@ def main() -> None:
     _print_summary(summary)
 
     payload = {
+        "scenario_kwargs": scenario_kwargs,
         "metadata": {
             "strategies": [spec.__dict__ | {"checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir)} for spec in specs],
             "steps": int(args.steps),

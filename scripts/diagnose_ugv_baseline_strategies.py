@@ -753,6 +753,7 @@ def main() -> None:
     summary = summarize(rows)
     _print_summary(summary)
     payload = {
+        "scenario_kwargs": scenario_kwargs,
         "metadata": {
             "strategies": [_spec_metadata(spec) for spec in specs],
             "happo_deterministic": not args.stochastic,
