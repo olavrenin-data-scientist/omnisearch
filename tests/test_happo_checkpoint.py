@@ -877,6 +877,21 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1, 1])
         self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
 
+    def test_joint_survivor_diagnostic_preserves_assignment_override(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_diag_route_cost",
+            joint_survivor_diagnostic=True,
+            ugv_target_assignment_mode="route-cost-global",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_global")
+
     def test_joint_schema_ugv_diagnostic_uses_delayed_joint_schema_defaults(self):
         _, algo_args, env_args = build_args(
             num_env_steps=100,
@@ -918,6 +933,21 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_coverage"], 0.0)
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
+
+    def test_joint_schema_ugv_diagnostic_preserves_assignment_override(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_route_cost",
+            joint_schema_ugv_diagnostic=True,
+            ugv_target_assignment_mode="route-cost-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_sticky")
 
     def test_joint_schema_uav_diagnostic_uses_padded_joint_observation_defaults(self):
         _, algo_args, env_args = build_args(

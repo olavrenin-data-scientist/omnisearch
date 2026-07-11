@@ -337,7 +337,7 @@ def build_args(
     ugv_planner_fire_buffer_m: float = 10.0,
     ugv_planner_fire_buffer_cost: float = 8.0,
     ugv_planner_land_cover_costs: tuple[float, ...] | None = None,
-    ugv_target_assignment_mode: str = "nearest",
+    ugv_target_assignment_mode: str | None = None,
     ugv_assigned_target_obs_only: bool | None = None,
     ugv_sticky_switch_margin_m: float = 20.0,
     ugv_sticky_switch_ratio: float = 0.80,
@@ -463,6 +463,12 @@ def build_args(
     if ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
         raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
+    if ugv_target_assignment_mode is None:
+        ugv_target_assignment_mode = (
+            "greedy_sticky"
+            if joint_survivor_diagnostic or joint_schema_ugv_diagnostic
+            else "nearest"
+        )
     ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
     valid_assignment_modes = {
         "nearest",
@@ -1262,7 +1268,7 @@ def build_args(
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
-            "ugv_target_assignment_mode": "greedy_sticky",
+            "ugv_target_assignment_mode": ugv_target_assignment_mode,
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
@@ -1335,7 +1341,7 @@ def build_args(
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
-            "ugv_target_assignment_mode": "greedy_sticky",
+            "ugv_target_assignment_mode": ugv_target_assignment_mode,
             "ugv_zero_uav_search_observations": True,
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "survivor_assignment_obs": True,
@@ -1604,8 +1610,9 @@ def main():
                        "route_cost_global",
                        "route-cost-global",
                    ),
-                   default="nearest",
-                   help="How UGV planner targets are selected from known, unconfirmed survivors.")
+                   default=None,
+                   help="How UGV planner targets are selected from known, unconfirmed survivors. "
+                        "Omit to use the diagnostic-mode default.")
     p.add_argument("--ugv-assigned-target-obs-only", action=argparse.BooleanOptionalAction, default=None,
                    help="Legacy compatibility flag. UGV survivor-message observations now keep all "
                         "known survivor slots visible; assignment still controls planner hints/rewards.")
@@ -1955,7 +1962,8 @@ def main():
     args = p.parse_args()
     args.action_transform = args.action_transform.replace("-", "_")
     args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
-    args.ugv_target_assignment_mode = args.ugv_target_assignment_mode.replace("-", "_")
+    if args.ugv_target_assignment_mode is not None:
+        args.ugv_target_assignment_mode = args.ugv_target_assignment_mode.replace("-", "_")
     args.survivor_reveal_schedule = args.survivor_reveal_schedule.replace("-", "_")
 
     if (
@@ -2314,10 +2322,12 @@ def main():
             "--uav-survivor-diagnostic, --joint-schema-uav-diagnostic, "
             "--joint-survivor-diagnostic, or --joint-schema-ugv-diagnostic"
         )
-    if args.joint_survivor_diagnostic:
+    if args.ugv_target_assignment_mode is None and (
+        args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
+    ):
         args.ugv_target_assignment_mode = "greedy_sticky"
-    if args.joint_schema_ugv_diagnostic:
-        args.ugv_target_assignment_mode = "greedy_sticky"
+    if args.ugv_target_assignment_mode is None:
+        args.ugv_target_assignment_mode = "nearest"
     if args.ugv_assigned_target_obs_only is None:
         args.ugv_assigned_target_obs_only = False
     if args.survivor_assignment_obs is None:
