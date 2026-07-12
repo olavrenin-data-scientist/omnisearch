@@ -1,7 +1,9 @@
 import unittest
+import heapq
 import math
 from pathlib import Path
 
+import numpy as np
 import torch
 import vmas
 
@@ -101,6 +103,64 @@ class SurvivorCommunicationTests(unittest.TestCase):
             direct_blocked,
         )
         return waypoint, direct_blocked, detour_needed
+
+    def _reference_global_static_raw_cost_to_go(self, scenario, env_index, goals):
+        G = int(scenario.fire_grid_size)
+        traversable, movement_cost = scenario._ugv_static_planner_layer_arrays_for_env(env_index)
+
+        def in_bounds(cell):
+            x, y = cell
+            return 0 <= x < G and 0 <= y < G
+
+        def open_cell(cell):
+            if not in_bounds(cell):
+                return False
+            x, y = cell
+            return bool(traversable[y, x]) and math.isfinite(float(movement_cost[y, x]))
+
+        costs = np.full((G, G), np.inf, dtype=np.float64)
+        open_heap = []
+        for goal in tuple((int(x), int(y)) for x, y in goals):
+            if not open_cell(goal):
+                continue
+            gx, gy = goal
+            if costs[gy, gx] == 0.0:
+                continue
+            costs[gy, gx] = 0.0
+            heapq.heappush(open_heap, (0.0, goal))
+
+        neighbor_offsets = (
+            (-1, 0, 1.0),
+            (1, 0, 1.0),
+            (0, -1, 1.0),
+            (0, 1, 1.0),
+            (-1, -1, math.sqrt(2.0)),
+            (-1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)),
+            (1, 1, math.sqrt(2.0)),
+        )
+        while open_heap:
+            cost_so_far, current = heapq.heappop(open_heap)
+            cx, cy = current
+            if cost_so_far > costs[cy, cx] + 1e-9:
+                continue
+            for ox, oy, step_len in neighbor_offsets:
+                nxt = (cx + ox, cy + oy)
+                if not open_cell(nxt):
+                    continue
+                if ox != 0 and oy != 0 and (
+                    not open_cell((cx + ox, cy)) or not open_cell((cx, cy + oy))
+                ):
+                    continue
+                nx, ny = nxt
+                edge_cost = step_len * (
+                    float(movement_cost[cy, cx]) + float(movement_cost[ny, nx])
+                ) * 0.5
+                new_cost = cost_so_far + edge_cost
+                if new_cost < costs[ny, nx]:
+                    costs[ny, nx] = new_cost
+                    heapq.heappush(open_heap, (new_cost, nxt))
+        return costs
 
     def _set_local_astar_case(self, scenario, start_cell, target_cell, blocked_cells=()):
         ground = scenario.world.agents[scenario.n_drones]
@@ -684,6 +744,28 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertGreater(first_call_count, 0)
         self.assertEqual(calls, first_call_count)
+
+    def test_global_static_raw_cost_to_go_matches_reference_loop(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        scenario = env.scenario
+        traversable, movement_cost = scenario._ugv_static_planner_layer_arrays_for_env(0)
+        survivor = scenario._survivors[0]
+        goals = scenario._global_astar_goal_cells_for_env(
+            0,
+            survivor.state.pos[0],
+            traversable,
+            movement_cost,
+        )
+        self.assertTrue(goals)
+
+        reference = self._reference_global_static_raw_cost_to_go(scenario, 0, goals)
+        scenario._ugv_global_raw_cost_to_go_cache.clear()
+        actual = scenario._global_astar_static_raw_cost_to_go_for_env(0, goals)
+
+        np.testing.assert_allclose(actual, reference, atol=1e-9, rtol=1e-9)
 
     def test_route_cost_assignment_cache_reuses_same_step_result(self):
         env = self._diagnostic_env(

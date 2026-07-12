@@ -62,6 +62,24 @@ UGV_PLANNER_HINT_DIM = 5
 UGV_LOCAL_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
 UGV_PLANNER_HINT_MODES = UGV_LOCAL_PLANNER_HINT_MODES | {"global_astar"}
 UGV_GLOBAL_PLANNER_HEURISTICS = {"euclidean", "terrain"}
+_SCIPY_SPARSE_TOOLS = None
+_SCIPY_SPARSE_UNAVAILABLE = False
+
+
+def _scipy_sparse_tools():
+    global _SCIPY_SPARSE_TOOLS, _SCIPY_SPARSE_UNAVAILABLE
+    if _SCIPY_SPARSE_TOOLS is not None:
+        return _SCIPY_SPARSE_TOOLS
+    if _SCIPY_SPARSE_UNAVAILABLE:
+        return None
+    try:
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import dijkstra
+    except Exception:
+        _SCIPY_SPARSE_UNAVAILABLE = True
+        return None
+    _SCIPY_SPARSE_TOOLS = (csr_matrix, dijkstra)
+    return _SCIPY_SPARSE_TOOLS
 
 
 def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
@@ -1214,6 +1232,7 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_planner_layer_tensor_cache = {}
         self._ugv_planner_layer_array_cache = {}
         self._ugv_static_planner_layer_array_cache = {}
+        self._ugv_static_planner_graph_cache = {}
         self._ugv_global_heuristic_cache = {}
         self._ugv_global_raw_cost_to_go_cache = {}
         self._ugv_route_assignment_cost_grid_cache = {}
@@ -2736,6 +2755,7 @@ class WildfireSearchScenario(BaseScenario):
         self._invalidate_ugv_route_assignment_cost_grid_cache(env_index)
         caches = (
             "_ugv_static_planner_layer_array_cache",
+            "_ugv_static_planner_graph_cache",
             "_ugv_global_heuristic_cache",
             "_ugv_global_raw_cost_to_go_cache",
         )
@@ -2919,6 +2939,91 @@ class WildfireSearchScenario(BaseScenario):
         arrays = (traversable, movement_cost)
         cache[key] = arrays
         return arrays
+
+    def _ugv_static_planner_graph_for_env(self, env_index: int):
+        tools = _scipy_sparse_tools()
+        if tools is None:
+            return None
+        csr_matrix, _dijkstra = tools
+        version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
+        key = (int(env_index), version)
+        cache = getattr(self, "_ugv_static_planner_graph_cache", None)
+        if cache is None:
+            self._ugv_static_planner_graph_cache = {}
+            cache = self._ugv_static_planner_graph_cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+        traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+        valid = traversable & np.isfinite(movement_cost)
+        G = int(self.fire_grid_size)
+        indices = np.arange(G * G, dtype=np.int32).reshape(G, G)
+        rows: list[np.ndarray] = []
+        cols: list[np.ndarray] = []
+        data: list[np.ndarray] = []
+
+        def add_edges(mask: np.ndarray, a_idx: np.ndarray, b_idx: np.ndarray, weight: np.ndarray) -> None:
+            if not bool(np.any(mask)):
+                return
+            a = a_idx[mask].astype(np.int32, copy=False)
+            b = b_idx[mask].astype(np.int32, copy=False)
+            w = weight[mask].astype(np.float64, copy=False)
+            rows.extend((a, b))
+            cols.extend((b, a))
+            data.extend((w, w))
+
+        right = valid[:, :-1] & valid[:, 1:]
+        add_edges(
+            right,
+            indices[:, :-1],
+            indices[:, 1:],
+            0.5 * (movement_cost[:, :-1] + movement_cost[:, 1:]),
+        )
+        down = valid[:-1, :] & valid[1:, :]
+        add_edges(
+            down,
+            indices[:-1, :],
+            indices[1:, :],
+            0.5 * (movement_cost[:-1, :] + movement_cost[1:, :]),
+        )
+        diag_scale = math.sqrt(2.0) * 0.5
+        down_right = (
+            valid[:-1, :-1]
+            & valid[1:, 1:]
+            & valid[:-1, 1:]
+            & valid[1:, :-1]
+        )
+        add_edges(
+            down_right,
+            indices[:-1, :-1],
+            indices[1:, 1:],
+            diag_scale * (movement_cost[:-1, :-1] + movement_cost[1:, 1:]),
+        )
+        down_left = (
+            valid[:-1, 1:]
+            & valid[1:, :-1]
+            & valid[:-1, :-1]
+            & valid[1:, 1:]
+        )
+        add_edges(
+            down_left,
+            indices[:-1, 1:],
+            indices[1:, :-1],
+            diag_scale * (movement_cost[:-1, 1:] + movement_cost[1:, :-1]),
+        )
+
+        if rows:
+            row = np.concatenate(rows)
+            col = np.concatenate(cols)
+            values = np.concatenate(data)
+        else:
+            row = np.empty((0,), dtype=np.int32)
+            col = np.empty((0,), dtype=np.int32)
+            values = np.empty((0,), dtype=np.float64)
+        graph = csr_matrix((values, (row, col)), shape=(G * G, G * G))
+        cache[key] = graph
+        return graph
 
     def _ugv_route_fire_stats_for_env(self, env_index: int, path: list[tuple[int, int]]) -> dict[str, float]:
         if not path:
@@ -4006,6 +4111,10 @@ class WildfireSearchScenario(BaseScenario):
         episode, so caching the grid avoids repeatedly rebuilding goal cells and
         asking the reverse-Dijkstra cache for the same target.
         """
+        cache = getattr(self, "_ugv_route_assignment_cost_grid_cache", None)
+        if cache is None:
+            self._ugv_route_assignment_cost_grid_cache = {}
+            cache = self._ugv_route_assignment_cost_grid_cache
         version = int(getattr(self, "_ugv_static_planner_cache_version", 0))
         scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
         confirm_radius_sim = float(self.detection_range_by_env[env_index].detach().cpu().item())
@@ -4021,10 +4130,6 @@ class WildfireSearchScenario(BaseScenario):
             target_y,
             confirm_radius_sim,
         )
-        cache = getattr(self, "_ugv_route_assignment_cost_grid_cache", None)
-        if cache is None:
-            self._ugv_route_assignment_cost_grid_cache = {}
-            cache = self._ugv_route_assignment_cost_grid_cache
         if key in cache:
             return cache[key]
 
@@ -8872,28 +8977,48 @@ class WildfireSearchScenario(BaseScenario):
         if cached is not None:
             return cached
 
+        tools = _scipy_sparse_tools()
+        graph = self._ugv_static_planner_graph_for_env(env_index) if tools is not None else None
+        if graph is not None:
+            _csr_matrix, dijkstra = tools
+            traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+            valid = traversable & np.isfinite(movement_cost)
+            goal_indices = []
+            for gx, gy in goal_key:
+                if 0 <= gx < G and 0 <= gy < G and bool(valid[gy, gx]):
+                    goal_indices.append(gy * G + gx)
+            if goal_indices:
+                distances = dijkstra(
+                    graph,
+                    directed=False,
+                    indices=np.asarray(goal_indices, dtype=np.int32),
+                    min_only=True,
+                )
+                costs = np.asarray(distances, dtype=np.float64).reshape(G, G)
+            else:
+                costs = np.full((G, G), np.inf, dtype=np.float64)
+            cache[key] = costs
+            return costs
+
         traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
-
-        def in_bounds(cell: tuple[int, int]) -> bool:
-            x, y = cell
-            return 0 <= x < G and 0 <= y < G
-
-        def open_cell(cell: tuple[int, int]) -> bool:
-            if not in_bounds(cell):
-                return False
-            x, y = cell
-            return bool(traversable[y, x]) and math.isfinite(float(movement_cost[y, x]))
+        valid = traversable & np.isfinite(movement_cost)
+        valid_flat = valid.reshape(-1)
+        cost_flat = movement_cost.reshape(-1)
 
         costs = np.full((G, G), np.inf, dtype=np.float64)
-        open_heap: list[tuple[float, tuple[int, int]]] = []
+        costs_flat = costs.reshape(-1)
+        open_heap: list[tuple[float, int, int]] = []
         for goal in goal_key:
-            if not open_cell(goal):
-                continue
             gx, gy = goal
-            if costs[gy, gx] == 0.0:
+            if gx < 0 or gx >= G or gy < 0 or gy >= G:
                 continue
-            costs[gy, gx] = 0.0
-            heapq.heappush(open_heap, (0.0, goal))
+            goal_idx = gy * G + gx
+            if not bool(valid_flat[goal_idx]):
+                continue
+            if costs_flat[goal_idx] == 0.0:
+                continue
+            costs_flat[goal_idx] = 0.0
+            heapq.heappush(open_heap, (0.0, gx, gy))
 
         neighbor_offsets = (
             (-1, 0, 1.0),
@@ -8906,26 +9031,30 @@ class WildfireSearchScenario(BaseScenario):
             (1, 1, math.sqrt(2.0)),
         )
         while open_heap:
-            cost_so_far, current = heapq.heappop(open_heap)
-            cx, cy = current
-            if cost_so_far > costs[cy, cx] + 1e-9:
+            cost_so_far, cx, cy = heapq.heappop(open_heap)
+            current_idx = cy * G + cx
+            if cost_so_far > costs_flat[current_idx] + 1e-9:
                 continue
+            current_cell_cost = float(cost_flat[current_idx])
             for ox, oy, step_len in neighbor_offsets:
-                nxt = (cx + ox, cy + oy)
-                if not open_cell(nxt):
+                nx = cx + ox
+                ny = cy + oy
+                if nx < 0 or nx >= G or ny < 0 or ny >= G:
+                    continue
+                next_idx = ny * G + nx
+                if not bool(valid_flat[next_idx]):
                     continue
                 if ox != 0 and oy != 0 and (
-                    not open_cell((cx + ox, cy)) or not open_cell((cx, cy + oy))
+                    not bool(valid[cy, nx]) or not bool(valid[ny, cx])
                 ):
                     continue
-                nx, ny = nxt
                 edge_cost = step_len * (
-                    float(movement_cost[cy, cx]) + float(movement_cost[ny, nx])
+                    current_cell_cost + float(cost_flat[next_idx])
                 ) * 0.5
                 new_cost = cost_so_far + edge_cost
-                if new_cost < costs[ny, nx]:
-                    costs[ny, nx] = new_cost
-                    heapq.heappush(open_heap, (new_cost, nxt))
+                if new_cost < costs_flat[next_idx]:
+                    costs_flat[next_idx] = new_cost
+                    heapq.heappush(open_heap, (new_cost, nx, ny))
 
         cache[key] = costs
         return costs
