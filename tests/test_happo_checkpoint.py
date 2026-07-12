@@ -657,11 +657,11 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
         self.assertEqual(scenario["uav_coverage_normalization"], "map")
-        self.assertEqual(scenario["coverage_obs_grid"], 6)
-        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
-        self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
-        self.assertEqual(scenario["uav_confidence_obs_grid"], 6)
-        self.assertNotIn("local_confidence_obs_grid", scenario)
+        self.assertNotIn("coverage_obs_grid", scenario)
+        self.assertNotIn("local_coverage_obs_grid", scenario)
+        self.assertEqual(scenario["uav_confidence_obs_grid"], 32)
+        self.assertEqual(scenario["local_confidence_obs_grid"], 9)
+        self.assertEqual(scenario["local_confidence_obs_radius_m"], 60.0)
         self.assertEqual(scenario["r_uav_move_coverage"], 0.0)
         self.assertEqual(scenario["uav_move_coverage_normalization"], "raw")
         self.assertEqual(scenario["r_uav_move_coverage_cap"], 0.1)
@@ -683,20 +683,20 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_confidence"], 30.0)
         self.assertEqual(scenario["r_uav_team_confidence"], 0.0)
         self.assertEqual(scenario["r_uav_confidence_move"], 0.10)
-        self.assertEqual(scenario["r_uav_inefficient_move"], 0.01)
-        self.assertEqual(scenario["uav_inefficient_move_source"], "coverage")
+        self.assertEqual(scenario["r_uav_inefficient_move"], 0.005)
+        self.assertEqual(scenario["uav_inefficient_move_source"], "confidence")
         self.assertEqual(scenario["r_uav_confidence_overlap"], 0.06)
-        self.assertEqual(scenario["uav_confidence_overlap_mode"], "raw")
+        self.assertEqual(scenario["uav_confidence_overlap_mode"], "opportunity_regret")
         self.assertEqual(scenario["uav_confidence_overlap_allowed_regret"], 0.10)
         self.assertEqual(scenario["uav_confidence_overlap_threshold"], 0.80)
+        self.assertNotIn("uav_cleanup_target_obs", scenario)
         self.assertEqual(scenario["uav_confidence_opportunity_eps"], 1e-6)
-        self.assertTrue(scenario["uav_cleanup_target_obs"])
-        self.assertEqual(scenario["r_uav_cleanup_target_progress"], 0.10)
+        self.assertEqual(scenario["r_uav_cleanup_target_progress"], 0.0)
         self.assertEqual(scenario["uav_cleanup_target_refresh_mode"], "fixed_hold")
         self.assertEqual(scenario["r_uav_outside_footprint"], 0.10)
         self.assertEqual(scenario["uav_start_min_separation_m"], 150.0)
         self.assertEqual(scenario["uav_start_edge_margin_m"], 50.0)
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 336)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1283)
 
     def test_uav_survivor_diagnostic_can_set_survivor_count(self):
         _, _algo_args, env_args = build_args(
@@ -760,8 +760,16 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_team_confidence"], 0.0)
         self.assertEqual(scenario["r_uav_confidence_move"], 0.10)
         self.assertEqual(scenario["r_uav_confidence_overlap"], 0.06)
-        self.assertTrue(scenario["uav_cleanup_target_obs"])
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
+        self.assertEqual(scenario["r_uav_inefficient_move"], 0.005)
+        self.assertEqual(scenario["uav_inefficient_move_source"], "confidence")
+        self.assertEqual(scenario["uav_confidence_overlap_mode"], "opportunity_regret")
+        self.assertNotIn("coverage_obs_grid", scenario)
+        self.assertNotIn("local_coverage_obs_grid", scenario)
+        self.assertEqual(scenario["uav_confidence_obs_grid"], 32)
+        self.assertEqual(scenario["local_confidence_obs_grid"], 9)
+        self.assertEqual(scenario["local_confidence_obs_radius_m"], 60.0)
+        self.assertNotIn("uav_cleanup_target_obs", scenario)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1302)
 
     def test_joint_diagnostics_can_set_survivor_count(self):
         _, _algo_args, joint_env_args = build_args(
@@ -950,7 +958,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1302)
 
     def test_joint_schema_ugv_diagnostic_preserves_assignment_override(self):
         _, _algo_args, env_args = build_args(
@@ -1013,7 +1021,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
         self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertTrue(scenario["survivor_assignment_obs"])
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 355)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1302)
 
     def test_joint_schema_uav_diagnostic_can_enable_fire_in_training_config(self):
         _, _algo_args, env_args = build_args(
@@ -1397,8 +1405,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_all_survivors_found"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
-        self.assertEqual(scenario["coverage_obs_grid"], 6)
-        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
+        self.assertNotIn("coverage_obs_grid", scenario)
+        self.assertNotIn("local_coverage_obs_grid", scenario)
         self.assertEqual(scenario["r_uav_confidence"], 30.0)
         self.assertEqual(scenario["r_uav_confidence_overlap"], 0.06)
 
@@ -1518,7 +1526,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_coverage_threshold"], 6.0)
         self.assertEqual(scenario["uav_coverage_threshold_fraction"], 0.90)
 
-    def test_uav_diagnostic_can_disable_default_global_coverage_observation(self):
+    def test_uav_diagnostic_default_has_no_binary_coverage_observations(self):
         _, algo_args, env_args = build_args(
             num_env_steps=100,
             episode_length=50,
@@ -1528,13 +1536,11 @@ class HappoCheckpointTests(unittest.TestCase):
             exp_name="uav_local_only",
             uav_survivor_diagnostic=True,
             uav_coverage_only=True,
-            uav_no_global_coverage_obs=True,
         )
 
         scenario = env_args["scenario_kwargs"]
         self.assertNotIn("coverage_obs_grid", scenario)
-        self.assertEqual(scenario["local_coverage_obs_grid"], 9)
-        self.assertEqual(scenario["local_coverage_obs_radius_m"], 150.0)
+        self.assertNotIn("local_coverage_obs_grid", scenario)
         self.assertEqual(scenario["local_map_patch_size"], 7)
         self.assertEqual(scenario["terrain_source"], "real")
         self.assertTrue(scenario["terrain_cache_path"].endswith("malibu_creek_500m_128.npz"))
@@ -1542,9 +1548,11 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertTrue(scenario["uav_frontier_obs"])
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.05)
-        self.assertEqual(scenario["uav_confidence_obs_grid"], 6)
-        self.assertTrue(scenario["uav_cleanup_target_obs"])
-        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 299)
+        self.assertEqual(scenario["uav_confidence_obs_grid"], 32)
+        self.assertEqual(scenario["local_confidence_obs_grid"], 9)
+        self.assertEqual(scenario["local_confidence_obs_radius_m"], 60.0)
+        self.assertNotIn("uav_cleanup_target_obs", scenario)
+        self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1283)
 
     def test_uav_diagnostic_explicit_zero_disables_coverage_observations(self):
         _, algo_args, env_args = build_args(
@@ -1557,12 +1565,17 @@ class HappoCheckpointTests(unittest.TestCase):
             uav_survivor_diagnostic=True,
             coverage_obs_grid=0,
             local_coverage_obs_grid=0,
+            uav_confidence_obs_grid=0,
+            uav_local_confidence_obs_grid=0,
+            uav_frontier_obs=False,
         )
 
         scenario = env_args["scenario_kwargs"]
         self.assertNotIn("coverage_obs_grid", scenario)
         self.assertNotIn("local_coverage_obs_grid", scenario)
-        self.assertEqual(scenario["uav_confidence_obs_grid"], 6)
+        self.assertNotIn("uav_confidence_obs_grid", scenario)
+        self.assertNotIn("local_confidence_obs_grid", scenario)
+        self.assertFalse(scenario["uav_frontier_obs"])
         self.assertLess(algo_args["model"]["terrain_cnn_single_obs_dim"], 258)
 
     def test_diagnostic_modes_are_mutually_exclusive(self):
