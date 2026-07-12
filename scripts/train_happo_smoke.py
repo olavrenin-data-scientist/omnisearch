@@ -2215,6 +2215,17 @@ def main():
         p.error("--uav-inefficient-move-penalty must be nonnegative")
     if args.uav_confidence_overlap_penalty is not None and args.uav_confidence_overlap_penalty < 0.0:
         p.error("--uav-confidence-overlap-penalty must be nonnegative")
+    if args.uav_confidence_overlap_mode is None:
+        args.uav_confidence_overlap_mode = (
+            DEFAULT_UAV_DIAG_CONFIDENCE_OVERLAP_MODE
+            if (
+                args.uav_survivor_diagnostic
+                or args.joint_schema_uav_diagnostic
+                or args.joint_survivor_diagnostic
+                or args.joint_schema_ugv_diagnostic
+            )
+            else "raw"
+        )
     args.uav_confidence_overlap_mode = str(args.uav_confidence_overlap_mode).replace("-", "_").lower()
     if args.uav_confidence_overlap_mode not in {"raw", "opportunity_regret"}:
         p.error("--uav-confidence-overlap-mode must be one of: raw, opportunity-regret")
