@@ -739,7 +739,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertFalse(scenario["drone_can_confirm"])
         self.assertTrue(scenario["disable_fire"])
         self.assertEqual(scenario["comms_dropout"], 0.0)
-        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_sticky")
         self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertTrue(scenario["survivor_assignment_obs"])
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
@@ -751,7 +751,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_team_scout"], 1.0)
         self.assertEqual(scenario["r_ground_confirm"], 10.0)
         self.assertEqual(scenario["r_found_survivor"], 4.0)
-        self.assertEqual(scenario["r_pending_penalty"], -0.005)
+        self.assertEqual(scenario["r_pending_penalty"], -0.02)
+        self.assertEqual(scenario["r_ugv_route_progress_shortfall_penalty"], 0.10)
         self.assertEqual(scenario["r_ground_approach"], 0.0)
         self.assertEqual(scenario["r_all_survivors_found"], 0.0)
         self.assertEqual(scenario["r_time_penalty"], 0.0)
@@ -872,7 +873,7 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 2)
-        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_sticky")
         self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertEqual(algo_args["algo"]["share_param_groups"], [0, 0, 0, 1, 1])
         self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
@@ -935,7 +936,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["survivor_reveal_initial_count"], 1)
         self.assertEqual(scenario["survivor_reveal_start_step"], 10)
         self.assertEqual(scenario["survivor_reveal_end_step"], 180)
-        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sticky")
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_sticky")
         self.assertTrue(scenario["ugv_zero_uav_search_observations"])
         self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertTrue(scenario["survivor_assignment_obs"])
@@ -943,6 +944,8 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["ugv_dense_reward_mode"], "planner_follow")
         self.assertEqual(scenario["r_ground_confirm"], 10.0)
         self.assertEqual(scenario["r_found_survivor"], 4.0)
+        self.assertEqual(scenario["r_pending_penalty"], -0.02)
+        self.assertEqual(scenario["r_ugv_route_progress_shortfall_penalty"], 0.10)
         self.assertEqual(scenario["r_team_scout"], 0.0)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
@@ -959,10 +962,14 @@ class HappoCheckpointTests(unittest.TestCase):
             exp_name="joint_schema_ugv_route_cost",
             joint_schema_ugv_diagnostic=True,
             ugv_target_assignment_mode="route-cost-sticky",
+            ugv_pending_penalty=-0.005,
+            ugv_route_progress_shortfall_penalty=0.0,
         )
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_sticky")
+        self.assertEqual(scenario["r_pending_penalty"], -0.005)
+        self.assertEqual(scenario["r_ugv_route_progress_shortfall_penalty"], 0.0)
 
     def test_joint_schema_ugv_diagnostic_accepts_route_cost_greedy_assignment(self):
         _, _algo_args, env_args = build_args(

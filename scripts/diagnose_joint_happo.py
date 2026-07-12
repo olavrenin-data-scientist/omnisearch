@@ -104,7 +104,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     scenario_kwargs.setdefault("known_survivors_at_reset", False)
     scenario_kwargs.setdefault("drone_can_confirm", False)
     scenario_kwargs.setdefault("comms_dropout", 0.0)
-    scenario_kwargs.setdefault("ugv_target_assignment_mode", "greedy")
+    scenario_kwargs.setdefault("ugv_target_assignment_mode", "route_cost_sticky")
     scenario_kwargs.setdefault("ugv_planner_hint", "global_astar")
     scenario_kwargs.setdefault("ugv_dense_reward_mode", "planner_follow")
     scenario_kwargs["uav_confidence_diagnostics"] = True

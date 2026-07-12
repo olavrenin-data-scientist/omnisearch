@@ -131,7 +131,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs.setdefault("obs_schema_n_survivors", 5)
         scenario_kwargs.setdefault("known_survivors_at_reset", False)
         scenario_kwargs.setdefault("delayed_survivor_knowledge", True)
-        scenario_kwargs.setdefault("ugv_target_assignment_mode", "greedy_sticky")
+        scenario_kwargs.setdefault("ugv_target_assignment_mode", "route_cost_sticky")
         scenario_kwargs.setdefault("ugv_zero_uav_search_observations", True)
         if args.enable_fire:
             scenario_kwargs["disable_fire"] = False

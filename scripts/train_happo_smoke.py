@@ -103,7 +103,9 @@ DEFAULT_JOINT_DIAG_SURVIVORS = 5
 DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD = 1.0
 DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD = 4.0
 DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD = 10.0
-DEFAULT_JOINT_DIAG_PENDING_PENALTY = -0.005
+DEFAULT_JOINT_DIAG_PENDING_PENALTY = -0.02
+DEFAULT_JOINT_DIAG_ROUTE_PROGRESS_SHORTFALL_PENALTY = 0.10
+DEFAULT_JOINT_DIAG_UGV_TARGET_ASSIGNMENT_MODE = "route_cost_sticky"
 DEFAULT_UAV_FRONTIER_MODE = "sector_topk"
 DEFAULT_UAV_DIAG_FRONTIER_MODE = "local_global"
 DEFAULT_UAV_DIAG_FRONTIER_SOURCE = "confidence"
@@ -314,7 +316,7 @@ def build_args(
     ugv_stall_displacement_threshold_m: float = 0.05,
     ugv_route_progress_floor_penalty: float = 0.0,
     ugv_route_progress_floor_m: float = 0.0,
-    ugv_route_progress_shortfall_penalty: float = 0.0,
+    ugv_route_progress_shortfall_penalty: float | None = None,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
@@ -465,7 +467,7 @@ def build_args(
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     if ugv_target_assignment_mode is None:
         ugv_target_assignment_mode = (
-            "greedy_sticky"
+            DEFAULT_JOINT_DIAG_UGV_TARGET_ASSIGNMENT_MODE
             if joint_survivor_diagnostic or joint_schema_ugv_diagnostic
             else "nearest"
         )
@@ -486,6 +488,15 @@ def build_args(
     if ugv_assigned_target_obs_only is None:
         ugv_assigned_target_obs_only = False
     ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
+    if ugv_route_progress_shortfall_penalty is None:
+        ugv_route_progress_shortfall_penalty = (
+            DEFAULT_JOINT_DIAG_ROUTE_PROGRESS_SHORTFALL_PENALTY
+            if joint_survivor_diagnostic or joint_schema_ugv_diagnostic
+            else 0.0
+        )
+    if float(ugv_route_progress_shortfall_penalty) < 0.0:
+        raise ValueError("ugv_route_progress_shortfall_penalty must be nonnegative")
+    ugv_route_progress_shortfall_penalty = float(ugv_route_progress_shortfall_penalty)
     if survivor_assignment_obs is None:
         survivor_assignment_obs = bool(
             joint_survivor_diagnostic
@@ -1948,9 +1959,10 @@ def main():
     p.add_argument("--ugv-route-progress-floor-m", type=float, default=0.0,
                    help="Minimum expected planner-route progress per step before "
                         "--ugv-route-progress-floor-penalty starts.")
-    p.add_argument("--ugv-route-progress-shortfall-penalty", type=float, default=0.0,
+    p.add_argument("--ugv-route-progress-shortfall-penalty", type=float, default=None,
                    help="Penalty coefficient per meter that planner-route progress falls short of "
-                        "remaining_route_distance / remaining_episode_steps. Default 0 disables.")
+                        "remaining_route_distance / remaining_episode_steps. Omit to use the "
+                        "diagnostic mode default; pass 0 to disable.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
@@ -2293,7 +2305,10 @@ def main():
         p.error("--ugv-route-progress-floor-penalty must be nonnegative")
     if args.ugv_route_progress_floor_m < 0.0:
         p.error("--ugv-route-progress-floor-m must be nonnegative")
-    if args.ugv_route_progress_shortfall_penalty < 0.0:
+    if (
+        args.ugv_route_progress_shortfall_penalty is not None
+        and args.ugv_route_progress_shortfall_penalty < 0.0
+    ):
         p.error("--ugv-route-progress-shortfall-penalty must be nonnegative")
     if args.survivor_reveal_initial_count < 0:
         p.error("--survivor-reveal-initial-count must be nonnegative")
@@ -2328,9 +2343,15 @@ def main():
     if args.ugv_target_assignment_mode is None and (
         args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
     ):
-        args.ugv_target_assignment_mode = "greedy_sticky"
+        args.ugv_target_assignment_mode = DEFAULT_JOINT_DIAG_UGV_TARGET_ASSIGNMENT_MODE
     if args.ugv_target_assignment_mode is None:
         args.ugv_target_assignment_mode = "nearest"
+    if args.ugv_route_progress_shortfall_penalty is None:
+        args.ugv_route_progress_shortfall_penalty = (
+            DEFAULT_JOINT_DIAG_ROUTE_PROGRESS_SHORTFALL_PENALTY
+            if args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
+            else 0.0
+        )
     if args.ugv_assigned_target_obs_only is None:
         args.ugv_assigned_target_obs_only = False
     if args.survivor_assignment_obs is None:
