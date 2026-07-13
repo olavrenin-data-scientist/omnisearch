@@ -101,6 +101,12 @@ def main():
              "0.0 = perfect radio, 0.3 = visible dropouts in viewer, "
              "0.8 = mostly broken.",
     )
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
+                   help="Communication dropout process for trajectory export.")
+    p.add_argument("--comms-dropout-min-steps", type=int, default=5,
+                   help="Minimum outage duration for --comms-dropout-mode bursty.")
+    p.add_argument("--comms-dropout-max-steps", type=int, default=15,
+                   help="Maximum outage duration for --comms-dropout-mode bursty.")
     p.add_argument("--enable-fire", action="store_true",
                    help="Enable fire in exported trajectories when the merged scenario disables it.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
@@ -364,6 +370,10 @@ def main():
         raise SystemExit("--joint-diagnostic-ugvs must be positive")
     if args.joint_survivor_diagnostic and args.joint_schema_ugv_diagnostic:
         raise SystemExit("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
+    if args.comms_dropout_min_steps < 1:
+        raise SystemExit("--comms-dropout-min-steps must be >= 1")
+    if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
+        raise SystemExit("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
@@ -371,6 +381,7 @@ def main():
     print(f" Steps:         {args.steps}")
     print(f" Grid:          {args.grid_size}x{args.grid_size}")
     print(f" Comms dropout: {args.comms_dropout}")
+    print(f" Comms mode:    {args.comms_dropout_mode}")
     print(f" Terrain:       {args.terrain_source}")
     print("-" * 60)
 
@@ -380,6 +391,9 @@ def main():
         "y_semidim":        args.y_semidim,
         "fire_grid_size":   args.grid_size,
         "comms_dropout":    args.comms_dropout,
+        "comms_dropout_mode": args.comms_dropout_mode,
+        "comms_dropout_min_steps": args.comms_dropout_min_steps,
+        "comms_dropout_max_steps": args.comms_dropout_max_steps,
         "terrain_source":   args.terrain_source,
         "terrain_place":    args.terrain_place,
         "terrain_cache_dir": args.terrain_cache_dir,
@@ -420,6 +434,11 @@ def main():
                 max_steps=args.steps,
                 comms_dropout=args.comms_dropout,
             )
+            scenario_kwargs.update({
+                "comms_dropout_mode": args.comms_dropout_mode,
+                "comms_dropout_min_steps": args.comms_dropout_min_steps,
+                "comms_dropout_max_steps": args.comms_dropout_max_steps,
+            })
             print(f" HAPPO env:     restored from {happo_checkpoint.parent.name}")
         else:
             print(" HAPPO env:     legacy checkpoint (no saved training config)")
@@ -446,6 +465,9 @@ def main():
             "known_survivors_at_reset": False,
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
+            "comms_dropout_mode": args.comms_dropout_mode,
+            "comms_dropout_min_steps": args.comms_dropout_min_steps,
+            "comms_dropout_max_steps": args.comms_dropout_max_steps,
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_assigned_target_obs_only": False,
             "survivor_assignment_obs": True,
@@ -470,6 +492,9 @@ def main():
             "survivor_reveal_end_step": 180,
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
+            "comms_dropout_mode": args.comms_dropout_mode,
+            "comms_dropout_min_steps": args.comms_dropout_min_steps,
+            "comms_dropout_max_steps": args.comms_dropout_max_steps,
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_assigned_target_obs_only": False,
             "survivor_assignment_obs": True,

@@ -510,7 +510,15 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_sensor_max_range = float(max(drone_flight_levels) * self.drone_camera_half_angle_tan)
 
         # Communication
-        self.comms_dropout = kwargs.pop("comms_dropout", 0.0)
+        self.comms_dropout = min(max(float(kwargs.pop("comms_dropout", 0.0)), 0.0), 1.0)
+        self.comms_dropout_mode = str(kwargs.pop("comms_dropout_mode", "iid")).replace("-", "_").lower()
+        if self.comms_dropout_mode not in {"iid", "bursty"}:
+            raise ValueError("comms_dropout_mode must be one of: iid, bursty")
+        self.comms_dropout_min_steps = max(int(kwargs.pop("comms_dropout_min_steps", 5)), 1)
+        self.comms_dropout_max_steps = max(
+            int(kwargs.pop("comms_dropout_max_steps", 15)),
+            self.comms_dropout_min_steps,
+        )
         self.survivor_message_distance_scale_m = max(
             float(kwargs.pop("survivor_message_distance_scale_m", 100.0)),
             1e-6,
@@ -1069,6 +1077,12 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.step_decoy_false_detections = torch.zeros(
             batch_dim, self.n_drones, self.n_decoys, dtype=torch.bool, device=device,
+        )
+        self.comms_dropout_remaining_steps = torch.zeros(
+            batch_dim, self.n_agents, dtype=torch.long, device=device,
+        )
+        self.comms_dropout_last_update_step = torch.full(
+            (batch_dim,), -1, dtype=torch.long, device=device,
         )
         self.survivor_reveal_steps = torch.full(
             (batch_dim, self.n_survivors), -1, dtype=torch.long, device=device,
@@ -1990,6 +2004,8 @@ class WildfireSearchScenario(BaseScenario):
             self.dismissed_decoys.zero_()
             self.known_decoys_by_agent.zero_()
             self.step_decoy_false_detections.zero_()
+            self.comms_dropout_remaining_steps.zero_()
+            self.comms_dropout_last_update_step.fill_(-1)
             self.survivor_reveal_steps.fill_(-1)
             self.survivor_oracle_revealed.zero_()
             self.decoy_reveal_steps.fill_(-1)
@@ -2030,6 +2046,8 @@ class WildfireSearchScenario(BaseScenario):
             self.dismissed_decoys[env_index] = False
             self.known_decoys_by_agent[env_index] = False
             self.step_decoy_false_detections[env_index] = False
+            self.comms_dropout_remaining_steps[env_index] = 0
+            self.comms_dropout_last_update_step[env_index] = -1
             self.survivor_reveal_steps[env_index] = -1
             self.survivor_oracle_revealed[env_index] = False
             self.decoy_reveal_steps[env_index] = -1
@@ -8659,17 +8677,82 @@ class WildfireSearchScenario(BaseScenario):
 
     def _communication_keep(self, agent: Agent) -> Tensor:
         """Sample one receiver-level communication state for this observation."""
-        if self.comms_dropout > 0:
+        if self.comms_dropout <= 0:
+            keep = torch.ones(
+                self.world.batch_dim, 1, dtype=torch.bool, device=agent.state.pos.device,
+            )
+        elif self.comms_dropout_mode == "bursty":
+            self._advance_bursty_comms_dropout()
+            agent_idx = self.world.agents.index(agent)
+            keep = (self.comms_dropout_remaining_steps[:, agent_idx] <= 0).view(-1, 1)
+        else:
             keep = (
                 torch.rand(self.world.batch_dim, 1, device=agent.state.pos.device)
                 > self.comms_dropout
             )
-        else:
-            keep = torch.ones(
-                self.world.batch_dim, 1, dtype=torch.bool, device=agent.state.pos.device,
-            )
         agent.comms_up = keep[:, 0]
         return keep
+
+    def _bursty_comms_start_probability(self) -> float:
+        """Per-connected-step outage start probability for target down fraction."""
+        target_fraction = min(max(float(self.comms_dropout), 0.0), 1.0)
+        if target_fraction <= 0.0:
+            return 0.0
+        if target_fraction >= 1.0:
+            return 1.0
+        mean_duration = 0.5 * (
+            float(self.comms_dropout_min_steps) + float(self.comms_dropout_max_steps)
+        )
+        # Outages start on a connected step and consume that same step. With a
+        # geometric connected run, q below gives the requested long-run down
+        # fraction in expectation for the configured mean outage duration.
+        return target_fraction / (
+            target_fraction + (1.0 - target_fraction) * max(mean_duration, 1.0)
+        )
+
+    def _advance_bursty_comms_dropout(self) -> None:
+        """Advance receiver-level burst outage timers once per env step."""
+        if self.n_agents <= 0:
+            return
+        current_step = self.step_count.to(
+            device=self.comms_dropout_last_update_step.device,
+            dtype=self.comms_dropout_last_update_step.dtype,
+        )
+        due = current_step != self.comms_dropout_last_update_step
+        if not bool(due.any().item()):
+            return
+
+        due_idx = due.nonzero(as_tuple=False).flatten()
+        previous_initialized = self.comms_dropout_last_update_step[due_idx] >= 0
+        if bool(previous_initialized.any().item()):
+            initialized_envs = due_idx[previous_initialized]
+            elapsed = (
+                current_step[initialized_envs]
+                - self.comms_dropout_last_update_step[initialized_envs]
+            ).clamp_min(1).view(-1, 1)
+            self.comms_dropout_remaining_steps[initialized_envs] = (
+                self.comms_dropout_remaining_steps[initialized_envs] - elapsed
+            ).clamp_min(0)
+
+        start_probability = self._bursty_comms_start_probability()
+        if start_probability > 0.0:
+            remaining = self.comms_dropout_remaining_steps[due_idx]
+            connected = remaining <= 0
+            starts = (
+                torch.rand(remaining.shape, device=remaining.device) < start_probability
+            ) & connected
+            if bool(starts.any().item()):
+                durations = torch.randint(
+                    int(self.comms_dropout_min_steps),
+                    int(self.comms_dropout_max_steps) + 1,
+                    remaining.shape,
+                    device=remaining.device,
+                    dtype=remaining.dtype,
+                )
+                updated = torch.where(starts, durations, remaining)
+                self.comms_dropout_remaining_steps[due_idx] = updated
+
+        self.comms_dropout_last_update_step[due_idx] = current_step[due_idx]
 
     def _survivor_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
         """Encode known survivor/false-positive candidates.
@@ -11356,6 +11439,9 @@ if __name__ == "__main__":
     p.add_argument("--n-survivors", type=int, default=5)
     p.add_argument("--grid-size",   type=int, default=128)
     p.add_argument("--comms-dropout", type=float, default=0.0)
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid")
+    p.add_argument("--comms-dropout-min-steps", type=int, default=5)
+    p.add_argument("--comms-dropout-max-steps", type=int, default=15)
     args = p.parse_args()
     render_interactively(
         WildfireSearchScenario(),
@@ -11365,6 +11451,9 @@ if __name__ == "__main__":
         n_survivors=args.n_survivors,
         fire_grid_size=args.grid_size,
         comms_dropout=args.comms_dropout,
+        comms_dropout_mode=args.comms_dropout_mode,
+        comms_dropout_min_steps=args.comms_dropout_min_steps,
+        comms_dropout_max_steps=args.comms_dropout_max_steps,
         terrain_cache_path=args.terrain_cache_path,
         terrain_place=args.terrain_place,
     )

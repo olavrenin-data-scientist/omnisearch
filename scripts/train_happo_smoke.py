@@ -194,6 +194,9 @@ def build_args(
     comms_dropout:  float,
     entropy_coef:   float,
     exp_name:       str,
+    comms_dropout_mode: str = "iid",
+    comms_dropout_min_steps: int = 5,
+    comms_dropout_max_steps: int = 15,
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
     linear_lr_decay: bool | None = None,
@@ -865,6 +868,9 @@ def build_args(
         "n_survivors":   survivor_count,
         "n_decoys":      decoy_count,
         "comms_dropout": comms_dropout,
+        "comms_dropout_mode": comms_dropout_mode,
+        "comms_dropout_min_steps": comms_dropout_min_steps,
+        "comms_dropout_max_steps": comms_dropout_max_steps,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
@@ -1485,6 +1491,13 @@ def main():
     p.add_argument("--seed",           type=int,   default=1)
     p.add_argument("--comms-dropout",  type=float, default=0.0,
                    help="Per-step prob each agent's comms are dropped (default: 0.0).")
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
+                   help="Communication dropout process: iid preserves one-step Bernoulli dropout; "
+                        "bursty creates temporary outages with resync on reconnect.")
+    p.add_argument("--comms-dropout-min-steps", type=int, default=5,
+                   help="Minimum outage duration in steps for --comms-dropout-mode bursty.")
+    p.add_argument("--comms-dropout-max-steps", type=int, default=15,
+                   help="Maximum outage duration in steps for --comms-dropout-mode bursty.")
     p.add_argument("--entropy-coef",   type=float, default=0.01,
                    help="Higher (0.05+) encourages exploration — helps break "
                         "the drones-at-corners action-saturation pathology.")
@@ -2105,6 +2118,10 @@ def main():
     )
     if not 0.0 <= args.comms_dropout <= 1.0:
         p.error("--comms-dropout must be in [0, 1]")
+    if args.comms_dropout_min_steps < 1:
+        p.error("--comms-dropout-min-steps must be >= 1")
+    if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
+        p.error("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
     if args.entropy_coef < 0.0:
         p.error("--entropy-coef must be nonnegative")
     if args.lr <= 0.0:
@@ -2646,6 +2663,11 @@ def main():
     print(f" episode_length: {episode_length}")
     print(f" seed:           {args.seed}")
     print(f" comms_dropout:  {args.comms_dropout}")
+    print(f" comms_dropout_mode: {args.comms_dropout_mode}")
+    print(
+        " comms_dropout_burst_steps: "
+        f"{args.comms_dropout_min_steps}-{args.comms_dropout_max_steps}"
+    )
     print(f" entropy_coef:   {args.entropy_coef}")
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
@@ -2781,6 +2803,9 @@ def main():
         episode_length = episode_length,
         seed           = args.seed,
         comms_dropout  = args.comms_dropout,
+        comms_dropout_mode = args.comms_dropout_mode,
+        comms_dropout_min_steps = args.comms_dropout_min_steps,
+        comms_dropout_max_steps = args.comms_dropout_max_steps,
         entropy_coef   = args.entropy_coef,
         lr             = args.lr,
         critic_lr      = args.critic_lr,

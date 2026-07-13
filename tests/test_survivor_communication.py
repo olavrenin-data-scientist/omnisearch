@@ -16,7 +16,7 @@ TERRAIN_500M_CACHE = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.np
 
 
 class SurvivorCommunicationTests(unittest.TestCase):
-    def _env(self, *, n_survivors=2, comms_dropout=0.0):
+    def _env(self, *, n_survivors=2, comms_dropout=0.0, **kwargs):
         return vmas.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
@@ -31,6 +31,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             max_steps=10,
             terrain_source="real",
             terrain_cache_path=str(TERRAIN_CACHE),
+            **kwargs,
         )
 
     def _diagnostic_env(self, **kwargs):
@@ -423,6 +424,43 @@ class SurvivorCommunicationTests(unittest.TestCase):
         ).view(1, scenario.n_survivors, 7)
         self.assertEqual(float(disconnected_again[0, 0, 0]), 1.0)
         self.assertEqual(float(disconnected_again[0, 1, 0]), 1.0)
+
+    def test_bursty_comms_dropout_uses_persistent_outage_timer(self):
+        env = self._env(
+            comms_dropout=1.0,
+            comms_dropout_mode="bursty",
+            comms_dropout_min_steps=3,
+            comms_dropout_max_steps=3,
+        )
+        scenario = env.scenario
+        drone = env.agents[0]
+
+        self.assertFalse(bool(scenario._communication_keep(drone)[0, 0]))
+        self.assertEqual(int(scenario.comms_dropout_remaining_steps[0, 0]), 3)
+
+        scenario.step_count += 1
+        self.assertFalse(bool(scenario._communication_keep(drone)[0, 0]))
+        self.assertEqual(int(scenario.comms_dropout_remaining_steps[0, 0]), 2)
+
+        scenario.step_count += 1
+        self.assertFalse(bool(scenario._communication_keep(drone)[0, 0]))
+        self.assertEqual(int(scenario.comms_dropout_remaining_steps[0, 0]), 1)
+
+        scenario.step_count += 1
+        self.assertFalse(bool(scenario._communication_keep(drone)[0, 0]))
+        self.assertEqual(int(scenario.comms_dropout_remaining_steps[0, 0]), 3)
+
+    def test_bursty_comms_start_probability_targets_down_fraction(self):
+        env = self._env(
+            comms_dropout=0.3,
+            comms_dropout_mode="bursty",
+            comms_dropout_min_steps=5,
+            comms_dropout_max_steps=15,
+        )
+        scenario = env.scenario
+
+        expected = 0.3 / (0.3 + 0.7 * 10.0)
+        self.assertAlmostEqual(scenario._bursty_comms_start_probability(), expected)
 
     def test_decoy_uses_unified_candidate_slot_with_false_positive_status(self):
         env = self._diagnostic_env(
