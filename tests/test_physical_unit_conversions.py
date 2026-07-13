@@ -140,6 +140,33 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(footprint.item()), 50.0 * scale, places=7)
         self.assertLess(float(footprint.item()), 0.12)
 
+    def test_uav_detection_probability_uses_confidence_grid_size(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=16)
+        scenario.fire_grid_size = 64
+        scenario.uav_confidence_map_grid_size = 16
+        scenario.uav_confidence_grid = torch.zeros(1, 16, 16)
+        scenario.land_cover_grid = torch.zeros(1, 64, 64, dtype=torch.long)
+
+        probability, visible = scenario._uav_cell_detection_probability(
+            torch.zeros(1, 1, 2)
+        )
+
+        self.assertEqual(tuple(probability.shape), (1, 1, 16, 16))
+        self.assertEqual(tuple(visible.shape), (1, 1, 16, 16))
+
+    def test_uav_coverage_reward_uses_coverage_grid_size(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=16)
+        scenario.fire_grid_size = 64
+        scenario.uav_coverage_map_grid_size = 16
+        scenario.coverage_grid = torch.zeros(1, 16, 16, dtype=torch.bool)
+        drone_pos = torch.zeros(1, 1, 2)
+
+        coverage_new, *_ = scenario._coverage_reward(drone_pos)
+
+        self.assertEqual(tuple(scenario.coverage_grid.shape), (1, 16, 16))
+        self.assertGreater(float(coverage_new[0, 0]), 0.0)
+        self.assertLessEqual(float(coverage_new[0, 0]), 1.0)
+
     def test_legacy_floor_sim_overrides_take_precedence(self):
         scenario = self._scenario()
         scenario.drone_min_footprint_sim_override = 0.15
@@ -188,6 +215,12 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_frontier_sectors = 8
         scenario.uav_frontier_top_k = 2
         scenario.uav_frontier_ownership = False
+        scenario.uav_decision_grid = 0
+        scenario.uav_confidence_reward_grid = 0
+        scenario.uav_frontier_global_grid = 0
+        scenario.uav_coverage_reward_grid = 0
+        scenario.uav_confidence_map_grid_size = grid_size
+        scenario.uav_coverage_map_grid_size = grid_size
         scenario.r_uav_confidence = 0.0
         scenario.r_uav_confidence_move = 0.0
         scenario.r_uav_confidence_overlap = 0.0

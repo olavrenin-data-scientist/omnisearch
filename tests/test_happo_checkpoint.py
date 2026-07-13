@@ -1614,6 +1614,27 @@ class HappoCheckpointTests(unittest.TestCase):
             0.02,
         )
 
+    def test_can_set_uav_decision_grids(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="uav_decision_grids",
+            joint_schema_uav_diagnostic=True,
+            uav_decision_grid=64,
+            uav_confidence_reward_grid=64,
+            uav_frontier_global_grid=32,
+            uav_coverage_reward_grid=128,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["uav_decision_grid"], 64)
+        self.assertEqual(scenario["uav_confidence_reward_grid"], 64)
+        self.assertEqual(scenario["uav_frontier_global_grid"], 32)
+        self.assertEqual(scenario["uav_coverage_reward_grid"], 128)
+
     def test_rejects_negative_uav_team_confidence_reward(self):
         with self.assertRaises(ValueError):
             build_args(

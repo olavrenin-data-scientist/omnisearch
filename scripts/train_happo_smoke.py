@@ -233,6 +233,10 @@ def build_args(
     uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
     uav_frontier_top_k: int = DEFAULT_UAV_FRONTIER_TOP_K,
     uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
+    uav_decision_grid: int = 0,
+    uav_confidence_reward_grid: int = 0,
+    uav_frontier_global_grid: int = 0,
+    uav_coverage_reward_grid: int = 0,
     uav_cleanup_target_obs: bool | None = None,
     uav_cleanup_target_grid: int = 16,
     uav_cleanup_target_hold_steps: int = 15,
@@ -1047,6 +1051,26 @@ def build_args(
     uav_frontier_top_k = int(uav_frontier_top_k)
     if uav_frontier_top_k < 1 or uav_frontier_top_k > uav_frontier_sectors:
         raise ValueError("uav_frontier_top_k must be in [1, uav_frontier_sectors]")
+    uav_decision_grid = int(uav_decision_grid)
+    if uav_decision_grid < 0 or uav_decision_grid == 1:
+        raise ValueError("uav_decision_grid must be 0 or at least 2")
+    uav_confidence_reward_grid = int(uav_confidence_reward_grid)
+    if uav_confidence_reward_grid < 0 or uav_confidence_reward_grid == 1:
+        raise ValueError("uav_confidence_reward_grid must be 0 or at least 2")
+    uav_frontier_global_grid = int(uav_frontier_global_grid)
+    if uav_frontier_global_grid < 0 or uav_frontier_global_grid == 1:
+        raise ValueError("uav_frontier_global_grid must be 0 or at least 2")
+    uav_coverage_reward_grid = int(uav_coverage_reward_grid)
+    if uav_coverage_reward_grid < 0 or uav_coverage_reward_grid == 1:
+        raise ValueError("uav_coverage_reward_grid must be 0 or at least 2")
+    if uav_decision_grid > 0:
+        scenario_kwargs["uav_decision_grid"] = uav_decision_grid
+    if uav_confidence_reward_grid > 0:
+        scenario_kwargs["uav_confidence_reward_grid"] = uav_confidence_reward_grid
+    if uav_frontier_global_grid > 0:
+        scenario_kwargs["uav_frontier_global_grid"] = uav_frontier_global_grid
+    if uav_coverage_reward_grid > 0:
+        scenario_kwargs["uav_coverage_reward_grid"] = uav_coverage_reward_grid
     uav_frontier_alignment_reward = float(uav_frontier_alignment_reward)
     if uav_frontier_alignment_reward < 0.0:
         raise ValueError("uav_frontier_alignment_reward must be nonnegative")
@@ -1812,6 +1836,18 @@ def main():
                    help="Number of angular sectors for --uav-frontier-mode sector_topk.")
     p.add_argument("--uav-frontier-top-k", type=int, default=DEFAULT_UAV_FRONTIER_TOP_K,
                    help="How many sector candidates to expose in --uav-frontier-mode sector_topk.")
+    p.add_argument("--uav-decision-grid", type=int, default=0,
+                   help="Fallback UAV internal decision-map grid size for reward/frontier calculations. "
+                        "0 keeps the existing fire-grid resolution. Specific grid flags below override it.")
+    p.add_argument("--uav-confidence-reward-grid", type=int, default=0,
+                   help="Grid size for UAV confidence reward/penalty/opportunity maps. "
+                        "0 keeps the existing fire-grid resolution or --uav-decision-grid fallback.")
+    p.add_argument("--uav-frontier-global-grid", type=int, default=0,
+                   help="Grid size for the global leg of local-global UAV frontier scoring. "
+                        "0 keeps the current source-map resolution or --uav-decision-grid fallback.")
+    p.add_argument("--uav-coverage-reward-grid", type=int, default=0,
+                   help="Grid size for UAV binary coverage reward/overlap maps. "
+                        "0 keeps the existing fire-grid resolution or --uav-decision-grid fallback.")
     p.set_defaults(uav_frontier_ownership=DEFAULT_UAV_FRONTIER_OWNERSHIP)
     p.add_argument("--uav-frontier-ownership", dest="uav_frontier_ownership", action="store_true",
                    help="Ownership-weight sector scores by which UAV is closest to uncovered cells.")
@@ -2230,6 +2266,14 @@ def main():
         p.error("--uav-frontier-sectors must be at least 2")
     if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:
         p.error("--uav-frontier-top-k must be in [1, --uav-frontier-sectors]")
+    if args.uav_decision_grid < 0 or args.uav_decision_grid == 1:
+        p.error("--uav-decision-grid must be 0 or at least 2")
+    if args.uav_confidence_reward_grid < 0 or args.uav_confidence_reward_grid == 1:
+        p.error("--uav-confidence-reward-grid must be 0 or at least 2")
+    if args.uav_frontier_global_grid < 0 or args.uav_frontier_global_grid == 1:
+        p.error("--uav-frontier-global-grid must be 0 or at least 2")
+    if args.uav_coverage_reward_grid < 0 or args.uav_coverage_reward_grid == 1:
+        p.error("--uav-coverage-reward-grid must be 0 or at least 2")
     if args.uav_cleanup_target_grid < 2:
         p.error("--uav-cleanup-target-grid must be at least 2")
     if args.uav_cleanup_target_hold_steps < 1:
@@ -2779,6 +2823,10 @@ def main():
     print(f" uav_frontier_source: {args.uav_frontier_source}")
     print(f" uav_frontier_sectors: {args.uav_frontier_sectors}")
     print(f" uav_frontier_top_k: {args.uav_frontier_top_k}")
+    print(f" uav_decision_grid: {args.uav_decision_grid}")
+    print(f" uav_confidence_reward_grid: {args.uav_confidence_reward_grid}")
+    print(f" uav_frontier_global_grid: {args.uav_frontier_global_grid}")
+    print(f" uav_coverage_reward_grid: {args.uav_coverage_reward_grid}")
     print(f" uav_frontier_ownership: {args.uav_frontier_ownership}")
     print(f" uav_cleanup_target_obs: {args.uav_cleanup_target_obs}")
     print(f" uav_cleanup_target_grid: {args.uav_cleanup_target_grid}")
@@ -2948,6 +2996,10 @@ def main():
         uav_frontier_sectors = args.uav_frontier_sectors,
         uav_frontier_top_k = args.uav_frontier_top_k,
         uav_frontier_ownership = args.uav_frontier_ownership,
+        uav_decision_grid = args.uav_decision_grid,
+        uav_confidence_reward_grid = args.uav_confidence_reward_grid,
+        uav_frontier_global_grid = args.uav_frontier_global_grid,
+        uav_coverage_reward_grid = args.uav_coverage_reward_grid,
         uav_cleanup_target_obs = args.uav_cleanup_target_obs,
         uav_cleanup_target_grid = args.uav_cleanup_target_grid,
         uav_cleanup_target_hold_steps = args.uav_cleanup_target_hold_steps,
