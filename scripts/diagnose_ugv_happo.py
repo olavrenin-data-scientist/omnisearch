@@ -156,6 +156,23 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs["n_survivors"] = int(args.n_survivors)
         if args.joint_schema_ugv_diagnostic:
             scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
+    if args.n_decoys is not None:
+        scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
+        if args.joint_schema_ugv_diagnostic and int(args.n_decoys) > 0:
+            scenario_kwargs.setdefault("delayed_decoy_knowledge", True)
+            scenario_kwargs.setdefault(
+                "decoy_reveal_schedule",
+                scenario_kwargs.get("survivor_reveal_schedule", "stratified_uniform"),
+            )
+            scenario_kwargs.setdefault("decoy_reveal_initial_count", 0)
+            scenario_kwargs.setdefault(
+                "decoy_reveal_start_step",
+                scenario_kwargs.get("survivor_reveal_start_step", 10),
+            )
+            scenario_kwargs.setdefault(
+                "decoy_reveal_end_step",
+                scenario_kwargs.get("survivor_reveal_end_step", 180),
+            )
     scenario_kwargs.update(distance_kwargs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -2912,6 +2929,8 @@ def main() -> None:
                         help="Override UGV count. Default preserves the checkpoint manifest or diagnostic default.")
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or diagnostic default.")
+    parser.add_argument("--n-decoys", type=int, default=None,
+                        help="Override decoy count. In joint-schema UGV diagnostics, decoys reveal over time as false-positive candidates.")
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
     parser.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None)
     parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
@@ -3127,6 +3146,7 @@ def main() -> None:
             f"{scenario_kwargs.get('n_drones', 0)} UAVs, "
             f"{scenario_kwargs.get('n_ground', 0)} UGVs, "
             f"{scenario_kwargs.get('n_survivors', 0)} survivors, "
+            f"{scenario_kwargs.get('n_decoys', 0)} decoys, "
             f"obs_schema=({scenario_kwargs.get('obs_schema_n_drones')}, "
             f"{scenario_kwargs.get('obs_schema_n_ground')}, "
             f"{scenario_kwargs.get('obs_schema_n_survivors')})"

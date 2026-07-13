@@ -460,6 +460,52 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(dismissed[0, 1, 6]), 0.0)
         self.assertEqual(float(dismissed[0, 1, 7]), 1.0)
 
+    def test_delayed_decoy_reveal_is_targetable_until_dismissed(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            n_decoys=1,
+            known_survivors_at_reset=False,
+            delayed_survivor_knowledge=True,
+            survivor_reveal_initial_count=0,
+            survivor_reveal_start_step=10,
+            survivor_reveal_end_step=10,
+            delayed_decoy_knowledge=True,
+            decoy_reveal_initial_count=0,
+            decoy_reveal_start_step=0,
+            decoy_reveal_end_step=0,
+            ugv_target_assignment_mode="greedy",
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        decoy = scenario._decoys[0]
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.5, 0.0]])
+        decoy.state.pos[:] = torch.tensor([[0.0, 0.0]])
+
+        self.assertFalse(bool(scenario.scouted_survivors[0, 0]))
+        self.assertTrue(bool(scenario.scouted_decoys[0, 0]))
+        self.assertTrue(bool(scenario.known_decoys_by_agent[0, scenario.n_drones:, 0].all()))
+
+        target_pos, targetable, is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertEqual(target_pos.shape[1], 2)
+        self.assertFalse(bool(targetable[0, :, 0].any()))
+        self.assertTrue(bool(targetable[0, :, 1].all()))
+        self.assertFalse(bool(is_decoy[0, 0]))
+        self.assertTrue(bool(is_decoy[0, 1]))
+
+        agent_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        penalty = scenario._process_decoy_false_positives(
+            agent_pos,
+            scenario.detection_range_by_env.view(-1, 1, 1),
+            torch.device("cpu"),
+        )
+        self.assertTrue(bool(scenario.dismissed_decoys[0, 0]))
+        self.assertEqual(float(penalty[0, 0]), 0.0)
+
+        _target_pos, targetable_after, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertFalse(bool(targetable_after[0, :, 1].any()))
+
     def test_ground_cannot_confirm_before_drone_scout(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario

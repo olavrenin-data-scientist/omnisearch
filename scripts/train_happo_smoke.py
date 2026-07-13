@@ -253,6 +253,7 @@ def build_args(
     n_drones: int | None = None,
     n_ugvs: int | None = None,
     n_survivors: int | None = None,
+    n_decoys: int | None = None,
     delayed_survivor_knowledge: bool = False,
     survivor_reveal_schedule: str = "stratified_uniform",
     survivor_reveal_initial_count: int = 1,
@@ -356,6 +357,7 @@ def build_args(
     )
     joint_drone_count = DEFAULT_JOINT_DIAG_DRONES if n_drones is None else max(int(n_drones), 0)
     joint_ugv_count = DEFAULT_JOINT_DIAG_UGVS if n_ugvs is None else max(int(n_ugvs), 0)
+    decoy_count = 0 if n_decoys is None else max(int(n_decoys), 0)
     if n_drones is not None:
         uav_diagnostic_drones = max(int(n_drones), 1)
     if n_ugvs is not None:
@@ -861,6 +863,7 @@ def build_args(
         "n_drones":      joint_drone_count,
         "n_ground":      joint_ugv_count,
         "n_survivors":   survivor_count,
+        "n_decoys":      decoy_count,
         "comms_dropout": comms_dropout,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
@@ -898,6 +901,11 @@ def build_args(
         "survivor_reveal_initial_count": survivor_reveal_initial_count,
         "survivor_reveal_start_step": survivor_reveal_start_step,
         "survivor_reveal_end_step": survivor_reveal_end_step,
+        "delayed_decoy_knowledge": bool(joint_schema_ugv_diagnostic and decoy_count > 0),
+        "decoy_reveal_schedule": survivor_reveal_schedule,
+        "decoy_reveal_initial_count": 0,
+        "decoy_reveal_start_step": survivor_reveal_start_step,
+        "decoy_reveal_end_step": survivor_reveal_end_step,
         "drone_min_footprint_m": drone_min_footprint_m,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
@@ -1355,15 +1363,21 @@ def build_args(
             "n_drones": 0,
             "n_ground": joint_ugv_count,
             "n_survivors": survivor_count,
+            "n_decoys": decoy_count,
             "obs_schema_n_drones": joint_drone_count,
             "obs_schema_n_ground": joint_ugv_count,
             "obs_schema_n_survivors": survivor_count,
             "known_survivors_at_reset": False,
             "delayed_survivor_knowledge": True,
+            "delayed_decoy_knowledge": decoy_count > 0,
             "survivor_reveal_schedule": survivor_reveal_schedule,
             "survivor_reveal_initial_count": int(survivor_reveal_initial_count),
             "survivor_reveal_start_step": int(survivor_reveal_start_step),
             "survivor_reveal_end_step": int(survivor_reveal_end_step),
+            "decoy_reveal_schedule": survivor_reveal_schedule,
+            "decoy_reveal_initial_count": 0,
+            "decoy_reveal_start_step": int(survivor_reveal_start_step),
+            "decoy_reveal_end_step": int(survivor_reveal_end_step),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": 0.0,
@@ -1429,10 +1443,12 @@ def build_args(
     obs_dim_n_survivors = int(
         scenario_kwargs.get("obs_schema_n_survivors", scenario_kwargs["n_survivors"])
     )
+    obs_dim_n_decoys = int(scenario_kwargs.get("n_decoys", 0))
     algo_args["model"]["terrain_cnn_single_obs_dim"] = wildfire_single_observation_dim(
         local_map_patch_size=int(local_map_patch_size),
         n_agents=obs_dim_n_agents,
         n_survivors=obs_dim_n_survivors,
+        n_decoys=obs_dim_n_decoys,
         ugv_planner_hint=ugv_planner_hint,
         ugv_planner_detour_obs=bool(ugv_planner_detour_obs),
         coverage_obs_grid=int(coverage_obs_grid),
@@ -1802,6 +1818,9 @@ def main():
     p.add_argument("--n-survivors", type=int, default=None,
                    help="Override the number of survivors for training/diagnostic scenarios. "
                         "Joint-schema modes use the same value for the survivor observation schema.")
+    p.add_argument("--n-decoys", type=int, default=None,
+                   help="Add this many decoy false-positive candidates. In --joint-schema-ugv-diagnostic, "
+                        "decoys are revealed over time like oracle survivor scout events.")
     p.add_argument("--delayed-survivor-knowledge", action="store_true",
                    help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
     p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
@@ -2824,6 +2843,7 @@ def main():
         n_drones = args.n_drones,
         n_ugvs = args.n_ugvs,
         n_survivors = args.n_survivors,
+        n_decoys = args.n_decoys,
         delayed_survivor_knowledge = bool(
             args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
         ),

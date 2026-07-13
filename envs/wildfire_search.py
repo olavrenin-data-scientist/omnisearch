@@ -537,6 +537,24 @@ class WildfireSearchScenario(BaseScenario):
             int(kwargs.pop("survivor_reveal_end_step", 180)),
             self.survivor_reveal_start_step,
         )
+        self.delayed_decoy_knowledge = bool(kwargs.pop("delayed_decoy_knowledge", False))
+        self.decoy_reveal_schedule = str(
+            kwargs.pop("decoy_reveal_schedule", self.survivor_reveal_schedule)
+        ).replace("-", "_").lower()
+        if self.decoy_reveal_schedule not in {"stratified_uniform"}:
+            raise ValueError("decoy_reveal_schedule must be stratified_uniform")
+        self.decoy_reveal_initial_count = max(
+            int(kwargs.pop("decoy_reveal_initial_count", 0)),
+            0,
+        )
+        self.decoy_reveal_start_step = max(
+            int(kwargs.pop("decoy_reveal_start_step", self.survivor_reveal_start_step)),
+            0,
+        )
+        self.decoy_reveal_end_step = max(
+            int(kwargs.pop("decoy_reveal_end_step", self.survivor_reveal_end_step)),
+            self.decoy_reveal_start_step,
+        )
         self.survivor_spawn_reference = str(kwargs.pop("survivor_spawn_reference", "auto")).lower()
         if self.survivor_spawn_reference not in {"auto", "ground", "drone"}:
             raise ValueError("survivor_spawn_reference must be one of: auto, ground, drone")
@@ -1056,6 +1074,10 @@ class WildfireSearchScenario(BaseScenario):
             (batch_dim, self.n_survivors), -1, dtype=torch.long, device=device,
         )
         self.survivor_oracle_revealed = torch.zeros_like(self.found_survivors)
+        self.decoy_reveal_steps = torch.full(
+            (batch_dim, self.n_decoys), -1, dtype=torch.long, device=device,
+        )
+        self.decoy_oracle_revealed = torch.zeros_like(self.scouted_decoys)
         self.coverage_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
         )
@@ -1415,6 +1437,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_team_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_pending_penalty = torch.zeros(batch_dim, device=device)
         self.metric_survivor_oracle_reveals = torch.zeros(batch_dim, device=device)
+        self.metric_decoy_oracle_reveals = torch.zeros(batch_dim, device=device)
         self.metric_ugv_assignment_switches = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_scout = torch.zeros(batch_dim, device=device)
         self.metric_reward_drone_progress = torch.zeros(batch_dim, device=device)
@@ -1646,6 +1669,7 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_team_scout,
             self.metric_reward_pending_penalty,
             self.metric_survivor_oracle_reveals,
+            self.metric_decoy_oracle_reveals,
             self.metric_ugv_assignment_switches,
             self.metric_reward_drone_scout,
             self.metric_reward_drone_progress,
@@ -1968,6 +1992,8 @@ class WildfireSearchScenario(BaseScenario):
             self.step_decoy_false_detections.zero_()
             self.survivor_reveal_steps.fill_(-1)
             self.survivor_oracle_revealed.zero_()
+            self.decoy_reveal_steps.fill_(-1)
+            self.decoy_oracle_revealed.zero_()
             self.coverage_grid.zero_()
             self.uav_confidence_grid.zero_()
             self.ground_coverage_grid.zero_()
@@ -2006,6 +2032,8 @@ class WildfireSearchScenario(BaseScenario):
             self.step_decoy_false_detections[env_index] = False
             self.survivor_reveal_steps[env_index] = -1
             self.survivor_oracle_revealed[env_index] = False
+            self.decoy_reveal_steps[env_index] = -1
+            self.decoy_oracle_revealed[env_index] = False
             self.coverage_grid[env_index] = False
             self.uav_confidence_grid[env_index] = 0.0
             self.ground_coverage_grid[env_index] = False
@@ -2043,8 +2071,12 @@ class WildfireSearchScenario(BaseScenario):
                 self._sample_delayed_survivor_reveals(b)
             else:
                 self._initialize_known_survivors_at_reset(b)
+            if self.delayed_decoy_knowledge:
+                self._sample_delayed_decoy_reveals(b)
         if self.delayed_survivor_knowledge:
             self._apply_delayed_survivor_reveals(env_index)
+        if self.delayed_decoy_knowledge:
+            self._apply_delayed_decoy_reveals(env_index)
         self._invalidate_uav_terrain_caches()
         self._invalidate_ugv_planner_route_cache(env_index, terrain_changed=True)
 
@@ -2108,6 +2140,31 @@ class WildfireSearchScenario(BaseScenario):
                 reveal_steps[survivor_idx] = step
         self.survivor_reveal_steps[env_index] = reveal_steps
 
+    def _sample_delayed_decoy_reveals(self, env_index: int) -> None:
+        if not self.delayed_decoy_knowledge or self.n_decoys <= 0:
+            return
+        device = self.decoy_reveal_steps.device
+        count = int(self.n_decoys)
+        initial_count = min(int(self.decoy_reveal_initial_count), count)
+        reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
+        order = torch.randperm(count, device=device)
+        if initial_count > 0:
+            reveal_steps[order[:initial_count]] = 0
+        remaining = count - initial_count
+        if remaining > 0:
+            start = int(min(max(self.decoy_reveal_start_step, 0), self.max_steps))
+            end = int(min(max(self.decoy_reveal_end_step, start), self.max_steps))
+            edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
+            for k, decoy_idx in enumerate(order[initial_count:]):
+                lo = int(torch.floor(edges[k]).item())
+                hi = int(torch.floor(edges[k + 1]).item())
+                if hi <= lo:
+                    step = lo
+                else:
+                    step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
+                reveal_steps[decoy_idx] = step
+        self.decoy_reveal_steps[env_index] = reveal_steps
+
     def _apply_delayed_survivor_reveals(self, env_index: int | None = None) -> None:
         if not self.delayed_survivor_knowledge or self.n_survivors <= 0:
             return
@@ -2134,6 +2191,85 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.metric_survivor_oracle_reveals[env_index] = reveal_counts[0]
         self._invalidate_ugv_assignment_cache(env_index)
+
+    def _apply_delayed_decoy_reveals(self, env_index: int | None = None) -> None:
+        if not self.delayed_decoy_knowledge or self.n_decoys <= 0:
+            return
+        if env_index is None:
+            env_slice = slice(None)
+            steps = self.step_count.view(-1, 1)
+        else:
+            env_slice = slice(env_index, env_index + 1)
+            steps = self.step_count[env_index : env_index + 1].view(1, 1)
+        due = (
+            (self.decoy_reveal_steps[env_slice] >= 0)
+            & (self.decoy_reveal_steps[env_slice] <= steps)
+            & ~self.decoy_oracle_revealed[env_slice]
+            & ~self.dismissed_decoys[env_slice]
+        )
+        if due.numel() == 0 or not bool(due.any().item()):
+            return
+        self.decoy_oracle_revealed[env_slice] |= due
+        self.scouted_decoys[env_slice] |= due
+        if self.n_ground > 0:
+            self.known_decoys_by_agent[env_slice, self.n_drones:, :] |= due.unsqueeze(1)
+        reveal_counts = due.float().sum(dim=1)
+        if env_index is None:
+            self.metric_decoy_oracle_reveals.copy_(reveal_counts)
+        else:
+            self.metric_decoy_oracle_reveals[env_index] = reveal_counts[0]
+        self._invalidate_ugv_assignment_cache(env_index)
+
+    def _ugv_ground_target_candidates(self) -> tuple[Tensor, Tensor, Tensor]:
+        """Return combined UGV targets: true survivors first, then decoys."""
+        device = self.fire_grid.device
+        ground_slice = slice(self.n_drones, self.n_agents)
+        target_pos_parts: list[Tensor] = []
+        targetable_parts: list[Tensor] = []
+        is_decoy_parts: list[Tensor] = []
+
+        if self.n_survivors > 0:
+            survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
+            unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
+            ground_known = self.known_survivors_by_agent[:, ground_slice]
+            survivor_targetable = ground_known & unconfirmed_scouted.unsqueeze(1)
+            target_pos_parts.append(survivor_pos)
+            targetable_parts.append(survivor_targetable)
+            is_decoy_parts.append(torch.zeros(
+                self.world.batch_dim,
+                self.n_survivors,
+                dtype=torch.bool,
+                device=device,
+            ))
+
+        if self.n_decoys > 0:
+            decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
+            ground_decoy_known = self.known_decoys_by_agent[:, ground_slice]
+            decoy_targetable = (
+                ground_decoy_known
+                & self.scouted_decoys.unsqueeze(1)
+                & ~self.dismissed_decoys.unsqueeze(1)
+            )
+            target_pos_parts.append(decoy_pos)
+            targetable_parts.append(decoy_targetable)
+            is_decoy_parts.append(torch.ones(
+                self.world.batch_dim,
+                self.n_decoys,
+                dtype=torch.bool,
+                device=device,
+            ))
+
+        if not target_pos_parts:
+            return (
+                torch.zeros(self.world.batch_dim, 0, 2, device=device),
+                torch.zeros(self.world.batch_dim, self.n_ground, 0, dtype=torch.bool, device=device),
+                torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device),
+            )
+        return (
+            torch.cat(target_pos_parts, dim=1),
+            torch.cat(targetable_parts, dim=2),
+            torch.cat(is_decoy_parts, dim=1),
+        )
 
     def _invalidate_ugv_assignment_cache(self, env_index: int | None = None) -> None:
         if not hasattr(self, "ugv_assignment_cache_step"):
@@ -3256,8 +3392,10 @@ class WildfireSearchScenario(BaseScenario):
             self.step_uav_boundary_hit.zero_()
         self.step_count += 1
         self.metric_survivor_oracle_reveals.zero_()
+        self.metric_decoy_oracle_reveals.zero_()
         self.metric_ugv_assignment_switches.zero_()
         self._apply_delayed_survivor_reveals()
+        self._apply_delayed_decoy_reveals()
 
         if not self.disable_fire:
             if int(self.step_count.max().item()) % self.fire_step_interval == 0:
@@ -3758,7 +3896,8 @@ class WildfireSearchScenario(BaseScenario):
         """Assign known, unconfirmed survivor targets to UGVs."""
         batch_dim = ground_pos.shape[0]
         device = ground_pos.device
-        if self.n_ground == 0 or self.n_survivors == 0:
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
             return (
                 torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device),
                 torch.full((batch_dim, self.n_ground), float("inf"), device=device),
@@ -3918,7 +4057,8 @@ class WildfireSearchScenario(BaseScenario):
         batch_dim = scores.shape[0]
         device = scores.device
         assigned = torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device)
-        if self.n_ground == 0 or self.n_survivors == 0:
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
             return assigned
 
         for env_index in range(batch_dim):
@@ -3989,7 +4129,8 @@ class WildfireSearchScenario(BaseScenario):
         batch_dim = scores.shape[0]
         device = scores.device
         assigned = torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device)
-        if self.n_ground == 0 or self.n_survivors == 0:
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
             return assigned
 
         current_step = self.step_count.to(device=device)
@@ -4096,13 +4237,14 @@ class WildfireSearchScenario(BaseScenario):
     ) -> Tensor:
         """Cost UGV-target assignments by cached terrain route cost instead of straight-line distance."""
         batch_dim, n_ground, _ = ground_pos.shape
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
         costs_m = torch.full(
-            (batch_dim, n_ground, self.n_survivors),
+            (batch_dim, n_ground, n_targets),
             float("inf"),
             device=ground_pos.device,
             dtype=ground_pos.dtype,
         )
-        if n_ground == 0 or self.n_survivors == 0:
+        if n_ground == 0 or n_targets == 0:
             return costs_m
         if self.ugv_planner_hint != "global_astar":
             scale = self.terrain_sim_units_per_meter.to(device=ground_pos.device).view(-1, 1, 1).clamp_min(1e-9)
@@ -4118,13 +4260,13 @@ class WildfireSearchScenario(BaseScenario):
             cell_m = max(cell_w_sim, cell_h_sim) / max(scale, 1e-9)
             traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
             traversable_tensor = self.traversable_grid[env_index]
-            for survivor_index in range(self.n_survivors):
-                if not bool(targetable[env_index, :, survivor_index].any().item()):
+            for target_index in range(n_targets):
+                if not bool(targetable[env_index, :, target_index].any().item()):
                     continue
-                target_pos = survivor_pos[env_index, survivor_index]
+                target_pos = survivor_pos[env_index, target_index]
                 cost_to_go = self._ugv_route_assignment_cost_grid_for_survivor(
                     env_index,
-                    survivor_index,
+                    target_index,
                     target_pos,
                     traversable,
                     movement_cost,
@@ -4134,7 +4276,7 @@ class WildfireSearchScenario(BaseScenario):
                 if cost_to_go is None:
                     continue
                 for ground_index in range(n_ground):
-                    if not bool(targetable[env_index, ground_index, survivor_index].item()):
+                    if not bool(targetable[env_index, ground_index, target_index].item()):
                         continue
                     start_cell = self._single_position_to_grid_cell(ground_pos[env_index, ground_index])
                     sx, sy = start_cell
@@ -4151,7 +4293,7 @@ class WildfireSearchScenario(BaseScenario):
                         sx, sy = nearest_start
                     route_cost = float(cost_to_go[sy, sx])
                     if math.isfinite(route_cost):
-                        costs_m[env_index, ground_index, survivor_index] = route_cost * cell_m
+                        costs_m[env_index, ground_index, target_index] = route_cost * cell_m
         return costs_m
 
     def _ugv_route_assignment_cost_grid_for_survivor(
@@ -4332,16 +4474,16 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.prev_drone_dist = curr_drone_dist
 
-        # Ground robots: target = locally known, scouted, unconfirmed survivors.
+        # Ground robots: target = locally known pending candidates. True survivors
+        # are first in the target tensor; false-positive decoys follow them.
         # Progress is measured in meters and clipped to one nominal UGV step so
         # the shaping coefficient has a terrain-independent reward scale.
         unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
-        ground_known = self.known_survivors_by_agent[:, self.n_drones:, :]
-        known_ground_targets = ground_known & unconfirmed_scouted.unsqueeze(1)
+        ground_target_pos, known_ground_targets, ground_target_is_decoy = self._ugv_ground_target_candidates()
         ground_pos_for_assignment = agent_pos[:, self.n_drones:, :]
         curr_ground_target_idx, curr_ground_dist_sim = self._ugv_assigned_target_indices(
             ground_pos_for_assignment,
-            surv_pos,
+            ground_target_pos,
             known_ground_targets,
         )
         sim_units_per_meter = self.terrain_sim_units_per_meter.to(curr_ground_dist_sim.device)
@@ -4379,7 +4521,7 @@ class WildfireSearchScenario(BaseScenario):
             ground_pos = agent_pos[:, self.n_drones:, :]
             target_idx_safe = curr_ground_target_idx.clamp(min=0)
             target_pos = torch.gather(
-                surv_pos,
+                ground_target_pos,
                 dim=1,
                 index=target_idx_safe.unsqueeze(-1).expand(-1, -1, 2),
             )
@@ -4589,7 +4731,8 @@ class WildfireSearchScenario(BaseScenario):
         ):
             milestone_radii = self.ground_approach_milestone_radii_m_tensor.view(1, 1, -1)
             milestone_rewards = self.ground_approach_milestone_rewards_tensor.view(1, 1, -1)
-            target_idx_safe = curr_ground_target_idx.clamp(min=0)
+            real_ground_target = valid_ground_target & (curr_ground_target_idx < self.n_survivors)
+            target_idx_safe = curr_ground_target_idx.clamp(min=0, max=max(self.n_survivors - 1, 0))
             milestone_index = target_idx_safe.unsqueeze(-1).unsqueeze(-1).expand(
                 -1,
                 -1,
@@ -4607,6 +4750,7 @@ class WildfireSearchScenario(BaseScenario):
             milestone_crossed = (
                 milestone_gate.unsqueeze(-1)
                 & prev_known.unsqueeze(-1)
+                & real_ground_target.unsqueeze(-1)
                 & (self.prev_ground_dist.unsqueeze(-1) >= milestone_radii)
                 & (curr_ground_dist_m.unsqueeze(-1) < milestone_radii)
                 & ~target_milestones_reached
@@ -4655,7 +4799,15 @@ class WildfireSearchScenario(BaseScenario):
         # Per-step pressure: number of scouted-but-unconfirmed survivors still
         # waiting. Applied to ground robots so idling while survivors are pending
         # is no longer a safe zero-reward option.
-        n_pending = unconfirmed_scouted.float().sum(dim=1)  # [B]
+        pending_decoys = (
+            self.scouted_decoys & ~self.dismissed_decoys
+            if self.n_decoys > 0
+            else torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
+        )
+        n_pending = (
+            unconfirmed_scouted.float().sum(dim=1)
+            + pending_decoys.float().sum(dim=1)
+        )  # [B]
         pending_penalty_reward = n_pending * self.r_pending_penalty * float(self.n_ground)
 
         ground_agents = self.world.agents[self.n_drones:]
@@ -5161,6 +5313,8 @@ class WildfireSearchScenario(BaseScenario):
             self.known_decoys_by_agent[:, self.n_drones:] |= investigatable
             newly_dismissed = investigatable.any(dim=1) & ~self.dismissed_decoys
             self.dismissed_decoys = self.dismissed_decoys | newly_dismissed
+            if bool(newly_dismissed.any().item()):
+                self._invalidate_ugv_assignment_cache()
             trips_per_ground = investigatable.float().sum(dim=2)
             decoy_penalty = trips_per_ground * self.r_decoy_pursuit_penalty
 
@@ -8734,25 +8888,24 @@ class WildfireSearchScenario(BaseScenario):
         agent_idx = self.world.agents.index(agent)
         if agent_idx == self.n_drones:
             self._invalidate_ugv_planner_route_cache()
-        if agent.is_drone or self.n_survivors == 0:
+        if agent.is_drone:
             return torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
 
         ground_slice = slice(self.n_drones, self.n_agents)
-        ground_known = self.known_survivors_by_agent[:, ground_slice]
-        ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
-        targetable = ground_known & ~ground_confirmed
-        survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
+        target_pos_all, targetable, _target_is_decoy = self._ugv_ground_target_candidates()
+        if target_pos_all.shape[1] == 0:
+            return torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
         ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
         assigned_idx, _assigned_dist = self._ugv_assigned_target_indices(
             ground_pos,
-            survivor_pos,
+            target_pos_all,
             targetable,
         )
         ground_index = agent_idx - self.n_drones
         target_idx = assigned_idx[:, ground_index]
         has_target = target_idx >= 0
         target_idx_safe = target_idx.clamp(min=0)
-        target_pos = survivor_pos.gather(1, target_idx_safe.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
+        target_pos = target_pos_all.gather(1, target_idx_safe.view(-1, 1, 1).expand(-1, 1, 2)).squeeze(1)
 
         out = torch.zeros(self.world.batch_dim, hint_dim, device=agent.state.pos.device)
         for env_index in range(self.world.batch_dim):
@@ -10992,6 +11145,8 @@ class WildfireSearchScenario(BaseScenario):
             "mission/new_scouts": self.metric_new_scouts,
             "mission/new_oracle_reveals": self.metric_survivor_oracle_reveals,
             "mission/n_oracle_revealed": self.survivor_oracle_revealed.sum(dim=1).float(),
+            "mission/new_decoy_oracle_reveals": self.metric_decoy_oracle_reveals,
+            "mission/n_decoy_oracle_revealed": self.decoy_oracle_revealed.sum(dim=1).float(),
             "mission/new_confirmations": self.metric_new_confirmations,
             "mission/n_scouted": self.scouted_survivors.sum(dim=1).float(),
             "mission/n_confirmed": self.found_survivors.sum(dim=1).float(),
