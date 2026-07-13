@@ -777,6 +777,44 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([2.0]))
         torch.testing.assert_close(scenario.metric_reward_ground_confirm, torch.tensor([10.0]))
 
+    def test_pending_penalty_uses_each_ugv_local_known_targets(self):
+        env = self._diagnostic_env(
+            n_drones=0,
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            r_found_survivor=0.0,
+            r_ground_confirm=0.0,
+            r_ground_shaping=0.0,
+            r_ground_approach=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_ugv_planner_progress=0.0,
+            r_pending_penalty=-0.5,
+            r_fire_penalty=0.0,
+            r_ground_travel_cost=0.0,
+            r_time_penalty=0.0,
+            r_coverage=0.0,
+        )
+        env.reset()
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        survivor = scenario._survivors[0]
+        ugv0.state.pos[:] = torch.tensor([[-0.8, -0.8]])
+        ugv1.state.pos[:] = torch.tensor([[0.8, 0.8]])
+        survivor.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent.zero_()
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        ugv0.comms_up = torch.tensor([False])
+        ugv1.comms_up = torch.tensor([False])
+
+        scenario._compute_step_rewards()
+
+        torch.testing.assert_close(ugv0.scenario_reward, torch.tensor([-0.5]))
+        torch.testing.assert_close(ugv1.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(scenario.metric_reward_pending_penalty, torch.tensor([-0.5]))
+
     def test_greedy_ugv_assignment_prefers_distinct_known_targets(self):
         env = self._diagnostic_env(
             n_ground=2,

@@ -4885,19 +4885,36 @@ class WildfireSearchScenario(BaseScenario):
             + float(self.r_time_penalty)
         )
 
-        # Per-step pressure: number of scouted-but-unconfirmed survivors still
-        # waiting. Applied to ground robots so idling while survivors are pending
-        # is no longer a safe zero-reward option.
-        pending_decoys = (
-            self.scouted_decoys & ~self.dismissed_decoys
-            if self.n_decoys > 0
-            else torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
-        )
-        n_pending = (
-            unconfirmed_scouted.float().sum(dim=1)
-            + pending_decoys.float().sum(dim=1)
-        )  # [B]
-        pending_penalty_reward = n_pending * self.r_pending_penalty * float(self.n_ground)
+        # Per-step pressure from each UGV's local mission memory. A disconnected
+        # UGV is only penalized for candidates it currently knows and has not
+        # locally marked as resolved; reconnection updates that local memory via
+        # the survivor-message synchronization path.
+        if self.n_ground > 0:
+            ground_slice = slice(self.n_drones, self.n_agents)
+            local_pending_survivors = (
+                self.known_survivors_by_agent[:, ground_slice, :]
+                & ~self.confirmed_survivors_by_agent[:, ground_slice, :]
+            )
+            if self.n_decoys > 0:
+                local_pending_decoys = (
+                    self.known_decoys_by_agent[:, ground_slice, :]
+                    & ~self.dismissed_decoys.unsqueeze(1)
+                )
+                local_pending_targets = torch.cat(
+                    (local_pending_survivors, local_pending_decoys),
+                    dim=2,
+                )
+            else:
+                local_pending_targets = local_pending_survivors
+            n_pending_by_ground = local_pending_targets.float().sum(dim=2)
+        else:
+            n_pending_by_ground = torch.zeros(
+                self.world.batch_dim,
+                0,
+                device=device,
+            )
+        pending_penalty_by_ground = n_pending_by_ground * float(self.r_pending_penalty)
+        pending_penalty_reward = pending_penalty_by_ground.sum(dim=1)
 
         ground_agents = self.world.agents[self.n_drones:]
         ground_in_fire = self._agents_in_fire(ground_agents)  # [B, G]
@@ -5346,7 +5363,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + self.step_ugv_travel_cost[:, g] * self.r_ground_travel_cost
                 r = r + ground_shaping[:, g]
                 r = r + ground_approach[:, g]
-                r = r + n_pending * self.r_pending_penalty
+                r = r + pending_penalty_by_ground[:, g]
                 r = r + ground_cov_new[:, g] * self.r_ground_coverage
                 r = r + movement_alignment_reward[:, g]
                 r = r + planner_progress_reward[:, g]
