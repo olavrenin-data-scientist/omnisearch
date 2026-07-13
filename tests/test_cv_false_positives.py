@@ -176,7 +176,7 @@ class TestDecoyConfigIntegration:
         scenario.make_world(batch_dim=1, device=torch.device("cpu"),
                             n_drones=1, n_ground=1, n_survivors=2)
         assert scenario.n_decoys == 0
-        assert scenario.drone_false_positive_rate == 0.0
+        assert scenario.drone_false_positive_rate == 0.05
         assert len(scenario._decoys) == 0
 
     def test_decoys_configured(self):

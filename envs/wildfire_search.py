@@ -140,13 +140,12 @@ class WildfireSearchScenario(BaseScenario):
         self._cv_adapter = None  # lazily initialized on first CV detection step.
 
         # False-positive perception model (decoy landmarks).
-        # Disabled when no decoys are configured to keep observation size and
-        # existing behavior unchanged. When decoys are enabled, drones can
-        # falsely scout them and UGVs can waste trips dismissing them.
+        # Disabled when no decoys are configured because there are no decoy
+        # landmarks to detect. When decoys are enabled, drones can falsely scout
+        # them and UGVs can waste trips dismissing them.
         self.n_decoys = max(int(kwargs.pop("n_decoys", 0)), 0)
-        default_false_positive_rate = 0.05 if self.n_decoys > 0 else 0.0
         self.drone_false_positive_rate = min(
-            max(float(kwargs.pop("drone_false_positive_rate", default_false_positive_rate)), 0.0),
+            max(float(kwargs.pop("drone_false_positive_rate", 0.05)), 0.0),
             1.0,
         )
         self.r_decoy_pursuit_penalty = float(kwargs.pop("r_decoy_pursuit_penalty", 0.0))
