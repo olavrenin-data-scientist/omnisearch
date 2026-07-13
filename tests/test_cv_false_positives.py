@@ -190,3 +190,11 @@ class TestDecoyConfigIntegration:
         assert scenario.r_decoy_pursuit_penalty == -1.5
         assert len(scenario._decoys) == 3
         assert scenario.scouted_decoys.shape == (1, 3)
+
+    def test_decoy_enabled_default_false_positive_rate(self):
+        scenario = WildfireSearchScenario()
+        scenario.make_world(batch_dim=1, device=torch.device("cpu"),
+                            n_drones=1, n_ground=1, n_survivors=2,
+                            n_decoys=1)
+        assert scenario.n_decoys == 1
+        assert scenario.drone_false_positive_rate == 0.05
