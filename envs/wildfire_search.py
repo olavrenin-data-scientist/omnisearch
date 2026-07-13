@@ -6220,43 +6220,128 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("drone_pos must have shape [B, N, 2]")
         B, N, _ = drone_pos.shape
         G = int(self.uav_confidence_map_grid_size if grid_size is None else grid_size)
+        if B == 0 or N == 0:
+            empty_probability = drone_pos.new_zeros(B, N, G, G)
+            empty_visible = torch.zeros(B, N, G, G, device=drone_pos.device, dtype=torch.bool)
+            return empty_probability, empty_visible
         device = drone_pos.device
         dtype = drone_pos.dtype
-        xs, ys, _, _, cell_pos, _, _, _ = self._uav_grid_geometry(device, dtype, grid_size=G)
-        center_dx = xs.view(1, 1, 1, G) - drone_pos[..., X].view(B, N, 1, 1)
-        center_dy = ys.view(1, 1, G, 1) - drone_pos[..., Y].view(B, N, 1, 1)
-        center_dist = torch.sqrt(center_dx.square() + center_dy.square())
         if footprint is None:
             if N != self.n_drones:
                 raise ValueError("footprint is required when N != n_drones")
             footprint = self._drone_camera_ranges()
-        footprint = footprint.to(device=device, dtype=dtype).view(B, N, 1, 1)
-        visible = center_dist <= footprint
-        normalized_distance = (center_dist / footprint.clamp_min(1e-6)).clamp(0.0, 1.0)
-        distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
-
-        cover_factor = self._uav_land_cover_detection_factor(device, dtype, grid_size=G)
         if altitude_quality is None:
             if N != self.n_drones:
                 raise ValueError("altitude_quality is required when N != n_drones")
             altitude_quality = self.drone_altitude_quality
-        altitude_quality = altitude_quality.to(device=device, dtype=dtype).view(B, N, 1, 1)
-        if self.disable_fire:
-            fire_smoke_factor = torch.ones(B, N, G, G, device=device, dtype=dtype)
-        else:
-            cell_pos = cell_pos.expand(B, -1, -1).to(device=device, dtype=dtype)
-            fire_smoke_factor = self._drone_fire_smoke_visibility_factor(
-                drone_pos,
-                cell_pos,
-            ).view(B, N, G, G).to(dtype=dtype)
+        footprint = footprint.to(device=device, dtype=dtype).view(B, N)
+        altitude_quality = altitude_quality.to(device=device, dtype=dtype).view(B, N)
 
+        if not self.disable_fire:
+            return self._uav_cell_detection_probability_fire_patch(
+                drone_pos,
+                altitude_quality=altitude_quality,
+                footprint=footprint,
+                grid_size=G,
+            )
+
+        xs, ys, _, _, _, _, _, _ = self._uav_grid_geometry(device, dtype, grid_size=G)
+        center_dx = xs.view(1, 1, 1, G) - drone_pos[..., X].view(B, N, 1, 1)
+        center_dy = ys.view(1, 1, G, 1) - drone_pos[..., Y].view(B, N, 1, 1)
+        center_dist = torch.sqrt(center_dx.square() + center_dy.square())
+        footprint_grid = footprint.view(B, N, 1, 1)
+        visible = center_dist <= footprint_grid
+        normalized_distance = (center_dist / footprint_grid.clamp_min(1e-6)).clamp(0.0, 1.0)
+        distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
+        cover_factor = self._uav_land_cover_detection_factor(device, dtype, grid_size=G)
+        altitude_quality_grid = altitude_quality.view(B, N, 1, 1)
         probability = (
-            altitude_quality
+            altitude_quality_grid
             * distance_factor
             * cover_factor
-            * fire_smoke_factor
         ).clamp(0.0, 1.0)
         return torch.where(visible, probability, torch.zeros_like(probability)), visible
+
+    def _uav_cell_detection_probability_fire_patch(
+        self,
+        drone_pos: Tensor,
+        *,
+        altitude_quality: Tensor,
+        footprint: Tensor,
+        grid_size: int,
+    ) -> tuple[Tensor, Tensor]:
+        """Fire-aware UAV detection probability, computed only over footprint patches."""
+        B, N, _ = drone_pos.shape
+        G = int(grid_size)
+        device = drone_pos.device
+        dtype = drone_pos.dtype
+        probability = torch.zeros(B, N, G, G, device=device, dtype=dtype)
+        visible = torch.zeros(B, N, G, G, device=device, dtype=torch.bool)
+
+        xs, ys, _, _, _, cell_width, cell_height, _ = self._uav_grid_geometry(
+            device,
+            dtype,
+            grid_size=G,
+        )
+        max_footprint = float(footprint.detach().max().cpu().item()) if footprint.numel() > 0 else 0.0
+        rx = min(G - 1, int(math.ceil(max_footprint / max(float(cell_width), 1e-12))) + 1)
+        ry = min(G - 1, int(math.ceil(max_footprint / max(float(cell_height), 1e-12))) + 1)
+        offset_x = torch.arange(-rx, rx + 1, device=device).view(1, 1, 1, -1)
+        offset_y = torch.arange(-ry, ry + 1, device=device).view(1, 1, -1, 1)
+        center_gx, center_gy = self._positions_to_grid(drone_pos, grid_size=G)
+        gx_raw = center_gx.view(B, N, 1, 1) + offset_x
+        gy_raw = center_gy.view(B, N, 1, 1) + offset_y
+        valid = (gx_raw >= 0) & (gx_raw < G) & (gy_raw >= 0) & (gy_raw < G)
+        gx = gx_raw.clamp(0, G - 1).expand_as(valid)
+        gy = gy_raw.clamp(0, G - 1).expand_as(valid)
+        batch_idx = torch.arange(B, device=device).view(B, 1, 1, 1).expand_as(valid)
+        drone_idx = torch.arange(N, device=device).view(1, N, 1, 1).expand_as(valid)
+
+        center_dx = xs[gx] - drone_pos[..., X].view(B, N, 1, 1)
+        center_dy = ys[gy] - drone_pos[..., Y].view(B, N, 1, 1)
+        center_dist = torch.sqrt(center_dx.square() + center_dy.square())
+        footprint_patch = footprint.view(B, N, 1, 1)
+        visible_patch = valid & (center_dist <= footprint_patch)
+        normalized_distance = (center_dist / footprint_patch.clamp_min(1e-6)).clamp(0.0, 1.0)
+        distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
+
+        cover_factor = self._uav_land_cover_detection_factor(device, dtype, grid_size=G)[:, 0]
+        cover_patch = cover_factor[batch_idx, gy, gx]
+        patch_cell_pos = torch.stack(
+            (
+                xs[gx].expand_as(center_dist),
+                ys[gy].expand_as(center_dist),
+            ),
+            dim=-1,
+        )
+        fire_smoke_factor = self._uav_patch_fire_smoke_visibility_factor(
+            drone_pos.to(device=device, dtype=dtype),
+            patch_cell_pos,
+        )
+        probability_patch = (
+            altitude_quality.view(B, N, 1, 1)
+            * distance_factor
+            * cover_patch
+            * fire_smoke_factor
+        ).clamp(0.0, 1.0)
+        probability_patch = torch.where(
+            visible_patch,
+            probability_patch,
+            torch.zeros_like(probability_patch),
+        )
+        probability[
+            batch_idx[visible_patch],
+            drone_idx[visible_patch],
+            gy[visible_patch],
+            gx[visible_patch],
+        ] = probability_patch[visible_patch]
+        visible[
+            batch_idx[visible_patch],
+            drone_idx[visible_patch],
+            gy[visible_patch],
+            gx[visible_patch],
+        ] = True
+        return probability, visible
 
     def _uav_confidence_stencil_candidates(self, previous: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         B = previous.shape[0]

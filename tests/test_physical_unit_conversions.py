@@ -606,14 +606,99 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         B = previous.shape[0]
         D = scenario.n_drones
         flat_pos, altitude_quality, footprint = scenario._uav_confidence_stencil_candidates(previous)
-        probability, _ = scenario._uav_cell_detection_probability(
+        probability, _ = self._reference_uav_cell_detection_probability_full_grid(
+            scenario,
             flat_pos,
             altitude_quality=altitude_quality,
             footprint=footprint,
+            grid_size=previous.shape[-1],
         )
         candidate_gain = (1.0 - previous).clamp(0.0, 1.0).unsqueeze(1) * probability
         weighted_gain = (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
         return weighted_gain.view(B, D, 8).max(dim=2).values
+
+    def _reference_uav_cell_detection_probability_full_grid(
+        self,
+        scenario,
+        drone_pos,
+        *,
+        altitude_quality=None,
+        footprint=None,
+        grid_size=None,
+    ):
+        B, N, _ = drone_pos.shape
+        G = int(scenario.uav_confidence_map_grid_size if grid_size is None else grid_size)
+        device = drone_pos.device
+        dtype = drone_pos.dtype
+        xs, ys, _, _, cell_pos, _, _, _ = scenario._uav_grid_geometry(
+            device,
+            dtype,
+            grid_size=G,
+        )
+        center_dx = xs.view(1, 1, 1, G) - drone_pos[..., 0].view(B, N, 1, 1)
+        center_dy = ys.view(1, 1, G, 1) - drone_pos[..., 1].view(B, N, 1, 1)
+        center_dist = torch.sqrt(center_dx.square() + center_dy.square())
+        if footprint is None:
+            footprint = scenario._drone_camera_ranges()
+        footprint = footprint.to(device=device, dtype=dtype).view(B, N, 1, 1)
+        visible = center_dist <= footprint
+        normalized_distance = (center_dist / footprint.clamp_min(1e-6)).clamp(0.0, 1.0)
+        distance_factor = (
+            1.0
+            - (1.0 - float(scenario.drone_edge_detection_floor))
+            * normalized_distance.square()
+        )
+        cover_factor = scenario._uav_land_cover_detection_factor(device, dtype, grid_size=G)
+        if altitude_quality is None:
+            altitude_quality = scenario.drone_altitude_quality
+        altitude_quality = altitude_quality.to(device=device, dtype=dtype).view(B, N, 1, 1)
+        if scenario.disable_fire:
+            fire_smoke_factor = torch.ones(B, N, G, G, device=device, dtype=dtype)
+        else:
+            full_cell_pos = cell_pos.expand(B, -1, -1).to(device=device, dtype=dtype)
+            fire_smoke_factor = scenario._drone_fire_smoke_visibility_factor(
+                drone_pos,
+                full_cell_pos,
+            ).view(B, N, G, G).to(dtype=dtype)
+        probability = (
+            altitude_quality
+            * distance_factor
+            * cover_factor
+            * fire_smoke_factor
+        ).clamp(0.0, 1.0)
+        return torch.where(visible, probability, torch.zeros_like(probability)), visible
+
+    def test_uav_cell_detection_probability_fire_patch_matches_full_grid(self):
+        scenario = self._coverage_scenario(n_drones=2, grid_size=16)
+        scenario.fire_grid_size = 32
+        scenario.uav_confidence_map_grid_size = 16
+        scenario.disable_fire = False
+        scenario.land_cover_grid = torch.arange(32 * 32, dtype=torch.long).view(1, 32, 32) % 6
+        scenario.drone_cover_detection_factors = torch.tensor(
+            [1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.10, 0.05],
+            dtype=torch.float32,
+        )
+        scenario.smoke_grid = torch.linspace(0.0, 1.0, 32 * 32).view(1, 32, 32)
+        scenario.fire_intensity_grid = torch.linspace(1.0, 0.0, 32 * 32).view(1, 32, 32)
+        scenario.fire_grid = scenario.fire_intensity_grid > 0.72
+        scenario.drone_perception_path_samples = 5
+        scenario.drone_smoke_detection_factor = 0.55
+        scenario.drone_smoke_extinction = 1.4
+        scenario.drone_fire_glare_penalty = 0.35
+        scenario.drone_heat_distortion_penalty = 0.20
+        scenario.drone_altitude = torch.tensor([[0.22, 0.18]], dtype=torch.float32)
+        scenario.drone_altitude_quality = torch.tensor([[0.91, 0.73]], dtype=torch.float32)
+        positions = torch.tensor([[[0.74, -0.63], [-0.76, 0.71]]], dtype=torch.float32)
+
+        expected_probability, expected_visible = self._reference_uav_cell_detection_probability_full_grid(
+            scenario,
+            positions,
+            grid_size=16,
+        )
+        probability, visible = scenario._uav_cell_detection_probability(positions, grid_size=16)
+
+        torch.testing.assert_close(visible, expected_visible)
+        torch.testing.assert_close(probability, expected_probability, atol=1e-6, rtol=1e-6)
 
     def test_coverage_uses_camera_footprint(self):
         scenario = self._coverage_scenario()
