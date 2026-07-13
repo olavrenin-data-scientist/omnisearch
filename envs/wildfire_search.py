@@ -9002,7 +9002,7 @@ class WildfireSearchScenario(BaseScenario):
         pos: Tensor,
         env_indices: Tensor | None = None,
     ) -> Tensor:
-        gx, gy = self._positions_to_grid(pos)
+        gx, gy = self._positions_to_grid(pos, grid_size=int(grid.shape[-1]))
         if env_indices is None:
             env_indices = torch.arange(pos.shape[0], device=pos.device)
         expand_shape = (pos.shape[0],) + (1,) * (gx.ndim - 1)

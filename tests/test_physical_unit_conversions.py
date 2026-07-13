@@ -167,6 +167,16 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertGreater(float(coverage_new[0, 0]), 0.0)
         self.assertLessEqual(float(coverage_new[0, 0]), 1.0)
 
+    def test_grid_values_at_positions_infers_grid_size(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=64)
+        scenario.fire_grid_size = 128
+        grid = torch.arange(64 * 64, dtype=torch.float32).view(1, 64, 64)
+        pos = torch.tensor([[[0.75, 0.0]]], dtype=torch.float32)
+
+        value = scenario._grid_values_at_positions(grid, pos)
+
+        self.assertEqual(tuple(value.shape), (1, 1))
+
     def test_legacy_floor_sim_overrides_take_precedence(self):
         scenario = self._scenario()
         scenario.drone_min_footprint_sim_override = 0.15
