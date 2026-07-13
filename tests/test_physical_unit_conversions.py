@@ -179,8 +179,48 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.r_uav_move_coverage = 0.001
         scenario.uav_move_coverage_normalization = "raw"
         scenario.r_uav_move_coverage_cap = 0.1
+        scenario.uav_coverage_opportunity_cap = 1.0
+        scenario.r_uav_frontier_alignment = 0.0
+        scenario.uav_frontier_obs = False
+        scenario.uav_frontier_obs_radius_m = 10.0
+        scenario.uav_frontier_mode = "centroid"
+        scenario.uav_frontier_source = "coverage"
+        scenario.uav_frontier_sectors = 8
+        scenario.uav_frontier_top_k = 2
+        scenario.uav_frontier_ownership = False
+        scenario.r_uav_confidence = 0.0
+        scenario.r_uav_confidence_move = 0.0
+        scenario.r_uav_confidence_overlap = 0.0
+        scenario.uav_confidence_overlap_mode = "raw"
+        scenario.uav_confidence_overlap_allowed_regret = 0.10
+        scenario.uav_confidence_overlap_threshold = 0.65
+        scenario.uav_confidence_gamma = 2.0
+        scenario.uav_confidence_eps = 0.05
+        scenario.uav_confidence_opportunity_eps = 1e-6
+        scenario.uav_confidence_diagnostics = False
+        scenario.uav_confidence_obs_grid = 0
+        scenario.local_confidence_obs_grid = 0
+        scenario.local_confidence_obs_radius_m = 150.0
+        scenario.uav_cleanup_target_obs = False
+        scenario.uav_cleanup_target_diagnostics = False
+        scenario.uav_cleanup_target_grid = 8
+        scenario.uav_cleanup_target_hold_steps = 15
+        scenario.uav_cleanup_target_confidence_threshold = 0.80
+        scenario.uav_cleanup_target_min_value = 0.05
+        scenario.uav_cleanup_target_assignment_distance_scale_m = 250.0
+        scenario.uav_cleanup_target_refresh_mode = "exact"
+        scenario.r_uav_cleanup_target_progress = 0.0
+        scenario.r_uav_astar_progress = 0.0
+        scenario.uav_astar_route_obs = False
+        scenario.uav_astar_grid = 8
+        scenario.uav_astar_confidence_cost_alpha = 3.0
+        scenario.uav_astar_confidence_cost_gamma = 2.0
+        scenario.uav_astar_waypoint_lookahead_m = 5.0
+        scenario.uav_astar_route_replan_steps = 5
+        scenario.uav_astar_waypoint_reached_m = 1.0
         scenario.r_uav_overlap = 0.0
         scenario.uav_overlap_allowed = 0.10
+        scenario.uav_overlap_penalty_normalization = "raw"
         scenario.r_uav_inter_uav_overlap = 0.0
         scenario.uav_inter_uav_overlap_allowed = 0.20
         scenario.r_uav_outside_footprint = 0.0
@@ -515,12 +555,12 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         positions = torch.zeros(1, 1, 2)
 
         scenario.drone_altitude = torch.tensor([[0.05]])
-        small_credit, _, _, _ = scenario._coverage_reward(positions)
+        small_credit, *_ = scenario._coverage_reward(positions)
         small_footprint = float(small_credit.sum())
 
         scenario.coverage_grid.zero_()
         scenario.drone_altitude = torch.tensor([[0.20]])
-        large_credit, _, _, _ = scenario._coverage_reward(positions)
+        large_credit, *_ = scenario._coverage_reward(positions)
         large_footprint = float(large_credit.sum())
 
         self.assertGreater(large_footprint, small_footprint)
@@ -530,7 +570,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
         positions = torch.zeros(1, 2, 2)
 
-        credit, overlap, outside, inter_uav = scenario._coverage_reward(positions)
+        credit, overlap, outside, inter_uav, *_ = scenario._coverage_reward(positions)
 
         self.assertAlmostEqual(float(credit[0, 0]), float(credit[0, 1]), places=7)
         self.assertEqual(float(overlap.sum()), 0.0)
@@ -548,8 +588,8 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10]])
         positions = torch.zeros(1, 1, 2)
 
-        first_credit, first_overlap, first_outside, first_inter_uav = scenario._coverage_reward(positions)
-        revisit_credit, revisit_overlap, revisit_outside, revisit_inter_uav = scenario._coverage_reward(positions)
+        first_credit, first_overlap, first_outside, first_inter_uav, *_ = scenario._coverage_reward(positions)
+        revisit_credit, revisit_overlap, revisit_outside, revisit_inter_uav, *_ = scenario._coverage_reward(positions)
 
         self.assertGreater(float(first_credit.sum()), 0.0)
         self.assertEqual(float(first_overlap.sum()), 0.0)
@@ -567,7 +607,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         total = 0.0
         for x in (-0.75, -0.25, 0.25, 0.75):
             for y in (-0.75, -0.25, 0.25, 0.75):
-                credit, _, _, _ = scenario._coverage_reward(torch.tensor([[[x, y]]]))
+                credit, *_ = scenario._coverage_reward(torch.tensor([[[x, y]]]))
                 total += float(credit.sum())
 
         self.assertLessEqual(total, 1.0 + 1e-7)
@@ -595,13 +635,30 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(penalty[0, 2]), -0.05 / 3.0, places=6)
         self.assertAlmostEqual(float(penalty[0, 3]), -0.05, places=6)
 
+    def test_uav_overlap_penalty_can_use_opportunity_normalization(self):
+        scenario = self._coverage_scenario()
+        scenario.r_uav_overlap = 0.05
+        scenario.uav_overlap_allowed = 0.10
+        scenario.uav_overlap_penalty_normalization = "opportunity"
+        overlap = torch.tensor([[1.00]])
+        expected = torch.tensor([[0.60]])
+        opportunity_available = torch.tensor([[0.25]])
+
+        penalty = scenario._uav_overlap_penalty(
+            overlap,
+            expected,
+            opportunity_available,
+        )
+
+        self.assertAlmostEqual(float(penalty[0, 0]), -0.05 * 0.25, places=6)
+
     def test_uav_inter_uav_overlap_penalty_uses_same_step_overlap_slack(self):
         scenario = self._coverage_scenario(n_drones=2)
         scenario.r_uav_inter_uav_overlap = 0.03
         scenario.uav_inter_uav_overlap_allowed = 0.20
         scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
 
-        _, _, _, inter_uav = scenario._coverage_reward(torch.zeros(1, 2, 2))
+        _, _, _, inter_uav, *_ = scenario._coverage_reward(torch.zeros(1, 2, 2))
         penalty = scenario._uav_inter_uav_overlap_penalty(inter_uav)
 
         self.assertEqual(float(inter_uav[0, 0]), 1.0)
@@ -609,16 +666,61 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(penalty[0, 0]), -0.03, places=6)
         self.assertAlmostEqual(float(penalty[0, 1]), -0.03, places=6)
 
+    def test_uav_frontier_features_point_toward_uncovered_mass(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_frontier_obs = True
+        scenario.coverage_grid[:] = True
+        scenario.coverage_grid[:, :, 4:] = False
+
+        features = scenario._uav_frontier_features_for_positions(torch.zeros(1, 1, 2))
+
+        self.assertGreater(float(features[0, 0, 0]), 0.0)
+        self.assertAlmostEqual(float(features[0, 0, 1]), 0.0, places=6)
+        self.assertGreater(float(features[0, 0, 2]), 0.0)
+        self.assertGreater(float(features[0, 0, 3]), 0.0)
+
+    def test_uav_frontier_alignment_rewards_clamped_progress_toward_uncovered_mass(self):
+        scenario = self._coverage_scenario(grid_size=8)
+        scenario.uav_frontier_obs = True
+        scenario.r_uav_frontier_alignment = 0.2
+        scenario.coverage_grid[:] = True
+        scenario.coverage_grid[:, :, 4:] = False
+        scenario._pre_step_drone_pos = torch.zeros(1, 1, 2)
+
+        toward = torch.tensor([[[0.1, 0.0]]])
+        full_step = torch.tensor([[[2.0, 0.0]]])
+        overshoot = torch.tensor([[[4.0, 0.0]]])
+        away = torch.tensor([[[-0.1, 0.0]]])
+
+        toward_reward, toward_alignment, toward_progress, ratio = scenario._uav_frontier_alignment_reward(toward)
+        full_reward, _, full_progress, full_ratio = scenario._uav_frontier_alignment_reward(full_step)
+        overshoot_reward, _, overshoot_progress, _ = scenario._uav_frontier_alignment_reward(overshoot)
+        away_reward, away_alignment, away_progress, _ = scenario._uav_frontier_alignment_reward(away)
+
+        self.assertGreater(float(ratio[0, 0]), 0.0)
+        self.assertGreater(float(toward_alignment[0, 0]), 0.9)
+        self.assertLess(float(away_alignment[0, 0]), -0.9)
+        self.assertGreater(float(toward_progress[0, 0]), 0.0)
+        self.assertLess(float(toward_progress[0, 0]), 1.0)
+        self.assertEqual(float(full_progress[0, 0]), 1.0)
+        self.assertEqual(float(overshoot_progress[0, 0]), 1.0)
+        self.assertEqual(float(away_progress[0, 0]), 0.0)
+        self.assertGreater(float(toward_reward[0, 0]), 0.0)
+        self.assertLess(float(toward_reward[0, 0]), float(full_reward[0, 0]))
+        self.assertAlmostEqual(float(full_reward[0, 0]), 0.2 * float(full_ratio[0, 0]), places=6)
+        self.assertAlmostEqual(float(overshoot_reward[0, 0]), float(full_reward[0, 0]), places=6)
+        self.assertEqual(float(away_reward[0, 0]), 0.0)
+
     def test_uav_outside_footprint_penalty_scales_with_footprint_outside_map(self):
         scenario = self._coverage_scenario(grid_size=64)
         scenario.r_uav_outside_footprint = 0.1
         scenario.drone_altitude = torch.tensor([[0.20]])
 
-        _, _, center_outside, _ = scenario._coverage_reward(torch.tensor([[[0.0, 0.0]]]))
+        _, _, center_outside, *_ = scenario._coverage_reward(torch.tensor([[[0.0, 0.0]]]))
         center_penalty = scenario._uav_outside_footprint_penalty(center_outside)
 
         scenario.coverage_grid.zero_()
-        _, _, corner_outside, _ = scenario._coverage_reward(torch.tensor([[[0.95, 0.95]]]))
+        _, _, corner_outside, *_ = scenario._coverage_reward(torch.tensor([[[0.95, 0.95]]]))
         corner_penalty = scenario._uav_outside_footprint_penalty(corner_outside)
 
         self.assertAlmostEqual(float(center_outside[0, 0]), 0.0, places=6)

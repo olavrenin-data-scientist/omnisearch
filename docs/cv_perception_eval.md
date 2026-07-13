@@ -8,27 +8,27 @@
 
 | Scenario | Recall | Precision | Mean Conf (TP) | N trials |
 |----------|--------|-----------|----------------|----------|
-| clean@120px | 1.000 | 0.556 | 0.741 | 10 |
-| clean@30px | 1.000 | 0.833 | 0.678 | 10 |
-| clean@50px | 1.000 | 0.667 | 0.773 | 10 |
-| clean@80px | 1.000 | 0.588 | 0.764 | 10 |
-| fire@120px | 1.000 | 0.714 | 0.643 | 10 |
-| fire@30px | 0.700 | 1.000 | 0.654 | 10 |
-| fire@50px | 0.800 | 0.889 | 0.673 | 10 |
-| fire@80px | 0.900 | 0.900 | 0.636 | 10 |
-| fire_and_smoke@120px | 1.000 | 0.667 | 0.623 | 10 |
-| fire_and_smoke@30px | 0.600 | 1.000 | 0.642 | 10 |
-| fire_and_smoke@50px | 0.800 | 0.889 | 0.683 | 10 |
-| fire_and_smoke@80px | 0.900 | 1.000 | 0.673 | 10 |
-| heavy_smoke@120px | 1.000 | 0.714 | 0.721 | 10 |
-| heavy_smoke@30px | 1.000 | 1.000 | 0.650 | 10 |
-| heavy_smoke@50px | 1.000 | 0.833 | 0.723 | 10 |
-| heavy_smoke@80px | 1.000 | 0.769 | 0.753 | 10 |
-| light_smoke@120px | 1.000 | 0.556 | 0.755 | 10 |
-| light_smoke@30px | 1.000 | 0.909 | 0.661 | 10 |
-| light_smoke@50px | 1.000 | 0.909 | 0.719 | 10 |
-| light_smoke@80px | 1.000 | 0.833 | 0.756 | 10 |
-| **OVERALL** | **0.935** | **0.773** | — | 200 |
+| clean@120px | 1.000 | 0.625 | 0.712 | 10 |
+| clean@30px | 1.000 | 0.909 | 0.699 | 10 |
+| clean@50px | 1.000 | 0.909 | 0.743 | 10 |
+| clean@80px | 1.000 | 0.833 | 0.749 | 10 |
+| fire@120px | 0.700 | 0.778 | 0.710 | 10 |
+| fire@30px | 0.500 | 1.000 | 0.687 | 10 |
+| fire@50px | 0.600 | 0.857 | 0.676 | 10 |
+| fire@80px | 0.700 | 1.000 | 0.702 | 10 |
+| fire_and_smoke@120px | 0.700 | 0.875 | 0.646 | 10 |
+| fire_and_smoke@30px | 0.300 | 1.000 | 0.648 | 10 |
+| fire_and_smoke@50px | 0.600 | 0.857 | 0.567 | 10 |
+| fire_and_smoke@80px | 0.600 | 0.750 | 0.687 | 10 |
+| heavy_smoke@120px | 1.000 | 0.500 | 0.739 | 10 |
+| heavy_smoke@30px | 1.000 | 1.000 | 0.682 | 10 |
+| heavy_smoke@50px | 1.000 | 0.833 | 0.744 | 10 |
+| heavy_smoke@80px | 1.000 | 0.667 | 0.737 | 10 |
+| light_smoke@120px | 1.000 | 0.556 | 0.737 | 10 |
+| light_smoke@30px | 0.900 | 1.000 | 0.689 | 10 |
+| light_smoke@50px | 1.000 | 0.769 | 0.749 | 10 |
+| light_smoke@80px | 1.000 | 0.556 | 0.741 | 10 |
+| **OVERALL** | **0.830** | **0.758** | — | 200 |
 
 ## 2. False Positive Analysis (Empty Backgrounds)
 
@@ -57,9 +57,9 @@
 
 ## 5. Inference Performance
 
-- Mean inference time: 482 ms
-- Median inference time: 468 ms
-- P95 inference time: 508 ms
+- Mean inference time: 533 ms
+- Median inference time: 480 ms
+- P95 inference time: 510 ms
 
 ## 6. RL Integration Assessment
 
@@ -67,7 +67,7 @@
 
 | Signal | Available | Quality | RL-useful? |
 |--------|-----------|---------|------------|
-| Detection probability | Yes (confidence) | Good (recall=0.94) | Partial — no miss model |
+| Detection probability | Yes (confidence) | Good (recall=0.83) | Partial — no miss model |
 | False positive rate | Yes | Low (0.1 FP/frame) | Yes |
 | Spatial uncertainty | Yes (bbox center) | 3.6 px mean error | Partial |
 | Confidence scores | Yes | Needs calibration | Yes — thresholdable |
@@ -75,17 +75,19 @@
 
 ## 7. Recommendation
 
-### Verdict: INTEGRATE into simulator
+### Verdict: Keep as SEPARATE TOY DEMO
 
-The CV perception module is reliable enough to replace or augment the abstract
-stochastic camera model in the RL training loop. Detections produce stable,
-spatially accurate, high-recall signals with manageable false positive rates.
+The CV perception module does not reliably detect survivors in the current
+rendering conditions. Integration would provide random/noisy signals that
+hinder rather than help RL training.
 
-**Integration path:**
-1. Replace `_drone_survivor_detections()` Bernoulli with CV confidence > threshold
-2. Feed `estimated_world_xy` into survivor message observations (with noise)
-3. Model false positives as phantom observations that waste UGV travel
-4. Use CV confidence as quality signal in observation vector
+**Blockers:**
+- Recall too low (0.83) — model misses survivors at deployment sizes
+
+**Required improvements:**
+- Fine-tune on NAIP backgrounds spanning multiple geographic regions
+- Expand SARD asset diversity for training
+- Consider thermal/IR channel for smoke penetration
 
 ---
 

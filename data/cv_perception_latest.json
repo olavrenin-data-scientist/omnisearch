@@ -1,0 +1,9 @@
+{
+  "model": "models/survivor_naip_yolov8s.pt",
+  "overall_precision": 0.7579908675799086,
+  "overall_recall": 0.83,
+  "fp_rate_per_frame": 0.05,
+  "spatial_mean_error_px": 3.593580027824589,
+  "stability_count_consistent": true,
+  "verdict": "TOY DEMO"
+}

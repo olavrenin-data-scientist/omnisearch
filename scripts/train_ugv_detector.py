@@ -45,6 +45,40 @@ from detection.wildfire_effects import (
     WildfireMasks,
     apply_wildfire_effects_to_pil,
 )
+from scripts.train_survivor_detector import (
+    _crop_to_alpha,
+    _tight_alpha_bbox,
+)
+
+
+def _scale_sprite_long_axis(asset: "Image.Image", long_px: float) -> "Image.Image":
+    """Uniformly scale a sprite so its tight alpha LONG AXIS equals ``long_px``.
+
+    Perspective (UGV) sizing is anchored on the person's body length (~1.75 m):
+    an upright cutout gets that length as its pixel height, a lying/sitting
+    cutout as its pixel width. The other axis follows the asset's own aspect so
+    poses keep their true proportions — a person's real-world long axis then
+    always satisfies ``long_px * m_per_px ~= 1.75 m`` regardless of pose.
+    """
+    sprite = _crop_to_alpha(asset)
+    tw, th = sprite.size
+    scale = long_px / max(1, max(tw, th))
+    nw = max(2, int(round(tw * scale)))
+    nh = max(2, int(round(th * scale)))
+    out = sprite.resize((nw, nh), Image.Resampling.LANCZOS)
+    # Downscaling soft GrabCut mattes can push borderline alpha below the
+    # labelling threshold, leaving a visible extent far smaller than the
+    # physics target. Measure the post-resize tight extent and correct once.
+    bb = _tight_alpha_bbox(out)
+    if bb is not None:
+        measured = max(bb[2] - bb[0], bb[3] - bb[1])
+        if measured < long_px * 0.9:
+            corr = long_px / max(1, measured)
+            out = sprite.resize(
+                (max(2, int(round(nw * corr))), max(2, int(round(nh * corr)))),
+                Image.Resampling.LANCZOS,
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +102,35 @@ MAST_TILT_DEG = 45.0
 MAST_HFOV_DEG = 60.0
 MAST_RANGE_MIN_M = 3.0
 MAST_RANGE_MAX_M = 15.0
+
+# Hard-negative decoys sized by their real-world footprint (projected through
+# the same range physics as persons): mostly bushes/rocks/stumps, occasionally
+# a vehicle. Never a random 15-80 px blob.
+DECOY_BUSH_M = (0.5, 2.0)      # width and height range for vegetation/rocks
+DECOY_VEHICLE_W_M = (3.0, 8.0)  # vehicle length
+DECOY_VEHICLE_H_M = (1.4, 2.2)  # vehicle height
+DECOY_VEHICLE_FRAC = 0.3
+
+
+def front_m_per_px(range_m: float, image_width: int = 640,
+                   hfov_deg: float = FRONT_CAMERA_HFOV_DEG) -> float:
+    """Metres-per-pixel at a given range for the front camera (pinhole)."""
+    return 2.0 * range_m * np.tan(np.radians(hfov_deg) / 2.0) / image_width
+
+
+def mast_m_per_px(range_m: float, mast_height_m: float = 4.0,
+                  image_width: int = 640, hfov_deg: float = MAST_HFOV_DEG) -> float:
+    """Metres-per-pixel at a given slant range for the mast camera."""
+    slant = float(np.sqrt(range_m ** 2 + mast_height_m ** 2))
+    return 2.0 * slant * np.tan(np.radians(hfov_deg) / 2.0) / image_width
+
+
+def mast_foreshortening(range_m: float, mast_height_m: float = 4.0,
+                        tilt_deg: float = MAST_TILT_DEG) -> float:
+    """Apparent-height foreshortening factor for the mast's downward view."""
+    view_angle_rad = np.arctan2(mast_height_m, range_m)
+    f = np.cos(view_angle_rad - np.radians(90 - tilt_deg))
+    return float(max(0.3, min(1.0, abs(f))))
 
 
 def front_range_to_person_px(
@@ -414,45 +477,86 @@ def _generate_front_split(
         is_negative = rng.random() < neg_frac
         labels: list[str] = []
         placements: list[tuple[int, int, int, int]] = []
+        box_records: list[dict] = []
 
         if not is_negative:
             n_persons = int(rng.integers(1, 4))
             for _ in range(n_persons):
-                range_m = sample_front_range(rng)
-                px_h, px_w = front_range_to_person_px(range_m, image_width=size)
+                # Rejection-sample until the FINAL alpha extent (post erode /
+                # blur) matches the physics target within 20% — thin sprites
+                # can lose most of their silhouette to edge erosion, which
+                # would silently break box_long_px * m_per_px ~= 1.75 m.
+                sprite = None
+                for _attempt in range(6):
+                    range_m = sample_front_range(rng)
+                    px_h, _px_w = front_range_to_person_px(range_m, image_width=size)
 
-                # Add jitter for body variation
-                px_h = int(px_h * rng.uniform(0.8, 1.2))
-                px_w = int(px_w * rng.uniform(0.8, 1.2))
-                px_h = max(20, min(size - 10, px_h))
-                px_w = max(8, min(size // 2, px_w))
+                    # Single SCALAR jitter for body-size variation — one factor
+                    # for both axes so the aspect ratio is never distorted.
+                    body_jitter = float(rng.uniform(0.85, 1.15))
+                    px_h = int(max(15, min(size - 10, px_h * body_jitter)))
 
-                asset = assets[int(rng.integers(0, len(assets)))]
-                sprite = asset.resize((px_w, px_h), Image.Resampling.LANCZOS)
+                    asset = assets[int(rng.integers(0, len(assets)))]
+                    # Anchor the sprite's LONG axis to the body length so
+                    # box_long_px * m_per_px ~= 1.75 m regardless of pose.
+                    cand = _scale_sprite_long_axis(asset, px_h)
+                    if min(cand.size) >= 24:
+                        cand = _erode_alpha_edge(cand, rng)
+                    cand = _range_blur(cand, range_m, rng)
+                    bb = _tight_alpha_bbox(cand)
+                    if bb is None:
+                        continue
+                    # Accept only if the FINAL box implies a human-scale
+                    # person: long_px * m_per_px must land in [1.35, 2.15] m.
+                    long_final = max(bb[2] - bb[0], bb[3] - bb[1])
+                    implied = long_final * front_m_per_px(range_m, image_width=size)
+                    if not (1.35 <= implied <= 2.15):
+                        continue
+                    sprite = cand
+                    break
+                if sprite is None:
+                    continue
+                sw, sh = sprite.size
 
                 # Place person: bottom-aligned (feet near bottom of frame for close,
                 # higher up for farther)
                 range_frac = (range_m - FRONT_RANGE_MIN_M) / (FRONT_RANGE_MAX_M - FRONT_RANGE_MIN_M)
                 # Farther persons appear higher in frame (perspective)
-                base_y = int(size * (0.95 - range_frac * 0.5) - px_h)
-                y = max(0, min(size - px_h, base_y + int(rng.integers(-20, 20))))
-                x = int(rng.integers(0, max(1, size - px_w)))
+                base_y = int(size * (0.95 - range_frac * 0.5) - sh)
+                y = max(0, min(size - sh, base_y + int(rng.integers(-20, 20))))
+                x = int(rng.integers(0, max(1, size - sw)))
 
-                # Compositing pipeline
+                # Colour harmonisation preserves alpha, so the measured tight
+                # box remains exact after pasting.
                 bg_patch = bg.crop((
                     max(0, x), max(0, y),
-                    min(size, x + px_w), min(size, y + px_h)
+                    min(size, x + sw), min(size, y + sh)
                 ))
                 sprite = _harmonize_color(sprite, bg_patch, rng)
-                sprite = _erode_alpha_edge(sprite, rng)
-                sprite = _range_blur(sprite, range_m, rng)
                 bg.paste(sprite, (x, y), sprite)
-
-                placements.append((x, y, px_w, px_h))
-                clipped = _clip_label(x, y, px_w, px_h, size)
-                if clipped is not None:
-                    cx_n, cy_n, w_n, h_n = clipped
-                    labels.append(f"0 {cx_n:.6f} {cy_n:.6f} {w_n:.6f} {h_n:.6f}")
+                fx1, fy1, fx2, fy2 = x + bb[0], y + bb[1], x + bb[2], y + bb[3]
+                bx1, by1 = max(0, fx1), max(0, fy1)
+                bx2, by2 = min(size, fx2), min(size, fy2)
+                if bx2 - bx1 < 4 or by2 - by1 < 4:
+                    continue
+                placements.append((bx1, by1, bx2 - bx1, by2 - by1))
+                cx_n = (bx1 + bx2) / 2.0 / size
+                cy_n = (by1 + by2) / 2.0 / size
+                labels.append(f"0 {cx_n:.6f} {cy_n:.6f} "
+                              f"{(bx2 - bx1) / size:.6f} {(by2 - by1) / size:.6f}")
+                inter = (bx2 - bx1) * (by2 - by1)
+                union = inter + (fx2 - fx1) * (fy2 - fy1) - inter
+                m_px = front_m_per_px(range_m, image_width=size)
+                box_records.append({
+                    "range_m": round(range_m, 1),
+                    "m_per_px": round(m_px, 4),
+                    "x_px": bx1, "y_px": by1,
+                    "w_px": bx2 - bx1, "h_px": by2 - by1,
+                    "implied_long_m": round(max(bx2 - bx1, by2 - by1) * m_px, 2),
+                    "foreshortening": 1.0,
+                    "body_jitter": round(body_jitter, 3),
+                    "mask_iou": round(inter / union if union > 0 else 0.0, 3),
+                })
 
             # Vegetation occlusion (applied after all persons are placed)
             for bbox in placements:
@@ -464,12 +568,22 @@ def _generate_front_split(
             mask = _wildfire_masks_ground(size, rng, centers)
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg)
 
-        # Hard-negative decoys
+        # Hard-negative decoys — physically sized through the same range
+        # physics as persons (bush/rock 0.5-2 m, vehicle 3-8 m), never a
+        # random pixel blob.
         if rng.random() < decoy_frac:
             n_decoys = int(rng.integers(1, 3))
             for _ in range(n_decoys):
-                dw = int(rng.integers(15, 80))
-                dh = int(dw * rng.uniform(1.0, 2.5))
+                d_range = sample_front_range(rng)
+                d_mpp = front_m_per_px(d_range, image_width=size)
+                if rng.random() < DECOY_VEHICLE_FRAC:
+                    dw_m = float(rng.uniform(*DECOY_VEHICLE_W_M))
+                    dh_m = float(rng.uniform(*DECOY_VEHICLE_H_M))
+                else:
+                    dw_m = float(rng.uniform(*DECOY_BUSH_M))
+                    dh_m = float(rng.uniform(*DECOY_BUSH_M))
+                dw = int(max(6, min(size - 2, dw_m / d_mpp)))
+                dh = int(max(6, min(size - 2, dh_m / d_mpp)))
                 dx = int(rng.integers(0, max(1, size - dw)))
                 dy = int(rng.integers(size // 3, max(size // 3 + 1, size - dh)))
                 if decoy_assets:
@@ -488,11 +602,16 @@ def _generate_front_split(
 
         meta = {
             "camera": "front",
-            "n_persons": len(placements),
+            "camera_height_m": FRONT_CAMERA_HEIGHT_M,
+            "hfov_deg": FRONT_CAMERA_HFOV_DEG,
+            "scale_model": "pinhole_range",
+            "person_height_m": PERSON_HEIGHT_M,
+            "n_persons": len(labels),
+            "boxes": box_records,
             "is_negative": is_negative,
         }
         (lbl_dir / f"{i:05d}.json").write_text(json.dumps(meta), encoding="utf-8")
-        if is_negative:
+        if not labels:
             n_neg += 1
 
     print(f"  {out_dir.name}: {n} images ({n_neg} negatives, {100*n_neg/max(1,n):.0f}%)")
@@ -534,42 +653,84 @@ def _generate_mast_split(
         is_negative = rng.random() < neg_frac
         labels: list[str] = []
         placements: list[tuple[int, int, int, int]] = []
+        box_records: list[dict] = []
+        mast_h = sample_mast_height(rng)
 
         if not is_negative:
-            mast_h = sample_mast_height(rng)
             n_persons = int(rng.integers(1, 3))
             for _ in range(n_persons):
-                range_m = sample_mast_range(rng)
-                px_h, px_w = mast_range_to_person_px(
-                    range_m, mast_height_m=mast_h, image_width=size
-                )
+                # Rejection-sample until the FINAL alpha extent matches the
+                # physics target within 20% (see front split for rationale).
+                sprite = None
+                for _attempt in range(6):
+                    range_m = sample_mast_range(rng)
+                    px_h, _px_w = mast_range_to_person_px(
+                        range_m, mast_height_m=mast_h, image_width=size
+                    )
 
-                px_h = int(px_h * rng.uniform(0.8, 1.2))
-                px_w = int(px_w * rng.uniform(0.8, 1.2))
-                px_h = max(15, min(size - 10, px_h))
-                px_w = max(8, min(size // 2, px_w))
+                    # Single SCALAR jitter — preserve the person's aspect ratio.
+                    body_jitter = float(rng.uniform(0.85, 1.15))
+                    px_h = int(max(12, min(size - 10, px_h * body_jitter)))
 
-                asset = assets[int(rng.integers(0, len(assets)))]
-                sprite = asset.resize((px_w, px_h), Image.Resampling.LANCZOS)
+                    asset = assets[int(rng.integers(0, len(assets)))]
+                    # Anchor the sprite's LONG axis to the (foreshortened) body
+                    # length: box_long_px * m_per_px ~= 1.75 m * foreshortening.
+                    cand = _scale_sprite_long_axis(asset, px_h)
+                    if min(cand.size) >= 24:
+                        cand = _erode_alpha_edge(cand, rng)
+                    cand = _range_blur(cand, range_m, rng)
+                    bb = _tight_alpha_bbox(cand)
+                    if bb is None:
+                        continue
+                    # Accept only if the FINAL box implies a human-scale
+                    # person after de-foreshortening: [1.35, 2.15] m.
+                    long_final = max(bb[2] - bb[0], bb[3] - bb[1])
+                    implied = (
+                        long_final
+                        * mast_m_per_px(range_m, mast_height_m=mast_h, image_width=size)
+                        / mast_foreshortening(range_m, mast_h)
+                    )
+                    if not (1.35 <= implied <= 2.15):
+                        continue
+                    sprite = cand
+                    break
+                if sprite is None:
+                    continue
+                sw, sh = sprite.size
 
                 # Mast view: persons anywhere in frame (camera looks down at zone)
-                x = int(rng.integers(0, max(1, size - px_w)))
-                y = int(rng.integers(0, max(1, size - px_h)))
+                x = int(rng.integers(0, max(1, size - sw)))
+                y = int(rng.integers(0, max(1, size - sh)))
 
                 bg_patch = bg.crop((
                     max(0, x), max(0, y),
-                    min(size, x + px_w), min(size, y + px_h)
+                    min(size, x + sw), min(size, y + sh)
                 ))
                 sprite = _harmonize_color(sprite, bg_patch, rng)
-                sprite = _erode_alpha_edge(sprite, rng)
-                sprite = _range_blur(sprite, range_m, rng)
                 bg.paste(sprite, (x, y), sprite)
-
-                placements.append((x, y, px_w, px_h))
-                clipped = _clip_label(x, y, px_w, px_h, size)
-                if clipped is not None:
-                    cx_n, cy_n, w_n, h_n = clipped
-                    labels.append(f"0 {cx_n:.6f} {cy_n:.6f} {w_n:.6f} {h_n:.6f}")
+                fx1, fy1, fx2, fy2 = x + bb[0], y + bb[1], x + bb[2], y + bb[3]
+                bx1, by1 = max(0, fx1), max(0, fy1)
+                bx2, by2 = min(size, fx2), min(size, fy2)
+                if bx2 - bx1 < 4 or by2 - by1 < 4:
+                    continue
+                placements.append((bx1, by1, bx2 - bx1, by2 - by1))
+                cx_n = (bx1 + bx2) / 2.0 / size
+                cy_n = (by1 + by2) / 2.0 / size
+                labels.append(f"0 {cx_n:.6f} {cy_n:.6f} "
+                              f"{(bx2 - bx1) / size:.6f} {(by2 - by1) / size:.6f}")
+                inter = (bx2 - bx1) * (by2 - by1)
+                union = inter + (fx2 - fx1) * (fy2 - fy1) - inter
+                m_px = mast_m_per_px(range_m, mast_height_m=mast_h, image_width=size)
+                box_records.append({
+                    "range_m": round(range_m, 1),
+                    "m_per_px": round(m_px, 4),
+                    "x_px": bx1, "y_px": by1,
+                    "w_px": bx2 - bx1, "h_px": by2 - by1,
+                    "implied_long_m": round(max(bx2 - bx1, by2 - by1) * m_px, 2),
+                    "foreshortening": round(mast_foreshortening(range_m, mast_h), 3),
+                    "body_jitter": round(body_jitter, 3),
+                    "mask_iou": round(inter / union if union > 0 else 0.0, 3),
+                })
 
         # Fire/smoke effects (less common for mast since it's confirmation range)
         if rng.random() < fire_frac and placements:
@@ -577,12 +738,20 @@ def _generate_mast_split(
             mask = _wildfire_masks_ground(size, rng, centers)
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg)
 
-        # Hard-negative decoys
+        # Hard-negative decoys — physically sized through the mast range physics.
         if rng.random() < decoy_frac:
             n_decoys = int(rng.integers(1, 3))
             for _ in range(n_decoys):
-                dw = int(rng.integers(15, 80))
-                dh = int(dw * rng.uniform(0.8, 2.0))
+                d_range = sample_mast_range(rng)
+                d_mpp = mast_m_per_px(d_range, mast_height_m=mast_h, image_width=size)
+                if rng.random() < DECOY_VEHICLE_FRAC:
+                    dw_m = float(rng.uniform(*DECOY_VEHICLE_W_M))
+                    dh_m = float(rng.uniform(*DECOY_VEHICLE_H_M))
+                else:
+                    dw_m = float(rng.uniform(*DECOY_BUSH_M))
+                    dh_m = float(rng.uniform(*DECOY_BUSH_M))
+                dw = int(max(6, min(size - 2, dw_m / d_mpp)))
+                dh = int(max(6, min(size - 2, dh_m / d_mpp)))
                 dx = int(rng.integers(0, max(1, size - dw)))
                 dy = int(rng.integers(0, max(1, size - dh)))
                 if decoy_assets:
@@ -601,11 +770,17 @@ def _generate_mast_split(
 
         meta = {
             "camera": "mast",
-            "n_persons": len(placements),
+            "mast_height_m": round(mast_h, 1),
+            "tilt_deg": MAST_TILT_DEG,
+            "hfov_deg": MAST_HFOV_DEG,
+            "scale_model": "pinhole_range",
+            "person_height_m": PERSON_HEIGHT_M,
+            "n_persons": len(labels),
+            "boxes": box_records,
             "is_negative": is_negative,
         }
         (lbl_dir / f"{i:05d}.json").write_text(json.dumps(meta), encoding="utf-8")
-        if is_negative:
+        if not labels:
             n_neg += 1
 
     print(f"  {out_dir.name}: {n} images ({n_neg} negatives, {100*n_neg/max(1,n):.0f}%)")
@@ -799,6 +974,10 @@ def main() -> None:
             f"path: {cam_data_dir}\ntrain: train/images\nval: val/images\nnames:\n  0: person\n",
             encoding="utf-8",
         )
+
+        if args.epochs <= 0:
+            print("epochs<=0: generated dataset only, skipping training.")
+            continue
 
         from ultralytics import YOLO
         model = YOLO(base_model)

@@ -197,6 +197,120 @@ def run_rollout(
     expected_overlap_values: list[float] = []
     excess_overlap_values: list[float] = []
     inter_uav_overlap_values: list[float] = []
+    any_history_revisit_values: list[float] = []
+    own_history_revisit_values: list[float] = []
+    teammate_history_revisit_values: list[float] = []
+    own_only_revisit_values: list[float] = []
+    teammate_only_revisit_values: list[float] = []
+    shared_history_revisit_values: list[float] = []
+    unavoidable_revisit_values: list[float] = []
+    avoidable_revisit_values: list[float] = []
+    frontier_expected_new_cells_values: list[float] = []
+    frontier_new_cell_capture_values: list[float] = []
+    frontier_new_cell_gap_values: list[float] = []
+    candidate_best_new_cells_values: list[float] = []
+    candidate_capture_fraction_values: list[float] = []
+    candidate_new_cell_regret_values: list[float] = []
+    candidate_best_new_overlap_values: list[float] = []
+    candidate_best_useful_overlap_values: list[float] = []
+    candidate_avoidable_overlap_values: list[float] = []
+    candidate_action_rank_values: list[float] = []
+    candidate_movement_rank_values: list[float] = []
+    candidate_action_capture_values: list[float] = []
+    candidate_movement_capture_values: list[float] = []
+    candidate_action_best_alignment_values: list[float] = []
+    candidate_movement_best_alignment_values: list[float] = []
+    candidate_no_opportunity_values: list[float] = []
+    frontier_candidate_new_cells_values: list[float] = []
+    frontier_candidate_capture_fraction_values: list[float] = []
+    frontier_candidate_regret_values: list[float] = []
+    frontier_candidate_best_alignment_values: list[float] = []
+    frontier_candidate_rank_values: list[float] = []
+    frontier_candidate_nearest_rank_values: list[float] = []
+    frontier_candidate_is_best_values: list[float] = []
+    frontier_candidate_bad_values: list[float] = []
+    confidence_frontier_candidate_capture_fraction_values: list[float] = []
+    confidence_frontier_candidate_best_alignment_values: list[float] = []
+    confidence_frontier_candidate_rank_values: list[float] = []
+    confidence_frontier_candidate_bad_values: list[float] = []
+    confidence_lg_frontier_candidate_capture_fraction_values: list[float] = []
+    confidence_lg_frontier_candidate_best_alignment_values: list[float] = []
+    confidence_lg_frontier_candidate_rank_values: list[float] = []
+    confidence_lg_frontier_candidate_bad_values: list[float] = []
+    confidence_frontier_capture_advantage_values: list[float] = []
+    confidence_lg_frontier_capture_advantage_values: list[float] = []
+    frontier_alignment_values: list[float] = []
+    frontier_progress_values: list[float] = []
+    frontier_uncovered_ratio_values: list[float] = []
+    frontier_obs_distance_values: list[float] = []
+    frontier_obs_vector_norm_values: list[float] = []
+    frontier_local_coverage_cos_values: list[float] = []
+    frontier_global_coverage_cos_values: list[float] = []
+    local_global_coverage_cos_values: list[float] = []
+    frontier_sector_cos_values: list[float] = []
+    frontier_sector_dominance_values: list[float] = []
+    frontier_sector_entropy_values: list[float] = []
+    frontier_cancellation_values: list[float] = []
+    frontier_pairwise_cos_values: list[float] = []
+    frontier_pairwise_same_dir_values: list[float] = []
+    local_pairwise_same_dir_values: list[float] = []
+    global_pairwise_same_dir_values: list[float] = []
+    coverage_opportunity_cells_values: list[float] = []
+    coverage_opportunity_fraction_values: list[float] = []
+    coverage_opportunity_available_fraction_values: list[float] = []
+    confidence_mean_values: list[float] = []
+    confidence_gain_values: list[float] = []
+    confidence_gain_by_drone_values: list[float] = []
+    confidence_weighted_gain_values: list[float] = []
+    confidence_weighted_gain_by_drone_values: list[float] = []
+    confidence_opportunity_fraction_values: list[float] = []
+    confidence_opportunity_best_gain_values: list[float] = []
+    confidence_low_fraction_values: list[float] = []
+    confidence_high_fraction_values: list[float] = []
+    confidence_step_detection_probability_values: list[float] = []
+    confidence_step_detection_probability_by_drone_values: list[float] = []
+    confidence_overlap_fraction_values: list[float] = []
+    confidence_overlap_regret_values: list[float] = []
+    cleanup_target_valid_values: list[float] = []
+    cleanup_target_distance_values: list[float] = []
+    cleanup_target_value_values: list[float] = []
+    cleanup_target_progress_values: list[float] = []
+    cleanup_target_progress_fraction_values: list[float] = []
+    cleanup_target_switch_values: list[float] = []
+    cleanup_target_reached_values: list[float] = []
+    cleanup_target_value_decay_values: list[float] = []
+    cleanup_target_no_progress_values: list[float] = []
+    cleanup_target_progress_with_new_cells_values: list[float] = []
+    cleanup_target_progress_with_excess_overlap_values: list[float] = []
+    cleanup_target_frontier_gate_values: list[float] = []
+    reward_uav_coverage_values: list[float] = []
+    reward_uav_move_coverage_values: list[float] = []
+    reward_uav_frontier_values: list[float] = []
+    reward_uav_confidence_values: list[float] = []
+    reward_uav_team_confidence_values: list[float] = []
+    penalty_uav_team_confidence_overlap_values: list[float] = []
+    reward_uav_confidence_move_values: list[float] = []
+    reward_uav_cleanup_target_progress_values: list[float] = []
+    reward_uav_astar_progress_values: list[float] = []
+    penalty_uav_inefficient_move_values: list[float] = []
+    penalty_uav_confidence_overlap_values: list[float] = []
+    penalty_uav_overlap_values: list[float] = []
+    penalty_uav_inter_overlap_values: list[float] = []
+    penalty_uav_outside_footprint_values: list[float] = []
+    reward_uav_coverage_threshold_values: list[float] = []
+    reward_uav_scout_values: list[float] = []
+    reward_team_values: list[float] = []
+    reward_all_survivors_found_values: list[float] = []
+    reward_uav_aux_values: list[float] = []
+    frontier_abs_reward_share_values: list[float] = []
+    frontier_progress_edge_values: list[float] = []
+    frontier_progress_interior_values: list[float] = []
+    frontier_reward_edge_values: list[float] = []
+    frontier_reward_interior_values: list[float] = []
+    frontier_new_cells_edge_values: list[float] = []
+    frontier_new_cells_interior_values: list[float] = []
+    frontier_outside_edge_values: list[float] = []
+    frontier_outside_interior_values: list[float] = []
     boundary_distance_m_values: list[float] = []
     footprint_radius_m_values: list[float] = []
     path_positions_sim: list[np.ndarray] = []
@@ -423,6 +537,181 @@ def run_rollout(
             "metric_uav_inter_uav_overlap_fraction_by_drone",
             scenario.n_drones,
         )
+        coverage_opportunity_cells = _metric_array(
+            scenario,
+            "metric_uav_coverage_opportunity_cells_by_drone",
+            scenario.n_drones,
+        )
+        coverage_opportunity_fraction = _metric_array(
+            scenario,
+            "metric_uav_coverage_opportunity_fraction_by_drone",
+            scenario.n_drones,
+        )
+        coverage_opportunity_available_fraction = _metric_array(
+            scenario,
+            "metric_uav_coverage_opportunity_available_fraction_by_drone",
+            scenario.n_drones,
+        )
+        confidence_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_gain_by_drone",
+            scenario.n_drones,
+        )
+        confidence_weighted_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_weighted_confidence_gain_by_drone",
+            scenario.n_drones,
+        )
+        confidence_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_confidence_by_drone",
+            scenario.n_drones,
+        )
+        team_confidence_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_team_confidence_by_drone",
+            scenario.n_drones,
+        )
+        team_confidence_overlap_penalty_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_team_confidence_overlap_by_drone",
+            scenario.n_drones,
+        )
+        confidence_move_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_confidence_move_by_drone",
+            scenario.n_drones,
+        )
+        confidence_overlap_penalty_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_confidence_overlap_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_progress_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_cleanup_target_progress_by_drone",
+            scenario.n_drones,
+        )
+        astar_progress_reward_by_drone = _metric_array(
+            scenario,
+            "metric_reward_uav_astar_progress_by_drone",
+            scenario.n_drones,
+        )
+        astar_progress_fraction_by_drone = _metric_array(
+            scenario,
+            "metric_uav_astar_progress_fraction_by_drone",
+            scenario.n_drones,
+        )
+        astar_frontier_gate_by_drone = _metric_array(
+            scenario,
+            "metric_uav_astar_frontier_gate_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_frontier_gate_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_frontier_gate_by_drone",
+            scenario.n_drones,
+        )
+        confidence_overlap_fraction_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_overlap_fraction_by_drone",
+            scenario.n_drones,
+        )
+        confidence_overlap_regret_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_overlap_regret_by_drone",
+            scenario.n_drones,
+        )
+        confidence_opportunity_fraction_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_opportunity_fraction_by_drone",
+            scenario.n_drones,
+        )
+        confidence_opportunity_best_gain_by_drone = _metric_array(
+            scenario,
+            "metric_uav_confidence_opportunity_best_gain_by_drone",
+            scenario.n_drones,
+        )
+        confidence_step_detection_probability_by_drone = _metric_array(
+            scenario,
+            "metric_uav_step_detection_probability_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_valid_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_valid_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_distance_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_distance_m_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_value_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_value_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_progress_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_progress_m_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_progress_fraction_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_progress_fraction_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_switch_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_switch_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_reached_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_reached_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_value_decay_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_value_decay_by_drone",
+            scenario.n_drones,
+        )
+        cleanup_target_age_by_drone = _metric_array(
+            scenario,
+            "metric_uav_cleanup_target_age_by_drone",
+            scenario.n_drones,
+        )
+        confidence_mean = _metric_scalar(scenario, "metric_uav_confidence_mean")
+        confidence_gain = _metric_scalar(scenario, "metric_uav_confidence_gain")
+        confidence_weighted_gain = _metric_scalar(scenario, "metric_uav_weighted_confidence_gain")
+        confidence_low_fraction = _metric_scalar(scenario, "metric_uav_confidence_low_fraction")
+        confidence_high_fraction = _metric_scalar(scenario, "metric_uav_confidence_high_fraction")
+        confidence_step_detection_probability = _metric_scalar(
+            scenario,
+            "metric_uav_step_detection_probability",
+        )
+        confidence_mean_values.append(confidence_mean)
+        confidence_gain_values.append(confidence_gain)
+        confidence_weighted_gain_values.append(confidence_weighted_gain)
+        confidence_low_fraction_values.append(confidence_low_fraction)
+        confidence_high_fraction_values.append(confidence_high_fraction)
+        confidence_step_detection_probability_values.append(confidence_step_detection_probability)
+        frontier_alignment = _metric_array(
+            scenario,
+            "metric_uav_frontier_alignment_by_drone",
+            scenario.n_drones,
+        )
+        frontier_progress = _metric_array(
+            scenario,
+            "metric_uav_frontier_progress_fraction_by_drone",
+            scenario.n_drones,
+        )
+        frontier_uncovered_ratio = _metric_array(
+            scenario,
+            "metric_uav_frontier_uncovered_ratio_by_drone",
+            scenario.n_drones,
+        )
         boundary_distance_m = _metric_array(
             scenario,
             "metric_uav_boundary_distance_m_by_drone",
@@ -534,10 +823,528 @@ def run_rollout(
             expected_overlap = float(expected_overlap_fraction[drone_idx])
             excess_overlap = float(excess_overlap_fraction[drone_idx])
             inter_uav_overlap = float(inter_uav_overlap_fraction[drone_idx])
+
+            if not full_diagnostics:
+                opportunity_fraction = float(coverage_opportunity_fraction[drone_idx])
+                opportunity_available_fraction = float(
+                    coverage_opportunity_available_fraction[drone_idx]
+                )
+                confidence_reward = float(confidence_reward_by_drone[drone_idx])
+                team_confidence_reward = float(team_confidence_reward_by_drone[drone_idx])
+                team_confidence_overlap_penalty = float(
+                    team_confidence_overlap_penalty_by_drone[drone_idx]
+                )
+                confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
+                confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
+                confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
+                confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
+                confidence_overlap_regret = float(confidence_overlap_regret_by_drone[drone_idx])
+                cleanup_target_progress_reward = float(
+                    cleanup_target_progress_reward_by_drone[drone_idx]
+                )
+                astar_progress_reward = float(astar_progress_reward_by_drone[drone_idx])
+                frontier_progress_frac = float(frontier_progress[drone_idx])
+                frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
+                scout_reward = float(np.count_nonzero(scout_credit[drone_idx])) * float(
+                    getattr(scenario, "r_drone_scout", 0.0)
+                )
+                reward_terms = _uav_reward_terms(
+                    scenario=scenario,
+                    new_cells=new_cells,
+                    displacement_m=displacement_m,
+                    frontier_progress=frontier_progress_frac,
+                    frontier_ratio=frontier_ratio,
+                    overlap=overlap,
+                    expected_overlap=expected_overlap,
+                    inter_uav_overlap=inter_uav_overlap,
+                    outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                    coverage_opportunity_fraction=opportunity_fraction,
+                    coverage_opportunity_available_fraction=opportunity_available_fraction,
+                    confidence_reward=confidence_reward,
+                    team_confidence_reward=team_confidence_reward,
+                    team_confidence_overlap_penalty=team_confidence_overlap_penalty,
+                    confidence_move_reward=confidence_move_reward,
+                    confidence_opportunity_fraction=float(
+                        confidence_opportunity_fraction_by_drone[drone_idx]
+                    ),
+                    confidence_overlap_penalty=confidence_overlap_penalty,
+                    cleanup_target_progress_reward=cleanup_target_progress_reward,
+                    astar_progress_reward=astar_progress_reward,
+                    scout_reward=scout_reward,
+                )
+                reward_terms["team"] = team_reward
+                reward_terms["all_survivors_found"] = all_survivors_found_reward
+                reward_terms["coverage_threshold"] = coverage_threshold_reward
+
+                overlap_values.append(overlap)
+                expected_overlap_values.append(expected_overlap)
+                excess_overlap_values.append(excess_overlap)
+                inter_uav_overlap_values.append(inter_uav_overlap)
+                outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
+                boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
+                footprint_radius_m_values.append(footprint_radius)
+                reward_uav_coverage_values.append(reward_terms["coverage"])
+                reward_uav_move_coverage_values.append(reward_terms["move_coverage"])
+                reward_uav_frontier_values.append(reward_terms["frontier"])
+                reward_uav_confidence_values.append(reward_terms["confidence"])
+                reward_uav_team_confidence_values.append(reward_terms["team_confidence"])
+                penalty_uav_team_confidence_overlap_values.append(
+                    reward_terms["team_confidence_overlap_penalty"]
+                )
+                reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
+                reward_uav_cleanup_target_progress_values.append(
+                    reward_terms["cleanup_target_progress"]
+                )
+                reward_uav_astar_progress_values.append(reward_terms["astar_progress"])
+                penalty_uav_inefficient_move_values.append(reward_terms["inefficient_move_penalty"])
+                penalty_uav_confidence_overlap_values.append(reward_terms["confidence_overlap_penalty"])
+                penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
+                penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
+                penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+                reward_uav_coverage_threshold_values.append(reward_terms["coverage_threshold"])
+                reward_uav_scout_values.append(reward_terms["scout"])
+                reward_team_values.append(reward_terms["team"])
+                reward_all_survivors_found_values.append(reward_terms["all_survivors_found"])
+                reward_uav_aux_values.append(reward_terms["aux"])
+                if displacement_m > 1.0 and new_cells < 1.0:
+                    moving_no_new_coverage += 1
+                if action_norm < 0.05 and displacement_m > 1.0:
+                    low_action_high_motion += 1
+                if action_norm > 0.5 and displacement_m < 0.25:
+                    high_action_low_motion += 1
+                moving_no_confidence_gain_step = bool(
+                    displacement_m > 1.0
+                    and math.isfinite(confidence_weighted_gain_drone)
+                    and confidence_weighted_gain_drone <= moving_no_confidence_gain_threshold
+                )
+                if moving_no_confidence_gain_step:
+                    moving_no_confidence_gain += 1
+
+                edge_threshold = (
+                    footprint_radius
+                    if math.isfinite(footprint_radius) and footprint_radius > 0.0
+                    else 25.0
+                )
+                is_edge_step = bool(float(boundary_distance_m[drone_idx]) <= edge_threshold)
+
+                fast_drone_path_lengths[drone_idx] += displacement_m
+                fast_drone_displacements[drone_idx].append(displacement_m)
+                fast_drone_action_norms[drone_idx].append(action_norm)
+
+                action_displacement_alignment = math.nan
+                displacement_norm_sim = float(np.linalg.norm(displacement_vec))
+                if action_norm > 1e-6 and displacement_norm_sim > 1e-9:
+                    action_displacement_alignment = float(
+                        np.dot(action_vec[:2], displacement_vec[:2]) / (action_norm * displacement_norm_sim)
+                    )
+                    action_displacement_alignment = max(min(action_displacement_alignment, 1.0), -1.0)
+                    action_displacement_alignments.append(action_displacement_alignment)
+
+                diagnostic_steps += 1
+                _append_time_bin(
+                    time_bins,
+                    step=step,
+                    max_steps=int(scenario_kwargs["max_steps"]),
+                    values={
+                        "action_norm": action_norm,
+                        "displacement_m": displacement_m,
+                        "new_coverage_cells": new_cells,
+                        "action_displacement_alignment": action_displacement_alignment,
+                        "overlap": overlap,
+                        "excess_overlap": excess_overlap,
+                        "edge_step": float(is_edge_step),
+                        "moving_no_new_coverage": float(displacement_m > 1.0 and new_cells < 1.0),
+                        "moving_no_confidence_gain": float(moving_no_confidence_gain_step),
+                        "confidence_overlap_fraction": confidence_overlap_fraction,
+                        "confidence_overlap_regret": confidence_overlap_regret,
+                        "frontier_reward": reward_terms["frontier"],
+                        "confidence_reward": reward_terms["confidence"],
+                        "team_confidence_reward": reward_terms["team_confidence"],
+                        "team_confidence_overlap_penalty": reward_terms[
+                            "team_confidence_overlap_penalty"
+                        ],
+                        "confidence_move_reward": reward_terms["confidence_move"],
+                        "cleanup_target_progress_reward": reward_terms["cleanup_target_progress"],
+                        "astar_progress_reward": reward_terms["astar_progress"],
+                        "inefficient_move_penalty": reward_terms["inefficient_move_penalty"],
+                        "confidence_overlap_penalty": reward_terms["confidence_overlap_penalty"],
+                        "coverage_reward": reward_terms["coverage"],
+                        "move_coverage_reward": reward_terms["move_coverage"],
+                        "overlap_penalty": reward_terms["overlap_penalty"],
+                        "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
+                        "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                        "coverage_threshold_reward": reward_terms["coverage_threshold"],
+                        "scout_reward": reward_terms["scout"],
+                        "team_reward": reward_terms["team"],
+                        "all_survivors_reward": reward_terms["all_survivors_found"],
+                    },
+                )
+                continue
+
+            any_history_revisit = float(revisit["any_history"][drone_idx])
+            own_history_revisit = float(revisit["own_history"][drone_idx])
+            teammate_history_revisit = float(revisit["teammate_history"][drone_idx])
+            own_only_revisit = float(revisit["own_only"][drone_idx])
+            teammate_only_revisit = float(revisit["teammate_only"][drone_idx])
+            shared_history_revisit = float(revisit["shared_history"][drone_idx])
+            unavoidable_revisit = min(any_history_revisit, expected_overlap)
+            avoidable_revisit = max(any_history_revisit - expected_overlap, 0.0)
+            frontier_expected_cells = float(frontier_expected_new_cells[drone_idx])
+            frontier_new_cell_capture = (
+                raw_new_cells / frontier_expected_cells
+                if frontier_expected_cells > 1e-9
+                else math.nan
+            )
+            frontier_new_cell_gap = (
+                frontier_expected_cells - raw_new_cells
+                if frontier_expected_cells > 1e-9
+                else math.nan
+            )
+            candidate_new_cells = counterfactual["new_cells"][drone_idx]
+            candidate_best_new_cells = float(counterfactual["best_new_cells"][drone_idx])
+            candidate_best_new_overlap = float(counterfactual["best_new_overlap"][drone_idx])
+            candidate_best_useful_overlap = float(counterfactual["best_useful_overlap"][drone_idx])
+            candidate_capture_fraction = (
+                raw_new_cells / candidate_best_new_cells
+                if candidate_best_new_cells > 1e-9
+                else math.nan
+            )
+            candidate_new_cell_regret = (
+                max(candidate_best_new_cells - raw_new_cells, 0.0)
+                if candidate_best_new_cells > 1e-9
+                else math.nan
+            )
+            candidate_action = _counterfactual_choice_metrics(
+                action_vec[:2],
+                counterfactual["directions"],
+                candidate_new_cells,
+                counterfactual["best_new_direction"][drone_idx],
+            )
+            candidate_movement = _counterfactual_choice_metrics(
+                displacement_vec[:2],
+                counterfactual["directions"],
+                candidate_new_cells,
+                counterfactual["best_new_direction"][drone_idx],
+            )
+            frontier_use = _frontier_usefulness_for_drone(frontier_usefulness, drone_idx)
+            confidence_frontier_use = _frontier_usefulness_for_drone(
+                confidence_frontier_usefulness,
+                drone_idx,
+            )
+            confidence_lg_frontier_use = _frontier_usefulness_for_drone(
+                confidence_lg_frontier_usefulness,
+                drone_idx,
+            )
+            frontier_candidate_capture = float(frontier_use["capture_fraction"])
+            confidence_frontier_candidate_capture = float(
+                confidence_frontier_use["capture_fraction"]
+            )
+            confidence_lg_frontier_candidate_capture = float(
+                confidence_lg_frontier_use["capture_fraction"]
+            )
+            confidence_frontier_capture_advantage = (
+                confidence_frontier_candidate_capture - frontier_candidate_capture
+                if math.isfinite(confidence_frontier_candidate_capture)
+                and math.isfinite(frontier_candidate_capture)
+                else math.nan
+            )
+            confidence_lg_frontier_capture_advantage = (
+                confidence_lg_frontier_candidate_capture - frontier_candidate_capture
+                if math.isfinite(confidence_lg_frontier_candidate_capture)
+                and math.isfinite(frontier_candidate_capture)
+                else math.nan
+            )
+            candidate_avoidable_overlap = (
+                max(any_history_revisit - candidate_best_useful_overlap, 0.0)
+                if math.isfinite(candidate_best_useful_overlap)
+                else math.nan
+            )
+            candidate_no_opportunity = float(candidate_best_new_cells < 1.0)
+            opportunity_cells = float(coverage_opportunity_cells[drone_idx])
+            opportunity_fraction = float(coverage_opportunity_fraction[drone_idx])
+            opportunity_available_fraction = float(
+                coverage_opportunity_available_fraction[drone_idx]
+            )
+            confidence_gain_drone = float(confidence_gain_by_drone[drone_idx])
+            confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
+            confidence_pass_probability = float(
+                confidence_step_detection_probability_by_drone[drone_idx]
+            )
+            confidence_reward = float(confidence_reward_by_drone[drone_idx])
+            team_confidence_reward = float(team_confidence_reward_by_drone[drone_idx])
+            team_confidence_overlap_penalty = float(
+                team_confidence_overlap_penalty_by_drone[drone_idx]
+            )
+            confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
+            confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
+            confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
+            confidence_overlap_regret = float(confidence_overlap_regret_by_drone[drone_idx])
+            cleanup_target_progress_reward = float(
+                cleanup_target_progress_reward_by_drone[drone_idx]
+            )
+            astar_progress_reward = float(astar_progress_reward_by_drone[drone_idx])
+            astar_progress_fraction = float(astar_progress_fraction_by_drone[drone_idx])
+            astar_frontier_gate = float(astar_frontier_gate_by_drone[drone_idx])
+            cleanup_target_frontier_gate = float(cleanup_target_frontier_gate_by_drone[drone_idx])
+            cleanup_target_valid = float(cleanup_target_valid_by_drone[drone_idx])
+            cleanup_target_distance = float(cleanup_target_distance_by_drone[drone_idx])
+            cleanup_target_value = float(cleanup_target_value_by_drone[drone_idx])
+            cleanup_target_progress = float(cleanup_target_progress_by_drone[drone_idx])
+            cleanup_target_progress_fraction = float(cleanup_target_progress_fraction_by_drone[drone_idx])
+            cleanup_target_switch = float(cleanup_target_switch_by_drone[drone_idx])
+            cleanup_target_reached = float(cleanup_target_reached_by_drone[drone_idx])
+            cleanup_target_value_decay = float(cleanup_target_value_decay_by_drone[drone_idx])
+            cleanup_target_age = float(cleanup_target_age_by_drone[drone_idx])
+            confidence_opportunity_fraction = float(
+                confidence_opportunity_fraction_by_drone[drone_idx]
+            )
+            confidence_opportunity_best_gain = float(
+                confidence_opportunity_best_gain_by_drone[drone_idx]
+            )
+            confidence_revisit_step = bool(avoidable_revisit >= CONFIDENCE_REVISIT_THRESHOLD)
+            confidence_revisit_has_opportunity = bool(
+                math.isfinite(confidence_gain_drone)
+                and math.isfinite(confidence_opportunity_fraction)
+                and math.isfinite(confidence_opportunity_best_gain)
+                and confidence_gain_drone > CONFIDENCE_REVISIT_MIN_GAIN
+                and confidence_opportunity_best_gain > CONFIDENCE_REVISIT_MIN_GAIN
+            )
+            confidence_useful_revisit = bool(
+                confidence_revisit_step
+                and confidence_revisit_has_opportunity
+                and confidence_opportunity_fraction >= CONFIDENCE_REVISIT_USEFUL_OPPORTUNITY_THRESHOLD
+            )
+            confidence_wasteful_revisit = bool(
+                confidence_revisit_step
+                and (
+                    not confidence_revisit_has_opportunity
+                    or confidence_opportunity_fraction < CONFIDENCE_REVISIT_WASTEFUL_OPPORTUNITY_THRESHOLD
+                )
+            )
+            confidence_ambiguous_revisit = bool(
+                confidence_revisit_step
+                and not confidence_useful_revisit
+                and not confidence_wasteful_revisit
+            )
+            frontier_align = float(frontier_alignment[drone_idx])
+            frontier_progress_frac = float(frontier_progress[drone_idx])
+            frontier_ratio = float(frontier_uncovered_ratio[drone_idx])
+            frontier_candidates = _frontier_candidates_for_drone(scenario, frontier_obs, drone_idx)
+            frontier_obs_vec = (
+                frontier_candidates[0, :2]
+                if len(frontier_candidates)
+                else np.zeros(2)
+            )
+            frontier_obs_distance = (
+                float(frontier_candidates[0, 2])
+                if len(frontier_candidates)
+                else 0.0
+            )
+            frontier_obs_ratio = (
+                float(frontier_candidates[0, 3])
+                if len(frontier_candidates)
+                else 0.0
+            )
+            frontier_obs_norm = float(np.linalg.norm(frontier_obs_vec))
+            local_coverage_vec = coverage_signal["local_vec"][drone_idx]
+            global_coverage_vec = coverage_signal["global_vec"][drone_idx]
+            dominant_sector_vec = coverage_signal["sector_vec"][drone_idx]
+            frontier_local_cos = _cosine_or_nan(frontier_obs_vec, local_coverage_vec)
+            frontier_global_cos = _cosine_or_nan(frontier_obs_vec, global_coverage_vec)
+            local_global_cos = _cosine_or_nan(local_coverage_vec, global_coverage_vec)
+            frontier_sector_cos = _cosine_or_nan(frontier_obs_vec, dominant_sector_vec)
+            sector_dominance = float(coverage_signal["sector_dominance"][drone_idx])
+            sector_entropy = float(coverage_signal["sector_entropy"][drone_idx])
+            frontier_cancellation = float(coverage_signal["frontier_cancellation"][drone_idx])
+            action_frontier_alignment = _best_frontier_candidate_cosine(
+                action_vec[:2],
+                frontier_candidates,
+            )
+            action_frontier_intent = _best_frontier_candidate_projection(
+                action_vec[:2],
+                frontier_candidates,
+            )
+            action_frontier_movement_gap = (
+                action_frontier_alignment - frontier_align
+                if math.isfinite(action_frontier_alignment) and math.isfinite(frontier_align)
+                else math.nan
+            )
+            scout_reward = float(np.count_nonzero(scout_credit[drone_idx])) * float(
+                getattr(scenario, "r_drone_scout", 0.0)
+            )
+            reward_terms = _uav_reward_terms(
+                scenario=scenario,
+                new_cells=new_cells,
+                displacement_m=displacement_m,
+                frontier_progress=frontier_progress_frac,
+                frontier_ratio=frontier_ratio,
+                overlap=overlap,
+                expected_overlap=expected_overlap,
+                inter_uav_overlap=inter_uav_overlap,
+                outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                coverage_opportunity_fraction=opportunity_fraction,
+                coverage_opportunity_available_fraction=opportunity_available_fraction,
+                confidence_reward=confidence_reward,
+                team_confidence_reward=team_confidence_reward,
+                team_confidence_overlap_penalty=team_confidence_overlap_penalty,
+                confidence_move_reward=confidence_move_reward,
+                confidence_opportunity_fraction=confidence_opportunity_fraction,
+                confidence_overlap_penalty=confidence_overlap_penalty,
+                cleanup_target_progress_reward=cleanup_target_progress_reward,
+                astar_progress_reward=astar_progress_reward,
+                scout_reward=scout_reward,
+            )
+            reward_terms["team"] = team_reward
+            reward_terms["all_survivors_found"] = all_survivors_found_reward
+            reward_terms["coverage_threshold"] = coverage_threshold_reward
+            distances_to_edges = _distances_to_edges_m(
+                np.asarray([post_pos], dtype=float),
+                scenario,
+                meters_per_sim,
+            )[0]
+            edge_threshold = footprint_radius if math.isfinite(footprint_radius) and footprint_radius > 0.0 else 25.0
+            is_edge_step = bool(float(boundary_distance_m[drone_idx]) <= edge_threshold)
+            is_corner_step = bool(np.count_nonzero(distances_to_edges <= edge_threshold) >= 2)
+            coverage_fraction_now = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
             overlap_values.append(overlap)
             expected_overlap_values.append(expected_overlap)
             excess_overlap_values.append(excess_overlap)
             inter_uav_overlap_values.append(inter_uav_overlap)
+            any_history_revisit_values.append(any_history_revisit)
+            own_history_revisit_values.append(own_history_revisit)
+            teammate_history_revisit_values.append(teammate_history_revisit)
+            own_only_revisit_values.append(own_only_revisit)
+            teammate_only_revisit_values.append(teammate_only_revisit)
+            shared_history_revisit_values.append(shared_history_revisit)
+            unavoidable_revisit_values.append(unavoidable_revisit)
+            avoidable_revisit_values.append(avoidable_revisit)
+            frontier_expected_new_cells_values.append(frontier_expected_cells)
+            frontier_new_cell_capture_values.append(frontier_new_cell_capture)
+            frontier_new_cell_gap_values.append(frontier_new_cell_gap)
+            candidate_best_new_cells_values.append(candidate_best_new_cells)
+            candidate_capture_fraction_values.append(candidate_capture_fraction)
+            candidate_new_cell_regret_values.append(candidate_new_cell_regret)
+            candidate_best_new_overlap_values.append(candidate_best_new_overlap)
+            candidate_best_useful_overlap_values.append(candidate_best_useful_overlap)
+            candidate_avoidable_overlap_values.append(candidate_avoidable_overlap)
+            candidate_action_rank_values.append(candidate_action["rank"])
+            candidate_movement_rank_values.append(candidate_movement["rank"])
+            candidate_action_capture_values.append(candidate_action["capture_fraction"])
+            candidate_movement_capture_values.append(candidate_movement["capture_fraction"])
+            candidate_action_best_alignment_values.append(candidate_action["best_alignment"])
+            candidate_movement_best_alignment_values.append(candidate_movement["best_alignment"])
+            candidate_no_opportunity_values.append(candidate_no_opportunity)
+            frontier_candidate_new_cells_values.append(float(frontier_use["new_cells"]))
+            frontier_candidate_capture_fraction_values.append(frontier_candidate_capture)
+            frontier_candidate_regret_values.append(float(frontier_use["regret"]))
+            frontier_candidate_best_alignment_values.append(float(frontier_use["best_alignment"]))
+            frontier_candidate_rank_values.append(float(frontier_use["rank"]))
+            frontier_candidate_nearest_rank_values.append(float(frontier_use["nearest_rank"]))
+            frontier_candidate_is_best_values.append(float(frontier_use["is_best"]))
+            frontier_candidate_bad_values.append(float(frontier_use["bad"]))
+            confidence_frontier_candidate_capture_fraction_values.append(
+                confidence_frontier_candidate_capture
+            )
+            confidence_frontier_candidate_best_alignment_values.append(
+                float(confidence_frontier_use["best_alignment"])
+            )
+            confidence_frontier_candidate_rank_values.append(float(confidence_frontier_use["rank"]))
+            confidence_frontier_candidate_bad_values.append(float(confidence_frontier_use["bad"]))
+            confidence_lg_frontier_candidate_capture_fraction_values.append(
+                confidence_lg_frontier_candidate_capture
+            )
+            confidence_lg_frontier_candidate_best_alignment_values.append(
+                float(confidence_lg_frontier_use["best_alignment"])
+            )
+            confidence_lg_frontier_candidate_rank_values.append(float(confidence_lg_frontier_use["rank"]))
+            confidence_lg_frontier_candidate_bad_values.append(float(confidence_lg_frontier_use["bad"]))
+            confidence_frontier_capture_advantage_values.append(confidence_frontier_capture_advantage)
+            confidence_lg_frontier_capture_advantage_values.append(confidence_lg_frontier_capture_advantage)
+            coverage_opportunity_cells_values.append(opportunity_cells)
+            coverage_opportunity_fraction_values.append(opportunity_fraction)
+            coverage_opportunity_available_fraction_values.append(opportunity_available_fraction)
+            confidence_gain_by_drone_values.append(confidence_gain_drone)
+            confidence_weighted_gain_by_drone_values.append(confidence_weighted_gain_drone)
+            confidence_opportunity_fraction_values.append(confidence_opportunity_fraction)
+            confidence_opportunity_best_gain_values.append(confidence_opportunity_best_gain)
+            confidence_step_detection_probability_by_drone_values.append(confidence_pass_probability)
+            confidence_overlap_fraction_values.append(confidence_overlap_fraction)
+            confidence_overlap_regret_values.append(confidence_overlap_regret)
+            cleanup_target_valid_values.append(cleanup_target_valid)
+            cleanup_target_distance_values.append(cleanup_target_distance)
+            cleanup_target_value_values.append(cleanup_target_value)
+            cleanup_target_progress_values.append(cleanup_target_progress)
+            cleanup_target_progress_fraction_values.append(cleanup_target_progress_fraction)
+            cleanup_target_switch_values.append(cleanup_target_switch)
+            cleanup_target_reached_values.append(cleanup_target_reached)
+            cleanup_target_value_decay_values.append(cleanup_target_value_decay)
+            cleanup_target_no_progress_values.append(
+                float(cleanup_target_valid >= 0.5 and cleanup_target_progress <= 1e-6)
+            )
+            cleanup_target_progress_with_new_cells_values.append(
+                float(cleanup_target_valid >= 0.5 and cleanup_target_progress > 1e-6 and new_cells >= 1.0)
+            )
+            cleanup_target_progress_with_excess_overlap_values.append(
+                float(cleanup_target_valid >= 0.5 and cleanup_target_progress > 1e-6 and excess_overlap >= 0.10)
+            )
+            cleanup_target_frontier_gate_values.append(cleanup_target_frontier_gate)
+            frontier_alignment_values.append(frontier_align)
+            frontier_progress_values.append(frontier_progress_frac)
+            frontier_uncovered_ratio_values.append(frontier_ratio)
+            frontier_obs_distance_values.append(frontier_obs_distance)
+            frontier_obs_vector_norm_values.append(frontier_obs_norm)
+            frontier_local_coverage_cos_values.append(frontier_local_cos)
+            frontier_global_coverage_cos_values.append(frontier_global_cos)
+            local_global_coverage_cos_values.append(local_global_cos)
+            frontier_sector_cos_values.append(frontier_sector_cos)
+            frontier_sector_dominance_values.append(sector_dominance)
+            frontier_sector_entropy_values.append(sector_entropy)
+            frontier_cancellation_values.append(frontier_cancellation)
+            frontier_pairwise_cos_values.append(frontier_pairwise["mean_cos"])
+            frontier_pairwise_same_dir_values.append(frontier_pairwise["same_dir_frac"])
+            local_pairwise_same_dir_values.append(local_pairwise["same_dir_frac"])
+            global_pairwise_same_dir_values.append(global_pairwise["same_dir_frac"])
+            action_frontier_alignment_values.append(action_frontier_alignment)
+            action_frontier_intent_values.append(action_frontier_intent)
+            action_frontier_movement_gap_values.append(action_frontier_movement_gap)
+            if new_cells >= 1.0:
+                action_frontier_alignment_new_cov_values.append(action_frontier_alignment)
+            else:
+                action_frontier_alignment_no_new_cov_values.append(action_frontier_alignment)
+            reward_uav_coverage_values.append(reward_terms["coverage"])
+            reward_uav_move_coverage_values.append(reward_terms["move_coverage"])
+            reward_uav_frontier_values.append(reward_terms["frontier"])
+            reward_uav_confidence_values.append(reward_terms["confidence"])
+            reward_uav_team_confidence_values.append(reward_terms["team_confidence"])
+            penalty_uav_team_confidence_overlap_values.append(
+                reward_terms["team_confidence_overlap_penalty"]
+            )
+            reward_uav_confidence_move_values.append(reward_terms["confidence_move"])
+            reward_uav_cleanup_target_progress_values.append(
+                reward_terms["cleanup_target_progress"]
+            )
+            reward_uav_astar_progress_values.append(reward_terms["astar_progress"])
+            penalty_uav_inefficient_move_values.append(reward_terms["inefficient_move_penalty"])
+            penalty_uav_confidence_overlap_values.append(reward_terms["confidence_overlap_penalty"])
+            penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
+            penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
+            penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+            reward_uav_coverage_threshold_values.append(reward_terms["coverage_threshold"])
+            reward_uav_scout_values.append(reward_terms["scout"])
+            reward_team_values.append(reward_terms["team"])
+            reward_all_survivors_found_values.append(reward_terms["all_survivors_found"])
+            reward_uav_aux_values.append(reward_terms["aux"])
+            frontier_abs_reward_share_values.append(reward_terms["frontier_abs_share"])
+            if is_edge_step:
+                frontier_progress_edge_values.append(frontier_progress_frac)
+                frontier_reward_edge_values.append(reward_terms["frontier"])
+                frontier_new_cells_edge_values.append(new_cells)
+                frontier_outside_edge_values.append(float(outside_footprint_fraction[drone_idx]))
+            else:
+                frontier_progress_interior_values.append(frontier_progress_frac)
+                frontier_reward_interior_values.append(reward_terms["frontier"])
+                frontier_new_cells_interior_values.append(new_cells)
+                frontier_outside_interior_values.append(float(outside_footprint_fraction[drone_idx]))
             boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
             footprint_radius_m_values.append(footprint_radius)
             diagnostic_steps += 1
@@ -552,6 +1359,108 @@ def run_rollout(
             drone_stats["expected_overlap"].append(expected_overlap)
             drone_stats["excess_overlap"].append(excess_overlap)
             drone_stats["inter_uav_overlap"].append(inter_uav_overlap)
+            drone_stats["any_history_revisit"].append(any_history_revisit)
+            drone_stats["own_history_revisit"].append(own_history_revisit)
+            drone_stats["teammate_history_revisit"].append(teammate_history_revisit)
+            drone_stats["own_only_revisit"].append(own_only_revisit)
+            drone_stats["teammate_only_revisit"].append(teammate_only_revisit)
+            drone_stats["shared_history_revisit"].append(shared_history_revisit)
+            drone_stats["unavoidable_revisit"].append(unavoidable_revisit)
+            drone_stats["avoidable_revisit"].append(avoidable_revisit)
+            drone_stats["frontier_expected_new_cells"].append(frontier_expected_cells)
+            drone_stats["frontier_new_cell_capture"].append(frontier_new_cell_capture)
+            drone_stats["frontier_new_cell_gap"].append(frontier_new_cell_gap)
+            drone_stats["candidate_best_new_cells"].append(candidate_best_new_cells)
+            drone_stats["candidate_capture_fraction"].append(candidate_capture_fraction)
+            drone_stats["candidate_new_cell_regret"].append(candidate_new_cell_regret)
+            drone_stats["candidate_best_new_overlap"].append(candidate_best_new_overlap)
+            drone_stats["candidate_best_useful_overlap"].append(candidate_best_useful_overlap)
+            drone_stats["candidate_avoidable_overlap"].append(candidate_avoidable_overlap)
+            drone_stats["candidate_action_rank"].append(candidate_action["rank"])
+            drone_stats["candidate_movement_rank"].append(candidate_movement["rank"])
+            drone_stats["candidate_action_capture_fraction"].append(candidate_action["capture_fraction"])
+            drone_stats["candidate_movement_capture_fraction"].append(candidate_movement["capture_fraction"])
+            drone_stats["candidate_action_best_alignment"].append(candidate_action["best_alignment"])
+            drone_stats["candidate_movement_best_alignment"].append(candidate_movement["best_alignment"])
+            drone_stats["candidate_no_opportunity"].append(candidate_no_opportunity)
+            drone_stats["frontier_candidate_new_cells"].append(float(frontier_use["new_cells"]))
+            drone_stats["frontier_candidate_capture_fraction"].append(frontier_candidate_capture)
+            drone_stats["frontier_candidate_regret"].append(float(frontier_use["regret"]))
+            drone_stats["frontier_candidate_best_alignment"].append(float(frontier_use["best_alignment"]))
+            drone_stats["frontier_candidate_rank"].append(float(frontier_use["rank"]))
+            drone_stats["frontier_candidate_nearest_rank"].append(float(frontier_use["nearest_rank"]))
+            drone_stats["frontier_candidate_is_best"].append(float(frontier_use["is_best"]))
+            drone_stats["frontier_candidate_bad"].append(float(frontier_use["bad"]))
+            drone_stats["confidence_frontier_candidate_capture_fraction"].append(
+                confidence_frontier_candidate_capture
+            )
+            drone_stats["confidence_frontier_candidate_best_alignment"].append(
+                float(confidence_frontier_use["best_alignment"])
+            )
+            drone_stats["confidence_frontier_candidate_rank"].append(
+                float(confidence_frontier_use["rank"])
+            )
+            drone_stats["confidence_frontier_candidate_bad"].append(
+                float(confidence_frontier_use["bad"])
+            )
+            drone_stats["confidence_lg_frontier_candidate_capture_fraction"].append(
+                confidence_lg_frontier_candidate_capture
+            )
+            drone_stats["confidence_lg_frontier_candidate_best_alignment"].append(
+                float(confidence_lg_frontier_use["best_alignment"])
+            )
+            drone_stats["confidence_lg_frontier_candidate_rank"].append(
+                float(confidence_lg_frontier_use["rank"])
+            )
+            drone_stats["confidence_lg_frontier_candidate_bad"].append(
+                float(confidence_lg_frontier_use["bad"])
+            )
+            drone_stats["confidence_frontier_capture_advantage"].append(
+                confidence_frontier_capture_advantage
+            )
+            drone_stats["confidence_lg_frontier_capture_advantage"].append(
+                confidence_lg_frontier_capture_advantage
+            )
+            drone_stats["coverage_opportunity_cells"].append(opportunity_cells)
+            drone_stats["coverage_opportunity_fraction"].append(opportunity_fraction)
+            drone_stats["coverage_opportunity_available_fraction"].append(opportunity_available_fraction)
+            drone_stats["confidence_gain"].append(confidence_gain_drone)
+            drone_stats["confidence_weighted_gain"].append(confidence_weighted_gain_drone)
+            drone_stats["confidence_opportunity_fraction"].append(confidence_opportunity_fraction)
+            drone_stats["confidence_opportunity_best_gain"].append(confidence_opportunity_best_gain)
+            drone_stats["confidence_pass_probability"].append(confidence_pass_probability)
+            drone_stats["confidence_overlap_fraction"].append(confidence_overlap_fraction)
+            drone_stats["confidence_overlap_regret"].append(confidence_overlap_regret)
+            drone_stats["cleanup_target_valid"].append(cleanup_target_valid)
+            drone_stats["cleanup_target_distance_m"].append(cleanup_target_distance)
+            drone_stats["cleanup_target_value"].append(cleanup_target_value)
+            drone_stats["cleanup_target_progress_m"].append(cleanup_target_progress)
+            drone_stats["cleanup_target_progress_fraction"].append(cleanup_target_progress_fraction)
+            drone_stats["cleanup_target_switch"].append(cleanup_target_switch)
+            drone_stats["cleanup_target_reached"].append(cleanup_target_reached)
+            drone_stats["cleanup_target_value_decay"].append(cleanup_target_value_decay)
+            drone_stats["cleanup_target_age"].append(cleanup_target_age)
+            drone_stats["cleanup_target_frontier_gate"].append(cleanup_target_frontier_gate)
+            drone_stats["frontier_alignment"].append(frontier_align)
+            drone_stats["frontier_progress"].append(frontier_progress_frac)
+            drone_stats["frontier_uncovered_ratio"].append(frontier_ratio)
+            drone_stats["frontier_obs_distance"].append(frontier_obs_distance)
+            drone_stats["frontier_obs_vector_norm"].append(frontier_obs_norm)
+            drone_stats["frontier_obs_uncovered_ratio"].append(frontier_obs_ratio)
+            drone_stats["frontier_local_coverage_cos"].append(frontier_local_cos)
+            drone_stats["frontier_global_coverage_cos"].append(frontier_global_cos)
+            drone_stats["local_global_coverage_cos"].append(local_global_cos)
+            drone_stats["frontier_sector_cos"].append(frontier_sector_cos)
+            drone_stats["frontier_sector_dominance"].append(sector_dominance)
+            drone_stats["frontier_sector_entropy"].append(sector_entropy)
+            drone_stats["frontier_cancellation"].append(frontier_cancellation)
+            drone_stats["action_frontier_alignment"].append(action_frontier_alignment)
+            drone_stats["action_frontier_intent"].append(action_frontier_intent)
+            drone_stats["action_frontier_movement_gap"].append(action_frontier_movement_gap)
+            for key, value in reward_terms.items():
+                drone_stats["reward_terms"][key].append(value)
+            drone_stats["is_edge_step"].append(float(is_edge_step))
+            drone_stats["is_corner_step"].append(float(is_corner_step))
             drone_stats["boundary_distance_m"].append(float(boundary_distance_m[drone_idx]))
             drone_stats["footprint_radius_m"].append(footprint_radius)
             drone_stats["diagnostic_steps"] += 1
@@ -914,6 +1823,219 @@ def run_rollout(
         "avg_expected_overlap_fraction": _finite_mean(expected_overlap_values),
         "avg_excess_overlap_fraction": _finite_mean(excess_overlap_values),
         "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav_overlap_values),
+        "avg_any_history_revisit_fraction": _finite_mean(any_history_revisit_values),
+        "avg_own_history_revisit_fraction": _finite_mean(own_history_revisit_values),
+        "avg_teammate_history_revisit_fraction": _finite_mean(teammate_history_revisit_values),
+        "avg_own_only_revisit_fraction": _finite_mean(own_only_revisit_values),
+        "avg_teammate_only_revisit_fraction": _finite_mean(teammate_only_revisit_values),
+        "avg_shared_history_revisit_fraction": _finite_mean(shared_history_revisit_values),
+        "avg_unavoidable_revisit_fraction": _finite_mean(unavoidable_revisit_values),
+        "avg_avoidable_revisit_fraction": _finite_mean(avoidable_revisit_values),
+        "avg_frontier_expected_new_cells": _finite_mean(frontier_expected_new_cells_values),
+        "avg_frontier_new_cell_capture_fraction": _finite_mean(frontier_new_cell_capture_values),
+        "avg_frontier_new_cell_gap": _finite_mean(frontier_new_cell_gap_values),
+        "avg_candidate_best_new_cells": _finite_mean(candidate_best_new_cells_values),
+        "avg_candidate_capture_fraction": _finite_mean(candidate_capture_fraction_values),
+        "avg_candidate_new_cell_regret": _finite_mean(candidate_new_cell_regret_values),
+        "avg_candidate_best_new_overlap": _finite_mean(candidate_best_new_overlap_values),
+        "avg_candidate_best_useful_overlap": _finite_mean(candidate_best_useful_overlap_values),
+        "avg_candidate_avoidable_overlap": _finite_mean(candidate_avoidable_overlap_values),
+        "avg_candidate_action_rank": _finite_mean(candidate_action_rank_values),
+        "avg_candidate_movement_rank": _finite_mean(candidate_movement_rank_values),
+        "avg_candidate_action_capture_fraction": _finite_mean(candidate_action_capture_values),
+        "avg_candidate_movement_capture_fraction": _finite_mean(candidate_movement_capture_values),
+        "avg_candidate_action_best_alignment": _finite_mean(candidate_action_best_alignment_values),
+        "avg_candidate_movement_best_alignment": _finite_mean(candidate_movement_best_alignment_values),
+        "candidate_no_opportunity_frac": _finite_mean(candidate_no_opportunity_values),
+        "avg_frontier_candidate_new_cells": _finite_mean(frontier_candidate_new_cells_values),
+        "avg_frontier_candidate_capture_fraction": _finite_mean(
+            frontier_candidate_capture_fraction_values
+        ),
+        "avg_frontier_candidate_regret": _finite_mean(frontier_candidate_regret_values),
+        "avg_frontier_candidate_best_alignment": _finite_mean(
+            frontier_candidate_best_alignment_values
+        ),
+        "avg_frontier_candidate_rank": _finite_mean(frontier_candidate_rank_values),
+        "avg_frontier_candidate_nearest_rank": _finite_mean(
+            frontier_candidate_nearest_rank_values
+        ),
+        "frontier_candidate_is_best_frac": _finite_mean(frontier_candidate_is_best_values),
+        "frontier_candidate_bad_frac": _finite_mean(frontier_candidate_bad_values),
+        "avg_confidence_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_frontier_candidate_capture_fraction_values
+        ),
+        "avg_confidence_frontier_candidate_best_alignment": _finite_mean(
+            confidence_frontier_candidate_best_alignment_values
+        ),
+        "avg_confidence_frontier_candidate_rank": _finite_mean(
+            confidence_frontier_candidate_rank_values
+        ),
+        "confidence_frontier_candidate_bad_frac": _finite_mean(
+            confidence_frontier_candidate_bad_values
+        ),
+        "avg_confidence_lg_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_lg_frontier_candidate_capture_fraction_values
+        ),
+        "avg_confidence_lg_frontier_candidate_best_alignment": _finite_mean(
+            confidence_lg_frontier_candidate_best_alignment_values
+        ),
+        "avg_confidence_lg_frontier_candidate_rank": _finite_mean(
+            confidence_lg_frontier_candidate_rank_values
+        ),
+        "confidence_lg_frontier_candidate_bad_frac": _finite_mean(
+            confidence_lg_frontier_candidate_bad_values
+        ),
+        "avg_confidence_frontier_capture_advantage": _finite_mean(
+            confidence_frontier_capture_advantage_values
+        ),
+        "avg_confidence_lg_frontier_capture_advantage": _finite_mean(
+            confidence_lg_frontier_capture_advantage_values
+        ),
+        "frontier_candidate_capture_new_cells_corr": _safe_corr(
+            frontier_candidate_capture_fraction_values,
+            new_coverage_cells_values,
+        ),
+        "frontier_candidate_alignment_new_cells_corr": _safe_corr(
+            frontier_candidate_best_alignment_values,
+            new_coverage_cells_values,
+        ),
+        "avg_coverage_opportunity_cells": _finite_mean(coverage_opportunity_cells_values),
+        "avg_coverage_opportunity_fraction": _finite_mean(coverage_opportunity_fraction_values),
+        "avg_coverage_opportunity_available_fraction": _finite_mean(
+            coverage_opportunity_available_fraction_values
+        ),
+        "avg_confidence_mean": _finite_mean(confidence_mean_values),
+        "avg_confidence_gain": _finite_mean(confidence_gain_values),
+        "avg_confidence_gain_by_drone": _finite_mean(confidence_gain_by_drone_values),
+        "avg_confidence_weighted_gain": _finite_mean(confidence_weighted_gain_values),
+        "avg_confidence_weighted_gain_by_drone": _finite_mean(confidence_weighted_gain_by_drone_values),
+        "avg_confidence_opportunity_fraction": _finite_mean(confidence_opportunity_fraction_values),
+        "avg_confidence_opportunity_best_gain": _finite_mean(confidence_opportunity_best_gain_values),
+        "avg_confidence_low_fraction": _finite_mean(confidence_low_fraction_values),
+        "avg_confidence_high_fraction": _finite_mean(confidence_high_fraction_values),
+        "avg_confidence_step_detection_probability": _finite_mean(
+            confidence_step_detection_probability_values
+        ),
+        "avg_confidence_pass_probability": _finite_mean(
+            confidence_step_detection_probability_by_drone_values
+        ),
+        "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction_values),
+        "avg_confidence_overlap_regret": _finite_mean(confidence_overlap_regret_values),
+        "avg_cleanup_target_valid_fraction": _finite_mean(cleanup_target_valid_values),
+        "avg_cleanup_target_distance_m": _finite_mean(cleanup_target_distance_values),
+        "avg_cleanup_target_value": _finite_mean(cleanup_target_value_values),
+        "avg_cleanup_target_progress_m": _finite_mean(cleanup_target_progress_values),
+        "avg_cleanup_target_progress_fraction": _finite_mean(cleanup_target_progress_fraction_values),
+        "cleanup_target_switch_rate": _finite_mean(cleanup_target_switch_values),
+        "cleanup_target_reached_rate": _finite_mean(cleanup_target_reached_values),
+        "avg_cleanup_target_value_decay": _finite_mean(cleanup_target_value_decay_values),
+        "cleanup_target_no_progress_frac": _finite_mean(cleanup_target_no_progress_values),
+        "cleanup_target_progress_with_new_cells_frac": _finite_mean(
+            cleanup_target_progress_with_new_cells_values
+        ),
+        "cleanup_target_progress_with_excess_overlap_frac": _finite_mean(
+            cleanup_target_progress_with_excess_overlap_values
+        ),
+        "avg_cleanup_target_frontier_gate": _finite_mean(cleanup_target_frontier_gate_values),
+        "avg_frontier_alignment": _finite_mean(frontier_alignment_values),
+        "avg_frontier_progress_fraction": _finite_mean(frontier_progress_values),
+        "avg_frontier_uncovered_ratio": _finite_mean(frontier_uncovered_ratio_values),
+        "avg_frontier_obs_distance": _finite_mean(frontier_obs_distance_values),
+        "avg_frontier_obs_vector_norm": _finite_mean(frontier_obs_vector_norm_values),
+        "avg_frontier_local_coverage_cos": _finite_mean(frontier_local_coverage_cos_values),
+        "avg_frontier_global_coverage_cos": _finite_mean(frontier_global_coverage_cos_values),
+        "avg_local_global_coverage_cos": _finite_mean(local_global_coverage_cos_values),
+        "avg_frontier_sector_cos": _finite_mean(frontier_sector_cos_values),
+        "avg_frontier_sector_dominance": _finite_mean(frontier_sector_dominance_values),
+        "avg_frontier_sector_entropy": _finite_mean(frontier_sector_entropy_values),
+        "avg_frontier_cancellation": _finite_mean(frontier_cancellation_values),
+        "avg_frontier_pairwise_cos": _finite_mean(frontier_pairwise_cos_values),
+        "avg_frontier_pairwise_same_dir": _finite_mean(frontier_pairwise_same_dir_values),
+        "avg_local_pairwise_same_dir": _finite_mean(local_pairwise_same_dir_values),
+        "avg_global_pairwise_same_dir": _finite_mean(global_pairwise_same_dir_values),
+        "avg_reward_uav_coverage": _finite_mean(reward_uav_coverage_values),
+        "avg_reward_uav_move_coverage": _finite_mean(reward_uav_move_coverage_values),
+        "avg_reward_uav_frontier": _finite_mean(reward_uav_frontier_values),
+        "avg_reward_uav_confidence": _finite_mean(reward_uav_confidence_values),
+        "avg_reward_uav_team_confidence": _finite_mean(reward_uav_team_confidence_values),
+        "avg_penalty_uav_team_confidence_overlap": _finite_mean(
+            penalty_uav_team_confidence_overlap_values
+        ),
+        "avg_reward_uav_confidence_move": _finite_mean(reward_uav_confidence_move_values),
+        "avg_reward_uav_cleanup_target_progress": _finite_mean(
+            reward_uav_cleanup_target_progress_values
+        ),
+        "avg_reward_uav_astar_progress": _finite_mean(reward_uav_astar_progress_values),
+        "avg_penalty_uav_inefficient_move": _finite_mean(penalty_uav_inefficient_move_values),
+        "avg_penalty_uav_confidence_overlap": _finite_mean(penalty_uav_confidence_overlap_values),
+        "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
+        "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
+        "avg_penalty_uav_outside_footprint": _finite_mean(penalty_uav_outside_footprint_values),
+        "avg_reward_uav_coverage_threshold": _finite_mean(reward_uav_coverage_threshold_values),
+        "avg_reward_uav_scout": _finite_mean(reward_uav_scout_values),
+        "avg_reward_team": _finite_mean(reward_team_values),
+        "avg_reward_all_survivors_found": _finite_mean(reward_all_survivors_found_values),
+        "avg_reward_uav_aux": _finite_mean(reward_uav_aux_values),
+        "avg_frontier_abs_reward_share": _finite_mean(frontier_abs_reward_share_values),
+        "frontier_high_progress_step_frac": (
+            frontier_high_progress_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "frontier_high_progress_no_new_frac": (
+            frontier_high_progress_no_new_steps / frontier_high_progress_steps
+            if frontier_high_progress_steps else 0.0
+        ),
+        "frontier_high_progress_edge_frac": (
+            frontier_high_progress_edge_steps / frontier_high_progress_steps
+            if frontier_high_progress_steps else 0.0
+        ),
+        "frontier_high_progress_corner_frac": (
+            frontier_high_progress_corner_steps / frontier_high_progress_steps
+            if frontier_high_progress_steps else 0.0
+        ),
+        "frontier_edge_progress_mean": _finite_mean(frontier_progress_edge_values),
+        "frontier_interior_progress_mean": _finite_mean(frontier_progress_interior_values),
+        "frontier_edge_reward_mean": _finite_mean(frontier_reward_edge_values),
+        "frontier_interior_reward_mean": _finite_mean(frontier_reward_interior_values),
+        "frontier_edge_new_cells_mean": _finite_mean(frontier_new_cells_edge_values),
+        "frontier_interior_new_cells_mean": _finite_mean(frontier_new_cells_interior_values),
+        "frontier_edge_outside_mean": _finite_mean(frontier_outside_edge_values),
+        "frontier_interior_outside_mean": _finite_mean(frontier_outside_interior_values),
+        "frontier_progress_new_cells_corr": _safe_corr(frontier_progress_values, new_coverage_cells_values),
+        "frontier_expected_raw_new_cells_corr": _safe_corr(
+            frontier_expected_new_cells_values,
+            raw_new_coverage_cells_values,
+        ),
+        "frontier_progress_boundary_distance_corr": _safe_corr(
+            frontier_progress_values,
+            boundary_distance_m_values,
+        ),
+        "frontier_obs_empty_step_frac": (
+            frontier_obs_empty_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "action_frontier_aligned_step_frac": (
+            action_frontier_aligned_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "action_frontier_anti_aligned_step_frac": (
+            action_frontier_anti_aligned_steps / diagnostic_steps if diagnostic_steps else 0.0
+        ),
+        "action_frontier_aligned_no_new_frac": (
+            action_frontier_aligned_no_new_steps / action_frontier_aligned_steps
+            if action_frontier_aligned_steps else 0.0
+        ),
+        "action_frontier_aligned_edge_frac": (
+            action_frontier_aligned_edge_steps / action_frontier_aligned_steps
+            if action_frontier_aligned_steps else 0.0
+        ),
+        "action_frontier_alignment_new_cells_corr": _safe_corr(
+            action_frontier_alignment_values,
+            new_coverage_cells_values,
+        ),
+        "action_frontier_alignment_boundary_distance_corr": _safe_corr(
+            action_frontier_alignment_values,
+            boundary_distance_m_values,
+        ),
+        "time_bins": _finalize_time_bins(time_bins),
+        "perception_time_bins": _finalize_time_bins(perception_time_bins),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess_overlap_values]))
             if excess_overlap_values else 0.0
@@ -2771,6 +3893,108 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "expected_overlap": [],
         "excess_overlap": [],
         "inter_uav_overlap": [],
+        "any_history_revisit": [],
+        "own_history_revisit": [],
+        "teammate_history_revisit": [],
+        "own_only_revisit": [],
+        "teammate_only_revisit": [],
+        "shared_history_revisit": [],
+        "unavoidable_revisit": [],
+        "avoidable_revisit": [],
+        "frontier_expected_new_cells": [],
+        "frontier_new_cell_capture": [],
+        "frontier_new_cell_gap": [],
+        "candidate_best_new_cells": [],
+        "candidate_capture_fraction": [],
+        "candidate_new_cell_regret": [],
+        "candidate_best_new_overlap": [],
+        "candidate_best_useful_overlap": [],
+        "candidate_avoidable_overlap": [],
+        "candidate_action_rank": [],
+        "candidate_movement_rank": [],
+        "candidate_action_capture_fraction": [],
+        "candidate_movement_capture_fraction": [],
+        "candidate_action_best_alignment": [],
+        "candidate_movement_best_alignment": [],
+        "candidate_no_opportunity": [],
+        "frontier_candidate_new_cells": [],
+        "frontier_candidate_capture_fraction": [],
+        "frontier_candidate_regret": [],
+        "frontier_candidate_best_alignment": [],
+        "frontier_candidate_rank": [],
+        "frontier_candidate_nearest_rank": [],
+        "frontier_candidate_is_best": [],
+        "frontier_candidate_bad": [],
+        "confidence_frontier_candidate_capture_fraction": [],
+        "confidence_frontier_candidate_best_alignment": [],
+        "confidence_frontier_candidate_rank": [],
+        "confidence_frontier_candidate_bad": [],
+        "confidence_lg_frontier_candidate_capture_fraction": [],
+        "confidence_lg_frontier_candidate_best_alignment": [],
+        "confidence_lg_frontier_candidate_rank": [],
+        "confidence_lg_frontier_candidate_bad": [],
+        "confidence_frontier_capture_advantage": [],
+        "confidence_lg_frontier_capture_advantage": [],
+        "coverage_opportunity_cells": [],
+        "coverage_opportunity_fraction": [],
+        "coverage_opportunity_available_fraction": [],
+        "confidence_gain": [],
+        "confidence_weighted_gain": [],
+        "confidence_opportunity_fraction": [],
+        "confidence_opportunity_best_gain": [],
+        "confidence_pass_probability": [],
+        "confidence_overlap_fraction": [],
+        "confidence_overlap_regret": [],
+        "cleanup_target_valid": [],
+        "cleanup_target_distance_m": [],
+        "cleanup_target_value": [],
+        "cleanup_target_progress_m": [],
+        "cleanup_target_progress_fraction": [],
+        "cleanup_target_switch": [],
+        "cleanup_target_reached": [],
+        "cleanup_target_value_decay": [],
+        "cleanup_target_age": [],
+        "cleanup_target_frontier_gate": [],
+        "frontier_alignment": [],
+        "frontier_progress": [],
+        "frontier_uncovered_ratio": [],
+        "frontier_obs_distance": [],
+        "frontier_obs_vector_norm": [],
+        "frontier_obs_uncovered_ratio": [],
+        "frontier_local_coverage_cos": [],
+        "frontier_global_coverage_cos": [],
+        "local_global_coverage_cos": [],
+        "frontier_sector_cos": [],
+        "frontier_sector_dominance": [],
+        "frontier_sector_entropy": [],
+        "frontier_cancellation": [],
+        "action_frontier_alignment": [],
+        "action_frontier_intent": [],
+        "action_frontier_movement_gap": [],
+        "reward_terms": {
+            "coverage": [],
+            "move_coverage": [],
+            "frontier": [],
+            "confidence": [],
+            "team_confidence": [],
+            "team_confidence_overlap_penalty": [],
+            "confidence_move": [],
+            "cleanup_target_progress": [],
+            "astar_progress": [],
+            "inefficient_move_penalty": [],
+            "confidence_overlap_penalty": [],
+            "overlap_penalty": [],
+            "inter_uav_overlap_penalty": [],
+            "outside_footprint_penalty": [],
+            "coverage_threshold": [],
+            "scout": [],
+            "team": [],
+            "all_survivors_found": [],
+            "aux": [],
+            "frontier_abs_share": [],
+        },
+        "is_edge_step": [],
+        "is_corner_step": [],
         "boundary_distance_m": [],
         "footprint_radius_m": [],
         "scout_credit_count": 0,
@@ -2808,6 +4032,89 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     raw_new_cells = stats["raw_new_coverage_cells"]
     excess = stats["excess_overlap"]
     inter_uav = stats["inter_uav_overlap"]
+    any_history_revisit = stats["any_history_revisit"]
+    own_history_revisit = stats["own_history_revisit"]
+    teammate_history_revisit = stats["teammate_history_revisit"]
+    own_only_revisit = stats["own_only_revisit"]
+    teammate_only_revisit = stats["teammate_only_revisit"]
+    shared_history_revisit = stats["shared_history_revisit"]
+    unavoidable_revisit = stats["unavoidable_revisit"]
+    avoidable_revisit = stats["avoidable_revisit"]
+    frontier_expected_new_cells = stats["frontier_expected_new_cells"]
+    frontier_new_cell_capture = stats["frontier_new_cell_capture"]
+    frontier_new_cell_gap = stats["frontier_new_cell_gap"]
+    candidate_best_new_cells = stats["candidate_best_new_cells"]
+    candidate_capture_fraction = stats["candidate_capture_fraction"]
+    candidate_new_cell_regret = stats["candidate_new_cell_regret"]
+    candidate_best_new_overlap = stats["candidate_best_new_overlap"]
+    candidate_best_useful_overlap = stats["candidate_best_useful_overlap"]
+    candidate_avoidable_overlap = stats["candidate_avoidable_overlap"]
+    candidate_action_rank = stats["candidate_action_rank"]
+    candidate_movement_rank = stats["candidate_movement_rank"]
+    candidate_action_capture = stats["candidate_action_capture_fraction"]
+    candidate_movement_capture = stats["candidate_movement_capture_fraction"]
+    candidate_action_best_alignment = stats["candidate_action_best_alignment"]
+    candidate_movement_best_alignment = stats["candidate_movement_best_alignment"]
+    candidate_no_opportunity = stats["candidate_no_opportunity"]
+    frontier_candidate_new_cells = stats["frontier_candidate_new_cells"]
+    frontier_candidate_capture = stats["frontier_candidate_capture_fraction"]
+    frontier_candidate_regret = stats["frontier_candidate_regret"]
+    frontier_candidate_best_alignment = stats["frontier_candidate_best_alignment"]
+    frontier_candidate_rank = stats["frontier_candidate_rank"]
+    frontier_candidate_nearest_rank = stats["frontier_candidate_nearest_rank"]
+    frontier_candidate_is_best = stats["frontier_candidate_is_best"]
+    frontier_candidate_bad = stats["frontier_candidate_bad"]
+    confidence_frontier_candidate_capture = stats["confidence_frontier_candidate_capture_fraction"]
+    confidence_frontier_candidate_best_alignment = stats[
+        "confidence_frontier_candidate_best_alignment"
+    ]
+    confidence_frontier_candidate_rank = stats["confidence_frontier_candidate_rank"]
+    confidence_frontier_candidate_bad = stats["confidence_frontier_candidate_bad"]
+    confidence_lg_frontier_candidate_capture = stats[
+        "confidence_lg_frontier_candidate_capture_fraction"
+    ]
+    confidence_lg_frontier_candidate_best_alignment = stats[
+        "confidence_lg_frontier_candidate_best_alignment"
+    ]
+    confidence_lg_frontier_candidate_rank = stats["confidence_lg_frontier_candidate_rank"]
+    confidence_lg_frontier_candidate_bad = stats["confidence_lg_frontier_candidate_bad"]
+    confidence_frontier_capture_advantage = stats["confidence_frontier_capture_advantage"]
+    confidence_lg_frontier_capture_advantage = stats["confidence_lg_frontier_capture_advantage"]
+    opportunity_cells = stats["coverage_opportunity_cells"]
+    opportunity_fraction = stats["coverage_opportunity_fraction"]
+    opportunity_available_fraction = stats["coverage_opportunity_available_fraction"]
+    confidence_gain = stats["confidence_gain"]
+    confidence_weighted_gain = stats["confidence_weighted_gain"]
+    confidence_opportunity_fraction = stats["confidence_opportunity_fraction"]
+    confidence_opportunity_best_gain = stats["confidence_opportunity_best_gain"]
+    confidence_pass_probability = stats["confidence_pass_probability"]
+    confidence_overlap_fraction = stats["confidence_overlap_fraction"]
+    confidence_overlap_regret = stats["confidence_overlap_regret"]
+    cleanup_target_valid = stats["cleanup_target_valid"]
+    cleanup_target_distance = stats["cleanup_target_distance_m"]
+    cleanup_target_value = stats["cleanup_target_value"]
+    cleanup_target_progress = stats["cleanup_target_progress_m"]
+    cleanup_target_progress_fraction = stats["cleanup_target_progress_fraction"]
+    cleanup_target_switch = stats["cleanup_target_switch"]
+    cleanup_target_reached = stats["cleanup_target_reached"]
+    cleanup_target_value_decay = stats["cleanup_target_value_decay"]
+    cleanup_target_age = stats["cleanup_target_age"]
+    cleanup_target_frontier_gate = stats["cleanup_target_frontier_gate"]
+    frontier_alignment = stats["frontier_alignment"]
+    frontier_progress = stats["frontier_progress"]
+    frontier_ratio = stats["frontier_uncovered_ratio"]
+    frontier_obs_distance = stats["frontier_obs_distance"]
+    frontier_obs_norm = stats["frontier_obs_vector_norm"]
+    frontier_local_cos = stats["frontier_local_coverage_cos"]
+    frontier_global_cos = stats["frontier_global_coverage_cos"]
+    local_global_cos = stats["local_global_coverage_cos"]
+    frontier_sector_cos = stats["frontier_sector_cos"]
+    frontier_sector_dominance = stats["frontier_sector_dominance"]
+    frontier_sector_entropy = stats["frontier_sector_entropy"]
+    frontier_cancellation = stats["frontier_cancellation"]
+    action_frontier_alignment = stats["action_frontier_alignment"]
+    action_frontier_intent = stats["action_frontier_intent"]
+    action_frontier_gap = stats["action_frontier_movement_gap"]
     outside = stats["outside_footprint"]
     edge_mask = [bool(value) for value in stats["is_edge_step"]]
     high_frontier = int(stats["frontier_high_progress_steps"])
@@ -2852,6 +4159,193 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_expected_overlap_fraction": _finite_mean(stats["expected_overlap"]),
         "avg_excess_overlap_fraction": _finite_mean(excess),
         "avg_inter_uav_overlap_fraction": _finite_mean(inter_uav),
+        "avg_any_history_revisit_fraction": _finite_mean(any_history_revisit),
+        "avg_own_history_revisit_fraction": _finite_mean(own_history_revisit),
+        "avg_teammate_history_revisit_fraction": _finite_mean(teammate_history_revisit),
+        "avg_own_only_revisit_fraction": _finite_mean(own_only_revisit),
+        "avg_teammate_only_revisit_fraction": _finite_mean(teammate_only_revisit),
+        "avg_shared_history_revisit_fraction": _finite_mean(shared_history_revisit),
+        "avg_unavoidable_revisit_fraction": _finite_mean(unavoidable_revisit),
+        "avg_avoidable_revisit_fraction": _finite_mean(avoidable_revisit),
+        "avg_frontier_expected_new_cells": _finite_mean(frontier_expected_new_cells),
+        "avg_frontier_new_cell_capture_fraction": _finite_mean(frontier_new_cell_capture),
+        "avg_frontier_new_cell_gap": _finite_mean(frontier_new_cell_gap),
+        "avg_candidate_best_new_cells": _finite_mean(candidate_best_new_cells),
+        "avg_candidate_capture_fraction": _finite_mean(candidate_capture_fraction),
+        "avg_candidate_new_cell_regret": _finite_mean(candidate_new_cell_regret),
+        "avg_candidate_best_new_overlap": _finite_mean(candidate_best_new_overlap),
+        "avg_candidate_best_useful_overlap": _finite_mean(candidate_best_useful_overlap),
+        "avg_candidate_avoidable_overlap": _finite_mean(candidate_avoidable_overlap),
+        "avg_candidate_action_rank": _finite_mean(candidate_action_rank),
+        "avg_candidate_movement_rank": _finite_mean(candidate_movement_rank),
+        "avg_candidate_action_capture_fraction": _finite_mean(candidate_action_capture),
+        "avg_candidate_movement_capture_fraction": _finite_mean(candidate_movement_capture),
+        "avg_candidate_action_best_alignment": _finite_mean(candidate_action_best_alignment),
+        "avg_candidate_movement_best_alignment": _finite_mean(candidate_movement_best_alignment),
+        "candidate_no_opportunity_frac": _finite_mean(candidate_no_opportunity),
+        "avg_frontier_candidate_new_cells": _finite_mean(frontier_candidate_new_cells),
+        "avg_frontier_candidate_capture_fraction": _finite_mean(frontier_candidate_capture),
+        "avg_frontier_candidate_regret": _finite_mean(frontier_candidate_regret),
+        "avg_frontier_candidate_best_alignment": _finite_mean(frontier_candidate_best_alignment),
+        "avg_frontier_candidate_rank": _finite_mean(frontier_candidate_rank),
+        "avg_frontier_candidate_nearest_rank": _finite_mean(frontier_candidate_nearest_rank),
+        "frontier_candidate_is_best_frac": _finite_mean(frontier_candidate_is_best),
+        "frontier_candidate_bad_frac": _finite_mean(frontier_candidate_bad),
+        "avg_confidence_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_frontier_candidate_capture
+        ),
+        "avg_confidence_frontier_candidate_best_alignment": _finite_mean(
+            confidence_frontier_candidate_best_alignment
+        ),
+        "avg_confidence_frontier_candidate_rank": _finite_mean(confidence_frontier_candidate_rank),
+        "confidence_frontier_candidate_bad_frac": _finite_mean(confidence_frontier_candidate_bad),
+        "avg_confidence_lg_frontier_candidate_capture_fraction": _finite_mean(
+            confidence_lg_frontier_candidate_capture
+        ),
+        "avg_confidence_lg_frontier_candidate_best_alignment": _finite_mean(
+            confidence_lg_frontier_candidate_best_alignment
+        ),
+        "avg_confidence_lg_frontier_candidate_rank": _finite_mean(
+            confidence_lg_frontier_candidate_rank
+        ),
+        "confidence_lg_frontier_candidate_bad_frac": _finite_mean(
+            confidence_lg_frontier_candidate_bad
+        ),
+        "avg_confidence_frontier_capture_advantage": _finite_mean(
+            confidence_frontier_capture_advantage
+        ),
+        "avg_confidence_lg_frontier_capture_advantage": _finite_mean(
+            confidence_lg_frontier_capture_advantage
+        ),
+        "avg_coverage_opportunity_cells": _finite_mean(opportunity_cells),
+        "avg_coverage_opportunity_fraction": _finite_mean(opportunity_fraction),
+        "avg_coverage_opportunity_available_fraction": _finite_mean(opportunity_available_fraction),
+        "avg_confidence_gain": _finite_mean(confidence_gain),
+        "total_confidence_gain": float(np.sum(confidence_gain)) if confidence_gain else 0.0,
+        "avg_confidence_weighted_gain": _finite_mean(confidence_weighted_gain),
+        "avg_confidence_opportunity_fraction": _finite_mean(confidence_opportunity_fraction),
+        "avg_confidence_opportunity_best_gain": _finite_mean(confidence_opportunity_best_gain),
+        "avg_confidence_pass_probability": _finite_mean(confidence_pass_probability),
+        "avg_confidence_overlap_fraction": _finite_mean(confidence_overlap_fraction),
+        "avg_confidence_overlap_regret": _finite_mean(confidence_overlap_regret),
+        "avg_cleanup_target_valid_fraction": _finite_mean(cleanup_target_valid),
+        "avg_cleanup_target_distance_m": _finite_mean(cleanup_target_distance),
+        "avg_cleanup_target_value": _finite_mean(cleanup_target_value),
+        "avg_cleanup_target_progress_m": _finite_mean(cleanup_target_progress),
+        "avg_cleanup_target_progress_fraction": _finite_mean(cleanup_target_progress_fraction),
+        "cleanup_target_switch_rate": _finite_mean(cleanup_target_switch),
+        "cleanup_target_reached_rate": _finite_mean(cleanup_target_reached),
+        "avg_cleanup_target_value_decay": _finite_mean(cleanup_target_value_decay),
+        "avg_cleanup_target_age": _finite_mean(cleanup_target_age),
+        "avg_cleanup_target_frontier_gate": _finite_mean(cleanup_target_frontier_gate),
+        "cleanup_target_no_progress_frac": (
+            float(np.mean([
+                valid >= 0.5 and progress <= 1e-6
+                for valid, progress in zip(cleanup_target_valid, cleanup_target_progress)
+            ]))
+            if cleanup_target_valid else 0.0
+        ),
+        "avg_frontier_alignment": _finite_mean(frontier_alignment),
+        "avg_frontier_progress_fraction": _finite_mean(frontier_progress),
+        "avg_frontier_uncovered_ratio": _finite_mean(frontier_ratio),
+        "avg_frontier_obs_distance": _finite_mean(frontier_obs_distance),
+        "avg_frontier_obs_vector_norm": _finite_mean(frontier_obs_norm),
+        "avg_frontier_local_coverage_cos": _finite_mean(frontier_local_cos),
+        "avg_frontier_global_coverage_cos": _finite_mean(frontier_global_cos),
+        "avg_local_global_coverage_cos": _finite_mean(local_global_cos),
+        "avg_frontier_sector_cos": _finite_mean(frontier_sector_cos),
+        "avg_frontier_sector_dominance": _finite_mean(frontier_sector_dominance),
+        "avg_frontier_sector_entropy": _finite_mean(frontier_sector_entropy),
+        "avg_frontier_cancellation": _finite_mean(frontier_cancellation),
+        "avg_reward_uav_coverage": _finite_mean(reward_terms["coverage"]),
+        "avg_reward_uav_move_coverage": _finite_mean(reward_terms["move_coverage"]),
+        "avg_reward_uav_frontier": _finite_mean(reward_terms["frontier"]),
+        "avg_reward_uav_confidence": _finite_mean(reward_terms["confidence"]),
+        "avg_reward_uav_team_confidence": _finite_mean(reward_terms["team_confidence"]),
+        "avg_penalty_uav_team_confidence_overlap": _finite_mean(
+            reward_terms["team_confidence_overlap_penalty"]
+        ),
+        "avg_reward_uav_confidence_move": _finite_mean(reward_terms["confidence_move"]),
+        "avg_reward_uav_cleanup_target_progress": _finite_mean(
+            reward_terms["cleanup_target_progress"]
+        ),
+        "avg_reward_uav_astar_progress": _finite_mean(reward_terms["astar_progress"]),
+        "avg_penalty_uav_inefficient_move": _finite_mean(
+            reward_terms["inefficient_move_penalty"]
+        ),
+        "avg_penalty_uav_confidence_overlap": _finite_mean(
+            reward_terms["confidence_overlap_penalty"]
+        ),
+        "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
+        "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
+        "avg_penalty_uav_outside_footprint": _finite_mean(reward_terms["outside_footprint_penalty"]),
+        "avg_reward_uav_coverage_threshold": _finite_mean(reward_terms["coverage_threshold"]),
+        "avg_reward_uav_scout": _finite_mean(reward_terms["scout"]),
+        "avg_reward_team": _finite_mean(reward_terms["team"]),
+        "avg_reward_all_survivors_found": _finite_mean(reward_terms["all_survivors_found"]),
+        "avg_reward_uav_aux": _finite_mean(reward_terms["aux"]),
+        "avg_frontier_abs_reward_share": _finite_mean(reward_terms["frontier_abs_share"]),
+        "frontier_high_progress_step_frac": high_frontier / steps if steps else 0.0,
+        "frontier_high_progress_no_new_frac": (
+            stats["frontier_high_progress_no_new_steps"] / high_frontier
+            if high_frontier else 0.0
+        ),
+        "frontier_high_progress_edge_frac": (
+            stats["frontier_high_progress_edge_steps"] / high_frontier
+            if high_frontier else 0.0
+        ),
+        "frontier_high_progress_corner_frac": (
+            stats["frontier_high_progress_corner_steps"] / high_frontier
+            if high_frontier else 0.0
+        ),
+        "frontier_edge_progress_mean": _finite_mean([
+            value for value, is_edge in zip(frontier_progress, edge_mask) if is_edge
+        ]),
+        "frontier_interior_progress_mean": _finite_mean([
+            value for value, is_edge in zip(frontier_progress, edge_mask) if not is_edge
+        ]),
+        "frontier_edge_reward_mean": _finite_mean([
+            value for value, is_edge in zip(reward_terms["frontier"], edge_mask) if is_edge
+        ]),
+        "frontier_interior_reward_mean": _finite_mean([
+            value for value, is_edge in zip(reward_terms["frontier"], edge_mask) if not is_edge
+        ]),
+        "frontier_edge_new_cells_mean": _finite_mean([
+            value for value, is_edge in zip(new_cells, edge_mask) if is_edge
+        ]),
+        "frontier_interior_new_cells_mean": _finite_mean([
+            value for value, is_edge in zip(new_cells, edge_mask) if not is_edge
+        ]),
+        "frontier_edge_outside_mean": _finite_mean([
+            value for value, is_edge in zip(outside, edge_mask) if is_edge
+        ]),
+        "frontier_interior_outside_mean": _finite_mean([
+            value for value, is_edge in zip(outside, edge_mask) if not is_edge
+        ]),
+        "frontier_progress_new_cells_corr": _safe_corr(frontier_progress, new_cells),
+        "frontier_progress_boundary_distance_corr": _safe_corr(frontier_progress, boundary),
+        "frontier_obs_empty_step_frac": (
+            stats["frontier_obs_empty_steps"] / steps if steps else 0.0
+        ),
+        "action_frontier_aligned_step_frac": (
+            action_frontier_aligned / steps if steps else 0.0
+        ),
+        "action_frontier_anti_aligned_step_frac": (
+            stats["action_frontier_anti_aligned_steps"] / steps if steps else 0.0
+        ),
+        "action_frontier_aligned_no_new_frac": (
+            stats["action_frontier_aligned_no_new_steps"] / action_frontier_aligned
+            if action_frontier_aligned else 0.0
+        ),
+        "action_frontier_aligned_edge_frac": (
+            stats["action_frontier_aligned_edge_steps"] / action_frontier_aligned
+            if action_frontier_aligned else 0.0
+        ),
+        "action_frontier_alignment_new_cells_corr": _safe_corr(action_frontier_alignment, new_cells),
+        "action_frontier_alignment_boundary_distance_corr": _safe_corr(
+            action_frontier_alignment,
+            boundary,
+        ),
         "excess_overlap_step_frac_10": (
             float(np.mean([value >= 0.10 for value in excess]))
             if excess else 0.0
@@ -3462,6 +4956,435 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_inter_uav_overlap_fraction": _finite_mean([
             row["avg_inter_uav_overlap_fraction"] for row in rows
         ]),
+        "mean_any_history_revisit_fraction": _finite_mean([
+            row["avg_any_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_own_history_revisit_fraction": _finite_mean([
+            row["avg_own_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_teammate_history_revisit_fraction": _finite_mean([
+            row["avg_teammate_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_own_only_revisit_fraction": _finite_mean([
+            row["avg_own_only_revisit_fraction"] for row in rows
+        ]),
+        "mean_teammate_only_revisit_fraction": _finite_mean([
+            row["avg_teammate_only_revisit_fraction"] for row in rows
+        ]),
+        "mean_shared_history_revisit_fraction": _finite_mean([
+            row["avg_shared_history_revisit_fraction"] for row in rows
+        ]),
+        "mean_unavoidable_revisit_fraction": _finite_mean([
+            row["avg_unavoidable_revisit_fraction"] for row in rows
+        ]),
+        "mean_avoidable_revisit_fraction": _finite_mean([
+            row["avg_avoidable_revisit_fraction"] for row in rows
+        ]),
+        "mean_frontier_expected_new_cells": _finite_mean([
+            row["avg_frontier_expected_new_cells"] for row in rows
+        ]),
+        "mean_frontier_new_cell_capture_fraction": _finite_mean([
+            row["avg_frontier_new_cell_capture_fraction"] for row in rows
+        ]),
+        "mean_frontier_new_cell_gap": _finite_mean([
+            row["avg_frontier_new_cell_gap"] for row in rows
+        ]),
+        "mean_candidate_best_new_cells": _finite_mean([
+            row["avg_candidate_best_new_cells"] for row in rows
+        ]),
+        "mean_candidate_capture_fraction": _finite_mean([
+            row["avg_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_candidate_new_cell_regret": _finite_mean([
+            row["avg_candidate_new_cell_regret"] for row in rows
+        ]),
+        "mean_candidate_best_new_overlap": _finite_mean([
+            row["avg_candidate_best_new_overlap"] for row in rows
+        ]),
+        "mean_candidate_best_useful_overlap": _finite_mean([
+            row["avg_candidate_best_useful_overlap"] for row in rows
+        ]),
+        "mean_candidate_avoidable_overlap": _finite_mean([
+            row["avg_candidate_avoidable_overlap"] for row in rows
+        ]),
+        "mean_candidate_action_rank": _finite_mean([
+            row["avg_candidate_action_rank"] for row in rows
+        ]),
+        "mean_candidate_movement_rank": _finite_mean([
+            row["avg_candidate_movement_rank"] for row in rows
+        ]),
+        "mean_candidate_action_capture_fraction": _finite_mean([
+            row["avg_candidate_action_capture_fraction"] for row in rows
+        ]),
+        "mean_candidate_movement_capture_fraction": _finite_mean([
+            row["avg_candidate_movement_capture_fraction"] for row in rows
+        ]),
+        "mean_candidate_action_best_alignment": _finite_mean([
+            row["avg_candidate_action_best_alignment"] for row in rows
+        ]),
+        "mean_candidate_movement_best_alignment": _finite_mean([
+            row["avg_candidate_movement_best_alignment"] for row in rows
+        ]),
+        "mean_candidate_no_opportunity_frac": _finite_mean([
+            row["candidate_no_opportunity_frac"] for row in rows
+        ]),
+        "mean_frontier_candidate_new_cells": _finite_mean([
+            row["avg_frontier_candidate_new_cells"] for row in rows
+        ]),
+        "mean_frontier_candidate_capture_fraction": _finite_mean([
+            row["avg_frontier_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_frontier_candidate_regret": _finite_mean([
+            row["avg_frontier_candidate_regret"] for row in rows
+        ]),
+        "mean_frontier_candidate_best_alignment": _finite_mean([
+            row["avg_frontier_candidate_best_alignment"] for row in rows
+        ]),
+        "mean_frontier_candidate_rank": _finite_mean([
+            row["avg_frontier_candidate_rank"] for row in rows
+        ]),
+        "mean_frontier_candidate_nearest_rank": _finite_mean([
+            row["avg_frontier_candidate_nearest_rank"] for row in rows
+        ]),
+        "mean_frontier_candidate_is_best_frac": _finite_mean([
+            row["frontier_candidate_is_best_frac"] for row in rows
+        ]),
+        "mean_frontier_candidate_bad_frac": _finite_mean([
+            row["frontier_candidate_bad_frac"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_capture_fraction": _finite_mean([
+            row["avg_confidence_frontier_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_best_alignment": _finite_mean([
+            row["avg_confidence_frontier_candidate_best_alignment"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_rank": _finite_mean([
+            row["avg_confidence_frontier_candidate_rank"] for row in rows
+        ]),
+        "mean_confidence_frontier_candidate_bad_frac": _finite_mean([
+            row["confidence_frontier_candidate_bad_frac"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_capture_fraction": _finite_mean([
+            row["avg_confidence_lg_frontier_candidate_capture_fraction"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_best_alignment": _finite_mean([
+            row["avg_confidence_lg_frontier_candidate_best_alignment"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_rank": _finite_mean([
+            row["avg_confidence_lg_frontier_candidate_rank"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_candidate_bad_frac": _finite_mean([
+            row["confidence_lg_frontier_candidate_bad_frac"] for row in rows
+        ]),
+        "mean_confidence_frontier_capture_advantage": _finite_mean([
+            row["avg_confidence_frontier_capture_advantage"] for row in rows
+        ]),
+        "mean_confidence_lg_frontier_capture_advantage": _finite_mean([
+            row["avg_confidence_lg_frontier_capture_advantage"] for row in rows
+        ]),
+        "mean_frontier_candidate_capture_new_cells_corr": _finite_mean([
+            row["frontier_candidate_capture_new_cells_corr"] for row in rows
+        ]),
+        "mean_frontier_candidate_alignment_new_cells_corr": _finite_mean([
+            row["frontier_candidate_alignment_new_cells_corr"] for row in rows
+        ]),
+        "mean_coverage_opportunity_cells": _finite_mean([
+            row["avg_coverage_opportunity_cells"] for row in rows
+        ]),
+        "mean_coverage_opportunity_fraction": _finite_mean([
+            row["avg_coverage_opportunity_fraction"] for row in rows
+        ]),
+        "mean_coverage_opportunity_available_fraction": _finite_mean([
+            row["avg_coverage_opportunity_available_fraction"] for row in rows
+        ]),
+        "mean_confidence_mean": _finite_mean([
+            row["avg_confidence_mean"] for row in rows
+        ]),
+        "mean_confidence_gain": _finite_mean([
+            row["avg_confidence_gain"] for row in rows
+        ]),
+        "mean_confidence_gain_by_drone": _finite_mean([
+            row["avg_confidence_gain_by_drone"] for row in rows
+        ]),
+        "mean_confidence_weighted_gain": _finite_mean([
+            row["avg_confidence_weighted_gain"] for row in rows
+        ]),
+        "mean_confidence_weighted_gain_by_drone": _finite_mean([
+            row["avg_confidence_weighted_gain_by_drone"] for row in rows
+        ]),
+        "mean_confidence_opportunity_fraction": _finite_mean([
+            row["avg_confidence_opportunity_fraction"] for row in rows
+        ]),
+        "mean_confidence_opportunity_best_gain": _finite_mean([
+            row["avg_confidence_opportunity_best_gain"] for row in rows
+        ]),
+        "mean_confidence_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_useful_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_useful_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_wasteful_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_wasteful_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_ambiguous_revisit_step_frac": _finite_mean([
+            float(row.get("confidence_ambiguous_revisit_step_frac", math.nan)) for row in rows
+        ]),
+        "mean_confidence_revisit_useful_share": _finite_mean([
+            float(row.get("confidence_revisit_useful_share", math.nan)) for row in rows
+        ]),
+        "mean_confidence_revisit_wasteful_share": _finite_mean([
+            float(row.get("confidence_revisit_wasteful_share", math.nan)) for row in rows
+        ]),
+        "mean_confidence_revisit_gain_share": _finite_mean([
+            float(row.get("confidence_revisit_gain_share", math.nan)) for row in rows
+        ]),
+        "mean_confidence_gain_on_revisit": _finite_mean([
+            float(row.get("confidence_gain_on_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_gain_off_revisit": _finite_mean([
+            float(row.get("confidence_gain_off_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_opportunity_on_revisit": _finite_mean([
+            float(row.get("confidence_opportunity_on_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_opportunity_off_revisit": _finite_mean([
+            float(row.get("confidence_opportunity_off_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_best_gain_on_revisit": _finite_mean([
+            float(row.get("confidence_best_gain_on_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_best_gain_off_revisit": _finite_mean([
+            float(row.get("confidence_best_gain_off_revisit", math.nan)) for row in rows
+        ]),
+        "mean_confidence_low_fraction": _finite_mean([
+            row["avg_confidence_low_fraction"] for row in rows
+        ]),
+        "mean_confidence_high_fraction": _finite_mean([
+            row["avg_confidence_high_fraction"] for row in rows
+        ]),
+        "mean_confidence_step_detection_probability": _finite_mean([
+            row["avg_confidence_step_detection_probability"] for row in rows
+        ]),
+        "mean_confidence_pass_probability": _finite_mean([
+            row["avg_confidence_pass_probability"] for row in rows
+        ]),
+        "mean_confidence_overlap_fraction": _finite_mean([
+            row["avg_confidence_overlap_fraction"] for row in rows
+        ]),
+        "mean_confidence_overlap_regret": _finite_mean([
+            row.get("avg_confidence_overlap_regret", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_valid_fraction": _finite_mean([
+            row.get("avg_cleanup_target_valid_fraction", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_distance_m": _finite_mean([
+            row.get("avg_cleanup_target_distance_m", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_value": _finite_mean([
+            row.get("avg_cleanup_target_value", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_m": _finite_mean([
+            row.get("avg_cleanup_target_progress_m", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_fraction": _finite_mean([
+            row.get("avg_cleanup_target_progress_fraction", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_switch_rate": _finite_mean([
+            row.get("cleanup_target_switch_rate", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_reached_rate": _finite_mean([
+            row.get("cleanup_target_reached_rate", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_value_decay": _finite_mean([
+            row.get("avg_cleanup_target_value_decay", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_no_progress_frac": _finite_mean([
+            row.get("cleanup_target_no_progress_frac", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_with_new_cells_frac": _finite_mean([
+            row.get("cleanup_target_progress_with_new_cells_frac", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_progress_with_excess_overlap_frac": _finite_mean([
+            row.get("cleanup_target_progress_with_excess_overlap_frac", math.nan) for row in rows
+        ]),
+        "mean_cleanup_target_frontier_gate": _finite_mean([
+            row.get("avg_cleanup_target_frontier_gate", math.nan) for row in rows
+        ]),
+        "mean_frontier_alignment": _finite_mean([
+            row["avg_frontier_alignment"] for row in rows
+        ]),
+        "mean_frontier_progress_fraction": _finite_mean([
+            row["avg_frontier_progress_fraction"] for row in rows
+        ]),
+        "mean_frontier_uncovered_ratio": _finite_mean([
+            row["avg_frontier_uncovered_ratio"] for row in rows
+        ]),
+        "mean_frontier_obs_distance": _finite_mean([
+            row["avg_frontier_obs_distance"] for row in rows
+        ]),
+        "mean_frontier_obs_vector_norm": _finite_mean([
+            row["avg_frontier_obs_vector_norm"] for row in rows
+        ]),
+        "mean_frontier_local_coverage_cos": _finite_mean([
+            row["avg_frontier_local_coverage_cos"] for row in rows
+        ]),
+        "mean_frontier_global_coverage_cos": _finite_mean([
+            row["avg_frontier_global_coverage_cos"] for row in rows
+        ]),
+        "mean_local_global_coverage_cos": _finite_mean([
+            row["avg_local_global_coverage_cos"] for row in rows
+        ]),
+        "mean_frontier_sector_cos": _finite_mean([
+            row["avg_frontier_sector_cos"] for row in rows
+        ]),
+        "mean_frontier_sector_dominance": _finite_mean([
+            row["avg_frontier_sector_dominance"] for row in rows
+        ]),
+        "mean_frontier_sector_entropy": _finite_mean([
+            row["avg_frontier_sector_entropy"] for row in rows
+        ]),
+        "mean_frontier_cancellation": _finite_mean([
+            row["avg_frontier_cancellation"] for row in rows
+        ]),
+        "mean_frontier_pairwise_cos": _finite_mean([
+            row["avg_frontier_pairwise_cos"] for row in rows
+        ]),
+        "mean_frontier_pairwise_same_dir": _finite_mean([
+            row["avg_frontier_pairwise_same_dir"] for row in rows
+        ]),
+        "mean_local_pairwise_same_dir": _finite_mean([
+            row["avg_local_pairwise_same_dir"] for row in rows
+        ]),
+        "mean_global_pairwise_same_dir": _finite_mean([
+            row["avg_global_pairwise_same_dir"] for row in rows
+        ]),
+        "mean_reward_uav_coverage": _finite_mean([
+            row["avg_reward_uav_coverage"] for row in rows
+        ]),
+        "mean_reward_uav_move_coverage": _finite_mean([
+            row["avg_reward_uav_move_coverage"] for row in rows
+        ]),
+        "mean_reward_uav_frontier": _finite_mean([
+            row["avg_reward_uav_frontier"] for row in rows
+        ]),
+        "mean_reward_uav_confidence": _finite_mean([
+            row["avg_reward_uav_confidence"] for row in rows
+        ]),
+        "mean_reward_uav_team_confidence": _finite_mean([
+            row.get("avg_reward_uav_team_confidence", math.nan) for row in rows
+        ]),
+        "mean_penalty_uav_team_confidence_overlap": _finite_mean([
+            row.get("avg_penalty_uav_team_confidence_overlap", math.nan) for row in rows
+        ]),
+        "mean_reward_uav_confidence_move": _finite_mean([
+            row["avg_reward_uav_confidence_move"] for row in rows
+        ]),
+        "mean_reward_uav_cleanup_target_progress": _finite_mean([
+            row.get("avg_reward_uav_cleanup_target_progress", math.nan) for row in rows
+        ]),
+        "mean_reward_uav_astar_progress": _finite_mean([
+            row.get("avg_reward_uav_astar_progress", math.nan) for row in rows
+        ]),
+        "mean_penalty_uav_inefficient_move": _finite_mean([
+            row["avg_penalty_uav_inefficient_move"] for row in rows
+        ]),
+        "mean_penalty_uav_confidence_overlap": _finite_mean([
+            row["avg_penalty_uav_confidence_overlap"] for row in rows
+        ]),
+        "mean_penalty_uav_overlap": _finite_mean([
+            row["avg_penalty_uav_overlap"] for row in rows
+        ]),
+        "mean_penalty_uav_inter_overlap": _finite_mean([
+            row["avg_penalty_uav_inter_overlap"] for row in rows
+        ]),
+        "mean_penalty_uav_outside_footprint": _finite_mean([
+            row["avg_penalty_uav_outside_footprint"] for row in rows
+        ]),
+        "mean_reward_uav_coverage_threshold": _finite_mean([
+            row["avg_reward_uav_coverage_threshold"] for row in rows
+        ]),
+        "mean_reward_uav_scout": _finite_mean([
+            row["avg_reward_uav_scout"] for row in rows
+        ]),
+        "mean_reward_team": _finite_mean([
+            row["avg_reward_team"] for row in rows
+        ]),
+        "mean_reward_all_survivors_found": _finite_mean([
+            row["avg_reward_all_survivors_found"] for row in rows
+        ]),
+        "mean_reward_uav_aux": _finite_mean([
+            row["avg_reward_uav_aux"] for row in rows
+        ]),
+        "mean_frontier_abs_reward_share": _finite_mean([
+            row["avg_frontier_abs_reward_share"] for row in rows
+        ]),
+        "mean_frontier_high_progress_step_frac": _finite_mean([
+            row["frontier_high_progress_step_frac"] for row in rows
+        ]),
+        "mean_frontier_high_progress_no_new_frac": _finite_mean([
+            row["frontier_high_progress_no_new_frac"] for row in rows
+        ]),
+        "mean_frontier_high_progress_edge_frac": _finite_mean([
+            row["frontier_high_progress_edge_frac"] for row in rows
+        ]),
+        "mean_frontier_high_progress_corner_frac": _finite_mean([
+            row["frontier_high_progress_corner_frac"] for row in rows
+        ]),
+        "mean_frontier_edge_progress": _finite_mean([
+            row["frontier_edge_progress_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_progress": _finite_mean([
+            row["frontier_interior_progress_mean"] for row in rows
+        ]),
+        "mean_frontier_edge_reward": _finite_mean([
+            row["frontier_edge_reward_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_reward": _finite_mean([
+            row["frontier_interior_reward_mean"] for row in rows
+        ]),
+        "mean_frontier_edge_new_cells": _finite_mean([
+            row["frontier_edge_new_cells_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_new_cells": _finite_mean([
+            row["frontier_interior_new_cells_mean"] for row in rows
+        ]),
+        "mean_frontier_edge_outside": _finite_mean([
+            row["frontier_edge_outside_mean"] for row in rows
+        ]),
+        "mean_frontier_interior_outside": _finite_mean([
+            row["frontier_interior_outside_mean"] for row in rows
+        ]),
+        "mean_frontier_progress_new_cells_corr": _finite_mean([
+            row["frontier_progress_new_cells_corr"] for row in rows
+        ]),
+        "mean_frontier_expected_raw_new_cells_corr": _finite_mean([
+            row["frontier_expected_raw_new_cells_corr"] for row in rows
+        ]),
+        "mean_frontier_progress_boundary_distance_corr": _finite_mean([
+            row["frontier_progress_boundary_distance_corr"] for row in rows
+        ]),
+        "mean_frontier_obs_empty_step_frac": _finite_mean([
+            row["frontier_obs_empty_step_frac"] for row in rows
+        ]),
+        "mean_action_frontier_aligned_step_frac": _finite_mean([
+            row["action_frontier_aligned_step_frac"] for row in rows
+        ]),
+        "mean_action_frontier_anti_aligned_step_frac": _finite_mean([
+            row["action_frontier_anti_aligned_step_frac"] for row in rows
+        ]),
+        "mean_action_frontier_aligned_no_new_frac": _finite_mean([
+            row["action_frontier_aligned_no_new_frac"] for row in rows
+        ]),
+        "mean_action_frontier_aligned_edge_frac": _finite_mean([
+            row["action_frontier_aligned_edge_frac"] for row in rows
+        ]),
+        "mean_action_frontier_alignment_new_cells_corr": _finite_mean([
+            row["action_frontier_alignment_new_cells_corr"] for row in rows
+        ]),
+        "mean_action_frontier_alignment_boundary_distance_corr": _finite_mean([
+            row["action_frontier_alignment_boundary_distance_corr"] for row in rows
+        ]),
         "mean_excess_overlap_step_frac_10": _finite_mean([
             row["excess_overlap_step_frac_10"] for row in rows
         ]),
@@ -3681,6 +5604,136 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_expected_overlap_fraction",
         "avg_excess_overlap_fraction",
         "avg_inter_uav_overlap_fraction",
+        "avg_any_history_revisit_fraction",
+        "avg_own_history_revisit_fraction",
+        "avg_teammate_history_revisit_fraction",
+        "avg_own_only_revisit_fraction",
+        "avg_teammate_only_revisit_fraction",
+        "avg_shared_history_revisit_fraction",
+        "avg_unavoidable_revisit_fraction",
+        "avg_avoidable_revisit_fraction",
+        "avg_frontier_expected_new_cells",
+        "avg_frontier_new_cell_capture_fraction",
+        "avg_frontier_new_cell_gap",
+        "avg_candidate_best_new_cells",
+        "avg_candidate_capture_fraction",
+        "avg_candidate_new_cell_regret",
+        "avg_candidate_best_new_overlap",
+        "avg_candidate_best_useful_overlap",
+        "avg_candidate_avoidable_overlap",
+        "avg_candidate_action_rank",
+        "avg_candidate_movement_rank",
+        "avg_candidate_action_capture_fraction",
+        "avg_candidate_movement_capture_fraction",
+        "avg_candidate_action_best_alignment",
+        "avg_candidate_movement_best_alignment",
+        "candidate_no_opportunity_frac",
+        "avg_frontier_candidate_new_cells",
+        "avg_frontier_candidate_capture_fraction",
+        "avg_frontier_candidate_regret",
+        "avg_frontier_candidate_best_alignment",
+        "avg_frontier_candidate_rank",
+        "avg_frontier_candidate_nearest_rank",
+        "frontier_candidate_is_best_frac",
+        "frontier_candidate_bad_frac",
+        "avg_confidence_frontier_candidate_capture_fraction",
+        "avg_confidence_frontier_candidate_best_alignment",
+        "avg_confidence_frontier_candidate_rank",
+        "confidence_frontier_candidate_bad_frac",
+        "avg_confidence_lg_frontier_candidate_capture_fraction",
+        "avg_confidence_lg_frontier_candidate_best_alignment",
+        "avg_confidence_lg_frontier_candidate_rank",
+        "confidence_lg_frontier_candidate_bad_frac",
+        "avg_confidence_frontier_capture_advantage",
+        "avg_confidence_lg_frontier_capture_advantage",
+        "avg_coverage_opportunity_cells",
+        "avg_coverage_opportunity_fraction",
+        "avg_coverage_opportunity_available_fraction",
+        "avg_confidence_gain",
+        "total_confidence_gain",
+        "avg_confidence_weighted_gain",
+        "avg_confidence_opportunity_fraction",
+        "avg_confidence_opportunity_best_gain",
+        "confidence_revisit_step_frac",
+        "confidence_useful_revisit_step_frac",
+        "confidence_wasteful_revisit_step_frac",
+        "confidence_ambiguous_revisit_step_frac",
+        "confidence_revisit_useful_share",
+        "confidence_revisit_wasteful_share",
+        "confidence_revisit_gain_share",
+        "confidence_gain_on_revisit",
+        "confidence_gain_off_revisit",
+        "confidence_opportunity_on_revisit",
+        "confidence_opportunity_off_revisit",
+        "confidence_best_gain_on_revisit",
+        "confidence_best_gain_off_revisit",
+        "avg_confidence_pass_probability",
+        "avg_confidence_overlap_fraction",
+        "avg_confidence_overlap_regret",
+        "avg_cleanup_target_valid_fraction",
+        "avg_cleanup_target_distance_m",
+        "avg_cleanup_target_value",
+        "avg_cleanup_target_progress_m",
+        "avg_cleanup_target_progress_fraction",
+        "cleanup_target_switch_rate",
+        "cleanup_target_reached_rate",
+        "avg_cleanup_target_value_decay",
+        "avg_cleanup_target_age",
+        "cleanup_target_no_progress_frac",
+        "avg_cleanup_target_frontier_gate",
+        "avg_frontier_alignment",
+        "avg_frontier_progress_fraction",
+        "avg_frontier_uncovered_ratio",
+        "avg_frontier_obs_distance",
+        "avg_frontier_obs_vector_norm",
+        "avg_frontier_local_coverage_cos",
+        "avg_frontier_global_coverage_cos",
+        "avg_local_global_coverage_cos",
+        "avg_frontier_sector_cos",
+        "avg_frontier_sector_dominance",
+        "avg_frontier_sector_entropy",
+        "avg_frontier_cancellation",
+        "avg_reward_uav_coverage",
+        "avg_reward_uav_move_coverage",
+        "avg_reward_uav_frontier",
+        "avg_reward_uav_confidence",
+        "avg_reward_uav_team_confidence",
+        "avg_penalty_uav_team_confidence_overlap",
+        "avg_reward_uav_confidence_move",
+        "avg_reward_uav_cleanup_target_progress",
+        "avg_reward_uav_astar_progress",
+        "avg_penalty_uav_inefficient_move",
+        "avg_penalty_uav_confidence_overlap",
+        "avg_penalty_uav_overlap",
+        "avg_penalty_uav_inter_overlap",
+        "avg_penalty_uav_outside_footprint",
+        "avg_reward_uav_coverage_threshold",
+        "avg_reward_uav_scout",
+        "avg_reward_team",
+        "avg_reward_all_survivors_found",
+        "avg_reward_uav_aux",
+        "avg_frontier_abs_reward_share",
+        "frontier_high_progress_step_frac",
+        "frontier_high_progress_no_new_frac",
+        "frontier_high_progress_edge_frac",
+        "frontier_high_progress_corner_frac",
+        "frontier_edge_progress_mean",
+        "frontier_interior_progress_mean",
+        "frontier_edge_reward_mean",
+        "frontier_interior_reward_mean",
+        "frontier_edge_new_cells_mean",
+        "frontier_interior_new_cells_mean",
+        "frontier_edge_outside_mean",
+        "frontier_interior_outside_mean",
+        "frontier_progress_new_cells_corr",
+        "frontier_progress_boundary_distance_corr",
+        "frontier_obs_empty_step_frac",
+        "action_frontier_aligned_step_frac",
+        "action_frontier_anti_aligned_step_frac",
+        "action_frontier_aligned_no_new_frac",
+        "action_frontier_aligned_edge_frac",
+        "action_frontier_alignment_new_cells_corr",
+        "action_frontier_alignment_boundary_distance_corr",
         "excess_overlap_step_frac_10",
         "inter_uav_overlap_step_frac_20",
         "edge_step_frac",
@@ -3738,6 +5791,87 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "expected_overlap": "avg_expected_overlap_fraction",
         "excess_overlap": "avg_excess_overlap_fraction",
         "inter_uav_overlap": "avg_inter_uav_overlap_fraction",
+        "any_revisit": "avg_any_history_revisit_fraction",
+        "own_revisit": "avg_own_history_revisit_fraction",
+        "team_revisit": "avg_teammate_history_revisit_fraction",
+        "own_only_revisit": "avg_own_only_revisit_fraction",
+        "team_only_revisit": "avg_teammate_only_revisit_fraction",
+        "shared_revisit": "avg_shared_history_revisit_fraction",
+        "unavoidable_revisit": "avg_unavoidable_revisit_fraction",
+        "avoidable_revisit": "avg_avoidable_revisit_fraction",
+        "frontier_expected_new": "avg_frontier_expected_new_cells",
+        "frontier_new_capture": "avg_frontier_new_cell_capture_fraction",
+        "frontier_new_gap": "avg_frontier_new_cell_gap",
+        "candidate_best_new": "avg_candidate_best_new_cells",
+        "candidate_capture": "avg_candidate_capture_fraction",
+        "candidate_regret": "avg_candidate_new_cell_regret",
+        "candidate_best_overlap": "avg_candidate_best_new_overlap",
+        "candidate_useful_overlap": "avg_candidate_best_useful_overlap",
+        "candidate_avoidable": "avg_candidate_avoidable_overlap",
+        "candidate_action_rank": "avg_candidate_action_rank",
+        "candidate_movement_rank": "avg_candidate_movement_rank",
+        "candidate_action_capture": "avg_candidate_action_capture_fraction",
+        "candidate_movement_capture": "avg_candidate_movement_capture_fraction",
+        "candidate_no_opportunity": "candidate_no_opportunity_frac",
+        "frontier_candidate_capture": "avg_frontier_candidate_capture_fraction",
+        "frontier_candidate_rank": "avg_frontier_candidate_rank",
+        "frontier_candidate_align": "avg_frontier_candidate_best_alignment",
+        "frontier_candidate_bad": "frontier_candidate_bad_frac",
+        "confidence_frontier_capture": "avg_confidence_frontier_candidate_capture_fraction",
+        "confidence_frontier_rank": "avg_confidence_frontier_candidate_rank",
+        "confidence_frontier_bad": "confidence_frontier_candidate_bad_frac",
+        "confidence_lg_frontier_capture": "avg_confidence_lg_frontier_candidate_capture_fraction",
+        "confidence_lg_frontier_rank": "avg_confidence_lg_frontier_candidate_rank",
+        "confidence_lg_frontier_bad": "confidence_lg_frontier_candidate_bad_frac",
+        "confidence_frontier_advantage": "avg_confidence_frontier_capture_advantage",
+        "confidence_lg_frontier_advantage": "avg_confidence_lg_frontier_capture_advantage",
+        "coverage_opportunity_cells": "avg_coverage_opportunity_cells",
+        "coverage_opportunity": "avg_coverage_opportunity_fraction",
+        "coverage_opportunity_available": "avg_coverage_opportunity_available_fraction",
+        "confidence_final": "final_confidence_mean",
+        "confidence_gain": "avg_confidence_gain",
+        "confidence_drone_gain": "avg_confidence_gain_by_drone",
+        "confidence_weighted_gain": "avg_confidence_weighted_gain",
+        "confidence_opportunity": "avg_confidence_opportunity_fraction",
+        "confidence_best_gain": "avg_confidence_opportunity_best_gain",
+        "confidence_revisit": "confidence_revisit_step_frac",
+        "confidence_useful_revisit": "confidence_useful_revisit_step_frac",
+        "confidence_wasteful_revisit": "confidence_wasteful_revisit_step_frac",
+        "confidence_revisit_useful_share": "confidence_revisit_useful_share",
+        "confidence_revisit_gain_share": "confidence_revisit_gain_share",
+        "confidence_pass": "avg_confidence_pass_probability",
+        "confidence_overlap": "avg_confidence_overlap_fraction",
+        "confidence_overlap_regret": "avg_confidence_overlap_regret",
+        "frontier_align": "avg_frontier_alignment",
+        "frontier_progress": "avg_frontier_progress_fraction",
+        "frontier_ratio": "avg_frontier_uncovered_ratio",
+        "frontier_obs_dist": "avg_frontier_obs_distance",
+        "frontier_local": "avg_frontier_local_coverage_cos",
+        "frontier_global": "avg_frontier_global_coverage_cos",
+        "frontier_sector": "avg_frontier_sector_cos",
+        "sector_dom": "avg_frontier_sector_dominance",
+        "sector_entropy": "avg_frontier_sector_entropy",
+        "frontier_cancel": "avg_frontier_cancellation",
+        "frontier_pair": "avg_frontier_pairwise_cos",
+        "frontier_pair_same": "avg_frontier_pairwise_same_dir",
+        "action_frontier": "avg_action_frontier_alignment",
+        "action_frontier_intent": "avg_action_frontier_intent",
+        "action_frontier_gap": "avg_action_frontier_movement_gap",
+        "action_frontier_aligned": "action_frontier_aligned_step_frac",
+        "action_frontier_anti": "action_frontier_anti_aligned_step_frac",
+        "action_frontier_no_new": "action_frontier_aligned_no_new_frac",
+        "frontier_reward": "avg_reward_uav_frontier",
+        "confidence_move_reward": "avg_reward_uav_confidence_move",
+        "team_confidence_overlap_penalty": "avg_penalty_uav_team_confidence_overlap",
+        "cleanup_target_reward": "avg_reward_uav_cleanup_target_progress",
+        "astar_progress_reward": "avg_reward_uav_astar_progress",
+        "cleanup_target_gate": "avg_cleanup_target_frontier_gate",
+        "confidence_overlap_penalty": "avg_penalty_uav_confidence_overlap",
+        "frontier_share": "avg_frontier_abs_reward_share",
+        "frontier_high": "frontier_high_progress_step_frac",
+        "frontier_high_no_new": "frontier_high_progress_no_new_frac",
+        "frontier_high_edge": "frontier_high_progress_edge_frac",
+        "frontier_new_corr": "frontier_progress_new_cells_corr",
         "edge_frac": "edge_step_frac",
         "corner_frac": "corner_step_frac",
         "bbox_fill": "coverage_bbox_fill_fraction",
@@ -3807,7 +5941,31 @@ def _format_per_drone_row(drones: list[dict[str, Any]]) -> str:
             f"edge={drone['edge_step_frac']:.2f} "
             f"corner={drone['corner_step_frac']:.2f} "
             f"excess={drone['avg_excess_overlap_fraction']:.2f} "
+            f"own_rev={drone['avg_own_history_revisit_fraction']:.2f} "
+            f"team_rev={drone['avg_teammate_history_revisit_fraction']:.2f} "
+            f"avoid_rev={drone['avg_avoidable_revisit_fraction']:.2f} "
             f"inter={drone['avg_inter_uav_overlap_fraction']:.2f} "
+            f"front_exp={drone['avg_frontier_expected_new_cells']:.1f} "
+            f"front_cap={drone['avg_frontier_new_cell_capture_fraction']:.2f} "
+            f"cand_best={drone['avg_candidate_best_new_cells']:.1f} "
+            f"cand_cap={drone['avg_candidate_capture_fraction']:.2f} "
+            f"cand_rank={drone['avg_candidate_action_rank']:.1f}/"
+            f"{drone['avg_candidate_movement_rank']:.1f} "
+            f"front_use={drone['avg_frontier_candidate_capture_fraction']:.2f}/"
+            f"{drone['avg_frontier_candidate_rank']:.1f}/"
+            f"{drone['avg_frontier_candidate_best_alignment']:.2f} "
+            f"conf_front={drone['avg_confidence_frontier_candidate_capture_fraction']:.2f} "
+            f"conf_lg={drone['avg_confidence_lg_frontier_candidate_capture_fraction']:.2f} "
+            f"cand_avoid={drone['avg_candidate_avoidable_overlap']:.2f} "
+            f"front={drone['avg_frontier_alignment']:.2f}/"
+            f"{drone['avg_frontier_progress_fraction']:.2f}/"
+            f"{drone['avg_frontier_uncovered_ratio']:.2f} "
+            f"act_front={drone['avg_action_frontier_alignment']:.2f}/"
+            f"{drone['action_frontier_aligned_step_frac']:.2f} "
+            f"fhi={drone['frontier_high_progress_step_frac']:.2f}/"
+            f"{drone['frontier_high_progress_no_new_frac']:.2f}/"
+            f"{drone['frontier_high_progress_edge_frac']:.2f} "
+            f"move_no_conf={drone.get('moving_no_confidence_gain_frac', math.nan):.2f} "
             f"stall={drone['stalled_step_frac']:.2f}"
         )
     return "; ".join(parts)
@@ -3837,7 +5995,37 @@ def _format_per_drone_summary(drones: list[dict[str, Any]]) -> list[str]:
             f"corner={drone['mean_corner_step_frac']:.3f} "
             f"outside={drone['mean_avg_outside_footprint_fraction']:.3f} "
             f"excess={drone['mean_avg_excess_overlap_fraction']:.3f} "
+            f"own_rev={drone['mean_avg_own_history_revisit_fraction']:.3f} "
+            f"team_rev={drone['mean_avg_teammate_history_revisit_fraction']:.3f} "
+            f"avoid_rev={drone['mean_avg_avoidable_revisit_fraction']:.3f} "
             f"inter={drone['mean_avg_inter_uav_overlap_fraction']:.3f} "
+            f"front_exp={drone['mean_avg_frontier_expected_new_cells']:.1f} "
+            f"front_cap={drone['mean_avg_frontier_new_cell_capture_fraction']:.3f} "
+            f"cand_best={drone['mean_avg_candidate_best_new_cells']:.1f} "
+            f"cand_cap={drone['mean_avg_candidate_capture_fraction']:.3f} "
+            f"cand_reg={drone['mean_avg_candidate_new_cell_regret']:.1f} "
+            f"cand_rank={drone['mean_avg_candidate_action_rank']:.2f}/"
+            f"{drone['mean_avg_candidate_movement_rank']:.2f} "
+            f"front_use={drone['mean_avg_frontier_candidate_capture_fraction']:.3f}/"
+            f"{drone['mean_avg_frontier_candidate_rank']:.2f}/"
+            f"{drone['mean_avg_frontier_candidate_best_alignment']:.3f} "
+            f"conf_front={drone['mean_avg_confidence_frontier_candidate_capture_fraction']:.3f} "
+            f"conf_lg={drone['mean_avg_confidence_lg_frontier_candidate_capture_fraction']:.3f} "
+            f"cand_avoid={drone['mean_avg_candidate_avoidable_overlap']:.3f} "
+            f"front={drone['mean_avg_frontier_alignment']:.3f}/"
+            f"{drone['mean_avg_frontier_progress_fraction']:.3f}/"
+            f"{drone['mean_avg_frontier_uncovered_ratio']:.3f} "
+            f"act_front={drone['mean_avg_action_frontier_alignment']:.3f}/"
+            f"{drone['mean_action_frontier_aligned_step_frac']:.3f} "
+            f"front_rew={drone['mean_avg_reward_uav_frontier']:.4f} "
+            f"conf_move={drone['mean_avg_reward_uav_confidence_move']:.4f} "
+            f"cleanup_rew={drone['mean_avg_reward_uav_cleanup_target_progress']:.4f} "
+            f"astar_rew={drone['mean_avg_reward_uav_astar_progress']:.4f} "
+            f"cleanup_gate={drone['mean_avg_cleanup_target_frontier_gate']:.3f} "
+            f"front_hi={drone['mean_frontier_high_progress_step_frac']:.3f}/"
+            f"{drone['mean_frontier_high_progress_no_new_frac']:.3f}/"
+            f"{drone['mean_frontier_high_progress_edge_frac']:.3f} "
+            f"move_no_conf={drone['mean_moving_no_confidence_gain_frac']:.3f} "
             f"stall={drone['mean_stalled_step_frac']:.3f}"
         )
     return lines
@@ -5382,6 +7570,31 @@ def main() -> None:
             f"exp_ov={row['avg_expected_overlap_fraction']:.2f} "
             f"excess_ov={row['avg_excess_overlap_fraction']:.2f} "
             f"inter_ov={row['avg_inter_uav_overlap_fraction']:.2f} "
+            f"own_rev={row['avg_own_history_revisit_fraction']:.2f} "
+            f"team_rev={row['avg_teammate_history_revisit_fraction']:.2f} "
+            f"avoid_rev={row['avg_avoidable_revisit_fraction']:.2f} "
+            f"front_exp={row['avg_frontier_expected_new_cells']:.1f} "
+            f"front_cap={row['avg_frontier_new_cell_capture_fraction']:.2f} "
+            f"cand_best={row['avg_candidate_best_new_cells']:.1f} "
+            f"cand_cap={row['avg_candidate_capture_fraction']:.2f} "
+            f"cand_reg={row['avg_candidate_new_cell_regret']:.1f} "
+            f"cand_rank={row['avg_candidate_action_rank']:.1f}/"
+            f"{row['avg_candidate_movement_rank']:.1f} "
+            f"front_use={row['avg_frontier_candidate_capture_fraction']:.2f}/"
+            f"{row['avg_frontier_candidate_rank']:.1f}/"
+            f"{row['avg_frontier_candidate_best_alignment']:.2f} "
+            f"conf_front={row['avg_confidence_frontier_candidate_capture_fraction']:.2f} "
+            f"conf_lg={row['avg_confidence_lg_frontier_candidate_capture_fraction']:.2f} "
+            f"cand_avoid={row['avg_candidate_avoidable_overlap']:.2f} "
+            f"front={row['avg_frontier_alignment']:.2f}/"
+            f"{row['avg_frontier_progress_fraction']:.2f}/"
+            f"{row['avg_frontier_uncovered_ratio']:.2f} "
+            f"act_front={row['avg_action_frontier_alignment']:.2f}/"
+            f"{row['action_frontier_aligned_step_frac']:.2f} "
+            f"front_rew={row['avg_reward_uav_frontier']:.4f} "
+            f"front_hi={row['frontier_high_progress_step_frac']:.2f}/"
+            f"{row['frontier_high_progress_no_new_frac']:.2f}/"
+            f"{row['frontier_high_progress_edge_frac']:.2f} "
             f"center_cov={row['coverage_center_fraction']:.2f} "
             f"start_pair={_fmt_optional(row['min_start_pair_distance_m'])}m "
             f"start_edge={_fmt_optional(row['min_start_edge_distance_m'])}m "
@@ -5622,6 +7835,22 @@ def main() -> None:
         f"expected_overlap={summary['mean_expected_overlap_fraction']:.3f} "
         f"excess_overlap={summary['mean_excess_overlap_fraction']:.3f} "
         f"inter_uav_overlap={summary['mean_inter_uav_overlap_fraction']:.3f} "
+        f"own_revisit={summary['mean_own_history_revisit_fraction']:.3f} "
+        f"teammate_revisit={summary['mean_teammate_history_revisit_fraction']:.3f} "
+        f"own_only={summary['mean_own_only_revisit_fraction']:.3f} "
+        f"teammate_only={summary['mean_teammate_only_revisit_fraction']:.3f} "
+        f"shared_old={summary['mean_shared_history_revisit_fraction']:.3f} "
+        f"unavoidable={summary['mean_unavoidable_revisit_fraction']:.3f} "
+        f"avoidable={summary['mean_avoidable_revisit_fraction']:.3f} "
+        f"frontier_expected_new={summary['mean_frontier_expected_new_cells']:.1f} "
+        f"frontier_capture={summary['mean_frontier_new_cell_capture_fraction']:.3f} "
+        f"frontier_gap={summary['mean_frontier_new_cell_gap']:.1f} "
+        f"opp_cells={summary['mean_coverage_opportunity_cells']:.1f} "
+        f"opp_frac={summary['mean_coverage_opportunity_fraction']:.3f} "
+        f"opp_avail={summary['mean_coverage_opportunity_available_fraction']:.3f} "
+        f"frontier={summary['mean_frontier_alignment']:.3f}/"
+        f"{summary['mean_frontier_progress_fraction']:.3f}/"
+        f"{summary['mean_frontier_uncovered_ratio']:.3f} "
         f"excess10={summary['mean_excess_overlap_step_frac_10']:.3f} "
         f"inter20={summary['mean_inter_uav_overlap_step_frac_20']:.3f} "
         f"excess20={summary['mean_excess_overlap_step_frac_20']:.3f} "
@@ -5740,6 +7969,8 @@ def main() -> None:
         f"{summary['excess_overlap_p25']:.3f}/{summary['excess_overlap_p50']:.3f}/{summary['excess_overlap_p75']:.3f} "
         f"inter p25/p50/p75="
         f"{summary['inter_uav_overlap_p25']:.3f}/{summary['inter_uav_overlap_p50']:.3f}/{summary['inter_uav_overlap_p75']:.3f} "
+        f"frontier p25/p50/p75="
+        f"{summary['frontier_progress_p25']:.3f}/{summary['frontier_progress_p50']:.3f}/{summary['frontier_progress_p75']:.3f} "
         f"edge p25/p50/p75="
         f"{summary['edge_frac_p25']:.3f}/{summary['edge_frac_p50']:.3f}/{summary['edge_frac_p75']:.3f}"
     )

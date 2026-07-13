@@ -1,0 +1,22 @@
+{
+  "model": "models/survivor_yolov8s_1280.pt",
+  "conf": 0.15,
+  "imgsz": 1280,
+  "match_iou": 0.15,
+  "buckets": {
+    "clear": {
+      "recall": 0.8194,
+      "precision": 0.8405,
+      "tp": 295,
+      "gt": 360,
+      "detections": 351
+    },
+    "fire_or_smoke": {
+      "recall": 0.8785,
+      "precision": 0.8425,
+      "tp": 947,
+      "gt": 1078,
+      "detections": 1124
+    }
+  }
+}

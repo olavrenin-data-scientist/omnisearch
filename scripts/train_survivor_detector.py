@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -51,11 +51,48 @@ from detection.wildfire_effects import (
 
 DRONE_FLIGHT_LEVELS_M = (20.0, 35.0, 50.0)
 DRONE_CAMERA_FOV_DEG = 65.0
-# Full survivor bounding box width as seen from nadir (top-down). This is NOT
-# just shoulder width — it's the full detection bbox encompassing a person who
-# may be sprawled, carrying gear, or with arms extended.  Matches the value in
-# detection/simulation_adapter.py (survivor_width_m=2.4).
-SURVIVOR_BODY_WIDTH_M = 2.4
+
+# Physical survivor dimensions — a real human, not a vehicle-sized blob.
+# A person is modelled as an oriented box: shoulder width ~0.55 m, front-to-back
+# depth ~0.35 m, and standing height / prone body-length ~1.75 m. The detection
+# bounding box is the axis-aligned box of that body at a random heading and pose
+# (standing vs prone), so it is anisotropic and pose-dependent — NOT the old
+# ~2.4 m near-square blob (which implied a 6-8 m^2 footprint for one person).
+PERSON_HEIGHT_M = 1.75          # standing height / prone body length (long axis)
+PERSON_SHOULDER_M = 0.55        # shoulder width (short axis, top-down)
+PERSON_DEPTH_M = 0.35           # front-to-back thickness
+PRONE_FRAC = 0.45               # fraction of survivors lying prone
+MAX_SURVIVOR_LONG_AXIS_M = 2.0  # hard ceiling on any survivor bbox dimension
+MAX_NADIR_SHORT_AXIS_M = 0.7    # nadir footprint short axis (audit rule)
+SURVIVOR_MIN_PX = 5             # floor so far-away survivors aren't zero-size
+
+# Hard-negative decoys, sized by real-world footprint through the frame GSD.
+# Vehicle mix is biased toward passenger cars (4.2-5 m in reality): the old
+# uniform 3-8 m + 15% buses read as visually oversized next to 0.5-2 m people.
+DECOY_VEHICLE_LONG_M = (3.5, 4.8)   # compact sedans — the only vehicle class now.
+# Vans and buses are removed: they read as visually oversized next to 0.5-1.8 m
+# survivors, letting the model reject them by size alone. The human-scale decoy
+# classes (animal, colorful_object) cover the same-size case; compact cars cover
+# the "larger-but-not-huge" real-world vehicle that appears on Malibu fire roads.
+DECOY_VAN_LONG_M = (5.2, 8.0)       # kept for reference but not used
+DECOY_LARGE_VEHICLE_M = (8.0, 13.0) # kept for reference but not used
+DECOY_VAN_FRAC = 0.0                 # disabled
+DECOY_LARGE_FRAC = 0.0               # disabled
+DECOY_MIN_PX = 6
+
+# Human-scale decoys: animals and colourful human-sized objects (tarps,
+# jackets, gear) that match survivors in SIZE, COLOUR and CONTRAST. Vehicles
+# alone are too easy to reject (large, white/gray) — the model could pass by
+# learning "colourful small blob = human" or by keying on paste artifacts.
+# These decoys share the survivors' size band and clothing palette and go
+# through the identical composite pipeline, so the only remaining separator
+# is genuine human shape.
+DECOY_HUMAN_SCALE_FRAC = 0.5        # fraction of decoys at human scale
+DECOY_HUMAN_SCALE_LONG_M = (0.5, 1.8)
+
+# Back-compat alias: the "body width" used by the pinhole helpers is the
+# shoulder width (short axis, top-down), NOT the old oversized 2.4 m value.
+SURVIVOR_BODY_WIDTH_M = PERSON_SHOULDER_M
 
 # Oblique (side-angle) drone camera parameters.
 # When oblique_frac > 0, a fraction of training images simulate a tilted camera
@@ -63,7 +100,6 @@ SURVIVOR_BODY_WIDTH_M = 2.4
 # more elongated/upright than pure top-down views.
 OBLIQUE_TILT_MIN_DEG = 15.0   # Minimum tilt from nadir (shallow angle)
 OBLIQUE_TILT_MAX_DEG = 45.0   # Maximum tilt from nadir (steep side view)
-PERSON_HEIGHT_M = 1.75         # Used for oblique foreshortening calculation
 
 
 def altitude_to_survivor_px(
@@ -72,16 +108,17 @@ def altitude_to_survivor_px(
     fov_deg: float = DRONE_CAMERA_FOV_DEG,
     body_width_m: float = SURVIVOR_BODY_WIDTH_M,
 ) -> float:
-    """Compute the expected pixel width of a survivor at a given drone altitude.
+    """Expected pixel *shoulder width* of a survivor at a given drone altitude.
 
     Uses the pinhole camera model: the ground footprint of the image is
     ``2 * altitude * tan(fov/2)`` meters wide, spread across ``image_size``
-    pixels.  A survivor of width ``body_width_m`` therefore occupies
-    ``body_width_m / footprint_m * image_size`` pixels.
+    pixels.  A survivor of shoulder width ``body_width_m`` (~0.55 m) therefore
+    occupies ``body_width_m / footprint_m * image_size`` pixels.
 
-    At 20 m → ~25 px, 35 m → ~14 px, 50 m → ~10 px (for 640px image, 65° FOV).
-    These are *small* — close to the detection limit — which is why we train
-    heavily at this scale.
+    At 20 m → ~14 px, 35 m → ~8 px, 50 m → ~5 px (for 640px image, 65° FOV).
+    These are the *short axis*; a prone body's long axis is ~3x larger. Survivors
+    are genuinely tiny at altitude — close to the detection limit — which is why
+    we train heavily at this scale.
     """
     footprint_m = 2.0 * altitude_m * np.tan(np.radians(fov_deg) / 2.0)
     return body_width_m / footprint_m * image_size
@@ -129,6 +166,90 @@ def oblique_survivor_size(
     return float(width_px), float(height_px)
 
 
+def survivor_footprint_m(
+    rng: np.random.Generator,
+    *,
+    is_oblique: bool = False,
+    tilt_deg: float = 0.0,
+) -> tuple[float, float, str, float]:
+    """Physically-grounded survivor bounding-box footprint in metres.
+
+    Models a person as an oriented box (shoulder x depth x height) at a random
+    heading and pose, and returns the axis-aligned bounding box ``(w_m, h_m)``
+    plus the sampled ``pose`` and ``heading_deg``:
+
+      * prone  — lying flat: a ``1.75 x 0.55 m`` rectangle rotated by heading,
+        so the axis-aligned box is elongated (long axis up to ~1.75 m).
+      * standing, nadir — compact head+shoulders blob (~0.4-0.55 m each way).
+      * standing, oblique — apparent height grows with camera tilt (person seen
+        more side-on), up to ~1.4 m tall at 45°.
+
+    A ±15% jitter models body size/pose variation, and the long axis is capped
+    at ``MAX_SURVIVOR_LONG_AXIS_M`` (2.0 m). The result is anisotropic and
+    pose-dependent — never a fixed ~2.4 m near-square blob.
+    """
+    prone = bool(rng.random() < PRONE_FRAC)
+    if prone and not is_oblique:
+        # Nadir prone bodies keep a near-axis-aligned heading so the emitted
+        # axis-aligned box stays elongated (~0.5 x 1.8 m) instead of degrading
+        # into a large square AABB at diagonal headings. The audit rule caps
+        # the nadir short axis at 0.7 m (MAX_NADIR_SHORT_AXIS_M).
+        axis = 0.0 if rng.random() < 0.5 else np.pi / 2.0
+        heading = float(axis + np.radians(rng.uniform(-8.0, 8.0)))
+    else:
+        heading = float(rng.uniform(0.0, np.pi))
+    c, s = abs(np.cos(heading)), abs(np.sin(heading))
+    if prone:
+        length, width = PERSON_HEIGHT_M, PERSON_SHOULDER_M
+        w_m = length * c + width * s
+        h_m = length * s + width * c
+        pose = "prone"
+    else:
+        cross = PERSON_SHOULDER_M * s + PERSON_DEPTH_M * c
+        if is_oblique and tilt_deg > 0.0:
+            tilt = np.radians(tilt_deg)
+            vert = PERSON_HEIGHT_M * np.sin(tilt) + PERSON_DEPTH_M * np.cos(tilt)
+            w_m, h_m = cross, max(cross, float(vert))
+        else:
+            w_m = cross
+            h_m = PERSON_SHOULDER_M * c + PERSON_DEPTH_M * s
+        pose = "standing"
+    w_m *= float(rng.uniform(0.85, 1.15))
+    h_m *= float(rng.uniform(0.85, 1.15))
+    # Cap with a small margin under the 2.0 m audit ceiling so pixel rounding
+    # and the resolution-blur alpha halo cannot push an emitted box past it.
+    scale = min(1.0, (MAX_SURVIVOR_LONG_AXIS_M * 0.96) / max(w_m, h_m))
+    w_m *= scale
+    h_m *= scale
+    if not is_oblique:
+        # From straight above, a body's cross-section never exceeds ~0.5-0.6 m
+        # (prone width / shoulder span); clamp the short axis below the 0.7 m
+        # audit ceiling regardless of heading deviation and jitter.
+        cap = MAX_NADIR_SHORT_AXIS_M * 0.93
+        if min(w_m, h_m) > cap:
+            if w_m <= h_m:
+                w_m = cap
+            else:
+                h_m = cap
+    return w_m, h_m, pose, float(np.degrees(heading))
+
+
+def survivor_box_px(
+    rng: np.random.Generator,
+    gsd_m: float,
+    *,
+    is_oblique: bool = False,
+    tilt_deg: float = 0.0,
+) -> tuple[int, int, str, float]:
+    """Survivor pixel box ``(w_px, h_px, pose, heading_deg)`` at a given GSD."""
+    w_m, h_m, pose, heading = survivor_footprint_m(
+        rng, is_oblique=is_oblique, tilt_deg=tilt_deg
+    )
+    w_px = max(SURVIVOR_MIN_PX, int(round(w_m / gsd_m)))
+    h_px = max(SURVIVOR_MIN_PX, int(round(h_m / gsd_m)))
+    return w_px, h_px, pose, heading
+
+
 def sample_altitude(rng: np.random.Generator) -> float:
     """Sample a drone altitude from the operational flight envelope.
 
@@ -136,6 +257,84 @@ def sample_altitude(rng: np.random.Generator) -> float:
     a realistic altitude distribution matching RL training.
     """
     return float(rng.uniform(DRONE_FLIGHT_LEVELS_M[0], DRONE_FLIGHT_LEVELS_M[-1]))
+
+
+# Within one frame every survivor shares the same GSD, so their pixel sizes may
+# only differ by pose/body variation. Cap the max/min sqrt(box-area) ratio; a
+# frame mixing a prone adult and a standing child stays under ~2x. The generator
+# enforces a tighter bound so that residual erosion/blur shrinkage of the final
+# alpha mask cannot push emitted boxes past the 2.0 audit rule.
+FRAME_SIZE_RATIO_MAX = 2.0
+GEN_SIZE_RATIO_MAX = 1.7
+ALPHA_BBOX_THRESHOLD = 128
+# Below this sprite size, alpha erosion can wipe the silhouette entirely
+# (MinFilter of 2 px on a 6 px blob leaves nothing above threshold).
+MIN_ERODE_SPRITE_PX = 16
+
+
+def _tight_alpha_bbox(
+    sprite: Image.Image, threshold: int = ALPHA_BBOX_THRESHOLD
+) -> tuple[int, int, int, int] | None:
+    """Tight bbox (x1, y1, x2, y2) of the sprite's alpha > threshold, or None."""
+    a = np.asarray(sprite.getchannel("A"))
+    mask = a > threshold
+    if not mask.any():
+        return None
+    rows = np.where(mask.any(axis=1))[0]
+    cols = np.where(mask.any(axis=0))[0]
+    return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
+
+
+def _crop_to_alpha(sprite: Image.Image) -> Image.Image:
+    """Crop the sprite to its tight alpha bbox (removes transparent margins)."""
+    bb = _tight_alpha_bbox(sprite)
+    return sprite.crop(bb) if bb else sprite
+
+
+def _scale_sprite_into_box(sprite: Image.Image, w_px: int, h_px: int) -> Image.Image:
+    """Uniformly scale the sprite so its tight alpha extent fits (w_px, h_px).
+
+    Aspect-preserving: the sprite is never stretched to fill the axis-aligned
+    box. The emitted label is later derived from the pasted sprite's actual
+    alpha bbox, so labels stay tight regardless of the residual short-axis gap.
+    """
+    sprite = _crop_to_alpha(sprite)
+    tw, th = sprite.size
+    scale = min(w_px / max(1, tw), h_px / max(1, th))
+    nw = max(2, int(round(tw * scale)))
+    nh = max(2, int(round(th * scale)))
+    return sprite.resize((nw, nh), Image.Resampling.LANCZOS)
+
+
+def _top_down_standing_sprite(asset: Image.Image, rng: np.random.Generator) -> Image.Image:
+    """Synthesize a plausible top-down view of a STANDING person.
+
+    A drone at nadir sees only the head and shoulders of a standing person — a
+    compact roughly-elliptical blob — never the recognizable front/side profile
+    the SARD ground-level photos show. We approximate that view by cropping the
+    upper (head + shoulders) region of the cutout, squashing it slightly, and
+    masking with an ellipse so the silhouette reads as a foreshortened blob
+    with realistic hair/clothing colours.
+    """
+    asset = _crop_to_alpha(asset)
+    w, h = asset.size
+    crop = asset.crop((0, 0, w, max(2, int(h * 0.35))))
+    cw, ch = crop.size
+    # Squash vertically: from above, head+shoulders depth < shoulder width.
+    target_h = max(2, int(cw * rng.uniform(0.65, 0.95)))
+    crop = crop.resize((cw, target_h), Image.Resampling.LANCZOS)
+    ellipse = Image.new("L", crop.size, 0)
+    ImageDraw.Draw(ellipse).ellipse([0, 0, crop.size[0] - 1, crop.size[1] - 1], fill=255)
+    a = np.asarray(crop.getchannel("A"), dtype=np.float32)
+    e = np.asarray(ellipse, dtype=np.float32) / 255.0
+    new_alpha = Image.fromarray(np.clip(a * e, 0, 255).astype(np.uint8))
+    return Image.merge("RGBA", (*crop.convert("RGB").split(), new_alpha))
+
+
+def _boxes_intersect(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return not (ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay)
 
 
 def _procedural_background(size: int, rng: np.random.Generator) -> Image.Image:
@@ -423,6 +622,159 @@ def _synthetic_decoy_rgba(
     return result
 
 
+def _animal_decoy_rgba(
+    target_w: int, target_h: int, rng: np.random.Generator
+) -> Image.Image:
+    """Procedural top-down ANIMAL decoy (deer / dog / coyote scale).
+
+    An elongated body ellipse with a smaller head blob at one end and a fur-
+    tone palette. From 20-50 m a quadruped is a human-sized elongated blob —
+    the closest natural confuser for a prone survivor — so these force the
+    model to separate people from animals by silhouette, not by size.
+    """
+    w, h = max(8, target_w), max(8, target_h)
+    # Fur palette: tan / brown / grey / near-black / off-white.
+    palettes = [
+        (168, 132, 92), (120, 88, 58), (140, 140, 135),
+        (60, 52, 46), (205, 198, 185),
+    ]
+    r0, g0, b0 = palettes[int(rng.integers(0, len(palettes)))]
+
+    yy, xx = np.mgrid[0:h, 0:w]
+    horizontal = w >= h
+    body_len = (w if horizontal else h)
+    # Body: ellipse spanning ~70% of the long axis.
+    bx = w * (0.42 if horizontal else 0.5)
+    by = h * (0.5 if horizontal else 0.42)
+    brx = body_len * 0.36 if horizontal else w * 0.38
+    bry = h * 0.38 if horizontal else body_len * 0.36
+    blob = np.clip(1.0 - np.sqrt(((xx - bx) / max(1.5, brx)) ** 2
+                                 + ((yy - by) / max(1.5, bry)) ** 2), 0, 1)
+    # Head: smaller blob overlapping one end of the body ellipse.
+    hx = w * (0.80 if horizontal else 0.5)
+    hy = h * (0.5 if horizontal else 0.80)
+    hr = max(1.5, body_len * 0.14)
+    head = np.clip(1.0 - np.sqrt(((xx - hx) / hr) ** 2
+                                 + ((yy - hy) / hr) ** 2), 0, 1)
+    blob = np.maximum(blob, head)
+    alpha = ((blob > 0.28).astype(np.uint8) * 255)
+    alpha_img = Image.fromarray(alpha).filter(ImageFilter.GaussianBlur(radius=0.7))
+
+    rgb = np.full((h, w, 3), [r0, g0, b0], dtype=np.float32)
+    rgb += rng.normal(0, 12, rgb.shape)          # fur texture
+    # Darker dorsal stripe along the spine.
+    stripe = np.exp(-(((yy - by) if horizontal else (xx - bx)) ** 2)
+                    / max(1.0, (0.12 * (h if horizontal else w)) ** 2))
+    rgb -= (stripe * 22)[..., None]
+    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+    return Image.merge("RGBA", (*Image.fromarray(rgb).split(), alpha_img))
+
+
+def _colorful_decoy_rgba(
+    target_w: int, target_h: int, rng: np.random.Generator
+) -> Image.Image:
+    """Procedural COLOURFUL human-scale decoy (tarp, jacket, tent, gear).
+
+    Saturated clothing-like colours at survivor size and contrast. Survivor
+    sprites often wear bright clothing; without equally bright non-human
+    objects the model can shortcut on "saturated small pixels = person".
+    Optionally two-tone (like a jacket + pants) to mimic clothing colour
+    boundaries without human anatomy.
+    """
+    import colorsys
+    w, h = max(8, target_w), max(8, target_h)
+
+    def clothing_color(rng) -> tuple[int, int, int]:
+        hue = float(rng.uniform(0.0, 1.0))                 # any hue
+        sat = float(rng.uniform(0.55, 0.95))               # saturated
+        val = float(rng.uniform(0.45, 0.95))               # visible
+        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+        return int(r * 255), int(g * 255), int(b * 255)
+
+    yy, xx = np.mgrid[0:h, 0:w]
+    blob = np.zeros((h, w), dtype=np.float32)
+    # Shape families. "blob" alone was too narrow a distribution — the model
+    # rejected round tarps but still fired on anything elongated or bent
+    # (the shapes that most resemble a prone person). Cover those too.
+    shape = rng.choice(["blob", "elongated", "bent", "lobed"])
+    if shape == "elongated":
+        # Rolled tarp / sleeping bag: one long thin ellipse at a random angle.
+        ang = rng.uniform(0, np.pi)
+        ca, sa = np.cos(ang), np.sin(ang)
+        u = (xx - w / 2) * ca + (yy - h / 2) * sa
+        v = -(xx - w / 2) * sa + (yy - h / 2) * ca
+        ru = max(2.0, 0.48 * max(w, h))
+        rv = max(1.0, rng.uniform(0.12, 0.24) * min(w, h))
+        blob = np.clip(1.0 - np.sqrt((u / ru) ** 2 + (v / rv) ** 2), 0, 1)
+    elif shape == "bent":
+        # Bent/L shape: two thin ellipses joined at an end (limb-like geometry
+        # without anatomy).
+        for k in range(2):
+            ang = rng.uniform(0, np.pi)
+            ca, sa = np.cos(ang), np.sin(ang)
+            cx = rng.uniform(w * 0.35, w * 0.65)
+            cy = rng.uniform(h * 0.35, h * 0.65)
+            u = (xx - cx) * ca + (yy - cy) * sa
+            v = -(xx - cx) * sa + (yy - cy) * ca
+            ru = max(2.0, rng.uniform(0.3, 0.5) * max(w, h))
+            rv = max(1.0, rng.uniform(0.10, 0.2) * min(w, h))
+            blob = np.maximum(blob, np.clip(
+                1.0 - np.sqrt((u / ru) ** 2 + (v / rv) ** 2), 0, 1))
+    elif shape == "lobed":
+        # Torso+limb proportions: one big lobe with 1-2 small satellites.
+        cx, cy = w * 0.5, h * 0.5
+        blob = np.clip(1.0 - np.sqrt(((xx - cx) / (w * 0.32)) ** 2
+                                     + ((yy - cy) / (h * 0.32)) ** 2), 0, 1)
+        for _ in range(int(rng.integers(1, 3))):
+            sx = rng.uniform(w * 0.15, w * 0.85)
+            sy = rng.uniform(h * 0.15, h * 0.85)
+            sr = max(1.0, rng.uniform(0.10, 0.2) * min(w, h))
+            blob = np.maximum(blob, np.clip(
+                1.0 - np.sqrt(((xx - sx) / sr) ** 2 + ((yy - sy) / sr) ** 2), 0, 1))
+    else:
+        # Irregular blob (2-4 overlapping ellipses), like crumpled fabric.
+        for _ in range(int(rng.integers(2, 5))):
+            cx = rng.uniform(w * 0.2, w * 0.8)
+            cy = rng.uniform(h * 0.2, h * 0.8)
+            rx = max(1.0, rng.uniform(w * 0.18, w * 0.45))
+            ry = max(1.0, rng.uniform(h * 0.18, h * 0.45))
+            blob = np.maximum(blob, np.clip(
+                1.0 - np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2), 0, 1))
+    alpha = ((blob > 0.38).astype(np.uint8) * 255)
+    alpha_img = Image.fromarray(alpha).filter(ImageFilter.GaussianBlur(radius=1.0))
+
+    c1 = clothing_color(rng)
+    rgb = np.full((h, w, 3), c1, dtype=np.float32)
+    pattern = rng.choice(["solid", "twotone", "stripes", "patch"])
+    if pattern == "twotone":
+        # Two-tone split at an ARBITRARY angle (jacket/pants boundary is
+        # rarely axis-aligned in an aerial view).
+        c2 = clothing_color(rng)
+        ang = rng.uniform(0, np.pi)
+        boundary = (xx - w / 2) * np.cos(ang) + (yy - h / 2) * np.sin(ang)
+        rgb[boundary > rng.uniform(-0.15, 0.15) * max(w, h)] = c2
+    elif pattern == "stripes":
+        # 2-4 colour bands (folded tarp / gear straps).
+        n_bands = int(rng.integers(2, 5))
+        ang = rng.uniform(0, np.pi)
+        band = ((xx - w / 2) * np.cos(ang) + (yy - h / 2) * np.sin(ang))
+        band = ((band - band.min()) / max(1e-6, band.max() - band.min()) * n_bands).astype(int)
+        colors = [clothing_color(rng) for _ in range(n_bands + 1)]
+        for b in range(n_bands + 1):
+            rgb[band == b] = colors[b]
+    elif pattern == "patch":
+        # Small contrasting patch on a larger body (backpack-on-jacket look).
+        c2 = clothing_color(rng)
+        px = rng.uniform(w * 0.25, w * 0.75)
+        py = rng.uniform(h * 0.25, h * 0.75)
+        pr = max(1.0, rng.uniform(0.15, 0.3) * min(w, h))
+        patch_mask = ((xx - px) ** 2 + (yy - py) ** 2) < pr ** 2
+        rgb[patch_mask] = c2
+    rgb += rng.normal(0, float(rng.uniform(6, 18)), rgb.shape)  # fabric texture
+    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+    return Image.merge("RGBA", (*Image.fromarray(rgb).split(), alpha_img))
+
+
 # ---------------------------------------------------------------------------
 # Dataset generation
 # ---------------------------------------------------------------------------
@@ -502,8 +854,8 @@ def _generate_split(
         else:
             bg = _procedural_background(size, rng)
 
-        # Sample a drone altitude for this image — drives survivor pixel size
-        # and effective resolution.
+        # Sample a drone altitude for this image — drives the ground-sample
+        # distance and hence survivor pixel size.
         is_oblique = altitude_aware and rng.random() < oblique_frac
         img_tilt_deg = 0.0
         if altitude_aware:
@@ -511,78 +863,158 @@ def _generate_split(
             img_gsd = altitude_to_gsd(img_altitude_m, image_size=size)
             if is_oblique:
                 img_tilt_deg = float(rng.uniform(OBLIQUE_TILT_MIN_DEG, OBLIQUE_TILT_MAX_DEG))
-                base_w_px, base_h_px = oblique_survivor_size(
-                    img_altitude_m, img_tilt_deg, image_size=size
-                )
-                base_px = max(lo, min(hi, base_w_px))
-            else:
-                # Base survivor width from the physics; add ±30% jitter for pose,
-                # body size, and orientation variation.
-                base_px = altitude_to_survivor_px(img_altitude_m, image_size=size)
-                base_h_px = base_px  # nadir: roughly square (top-down blob)
-            # Clamp to the allowed range (still respect --min/max-surv-px).
-            base_px = max(lo, min(hi, base_px))
         else:
             img_altitude_m = None
             img_gsd = None
-            base_h_px = None
 
         # Negative-only images: survivor-free backgrounds teach the model that
         # NAIP terrain does not automatically imply a person is present.
         is_negative = rng.random() < neg_frac
 
-        placements: list[tuple[Image.Image, int, int, int, int]] = []
+        # Phase 1 — sample survivors: physically-sized, viewpoint-correct
+        # sprites at non-overlapping positions. All alpha-affecting transforms
+        # (erode, blur) are applied HERE so the emitted tight box is known
+        # before acceptance; the per-frame size-ratio and overlap checks then
+        # operate on the FINAL label boxes, not the physics targets. Colour
+        # harmonisation (RGB-only, alpha-preserving) happens at paste time.
+        placements: list[dict] = []
+        sizes_sqrt: list[float] = []
         if not is_negative:
             for _ in range(int(rng.integers(1, 4))):   # 1-3 survivors
-                asset = assets[int(rng.integers(0, len(assets)))]
-                if altitude_aware:
-                    # Jitter around the physics-derived size (±30%) to simulate
-                    # variation in body pose, crouching vs standing, etc.
-                    jitter = rng.uniform(0.7, 1.3)
-                    w = int(max(lo, min(hi, base_px * jitter)))
-                elif rng.random() < small_frac:
-                    w = int(rng.integers(max(lo, 20), min(50, hi)))
-                else:
-                    w = int(rng.integers(lo, hi))
-                if is_oblique and base_h_px is not None:
-                    # Oblique: use physics-derived height (person appears taller)
-                    h_jitter = rng.uniform(0.8, 1.2)
-                    h = int(max(w, base_h_px * jitter * h_jitter))
-                else:
-                    h = int(w * asset.height / asset.width)
-                if rng.random() < boundary_frac:
-                    x = int(rng.integers(-w // 2, max(1, size - w // 2)))
-                    y = int(rng.integers(-h // 2, max(1, size - h // 2)))
-                else:
-                    x = int(rng.integers(0, max(1, size - w)))
-                    y = int(rng.integers(0, max(1, size - h)))
-                placements.append((asset, w, h, x, y))
-            n_neg -= 1   # track below
+                for _attempt in range(8):
+                    asset = assets[int(rng.integers(0, len(assets)))]
+                    if altitude_aware:
+                        w, h, pose, heading = survivor_box_px(
+                            rng, img_gsd, is_oblique=is_oblique, tilt_deg=img_tilt_deg
+                        )
+                        # Viewpoint-correct sprite:
+                        #  - prone: full body rotated to its ground heading
+                        #    (plausible from above)
+                        #  - standing at nadir: top-down head+shoulders blob,
+                        #    never an upright ground-level photo
+                        #  - oblique: upright photo is legitimately visible
+                        if pose == "prone":
+                            # The upright cutout's long axis is vertical (90°);
+                            # rotate so it lies along the sampled ground heading
+                            # (measured from the x-axis, like the box math).
+                            sprite = asset.rotate(
+                                heading - 90.0, expand=True,
+                                resample=Image.Resampling.BICUBIC,
+                            )
+                        elif not is_oblique:
+                            sprite = _top_down_standing_sprite(asset, rng)
+                        else:
+                            sprite = asset
+                    elif rng.random() < small_frac:
+                        pose, heading = "photo", 0.0
+                        w = int(rng.integers(max(lo, 20), min(50, hi)))
+                        h = int(w * asset.height / asset.width)
+                        sprite = asset
+                    else:
+                        pose, heading = "photo", 0.0
+                        w = int(rng.integers(lo, hi))
+                        h = int(w * asset.height / asset.width)
+                        sprite = asset
+                    # Aspect-preserving scale: sprite alpha extent fits the
+                    # physics box; the sprite is never stretched to fill it.
+                    sprite = _scale_sprite_into_box(sprite, max(2, int(w)), max(2, int(h)))
+                    sw, sh = sprite.size
+                    # Alpha-final transforms (colour harmonisation later does
+                    # not touch alpha, so the tight box computed now is exact).
+                    if min(sw, sh) >= MIN_ERODE_SPRITE_PX:
+                        sprite = _erode_alpha_edge(sprite, rng)
+                    sprite = _resolution_blur(sprite, sw, rng, gsd_m=img_gsd)
+                    if _tight_alpha_bbox(sprite) is None:
+                        continue
+                    if rng.random() < boundary_frac:
+                        x = int(rng.integers(-sw // 2, max(1, size - sw // 2)))
+                        y = int(rng.integers(-sh // 2, max(1, size - sh // 2)))
+                    else:
+                        x = int(rng.integers(0, max(1, size - sw)))
+                        y = int(rng.integers(0, max(1, size - sh)))
+                    # Emitted label = tight bbox of the VISIBLE (in-frame) part
+                    # of the final alpha mask. For edge-truncated sprites this
+                    # is tighter than clipping the full-mask bbox (a protruding
+                    # limb outside the frame must not widen the visible box).
+                    vx1, vy1 = max(0, -x), max(0, -y)
+                    vx2, vy2 = min(sw, size - x), min(sh, size - y)
+                    if vx2 - vx1 < 4 or vy2 - vy1 < 4:
+                        continue
+                    alpha = np.asarray(sprite.getchannel("A"))
+                    vis = alpha[vy1:vy2, vx1:vx2] > ALPHA_BBOX_THRESHOLD
+                    if not vis.any():
+                        continue
+                    rows = np.where(vis.any(axis=1))[0]
+                    cols = np.where(vis.any(axis=0))[0]
+                    bx1 = x + vx1 + int(cols[0])
+                    bx2 = x + vx1 + int(cols[-1]) + 1
+                    by1 = y + vy1 + int(rows[0])
+                    by2 = y + vy1 + int(rows[-1]) + 1
+                    if bx2 - bx1 < 4 or by2 - by1 < 4:
+                        continue
+                    # Per-frame size coherence on the FINAL emitted boxes.
+                    s_size = float(np.sqrt((bx2 - bx1) * (by2 - by1)))
+                    if sizes_sqrt:
+                        s_max = max(sizes_sqrt + [s_size])
+                        s_min = min(sizes_sqrt + [s_size])
+                        if s_max / s_min > GEN_SIZE_RATIO_MAX:
+                            continue
+                    emitted = (bx1, by1, bx2 - bx1, by2 - by1)
+                    # Labels must not overlap: reject and resample the position.
+                    if any(_boxes_intersect(emitted, p["emitted"]) for p in placements):
+                        continue
+                    placements.append({
+                        "sprite": sprite, "x": x, "y": y,
+                        "pose": pose, "heading": heading,
+                        "emitted": emitted,
+                        # The label IS the visible-mask tight box, so its IoU
+                        # against the mask bbox is 1.0 by construction; it is
+                        # persisted so the validator can audit tightness after
+                        # the alpha channel is flattened into a JPG.
+                        "mask_iou": 1.0,
+                    })
+                    sizes_sqrt.append(s_size)
+                    break
 
-        centers = [(x + w / 2, y + h / 2) for (_, w, h, x, y) in placements]
+        centers = [
+            (p["emitted"][0] + p["emitted"][2] / 2, p["emitted"][1] + p["emitted"][3] / 2)
+            for p in placements
+        ]
         has_fire = rng.random() < fire_frac
         heavy_occlude = has_fire and rng.random() < heavy_occlude_frac
         mask = _wildfire_masks(size, rng, centers, heavy_occlude=heavy_occlude) if has_fire else None
         if mask is not None:    # burn + flame UNDER survivors (production order)
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg, include_burn=True, include_flame=True, include_smoke=False)
 
+        # Phase 2 — composite and emit TIGHT labels: the YOLO box is the tight
+        # bbox of the sprite's final alpha mask (computed in phase 1; colour
+        # harmonisation below is RGB-only and does not alter the alpha), clipped
+        # to the frame — never the padded paste rectangle.
         labels: list[str] = []
-        for asset, w, h, x, y in placements:
-            s = asset.resize((w, h), Image.Resampling.LANCZOS)
+        box_records: list[dict] = []
+        for p in placements:
+            sprite, x, y = p["sprite"], p["x"], p["y"]
+            sw, sh = sprite.size
             # Sample only the visible patch of the background for color harmonization.
             px1 = max(0, x); py1 = max(0, y)
-            px2 = min(size, x + w); py2 = min(size, y + h)
-            bg_patch = bg.crop((px1, py1, px2, py2)) if px2 > px1 and py2 > py1 else bg.crop((0, 0, w, h))
-            s = _harmonize_color(s, bg_patch, rng)   # tone match to local BG
-            s = _erode_alpha_edge(s, rng)             # soften GrabCut hard edges
-            s = _resolution_blur(s, w, rng, gsd_m=img_gsd)  # altitude-aware blur
+            px2 = min(size, x + sw); py2 = min(size, y + sh)
+            if px2 <= px1 or py2 <= py1:
+                continue
+            bg_patch = bg.crop((px1, py1, px2, py2))
+            s = _harmonize_color(sprite, bg_patch, rng)  # tone match to local BG
             bg.paste(s, (x, y), s)
-            # Use the visible (clipped) bbox for the YOLO label so that partially
-            # out-of-frame survivors get correct annotations.
-            clipped = _clip_label(x, y, w, h, size)
-            if clipped is not None:
-                cx_n, cy_n, w_n, h_n = clipped
-                labels.append(f"0 {cx_n:.6f} {cy_n:.6f} {w_n:.6f} {h_n:.6f}")
+            bx1, by1, bw, bh = p["emitted"]
+            cx_n = (bx1 + bw / 2.0) / size
+            cy_n = (by1 + bh / 2.0) / size
+            labels.append(f"0 {cx_n:.6f} {cy_n:.6f} {bw / size:.6f} {bh / size:.6f}")
+            box_records.append({
+                "pose": p["pose"],
+                "heading_deg": round(p["heading"], 1),
+                "x_px": bx1, "y_px": by1, "w_px": bw, "h_px": bh,
+                "w_m": round(bw * img_gsd, 2) if img_gsd else None,
+                "h_m": round(bh * img_gsd, 2) if img_gsd else None,
+                "mask_iou": round(p["mask_iou"], 3),
+            })
 
         if mask is not None:    # smoke drifts OVER survivors
             bg, _ = apply_wildfire_effects_to_pil(bg, mask, config=cfg, include_burn=False, include_flame=False, include_smoke=True)
@@ -592,48 +1024,124 @@ def _generate_split(
         # positive, negative, or mixed — the model must learn to ignore them.
         # Prefer REAL assets (VisDrone vehicles, SARD rejected) when available;
         # fall back to procedural synthetic blobs otherwise.
+        decoy_records: list[dict] = []
         if rng.random() < decoy_frac:
+            survivor_rects = [p["emitted"] for p in placements]
             n_decoys = int(rng.integers(1, 4))
             for _ in range(n_decoys):
-                dw = int(rng.integers(lo, hi))
-                dx = int(rng.integers(0, max(1, size - dw)))
-                if decoy_assets:
-                    # Real asset: resize to target width preserving aspect ratio.
+                decoy_type = "vehicle"
+                if altitude_aware and img_gsd:
+                    if rng.random() < DECOY_HUMAN_SCALE_FRAC:
+                        # Human-scale confuser: animal or colourful object in the
+                        # SAME size band as survivors (0.5-1.8 m) so size alone
+                        # cannot separate people from decoys.
+                        obj_long_m = float(rng.uniform(*DECOY_HUMAN_SCALE_LONG_M))
+                        long_px = max(DECOY_MIN_PX, obj_long_m / img_gsd)
+                        aspect = float(rng.uniform(0.35, 0.9))  # elongated, like a prone body
+                        if rng.random() < 0.5:
+                            dw = int(round(long_px)); dh = max(DECOY_MIN_PX, int(round(long_px * aspect)))
+                        else:
+                            dh = int(round(long_px)); dw = max(DECOY_MIN_PX, int(round(long_px * aspect)))
+                        if rng.random() < 0.5:
+                            decoy = _animal_decoy_rgba(dw, dh, rng)
+                            decoy_type = "animal"
+                        else:
+                            decoy = _colorful_decoy_rgba(dw, dh, rng)
+                            decoy_type = "colorful_object"
+                    else:
+                        # Physically-sized vehicle: sample a real-world long axis
+                        # and scale through the camera GSD, preserving the asset
+                        # aspect. Mix biased to passenger cars (~3.5-5.2 m).
+                        u = rng.random()
+                        if u < DECOY_LARGE_FRAC:
+                            veh_long_m = float(rng.uniform(*DECOY_LARGE_VEHICLE_M))
+                        elif u < DECOY_LARGE_FRAC + DECOY_VAN_FRAC:
+                            veh_long_m = float(rng.uniform(*DECOY_VAN_LONG_M))
+                        else:
+                            veh_long_m = float(rng.uniform(*DECOY_VEHICLE_LONG_M))
+                        long_px = max(DECOY_MIN_PX, veh_long_m / img_gsd)
+                        if decoy_assets:
+                            raw = decoy_assets[int(rng.integers(0, len(decoy_assets)))]
+                            aspect = raw.height / raw.width
+                            if aspect >= 1.0:
+                                dh = int(round(long_px)); dw = max(DECOY_MIN_PX, int(round(long_px / aspect)))
+                            else:
+                                dw = int(round(long_px)); dh = max(DECOY_MIN_PX, int(round(long_px * aspect)))
+                            decoy = raw.resize((dw, dh), Image.Resampling.LANCZOS)
+                        else:
+                            dw = int(round(long_px)); dh = max(DECOY_MIN_PX, int(dw * rng.uniform(0.5, 1.8)))
+                            decoy = _synthetic_decoy_rgba(dw, dh, rng)
+                    # Never let an UNLABELED decoy overlap a LABELED survivor box:
+                    # an unlabeled human-sized blob on top of a positive corrupts
+                    # both the positive and the hard-negative signal.
+                    dx = dy = None
+                    for _attempt in range(8):
+                        tx = int(rng.integers(0, max(1, size - dw)))
+                        ty = int(rng.integers(0, max(1, size - dh)))
+                        clash = any(
+                            tx < bx + bw_ and tx + dw > bx and ty < by + bh_ and ty + dh > by
+                            for (bx, by, bw_, bh_) in survivor_rects
+                        )
+                        if not clash:
+                            dx, dy = tx, ty
+                            break
+                    if dx is None:
+                        continue  # frame too crowded — skip this decoy
+                elif decoy_assets:
+                    # Legacy (uniform-size) mode: random width, preserve aspect.
+                    dw = int(rng.integers(lo, hi))
                     raw = decoy_assets[int(rng.integers(0, len(decoy_assets)))]
                     dh = max(8, int(dw * raw.height / raw.width))
+                    dx = int(rng.integers(0, max(1, size - dw)))
                     dy = int(rng.integers(0, max(1, size - dh)))
                     decoy = raw.resize((dw, dh), Image.Resampling.LANCZOS)
                 else:
                     # Fallback: procedural blob (non-human aspect ratios).
+                    dw = int(rng.integers(lo, hi))
                     dh = int(dw * rng.uniform(0.5, 1.8))
+                    dx = int(rng.integers(0, max(1, size - dw)))
                     dy = int(rng.integers(0, max(1, size - dh)))
                     decoy = _synthetic_decoy_rgba(dw, dh, rng)
+                    decoy_type = "synthetic_blob"
                 bg_patch = bg.crop((dx, dy, dx + dw, dy + dh))
                 decoy = _harmonize_color(decoy, bg_patch, rng)
-                decoy = _erode_alpha_edge(decoy, rng)
+                # Same erosion guard as survivors: skipping erosion on small
+                # sprites must apply to BOTH classes, or the edge treatment
+                # itself becomes a human/non-human shortcut cue.
+                if min(dw, dh) >= MIN_ERODE_SPRITE_PX:
+                    decoy = _erode_alpha_edge(decoy, rng)
                 decoy = _resolution_blur(decoy, dw, rng, gsd_m=img_gsd)
                 bg.paste(decoy, (dx, dy), decoy)
-                # Intentionally no label — this is the hard-negative signal.
+                # Intentionally no YOLO label — this is the hard-negative signal.
+                # Recorded in metadata so decoy composition is auditable.
+                decoy_records.append({
+                    "type": decoy_type,
+                    "x_px": dx, "y_px": dy, "w_px": dw, "h_px": dh,
+                    "long_m": round(max(dw, dh) * img_gsd, 2) if img_gsd else None,
+                })
 
         bg.save(img_dir / f"{i:05d}.jpg", quality=92)
         # Empty label file is the YOLO convention for a negative image.
         label_text = "\n".join(labels) + ("\n" if labels else "")
         (lbl_dir / f"{i:05d}.txt").write_text(label_text, encoding="utf-8")
-        # Altitude metadata sidecar — enables post-hoc analysis by flight level.
-        if altitude_aware and img_altitude_m is not None:
-            meta = {
-                "altitude_m": round(img_altitude_m, 1),
-                "gsd_m": round(img_gsd, 4),
-                "survivor_base_px": round(base_px, 1),
-                "n_survivors": len(placements),
-                "has_fire": has_fire,
-                "oblique": is_oblique,
-                "tilt_deg": round(img_tilt_deg, 1),
-            }
-            (lbl_dir / f"{i:05d}.json").write_text(
-                json.dumps(meta), encoding="utf-8",
-            )
-        if is_negative:
+        # Metadata sidecar — written for EVERY frame so each label's physical
+        # size is verifiable (real_size_m = px * gsd_m). Legacy (non-altitude-
+        # aware) frames carry gsd_m: null and are flagged by the validator.
+        meta = {
+            "altitude_m": round(img_altitude_m, 1) if img_altitude_m is not None else None,
+            "gsd_m": round(img_gsd, 4) if img_gsd is not None else None,
+            "view": ("oblique" if is_oblique else "nadir") if altitude_aware else "photo",
+            "n_survivors": len(labels),
+            "poses": [b["pose"] for b in box_records],
+            "boxes": box_records,
+            "has_fire": has_fire,
+            "oblique": is_oblique,
+            "tilt_deg": round(img_tilt_deg, 1),
+            "n_decoys": len(decoy_records),
+            "decoys": decoy_records,
+        }
+        (lbl_dir / f"{i:05d}.json").write_text(json.dumps(meta), encoding="utf-8")
+        if not labels:
             n_neg += 1
 
     neg_pct = 100 * n_neg / n if n else 0
@@ -647,6 +1155,8 @@ def main() -> None:
     ap.add_argument("--n-train", type=int, default=500)
     ap.add_argument("--n-val", type=int, default=80)
     ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--device", default="cpu",
+                    help="Training device: 'cpu' (default) or 'mps' (Apple GPU, much faster on M-series).")
     ap.add_argument("--size", type=int, default=640, help="Generated training image size.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fire-frac", type=float, default=0.65,
@@ -708,6 +1218,9 @@ def main() -> None:
                          "Default 0.25 (25%% of images). Set 0 for pure nadir only.")
     ap.add_argument("--data-dir", default=str(ROOT / "data/cv_train/survivor"))
     ap.add_argument("--out", default=str(ROOT / "models/survivor_yolov8n.pt"))
+    ap.add_argument("--skip-generation", action="store_true",
+                    help="Skip dataset generation and train on the existing --data-dir "
+                         "(use after a prior --epochs 0 generate-only run).")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -778,25 +1291,28 @@ def main() -> None:
         f"{DRONE_CAMERA_FOV_DEG:.0f}° FOV)"
         if args.altitude_aware else "uniform random size"
     )
-    print(f"Generating {args.n_train} train / {args.n_val} val composites at {args.size}px "
-          f"({int(args.fire_frac*100)}% with fire/smoke, {int(args.neg_frac*100)}% negatives, "
-          f"{int(args.decoy_frac*100)}% with hard-negative decoys, {alt_info}) ...")
-    _generate_split(
-        data_dir / "train", args.n_train, train_assets, args.size, rng, cfg,
-        fire_frac=args.fire_frac, surv_px=surv_px,
-        naip_tiles=naip_train_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
-        decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
-        small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
-        altitude_aware=args.altitude_aware, oblique_frac=args.oblique_frac,
-    )
-    _generate_split(
-        data_dir / "val", args.n_val, val_assets, args.size, rng, cfg,
-        fire_frac=args.fire_frac, surv_px=surv_px,
-        naip_tiles=naip_val_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
-        decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
-        small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
-        altitude_aware=args.altitude_aware, oblique_frac=args.oblique_frac,
-    )
+    if args.skip_generation:
+        print(f"--skip-generation: training on existing dataset in {data_dir}")
+    else:
+        print(f"Generating {args.n_train} train / {args.n_val} val composites at {args.size}px "
+              f"({int(args.fire_frac*100)}% with fire/smoke, {int(args.neg_frac*100)}% negatives, "
+              f"{int(args.decoy_frac*100)}% with hard-negative decoys, {alt_info}) ...")
+        _generate_split(
+            data_dir / "train", args.n_train, train_assets, args.size, rng, cfg,
+            fire_frac=args.fire_frac, surv_px=surv_px,
+            naip_tiles=naip_train_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
+            decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
+            small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
+            altitude_aware=args.altitude_aware, oblique_frac=args.oblique_frac,
+        )
+        _generate_split(
+            data_dir / "val", args.n_val, val_assets, args.size, rng, cfg,
+            fire_frac=args.fire_frac, surv_px=surv_px,
+            naip_tiles=naip_val_tiles, neg_frac=args.neg_frac, decoy_frac=args.decoy_frac,
+            decoy_assets=decoy_assets, boundary_frac=args.boundary_frac,
+            small_frac=args.small_frac, heavy_occlude_frac=args.heavy_occlude_frac,
+            altitude_aware=args.altitude_aware, oblique_frac=args.oblique_frac,
+        )
 
     yaml = data_dir / "survivor.yaml"
     yaml.write_text(
@@ -804,12 +1320,16 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    if args.epochs <= 0:
+        print("epochs<=0: generated dataset only, skipping training.")
+        return
+
     from ultralytics import YOLO
     model = YOLO(args.model)
     print(f"Fine-tuning {args.model} for {args.epochs} epochs ...")
     model.train(
         data=str(yaml), epochs=args.epochs, imgsz=args.imgsz, batch=16,
-        device="cpu", verbose=True, seed=args.seed, project=str(data_dir.resolve() / "runs"),
+        device=args.device, verbose=True, seed=args.seed, project=str(data_dir.resolve() / "runs"),
         name="survivor", exist_ok=True, plots=False,
     )
     # Ultralytics records the best-weights path on the trainer; fall back to a

@@ -343,7 +343,7 @@ def main():
                    choices=["cv", "thermal", "cv+thermal", "motion", "cv+motion"],
                    help="Detection modality: 'cv' (pure computer vision, default), "
                         "'thermal' (simulated thermal IR only), "
-                        "'cv+thermal' (sensor fusion — both run, results merged), "
+                        "'cv+thermal' (sensor fusion - both run, results merged), "
                         "'motion' (frame differencing only), "
                         "'cv+motion' (CV with motion confirmation boost).")
     p.add_argument("--thermal-detector", type=str, default="physics",
