@@ -600,6 +600,24 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(float(revisit_outside.sum()), 0.0)
         self.assertEqual(float(revisit_inter_uav.sum()), 0.0)
 
+    def test_per_agent_coverage_reward_uses_private_known_map(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=16)
+        scenario.comms_map_mode = "per_agent"
+        scenario.n_agents = 1
+        scenario.comm_agent_coverage_grid = torch.zeros(1, 1, 16, 16, dtype=torch.bool)
+        scenario.comm_team_coverage_grid = torch.zeros_like(scenario.coverage_grid)
+        scenario.coverage_grid[:] = True
+        scenario.drone_altitude = torch.tensor([[0.10]])
+        positions = torch.zeros(1, 1, 2)
+
+        private_credit, private_overlap, *_ = scenario._coverage_reward(
+            positions,
+            known_coverage=scenario._uav_coverage_maps_for_reward(),
+        )
+
+        self.assertGreater(float(private_credit[0, 0]), 0.0)
+        self.assertEqual(float(private_overlap[0, 0]), 0.0)
+
     def test_total_episode_coverage_credit_is_bounded(self):
         scenario = self._coverage_scenario(grid_size=16)
         scenario.drone_altitude = torch.tensor([[0.50]])
@@ -1443,6 +1461,29 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(
             float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
             1.0,
+            places=6,
+        )
+
+    def test_per_agent_confidence_overlap_uses_private_map(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.comms_map_mode = "per_agent"
+        scenario.n_agents = 1
+        scenario.comm_agent_confidence_grid = torch.zeros(1, 1, 16, 16)
+        scenario.comm_team_confidence_grid = torch.zeros_like(scenario.uav_confidence_grid)
+        scenario.r_uav_confidence_overlap = 0.2
+        scenario.uav_confidence_overlap_threshold = 0.5
+        scenario.uav_confidence_grid.fill_(1.0)
+        drone_pos = torch.zeros(1, 1, 2)
+
+        private_penalty = scenario._uav_confidence_overlap_penalty(
+            drone_pos,
+            previous=scenario._uav_confidence_maps_for_reward(),
+        )
+
+        self.assertAlmostEqual(float(private_penalty[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
+            0.0,
             places=6,
         )
 
