@@ -103,6 +103,14 @@ class WildfireSearchScenario(BaseScenario):
         self.n_drones    = kwargs.pop("n_drones", 3)
         self.n_ground    = kwargs.pop("n_ground", 2)
         self.n_survivors = kwargs.pop("n_survivors", 5)
+        self.active_survivors_min = int(kwargs.pop("active_survivors_min", self.n_survivors))
+        self.active_survivors_max = int(kwargs.pop("active_survivors_max", self.n_survivors))
+        if self.active_survivors_min < 0:
+            raise ValueError("active_survivors_min must be nonnegative")
+        if self.active_survivors_max < self.active_survivors_min:
+            raise ValueError("active_survivors_max must be >= active_survivors_min")
+        if self.active_survivors_max > self.n_survivors:
+            raise ValueError("active_survivors_max must be <= n_survivors")
         self.n_agents    = self.n_drones + self.n_ground
         self.obs_schema_n_drones = int(kwargs.pop("obs_schema_n_drones", self.n_drones))
         self.obs_schema_n_ground = int(kwargs.pop("obs_schema_n_ground", self.n_ground))
@@ -1057,6 +1065,7 @@ class WildfireSearchScenario(BaseScenario):
         self.found_survivors = torch.zeros(
             batch_dim, self.n_survivors, dtype=torch.bool, device=device,
         )
+        self.active_survivors = torch.ones_like(self.found_survivors)
         self.scouted_survivors = torch.zeros_like(self.found_survivors)
         self.step_drone_detections = torch.zeros(
             batch_dim, self.n_drones, self.n_survivors, dtype=torch.bool, device=device,
@@ -2019,6 +2028,7 @@ class WildfireSearchScenario(BaseScenario):
         )
 
         if env_index is None:
+            self.active_survivors.fill_(True)
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.step_drone_detections.zero_()
@@ -2067,6 +2077,7 @@ class WildfireSearchScenario(BaseScenario):
             self._reset_ugv_global_routes()
             envs_to_seed = range(self.world.batch_dim)
         else:
+            self.active_survivors[env_index] = True
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.step_drone_detections[env_index] = False
@@ -2118,8 +2129,21 @@ class WildfireSearchScenario(BaseScenario):
         H = W = self.fire_grid_size
         for b in envs_to_seed:
             self._generate_terrain(b)
+            self._sample_active_survivors(b)
+            ScenarioUtils.spawn_entities_randomly(
+                entities=self._active_survivor_entities(b) + self._decoys + self.world.agents,
+                world=self.world,
+                env_index=b,
+                min_dist_between_entities=(
+                    2 * self.agent_radius
+                    + float(self.spawn_padding_by_env[b].item())
+                ),
+                x_bounds=(-self.x_semidim, self.x_semidim),
+                y_bounds=(-self.y_semidim, self.y_semidim),
+            )
             self._place_drones_jointly_uniform_interior(b)
             self._place_diagnostic_survivors_near_reference_agents(b)
+            self._move_inactive_survivors_outside_map(b)
             if not self.disable_fire:
                 self._seed_initial_fire(b, H, W)
             if self.delayed_survivor_knowledge:
@@ -2162,37 +2186,105 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.step_ugv_travel_cost[env_index] = 0
 
+    def _active_survivor_mask(self) -> Tensor:
+        if hasattr(self, "active_survivors"):
+            return self.active_survivors
+        return torch.ones_like(self.found_survivors)
+
+    def _active_survivor_count(self) -> Tensor:
+        return self._active_survivor_mask().float().sum(dim=1)
+
+    def _all_active_survivors_found(self) -> Tensor:
+        active = self._active_survivor_mask()
+        return (self.found_survivors | ~active).all(dim=1)
+
+    def _all_active_survivors_scouted(self) -> Tensor:
+        active = self._active_survivor_mask()
+        return (self.scouted_survivors | ~active).all(dim=1)
+
+    def _sample_active_survivors(self, env_index: int) -> None:
+        if self.n_survivors <= 0:
+            return
+        device = self.active_survivors.device
+        min_count = min(max(int(self.active_survivors_min), 0), self.n_survivors)
+        max_count = min(max(int(self.active_survivors_max), min_count), self.n_survivors)
+        if min_count == max_count:
+            count = min_count
+        else:
+            count = int(torch.randint(min_count, max_count + 1, (1,), device=device).item())
+        mask = torch.zeros(self.n_survivors, dtype=torch.bool, device=device)
+        if count > 0:
+            mask[torch.randperm(self.n_survivors, device=device)[:count]] = True
+        self.active_survivors[env_index] = mask
+
+    def _active_survivor_entities(self, env_index: int) -> list[Landmark]:
+        if self.n_survivors <= 0:
+            return []
+        active = self._active_survivor_mask()[env_index]
+        return [
+            survivor
+            for survivor_idx, survivor in enumerate(self._survivors)
+            if bool(active[survivor_idx].item())
+        ]
+
+    def _move_inactive_survivors_outside_map(self, env_index: int) -> None:
+        if self.n_survivors <= 0:
+            return
+        inactive = ~self._active_survivor_mask()[env_index]
+        if not bool(inactive.any().item()):
+            return
+        offmap = torch.tensor(
+            [self.x_semidim + 10.0 * self.agent_radius, self.y_semidim + 10.0 * self.agent_radius],
+            device=self.fire_grid.device,
+            dtype=torch.float32,
+        )
+        for survivor_idx, survivor in enumerate(self._survivors):
+            if bool(inactive[survivor_idx].item()):
+                all_pos = survivor.state.pos.clone()
+                all_pos[env_index] = offmap.to(device=all_pos.device, dtype=all_pos.dtype)
+                survivor.set_pos(all_pos, batch_index=None)
+
     def _initialize_known_survivors_at_reset(self, env_index: int) -> None:
         """Optionally start the episode with survivors known to ground agents."""
         if not self.known_survivors_at_reset or self.n_survivors <= 0:
             return
-        self.scouted_survivors[env_index] = True
+        active = self._active_survivor_mask()[env_index]
+        self.scouted_survivors[env_index] = active
         if self.n_ground > 0:
-            self.known_survivors_by_agent[env_index, self.n_drones:, :] = True
+            self.known_survivors_by_agent[env_index, self.n_drones:, :] = active.unsqueeze(0)
 
     def _sample_delayed_survivor_reveals(self, env_index: int) -> None:
         if not self.delayed_survivor_knowledge or self.n_survivors <= 0:
             return
         device = self.survivor_reveal_steps.device
-        count = int(self.n_survivors)
+        active_idx = torch.nonzero(
+            self._active_survivor_mask()[env_index],
+            as_tuple=False,
+        ).flatten()
+        count = int(active_idx.numel())
+        reveal_steps = torch.full((self.n_survivors,), -1, dtype=torch.long, device=device)
+        if count <= 0:
+            self.survivor_reveal_steps[env_index] = reveal_steps
+            return
         initial_count = min(int(self.survivor_reveal_initial_count), count)
-        reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
+        active_reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
         order = torch.randperm(count, device=device)
         if initial_count > 0:
-            reveal_steps[order[:initial_count]] = 0
+            active_reveal_steps[order[:initial_count]] = 0
         remaining = count - initial_count
         if remaining > 0:
             start = int(min(max(self.survivor_reveal_start_step, 0), self.max_steps))
             end = int(min(max(self.survivor_reveal_end_step, start), self.max_steps))
             edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
-            for k, survivor_idx in enumerate(order[initial_count:]):
+            for k, active_order_idx in enumerate(order[initial_count:]):
                 lo = int(torch.floor(edges[k]).item())
                 hi = int(torch.floor(edges[k + 1]).item())
                 if hi <= lo:
                     step = lo
                 else:
                     step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
-                reveal_steps[survivor_idx] = step
+                active_reveal_steps[active_order_idx] = step
+        reveal_steps[active_idx] = active_reveal_steps
         self.survivor_reveal_steps[env_index] = reveal_steps
 
     def _sample_delayed_decoy_reveals(self, env_index: int) -> None:
@@ -2233,6 +2325,7 @@ class WildfireSearchScenario(BaseScenario):
             (self.survivor_reveal_steps[env_slice] >= 0)
             & (self.survivor_reveal_steps[env_slice] <= steps)
             & ~self.survivor_oracle_revealed[env_slice]
+            & self._active_survivor_mask()[env_slice]
         )
         if due.numel() == 0 or not bool(due.any().item()):
             return
@@ -2285,7 +2378,8 @@ class WildfireSearchScenario(BaseScenario):
 
         if self.n_survivors > 0:
             survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
-            unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
+            active = self._active_survivor_mask()
+            unconfirmed_scouted = active & self.scouted_survivors & ~self.found_survivors
             ground_known = self.known_survivors_by_agent[:, ground_slice]
             survivor_targetable = ground_known & unconfirmed_scouted.unsqueeze(1)
             target_pos_parts.append(survivor_pos)
@@ -2368,6 +2462,8 @@ class WildfireSearchScenario(BaseScenario):
             else self.world.agents[:self.n_drones]
         )
         for survivor_idx, survivor in enumerate(self._survivors):
+            if not bool(self._active_survivor_mask()[env_index, survivor_idx].item()):
+                continue
             reference_agent = reference_agents[survivor_idx % len(reference_agents)]
             gx, gy = self._positions_to_grid(reference_agent.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
@@ -4437,6 +4533,8 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos = agent_pos[:, :self.n_drones, :]
         drone_dists = dists[:, :self.n_drones, :]
         drone_seen = self._drone_survivor_detections(drone_dists, drone_pos, surv_pos)
+        active_survivors = self._active_survivor_mask()
+        drone_seen = drone_seen & active_survivors.unsqueeze(1)
         seen_by_drone       = drone_seen.any(dim=1)
         confirm_range = self.detection_range_by_env.view(-1, 1, 1)
         within_confirm      = dists < confirm_range
@@ -4444,9 +4542,15 @@ class WildfireSearchScenario(BaseScenario):
         sim_units_per_meter_env = self.terrain_sim_units_per_meter.to(device).clamp_min(1e-9)
         meters_per_sim_env = 1.0 / sim_units_per_meter_env
 
-        newly_scouted = seen_by_drone & ~self.scouted_survivors & ~self.found_survivors
+        newly_scouted = (
+            active_survivors
+            & seen_by_drone
+            & ~self.scouted_survivors
+            & ~self.found_survivors
+        )
         eligible_ground_confirmations = (
             within_confirm[:, self.n_drones:, :]
+            & active_survivors.unsqueeze(1)
             & self.scouted_survivors.unsqueeze(1)
         )
         if self.confirm_requires_los:
@@ -4470,17 +4574,16 @@ class WildfireSearchScenario(BaseScenario):
             self.step_drone_confirmations = torch.zeros_like(drone_seen)
             confirmed_by_drone = torch.zeros_like(confirmed_by_ground)
 
-        previously_all_found = self.found_survivors.all(dim=1)
+        previously_all_found = self._all_active_survivors_found()
         newly_found = (confirmed_by_ground | confirmed_by_drone) & ~self.found_survivors
 
-        self.scouted_survivors = self.scouted_survivors | newly_scouted
-        self.found_survivors   = self.found_survivors   | newly_found
+        self.scouted_survivors = self.scouted_survivors | (newly_scouted & active_survivors)
+        self.found_survivors   = self.found_survivors   | (newly_found & active_survivors)
         if bool((newly_scouted | newly_found).any().item()):
             self._invalidate_ugv_assignment_cache()
         all_survivors_found_now = (
-            self.found_survivors.all(dim=1)
+            self._all_active_survivors_found()
             & ~previously_all_found
-            & (self.n_survivors > 0)
         )
         self._record_local_survivor_knowledge(drone_seen, eligible_ground_confirmations)
 
@@ -4496,7 +4599,7 @@ class WildfireSearchScenario(BaseScenario):
         # Dense potential-based shaping (Ng et al. 1999): α · (prev_dist − curr_dist)
         # Drones: target = unscouted survivors
         INF = float("inf")
-        unscouted = ~self.scouted_survivors
+        unscouted = active_survivors & ~self.scouted_survivors
         drone_d = torch.where(
             unscouted.unsqueeze(1),
             dists[:, :self.n_drones, :],
@@ -4504,10 +4607,20 @@ class WildfireSearchScenario(BaseScenario):
         )
         curr_drone_dist, _ = drone_d.min(dim=2)
         if self.n_drones > 0 and self.n_survivors > 0:
-            nearest_drone_dist_sim = drone_dists.flatten(1).min(dim=1).values
+            active_drone_dists = torch.where(
+                active_survivors.unsqueeze(1),
+                drone_dists,
+                torch.full_like(drone_dists, INF),
+            )
+            nearest_drone_dist_sim = active_drone_dists.flatten(1).min(dim=1).values
+            nearest_drone_dist_sim = torch.where(
+                torch.isfinite(nearest_drone_dist_sim),
+                nearest_drone_dist_sim,
+                torch.zeros_like(nearest_drone_dist_sim),
+            )
             drone_footprint_m = self._drone_camera_ranges() * meters_per_sim_env.view(-1, 1)
             target_within_footprint = (
-                drone_dists <= self._drone_camera_ranges().unsqueeze(-1)
+                active_drone_dists <= self._drone_camera_ranges().unsqueeze(-1)
             ).any(dim=(1, 2))
             self.metric_uav_target_distance_m = nearest_drone_dist_sim * meters_per_sim_env
             self.metric_uav_footprint_radius_m = drone_footprint_m.mean(dim=1)
@@ -4520,7 +4633,7 @@ class WildfireSearchScenario(BaseScenario):
                 self.world.batch_dim, self.n_drones, device=device,
             )
             self.metric_uav_target_within_footprint = torch.zeros(self.world.batch_dim, device=device)
-        all_scouted = ~unscouted.any(dim=1, keepdim=True)
+        all_scouted = self._all_active_survivors_scouted().view(-1, 1)
         prev_known = ~torch.isinf(self.prev_drone_dist) & ~all_scouted
         drone_shaping = torch.where(
             prev_known,
@@ -4533,7 +4646,7 @@ class WildfireSearchScenario(BaseScenario):
         # are first in the target tensor; false-positive decoys follow them.
         # Progress is measured in meters and clipped to one nominal UGV step so
         # the shaping coefficient has a terrain-independent reward scale.
-        unconfirmed_scouted = self.scouted_survivors & ~self.found_survivors
+        unconfirmed_scouted = active_survivors & self.scouted_survivors & ~self.found_survivors
         ground_target_pos, known_ground_targets, ground_target_is_decoy = self._ugv_ground_target_candidates()
         ground_pos_for_assignment = agent_pos[:, self.n_drones:, :]
         curr_ground_target_idx, curr_ground_dist_sim = self._ugv_assigned_target_indices(
@@ -4894,6 +5007,7 @@ class WildfireSearchScenario(BaseScenario):
             local_pending_survivors = (
                 self.known_survivors_by_agent[:, ground_slice, :]
                 & ~self.confirmed_survivors_by_agent[:, ground_slice, :]
+                & self._active_survivor_mask().unsqueeze(1)
             )
             if self.n_decoys > 0:
                 local_pending_decoys = (
@@ -5089,9 +5203,9 @@ class WildfireSearchScenario(BaseScenario):
         )
         boundary_soft_risk, boundary_distance_m = self._uav_boundary_risk_metrics(drone_pos)
 
-        self.metric_new_scouts = newly_scouted.float().sum(dim=1)
-        self.metric_new_confirmations = newly_found.float().sum(dim=1)
-        self.metric_full_success = self.found_survivors.all(dim=1).float()
+        self.metric_new_scouts = (newly_scouted & active_survivors).float().sum(dim=1)
+        self.metric_new_confirmations = (newly_found & active_survivors).float().sum(dim=1)
+        self.metric_full_success = self._all_active_survivors_found().float()
         self.metric_reward_team = team_reward_by_agent.mean(dim=1)
         self.metric_reward_all_survivors_found = all_survivors_found_reward
         self.metric_reward_team_scout = team_scout_reward
@@ -9225,14 +9339,15 @@ class WildfireSearchScenario(BaseScenario):
         """
         agent_idx = self.world.agents.index(agent)
         has_decoys = self.n_decoys > 0
+        active_survivors = self._active_survivor_mask()
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
 
-        team_known = self.known_survivors_by_agent.any(dim=1)
-        team_confirmed = self.confirmed_survivors_by_agent.any(dim=1)
+        team_known = self.known_survivors_by_agent.any(dim=1) & active_survivors
+        team_confirmed = self.confirmed_survivors_by_agent.any(dim=1) & active_survivors
         connected = comms_keep.expand_as(local_known)
-        local_known = torch.where(connected, team_known, local_known)
-        local_confirmed = torch.where(connected, team_confirmed, local_confirmed)
+        local_known = torch.where(connected, team_known, local_known & active_survivors)
+        local_confirmed = torch.where(connected, team_confirmed, local_confirmed & active_survivors)
 
         self.known_survivors_by_agent[:, agent_idx] = local_known
         self.confirmed_survivors_by_agent[:, agent_idx] = local_confirmed
@@ -9264,7 +9379,7 @@ class WildfireSearchScenario(BaseScenario):
                 ground_slice = slice(self.n_drones, self.n_agents)
                 ground_known = self.known_survivors_by_agent[:, ground_slice]
                 ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
-                targetable = ground_known & ~ground_confirmed
+                targetable = ground_known & ~ground_confirmed & active_survivors.unsqueeze(1)
                 survivor_pos_for_assignment = torch.stack([s.state.pos for s in self._survivors], dim=1)
                 assignment_pos = survivor_pos_for_assignment
                 if has_decoys:
@@ -11663,7 +11778,7 @@ class WildfireSearchScenario(BaseScenario):
     # Done
     # ------------------------------------------------------------------
     def done(self) -> Tensor:
-        all_found = self.found_survivors.all(dim=1)
+        all_found = self._all_active_survivors_found()
         timed_out = self.step_count >= self.max_steps
         return all_found | timed_out
 
@@ -11682,16 +11797,24 @@ class WildfireSearchScenario(BaseScenario):
             else torch.zeros(self.world.batch_dim, device=self.fire_grid.device)
         )
         return {
-            "n_found":   self.found_survivors.sum(dim=1).float(),
-            "n_scouted": self.scouted_survivors.sum(dim=1).float(),
+            "n_found":   (self.found_survivors & self._active_survivor_mask()).sum(dim=1).float(),
+            "n_scouted": (self.scouted_survivors & self._active_survivor_mask()).sum(dim=1).float(),
+            "n_active_survivors": self._active_survivor_count(),
             "mission/new_scouts": self.metric_new_scouts,
             "mission/new_oracle_reveals": self.metric_survivor_oracle_reveals,
-            "mission/n_oracle_revealed": self.survivor_oracle_revealed.sum(dim=1).float(),
+            "mission/n_oracle_revealed": (
+                self.survivor_oracle_revealed & self._active_survivor_mask()
+            ).sum(dim=1).float(),
             "mission/new_decoy_oracle_reveals": self.metric_decoy_oracle_reveals,
             "mission/n_decoy_oracle_revealed": self.decoy_oracle_revealed.sum(dim=1).float(),
             "mission/new_confirmations": self.metric_new_confirmations,
-            "mission/n_scouted": self.scouted_survivors.sum(dim=1).float(),
-            "mission/n_confirmed": self.found_survivors.sum(dim=1).float(),
+            "mission/n_active_survivors": self._active_survivor_count(),
+            "mission/n_scouted": (
+                self.scouted_survivors & self._active_survivor_mask()
+            ).sum(dim=1).float(),
+            "mission/n_confirmed": (
+                self.found_survivors & self._active_survivor_mask()
+            ).sum(dim=1).float(),
             "mission/full_success": self.metric_full_success,
             **(
                 {

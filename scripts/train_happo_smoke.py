@@ -257,6 +257,8 @@ def build_args(
     n_drones: int | None = None,
     n_ugvs: int | None = None,
     n_survivors: int | None = None,
+    active_survivors_min: int | None = None,
+    active_survivors_max: int | None = None,
     n_decoys: int | None = None,
     delayed_survivor_knowledge: bool = False,
     survivor_reveal_schedule: str = "stratified_uniform",
@@ -359,6 +361,22 @@ def build_args(
         if n_survivors is None
         else max(int(n_survivors), 1)
     )
+    active_survivors_min_arg = active_survivors_min
+    active_survivors_max_arg = active_survivors_max
+
+    def _active_survivor_range_for(slot_count: int) -> tuple[int, int]:
+        slots = max(int(slot_count), 0)
+        min_active = slots if active_survivors_min_arg is None else int(active_survivors_min_arg)
+        max_active = slots if active_survivors_max_arg is None else int(active_survivors_max_arg)
+        if min_active < 0:
+            raise ValueError("active_survivors_min must be nonnegative")
+        if max_active < min_active:
+            raise ValueError("active_survivors_max must be >= active_survivors_min")
+        if max_active > slots:
+            raise ValueError("active_survivors_max must be <= n_survivors")
+        return min_active, max_active
+
+    active_survivors_min, active_survivors_max = _active_survivor_range_for(survivor_count)
     joint_drone_count = DEFAULT_JOINT_DIAG_DRONES if n_drones is None else max(int(n_drones), 0)
     joint_ugv_count = DEFAULT_JOINT_DIAG_UGVS if n_ugvs is None else max(int(n_ugvs), 0)
     decoy_count = 0 if n_decoys is None else max(int(n_decoys), 0)
@@ -867,6 +885,8 @@ def build_args(
         "n_drones":      joint_drone_count,
         "n_ground":      joint_ugv_count,
         "n_survivors":   survivor_count,
+        "active_survivors_min": active_survivors_min,
+        "active_survivors_max": active_survivors_max,
         "n_decoys":      decoy_count,
         "comms_dropout": comms_dropout,
         "comms_dropout_mode": comms_dropout_mode,
@@ -1158,6 +1178,8 @@ def build_args(
         raise ValueError("Choose only one diagnostic mode: UGV, UAV, joint-schema UAV, joint, or joint-schema UGV")
 
     if ugv_known_survivor_diagnostic:
+        ugv_known_survivor_count = 1 if n_survivors is None else survivor_count
+        ugv_active_min, ugv_active_max = _active_survivor_range_for(ugv_known_survivor_count)
         distance_kwargs = {}
         if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
             pass
@@ -1185,7 +1207,9 @@ def build_args(
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1 if n_ugvs is None else max(int(n_ugvs), 1),
-            "n_survivors": 1 if n_survivors is None else survivor_count,
+            "n_survivors": ugv_known_survivor_count,
+            "active_survivors_min": ugv_active_min,
+            "active_survivors_max": ugv_active_max,
             "known_survivors_at_reset": True,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
@@ -1836,6 +1860,12 @@ def main():
     p.add_argument("--n-survivors", type=int, default=None,
                    help="Override the number of survivors for training/diagnostic scenarios. "
                         "Joint-schema modes use the same value for the survivor observation schema.")
+    p.add_argument("--active-survivors-min", type=int, default=None,
+                   help="Minimum active survivor slots sampled per env reset. "
+                        "Use with --n-survivors as the maximum slot count.")
+    p.add_argument("--active-survivors-max", type=int, default=None,
+                   help="Maximum active survivor slots sampled per env reset. "
+                        "Example: --n-survivors 8 --active-survivors-min 3 --active-survivors-max 8.")
     p.add_argument("--n-decoys", type=int, default=None,
                    help="Add this many decoy false-positive candidates. In --joint-schema-ugv-diagnostic, "
                         "decoys are revealed over time like oracle survivor scout events.")
@@ -2399,6 +2429,16 @@ def main():
         p.error("--ugv-sticky-min-age-steps must be nonnegative")
     if args.n_survivors is not None and args.n_survivors < 1:
         p.error("--n-survivors must be positive")
+    if args.active_survivors_min is not None and args.active_survivors_min < 0:
+        p.error("--active-survivors-min must be nonnegative")
+    if args.active_survivors_max is not None and args.active_survivors_max < 0:
+        p.error("--active-survivors-max must be nonnegative")
+    if (
+        args.active_survivors_min is not None
+        and args.active_survivors_max is not None
+        and args.active_survivors_max < args.active_survivors_min
+    ):
+        p.error("--active-survivors-max must be >= --active-survivors-min")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
     if sum(
@@ -2715,6 +2755,11 @@ def main():
     print(f" joint_survivor_diagnostic: {args.joint_survivor_diagnostic}")
     print(f" joint_schema_ugv_diagnostic: {args.joint_schema_ugv_diagnostic}")
     print(f" n_survivors: {args.n_survivors if args.n_survivors is not None else 'default'}")
+    print(
+        " active_survivors: "
+        f"{args.active_survivors_min if args.active_survivors_min is not None else 'all'}-"
+        f"{args.active_survivors_max if args.active_survivors_max is not None else 'all'}"
+    )
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(
         " survivor_reveal: "
@@ -2878,6 +2923,8 @@ def main():
         n_drones = args.n_drones,
         n_ugvs = args.n_ugvs,
         n_survivors = args.n_survivors,
+        active_survivors_min = args.active_survivors_min,
+        active_survivors_max = args.active_survivors_max,
         n_decoys = args.n_decoys,
         delayed_survivor_knowledge = bool(
             args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic

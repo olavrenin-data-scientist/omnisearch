@@ -1609,6 +1609,28 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
         self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
+        self.assertEqual(scenario["n_survivors"], 1)
+        self.assertEqual(scenario["active_survivors_min"], 1)
+        self.assertEqual(scenario["active_survivors_max"], 1)
+
+    def test_build_args_exposes_variable_active_survivor_range(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="variable_survivors",
+            joint_survivor_diagnostic=True,
+            n_survivors=8,
+            active_survivors_min=3,
+            active_survivors_max=8,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_survivors"], 8)
+        self.assertEqual(scenario["active_survivors_min"], 3)
+        self.assertEqual(scenario["active_survivors_max"], 8)
 
     def test_ugv_known_survivor_exact_distance_uses_min_equals_max(self):
         _, _, env_args = build_args(

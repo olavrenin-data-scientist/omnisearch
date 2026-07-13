@@ -358,6 +358,36 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.zeros(3),
         )
 
+    def test_variable_active_survivors_mask_inactive_slots(self):
+        env = self._diagnostic_env(
+            n_drones=0,
+            n_ground=1,
+            n_survivors=8,
+            active_survivors_min=3,
+            active_survivors_max=3,
+            known_survivors_at_reset=True,
+        )
+        env.reset()
+        scenario = env.scenario
+
+        active = scenario.active_survivors[0]
+        self.assertEqual(int(active.sum().item()), 3)
+        self.assertTrue(torch.equal(scenario.scouted_survivors[0], active))
+        self.assertTrue(torch.equal(
+            scenario.known_survivors_by_agent[0, scenario.n_drones, :],
+            active,
+        ))
+
+        scenario.found_survivors[0] = active
+        scenario._compute_step_rewards()
+        info = scenario.info(env.agents[0])
+
+        torch.testing.assert_close(info["n_active_survivors"], torch.tensor([3.0]))
+        torch.testing.assert_close(info["mission/n_scouted"], torch.tensor([3.0]))
+        torch.testing.assert_close(info["mission/n_confirmed"], torch.tensor([3.0]))
+        torch.testing.assert_close(info["mission/full_success"], torch.tensor([1.0]))
+        torch.testing.assert_close(scenario.done().float(), torch.tensor([1.0]))
+
     def test_ground_action_magnitude_is_normalized_before_terrain_speed(self):
         env = self._diagnostic_env()
         env.reset()
