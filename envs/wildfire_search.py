@@ -514,6 +514,9 @@ class WildfireSearchScenario(BaseScenario):
         self.comms_dropout_mode = str(kwargs.pop("comms_dropout_mode", "iid")).replace("-", "_").lower()
         if self.comms_dropout_mode not in {"iid", "bursty"}:
             raise ValueError("comms_dropout_mode must be one of: iid, bursty")
+        self.comms_map_mode = str(kwargs.pop("comms_map_mode", "global")).replace("-", "_").lower()
+        if self.comms_map_mode not in {"global", "per_agent"}:
+            raise ValueError("comms_map_mode must be one of: global, per_agent")
         self.comms_dropout_min_steps = max(int(kwargs.pop("comms_dropout_min_steps", 5)), 1)
         self.comms_dropout_max_steps = max(
             int(kwargs.pop("comms_dropout_max_steps", 15)),
@@ -1098,6 +1101,28 @@ class WildfireSearchScenario(BaseScenario):
         self.uav_confidence_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.float, device=device,
         )
+        if self._comms_maps_enabled():
+            self.comm_agent_coverage_grid = torch.zeros(
+                batch_dim,
+                self.n_agents,
+                self.fire_grid_size,
+                self.fire_grid_size,
+                dtype=torch.bool,
+                device=device,
+            )
+            self.comm_agent_confidence_grid = torch.zeros(
+                batch_dim,
+                self.n_agents,
+                self.fire_grid_size,
+                self.fire_grid_size,
+                dtype=torch.float,
+                device=device,
+            )
+            self.comm_team_coverage_grid = torch.zeros_like(self.coverage_grid)
+            self.comm_team_confidence_grid = torch.zeros_like(self.uav_confidence_grid)
+            self.comm_map_last_sync_step = torch.full(
+                (batch_dim,), -1, dtype=torch.long, device=device,
+            )
         # Ground-robot visitation map (drives the ground exploration reward).
         self.ground_coverage_grid = torch.zeros(
             batch_dim, self.fire_grid_size, self.fire_grid_size, dtype=torch.bool, device=device,
@@ -2012,6 +2037,12 @@ class WildfireSearchScenario(BaseScenario):
             self.decoy_oracle_revealed.zero_()
             self.coverage_grid.zero_()
             self.uav_confidence_grid.zero_()
+            if self._comms_maps_enabled():
+                self.comm_agent_coverage_grid.zero_()
+                self.comm_agent_confidence_grid.zero_()
+                self.comm_team_coverage_grid.zero_()
+                self.comm_team_confidence_grid.zero_()
+                self.comm_map_last_sync_step.fill_(-1)
             self.ground_coverage_grid.zero_()
             self.fire_grid.zero_()
             self.burned_grid.zero_()
@@ -2054,6 +2085,12 @@ class WildfireSearchScenario(BaseScenario):
             self.decoy_oracle_revealed[env_index] = False
             self.coverage_grid[env_index] = False
             self.uav_confidence_grid[env_index] = 0.0
+            if self._comms_maps_enabled():
+                self.comm_agent_coverage_grid[env_index] = False
+                self.comm_agent_confidence_grid[env_index] = 0.0
+                self.comm_team_coverage_grid[env_index] = False
+                self.comm_team_confidence_grid[env_index] = 0.0
+                self.comm_map_last_sync_step[env_index] = -1
             self.ground_coverage_grid[env_index] = False
             self.fire_grid[env_index] = False
             self.burned_grid[env_index] = False
@@ -5552,6 +5589,131 @@ class WildfireSearchScenario(BaseScenario):
         self._invalidate_uav_frontier_feature_cache()
         self._invalidate_uav_local_confidence_obs_cache()
 
+    def _comms_maps_enabled(self) -> bool:
+        return getattr(self, "comms_map_mode", "global") == "per_agent"
+
+    def _agent_index(self, agent: Agent) -> int:
+        try:
+            return self.world.agents.index(agent)
+        except ValueError:
+            return 0
+
+    def _sync_comm_agent_maps_for_observation(self, agent: Agent, comms_keep: Tensor) -> None:
+        """Synchronize private map memories according to the active comm state.
+
+        Rewards and diagnostics still use the global maps. This only controls
+        which coverage/confidence memories are visible inside observations.
+        """
+        if not self._comms_maps_enabled() or self.n_agents <= 0:
+            return
+        if self.comms_dropout <= 0.0 or self.comms_dropout_mode == "bursty":
+            current_step = self.step_count.to(
+                device=self.comm_map_last_sync_step.device,
+                dtype=self.comm_map_last_sync_step.dtype,
+            )
+            due = current_step != self.comm_map_last_sync_step
+            if not bool(due.any().item()):
+                return
+            if self.comms_dropout <= 0.0:
+                connected = due.view(self.world.batch_dim, 1).expand(-1, self.n_agents)
+            else:
+                self._advance_bursty_comms_dropout()
+                connected = (self.comms_dropout_remaining_steps <= 0) & due.view(
+                    self.world.batch_dim,
+                    1,
+                )
+            if not bool(connected.any().item()):
+                self.comm_map_last_sync_step[due] = current_step[due]
+                return
+            connected_4d = connected.view(self.world.batch_dim, self.n_agents, 1, 1)
+            connected_coverage = self.comm_agent_coverage_grid & connected_4d
+            merged_coverage = self.comm_team_coverage_grid | connected_coverage.any(dim=1)
+            connected_confidence = torch.where(
+                connected_4d,
+                self.comm_agent_confidence_grid,
+                torch.zeros_like(self.comm_agent_confidence_grid),
+            )
+            merged_confidence = torch.maximum(
+                self.comm_team_confidence_grid,
+                connected_confidence.amax(dim=1),
+            )
+            self.comm_team_coverage_grid.copy_(merged_coverage)
+            self.comm_team_confidence_grid.copy_(merged_confidence)
+            self.comm_agent_coverage_grid.copy_(torch.where(
+                connected_4d,
+                self.comm_team_coverage_grid.unsqueeze(1),
+                self.comm_agent_coverage_grid,
+            ))
+            self.comm_agent_confidence_grid.copy_(torch.where(
+                connected_4d,
+                self.comm_team_confidence_grid.unsqueeze(1),
+                self.comm_agent_confidence_grid,
+            ))
+            self.comm_map_last_sync_step[due] = current_step[due]
+            return
+
+        agent_idx = self._agent_index(agent)
+        keep = comms_keep[:, 0].to(device=self.comm_agent_coverage_grid.device, dtype=torch.bool)
+        if not bool(keep.any().item()):
+            return
+        self.comm_team_coverage_grid[keep] |= self.comm_agent_coverage_grid[keep, agent_idx]
+        self.comm_team_confidence_grid[keep] = torch.maximum(
+            self.comm_team_confidence_grid[keep],
+            self.comm_agent_confidence_grid[keep, agent_idx],
+        )
+        self.comm_agent_coverage_grid[keep, agent_idx] = self.comm_team_coverage_grid[keep]
+        self.comm_agent_confidence_grid[keep, agent_idx] = self.comm_team_confidence_grid[keep]
+
+    def _coverage_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
+        if agent is None or not self._comms_maps_enabled():
+            return self.coverage_grid.float()
+        agent_idx = min(max(self._agent_index(agent), 0), self.n_agents - 1)
+        return self.comm_agent_coverage_grid[:, agent_idx].float()
+
+    def _confidence_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
+        if agent is None or not self._comms_maps_enabled():
+            return self.uav_confidence_grid.float()
+        agent_idx = min(max(self._agent_index(agent), 0), self.n_agents - 1)
+        return self.comm_agent_confidence_grid[:, agent_idx].float()
+
+    def _drone_coverage_grid_for_observation(self, drone_idx: int) -> Tensor:
+        if not self._comms_maps_enabled():
+            return self.coverage_grid.float()
+        agent_idx = min(max(int(drone_idx), 0), self.n_agents - 1)
+        return self.comm_agent_coverage_grid[:, agent_idx].float()
+
+    def _drone_confidence_grid_for_observation(self, drone_idx: int) -> Tensor:
+        if not self._comms_maps_enabled():
+            return self.uav_confidence_grid.float()
+        agent_idx = min(max(int(drone_idx), 0), self.n_agents - 1)
+        return self.comm_agent_confidence_grid[:, agent_idx].float()
+
+    def _update_comm_agent_coverage_from_claims(self, claims: Tensor) -> None:
+        if not self._comms_maps_enabled() or self.n_drones <= 0:
+            return
+        count = min(self.n_drones, self.n_agents, claims.shape[1])
+        if count <= 0:
+            return
+        self.comm_agent_coverage_grid[:, :count] |= claims[:, :count].to(
+            device=self.comm_agent_coverage_grid.device,
+            dtype=torch.bool,
+        )
+        self.comm_map_last_sync_step.fill_(-1)
+
+    def _update_comm_agent_confidence_from_probability(self, probability: Tensor) -> None:
+        if not self._comms_maps_enabled() or self.n_drones <= 0:
+            return
+        count = min(self.n_drones, self.n_agents, probability.shape[1])
+        if count <= 0:
+            return
+        current = self.comm_agent_confidence_grid[:, :count]
+        updated = torch.maximum(
+            current,
+            probability[:, :count].to(device=current.device, dtype=current.dtype).clamp(0.0, 1.0),
+        )
+        current.copy_(updated)
+        self.comm_map_last_sync_step.fill_(-1)
+
     def _invalidate_uav_terrain_caches(self) -> None:
         if hasattr(self, "_uav_land_cover_factor_cache"):
             self._uav_land_cover_factor_cache.clear()
@@ -7035,6 +7197,7 @@ class WildfireSearchScenario(BaseScenario):
             step_detection_probability_by_drone = probability.sum(dim=(-1, -2)) / visible_cells
 
             self.uav_confidence_grid.copy_(updated.to(dtype=self.uav_confidence_grid.dtype))
+            self._update_comm_agent_confidence_from_probability(probability)
             self._invalidate_uav_runtime_caches()
             self.metric_reward_uav_confidence_by_drone = reward
             self.metric_reward_uav_confidence = reward.sum(dim=1)
@@ -7317,6 +7480,7 @@ class WildfireSearchScenario(BaseScenario):
             )
             and self.r_uav_coverage_threshold <= 0.0
             and self.coverage_obs_grid <= 0
+            and self.local_coverage_obs_grid <= 0
             and not self.uav_frontier_obs
             and self.r_uav_frontier_alignment <= 0.0
             and self.r_uav_overlap <= 0.0
@@ -7411,6 +7575,7 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp(0.0, 1.0)
 
         self.coverage_grid |= team_claims
+        self._update_comm_agent_coverage_from_claims(claims)
         self._invalidate_uav_runtime_caches()
         return (
             new_credit_cells / float(G * G),
@@ -7493,25 +7658,55 @@ class WildfireSearchScenario(BaseScenario):
             return 4 * int(self.uav_frontier_top_k)
         return 4
 
-    def _uav_frontier_cell_scores(self, *, device: torch.device, dtype: torch.dtype) -> Tensor:
+    def _uav_frontier_cell_scores(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        coverage_grid: Tensor | None = None,
+        confidence_grid: Tensor | None = None,
+    ) -> Tensor:
         """Cell mass used by the UAV frontier observation/reward."""
         if self.uav_frontier_source == "confidence":
-            confidence = self.uav_confidence_grid.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+            source = self.uav_confidence_grid if confidence_grid is None else confidence_grid
+            confidence = source.to(device=device, dtype=dtype).clamp(0.0, 1.0)
             uncertainty = (1.0 - confidence).clamp(0.0, 1.0)
             confidence_weight = (
                 float(self.uav_confidence_eps)
                 + uncertainty.pow(float(self.uav_confidence_gamma))
             )
             return (confidence_weight * uncertainty).clamp(min=0.0)
-        return (~self.coverage_grid.to(device=device)).to(dtype=dtype)
+        source = self.coverage_grid if coverage_grid is None else coverage_grid
+        covered = source.to(device=device)
+        if covered.dtype == torch.bool:
+            return (~covered).to(dtype=dtype)
+        return (1.0 - covered.to(dtype=dtype).clamp(0.0, 1.0)).clamp(min=0.0)
 
-    def _uav_frontier_features_for_positions(self, positions: Tensor) -> Tensor:
+    def _uav_frontier_features_for_positions(
+        self,
+        positions: Tensor,
+        *,
+        coverage_grid: Tensor | None = None,
+        confidence_grid: Tensor | None = None,
+    ) -> Tensor:
         """UAV frontier features for the configured frontier mode."""
         if self.uav_frontier_mode == "local_global":
-            return self._uav_frontier_local_global_features_for_positions(positions)
+            return self._uav_frontier_local_global_features_for_positions(
+                positions,
+                coverage_grid=coverage_grid,
+                confidence_grid=confidence_grid,
+            )
         if self.uav_frontier_mode == "sector_topk":
-            return self._uav_frontier_sector_topk_features_for_positions(positions)
-        return self._uav_frontier_centroid_features_for_positions(positions)
+            return self._uav_frontier_sector_topk_features_for_positions(
+                positions,
+                coverage_grid=coverage_grid,
+                confidence_grid=confidence_grid,
+            )
+        return self._uav_frontier_centroid_features_for_positions(
+            positions,
+            coverage_grid=coverage_grid,
+            confidence_grid=confidence_grid,
+        )
 
     def _uav_frontier_cache_signature(self) -> tuple:
         coverage_version = getattr(self.coverage_grid, "_version", 0)
@@ -7560,9 +7755,24 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
+        if self._comms_maps_enabled():
+            features = []
+            for drone_idx in range(self.n_drones):
+                features.append(self._uav_frontier_features_for_positions(
+                    drone_pos[:, drone_idx : drone_idx + 1],
+                    coverage_grid=self._drone_coverage_grid_for_observation(drone_idx),
+                    confidence_grid=self._drone_confidence_grid_for_observation(drone_idx),
+                )[:, 0])
+            return torch.stack(features, dim=1)
         return self._cached_uav_frontier_features_for_positions("decision", drone_pos)
 
-    def _uav_frontier_centroid_features_for_positions(self, positions: Tensor) -> Tensor:
+    def _uav_frontier_centroid_features_for_positions(
+        self,
+        positions: Tensor,
+        *,
+        coverage_grid: Tensor | None = None,
+        confidence_grid: Tensor | None = None,
+    ) -> Tensor:
         """Direction, distance, and strength of nearby uncovered coverage mass."""
         if positions.ndim != 3:
             raise ValueError("positions must have shape [B, N, 2]")
@@ -7584,6 +7794,8 @@ class WildfireSearchScenario(BaseScenario):
         frontier_scores = self._uav_frontier_cell_scores(
             device=positions.device,
             dtype=positions.dtype,
+            coverage_grid=coverage_grid,
+            confidence_grid=confidence_grid,
         )
 
         for env_idx in range(B):
@@ -7615,7 +7827,13 @@ class WildfireSearchScenario(BaseScenario):
                 out[env_idx, item_idx, 3] = (count / ideal_cells).clamp(0.0, 1.0)
         return out
 
-    def _uav_frontier_sector_topk_features_for_positions(self, positions: Tensor) -> Tensor:
+    def _uav_frontier_sector_topk_features_for_positions(
+        self,
+        positions: Tensor,
+        *,
+        coverage_grid: Tensor | None = None,
+        confidence_grid: Tensor | None = None,
+    ) -> Tensor:
         """Top-k uncovered sector candidates with optional team ownership weighting.
 
         Each candidate is encoded as [unit_dx, unit_dy, distance_norm, score].
@@ -7644,6 +7862,8 @@ class WildfireSearchScenario(BaseScenario):
         frontier_scores = self._uav_frontier_cell_scores(
             device=positions.device,
             dtype=positions.dtype,
+            coverage_grid=coverage_grid,
+            confidence_grid=confidence_grid,
         )
 
         sector_width, sector_unit = self._uav_sector_geometry(sectors, positions.device, positions.dtype)
@@ -7839,7 +8059,13 @@ class WildfireSearchScenario(BaseScenario):
         other_dist = (other_dx.square() + other_dy.square()).sqrt().amin(dim=1)
         return (other_dist / (self_dist + other_dist + 1e-9)).unsqueeze(1).to(dtype=dtype)
 
-    def _uav_frontier_local_global_features_for_positions(self, positions: Tensor) -> Tensor:
+    def _uav_frontier_local_global_features_for_positions(
+        self,
+        positions: Tensor,
+        *,
+        coverage_grid: Tensor | None = None,
+        confidence_grid: Tensor | None = None,
+    ) -> Tensor:
         """Frontier with one tactical local and one diversified global candidate.
 
         Encodes ``[local_dx, local_dy, local_dist, local_score,
@@ -7876,6 +8102,8 @@ class WildfireSearchScenario(BaseScenario):
         frontier_scores = self._uav_frontier_cell_scores(
             device=positions.device,
             dtype=positions.dtype,
+            coverage_grid=coverage_grid,
+            confidence_grid=confidence_grid,
         )
         sector_width, _ = self._uav_sector_geometry(sectors, positions.device, positions.dtype)
         local_ideal_cells = (
@@ -8249,6 +8477,7 @@ class WildfireSearchScenario(BaseScenario):
         fire_local = self._local_fire_density(agent)        # [B, 1]
         flight_state = self._flight_state(agent)             # [B, 2]
         comms_keep = self._communication_keep(agent)
+        self._sync_comm_agent_maps_for_observation(agent, comms_keep)
         survivor_messages = self._survivor_message_observations(agent, comms_keep)
         terrain_local = self._local_terrain_features(agent)
         planner_hint = self._ugv_planner_hint_observations(agent)
@@ -8274,7 +8503,7 @@ class WildfireSearchScenario(BaseScenario):
                     dtype=agent.state.pos.dtype,
                 ))
             else:
-                parts.append(self._coverage_observation())       # [B, K*K + 1]
+                parts.append(self._coverage_observation(agent))       # [B, K*K + 1]
         if self.local_coverage_obs_grid > 0:
             if self.ugv_zero_uav_search_observations and not agent.is_drone:
                 parts.append(torch.zeros(
@@ -8294,7 +8523,7 @@ class WildfireSearchScenario(BaseScenario):
                     dtype=agent.state.pos.dtype,
                 ))
             else:
-                parts.append(self._uav_confidence_observation())       # [B, K*K + 1]
+                parts.append(self._uav_confidence_observation(agent))       # [B, K*K + 1]
         if self.local_confidence_obs_grid > 0:
             if self.ugv_zero_uav_search_observations and not agent.is_drone:
                 parts.append(torch.zeros(
@@ -8313,7 +8542,7 @@ class WildfireSearchScenario(BaseScenario):
             parts.append(self._uav_astar_route_observation(agent))
         return torch.cat(parts, dim=-1)
 
-    def _coverage_observation(self) -> Tensor:
+    def _coverage_observation(self, agent: Agent | None = None) -> Tensor:
         """Team-coverage situational awareness: a downsampled absolute map of
         already-scouted cells plus the global covered fraction.
 
@@ -8321,7 +8550,7 @@ class WildfireSearchScenario(BaseScenario):
         not-yet-covered regions instead of re-sweeping covered ground.
         """
         K = self.coverage_obs_grid
-        return self._global_grid_observation(self.coverage_grid.float(), K)
+        return self._global_grid_observation(self._coverage_grid_for_observation(agent), K)
 
     def _local_coverage_observation(self, agent: Agent) -> Tensor:
         """Pooled ego-centric coverage patch extracted from the coverage grid.
@@ -8333,16 +8562,16 @@ class WildfireSearchScenario(BaseScenario):
         """
         return self._local_grid_observation(
             agent,
-            self.coverage_grid.float(),
+            self._coverage_grid_for_observation(agent),
             K=self.local_coverage_obs_grid,
             radius_m=self.local_coverage_obs_radius_m,
             outside_value=1.0,
         )
 
-    def _uav_confidence_observation(self) -> Tensor:
+    def _uav_confidence_observation(self, agent: Agent | None = None) -> Tensor:
         """Team inspection confidence: downsampled map plus global mean."""
         K = self.uav_confidence_obs_grid
-        return self._global_grid_observation(self.uav_confidence_grid.float(), K)
+        return self._global_grid_observation(self._confidence_grid_for_observation(agent), K)
 
     def _local_confidence_observation(self, agent: Agent) -> Tensor:
         """Pooled ego-centric inspection-confidence patch.
@@ -8360,7 +8589,7 @@ class WildfireSearchScenario(BaseScenario):
             return self._current_uav_local_confidence_features()[:, drone_idx]
         return self._local_grid_observation(
             agent,
-            self.uav_confidence_grid.float(),
+            self._confidence_grid_for_observation(agent),
             K=self.local_confidence_obs_grid,
             radius_m=self.local_confidence_obs_radius_m,
             outside_value=1.0,
@@ -8380,6 +8609,17 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
+        if self._comms_maps_enabled():
+            features = []
+            for drone_idx in range(self.n_drones):
+                features.append(self._batched_local_grid_observation(
+                    drone_pos[:, drone_idx : drone_idx + 1],
+                    self._drone_confidence_grid_for_observation(drone_idx),
+                    K=self.local_confidence_obs_grid,
+                    radius_m=self.local_confidence_obs_radius_m,
+                    outside_value=1.0,
+                )[:, 0])
+            return torch.stack(features, dim=1)
         if not hasattr(self, "_uav_local_confidence_obs_cache"):
             self._uav_local_confidence_obs_cache = {}
         key = (
@@ -11440,9 +11680,11 @@ if __name__ == "__main__":
     p.add_argument("--grid-size",   type=int, default=128)
     p.add_argument("--comms-dropout", type=float, default=0.0)
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid")
+    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5)
     p.add_argument("--comms-dropout-max-steps", type=int, default=15)
     args = p.parse_args()
+    args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
     render_interactively(
         WildfireSearchScenario(),
         control_two_agents=True,
@@ -11452,6 +11694,7 @@ if __name__ == "__main__":
         fire_grid_size=args.grid_size,
         comms_dropout=args.comms_dropout,
         comms_dropout_mode=args.comms_dropout_mode,
+        comms_map_mode=args.comms_map_mode,
         comms_dropout_min_steps=args.comms_dropout_min_steps,
         comms_dropout_max_steps=args.comms_dropout_max_steps,
         terrain_cache_path=args.terrain_cache_path,

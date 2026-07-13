@@ -462,6 +462,98 @@ class SurvivorCommunicationTests(unittest.TestCase):
         expected = 0.3 / (0.3 + 0.7 * 10.0)
         self.assertAlmostEqual(scenario._bursty_comms_start_probability(), expected)
 
+    def test_per_agent_maps_sync_only_when_receiver_connected_iid(self):
+        env = self._diagnostic_env(
+            n_drones=2,
+            n_ground=0,
+            n_survivors=1,
+            comms_dropout=0.5,
+            comms_dropout_mode="iid",
+            comms_map_mode="per_agent",
+        )
+        scenario = env.scenario
+        drone0, drone1 = env.agents[:2]
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        drop = torch.zeros(1, 1, dtype=torch.bool)
+
+        scenario.comm_agent_coverage_grid.zero_()
+        scenario.comm_agent_confidence_grid.zero_()
+        scenario.comm_team_coverage_grid.zero_()
+        scenario.comm_team_confidence_grid.zero_()
+        scenario.comm_agent_coverage_grid[0, 0, 4, 5] = True
+        scenario.comm_agent_confidence_grid[0, 0, 6, 7] = 0.75
+
+        scenario._sync_comm_agent_maps_for_observation(drone0, keep)
+        scenario._sync_comm_agent_maps_for_observation(drone1, drop)
+        self.assertFalse(bool(scenario.comm_agent_coverage_grid[0, 1, 4, 5]))
+        self.assertEqual(float(scenario.comm_agent_confidence_grid[0, 1, 6, 7]), 0.0)
+
+        scenario._sync_comm_agent_maps_for_observation(drone1, keep)
+        self.assertTrue(bool(scenario.comm_agent_coverage_grid[0, 1, 4, 5]))
+        self.assertAlmostEqual(float(scenario.comm_agent_confidence_grid[0, 1, 6, 7]), 0.75)
+
+    def test_bursty_per_agent_maps_merge_all_connected_agents(self):
+        env = self._diagnostic_env(
+            n_drones=2,
+            n_ground=0,
+            n_survivors=1,
+            comms_dropout=0.3,
+            comms_dropout_mode="bursty",
+            comms_map_mode="per_agent",
+        )
+        scenario = env.scenario
+        drone0, drone1 = env.agents[:2]
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        scenario.comms_dropout_last_update_step[:] = scenario.step_count
+        scenario.comm_map_last_sync_step.fill_(-1)
+
+        scenario.comm_agent_coverage_grid.zero_()
+        scenario.comm_agent_confidence_grid.zero_()
+        scenario.comm_team_coverage_grid.zero_()
+        scenario.comm_team_confidence_grid.zero_()
+        scenario.comm_agent_coverage_grid[0, 0, 8, 9] = True
+        scenario.comm_agent_confidence_grid[0, 0, 9, 10] = 0.6
+        scenario.comms_dropout_remaining_steps[0, 0] = 0
+        scenario.comms_dropout_remaining_steps[0, 1] = 4
+
+        scenario._sync_comm_agent_maps_for_observation(drone0, keep)
+        self.assertTrue(bool(scenario.comm_team_coverage_grid[0, 8, 9]))
+        self.assertFalse(bool(scenario.comm_agent_coverage_grid[0, 1, 8, 9]))
+
+        scenario.step_count += 1
+        scenario.comms_dropout_last_update_step[:] = scenario.step_count
+        scenario.comm_map_last_sync_step.fill_(-1)
+        scenario.comms_dropout_remaining_steps[0, 1] = 0
+        scenario._sync_comm_agent_maps_for_observation(drone1, keep)
+        self.assertTrue(bool(scenario.comm_agent_coverage_grid[0, 1, 8, 9]))
+        self.assertAlmostEqual(float(scenario.comm_agent_confidence_grid[0, 1, 9, 10]), 0.6)
+
+    def test_map_observations_use_private_map_in_per_agent_mode(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=0,
+            n_survivors=1,
+            comms_map_mode="per_agent",
+            coverage_obs_grid=4,
+            uav_confidence_obs_grid=4,
+        )
+        scenario = env.scenario
+        drone = env.agents[0]
+        scenario.coverage_grid[0, 1, 1] = True
+        scenario.uav_confidence_grid[0, 2, 2] = 1.0
+
+        self.assertEqual(float(scenario._coverage_observation(drone)[0, -1]), 0.0)
+        self.assertEqual(float(scenario._uav_confidence_observation(drone)[0, -1]), 0.0)
+
+        scenario.comm_agent_coverage_grid[0, 0, 1, 1] = True
+        scenario.comm_agent_confidence_grid[0, 0, 2, 2] = 0.5
+        expected_fraction = 1.0 / float(scenario.fire_grid_size * scenario.fire_grid_size)
+        self.assertAlmostEqual(float(scenario._coverage_observation(drone)[0, -1]), expected_fraction)
+        self.assertAlmostEqual(
+            float(scenario._uav_confidence_observation(drone)[0, -1]),
+            0.5 * expected_fraction,
+        )
+
     def test_decoy_uses_unified_candidate_slot_with_false_positive_status(self):
         env = self._diagnostic_env(
             n_drones=1,

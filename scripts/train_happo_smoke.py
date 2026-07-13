@@ -195,6 +195,7 @@ def build_args(
     entropy_coef:   float,
     exp_name:       str,
     comms_dropout_mode: str = "iid",
+    comms_map_mode: str = "global",
     comms_dropout_min_steps: int = 5,
     comms_dropout_max_steps: int = 15,
     lr: float = 5e-4,
@@ -869,6 +870,7 @@ def build_args(
         "n_decoys":      decoy_count,
         "comms_dropout": comms_dropout,
         "comms_dropout_mode": comms_dropout_mode,
+        "comms_map_mode": comms_map_mode,
         "comms_dropout_min_steps": comms_dropout_min_steps,
         "comms_dropout_max_steps": comms_dropout_max_steps,
         "fire_grid_size": fire_grid_size,
@@ -1494,6 +1496,9 @@ def main():
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
                    help="Communication dropout process: iid preserves one-step Bernoulli dropout; "
                         "bursty creates temporary outages with resync on reconnect.")
+    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global",
+                   help="Coverage/confidence map observation memory: global preserves current shared maps; "
+                        "per_agent gives each agent a private map that syncs only when comms are up.")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5,
                    help="Minimum outage duration in steps for --comms-dropout-mode bursty.")
     p.add_argument("--comms-dropout-max-steps", type=int, default=15,
@@ -2118,6 +2123,9 @@ def main():
     )
     if not 0.0 <= args.comms_dropout <= 1.0:
         p.error("--comms-dropout must be in [0, 1]")
+    args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
+    if args.comms_map_mode not in {"global", "per_agent"}:
+        p.error("--comms-map-mode must be one of: global, per_agent")
     if args.comms_dropout_min_steps < 1:
         p.error("--comms-dropout-min-steps must be >= 1")
     if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
@@ -2664,6 +2672,7 @@ def main():
     print(f" seed:           {args.seed}")
     print(f" comms_dropout:  {args.comms_dropout}")
     print(f" comms_dropout_mode: {args.comms_dropout_mode}")
+    print(f" comms_map_mode: {args.comms_map_mode}")
     print(
         " comms_dropout_burst_steps: "
         f"{args.comms_dropout_min_steps}-{args.comms_dropout_max_steps}"
@@ -2804,6 +2813,7 @@ def main():
         seed           = args.seed,
         comms_dropout  = args.comms_dropout,
         comms_dropout_mode = args.comms_dropout_mode,
+        comms_map_mode = args.comms_map_mode,
         comms_dropout_min_steps = args.comms_dropout_min_steps,
         comms_dropout_max_steps = args.comms_dropout_max_steps,
         entropy_coef   = args.entropy_coef,

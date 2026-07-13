@@ -103,6 +103,8 @@ def main():
     )
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
                    help="Communication dropout process for trajectory export.")
+    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global",
+                   help="Coverage/confidence map observation memory for HAPPO export.")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5,
                    help="Minimum outage duration for --comms-dropout-mode bursty.")
     p.add_argument("--comms-dropout-max-steps", type=int, default=15,
@@ -374,6 +376,9 @@ def main():
         raise SystemExit("--comms-dropout-min-steps must be >= 1")
     if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
         raise SystemExit("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
+    args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
+    if args.comms_map_mode not in {"global", "per_agent"}:
+        raise SystemExit("--comms-map-mode must be one of: global, per_agent")
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
@@ -382,6 +387,7 @@ def main():
     print(f" Grid:          {args.grid_size}x{args.grid_size}")
     print(f" Comms dropout: {args.comms_dropout}")
     print(f" Comms mode:    {args.comms_dropout_mode}")
+    print(f" Comms maps:    {args.comms_map_mode}")
     print(f" Terrain:       {args.terrain_source}")
     print("-" * 60)
 
@@ -392,6 +398,7 @@ def main():
         "fire_grid_size":   args.grid_size,
         "comms_dropout":    args.comms_dropout,
         "comms_dropout_mode": args.comms_dropout_mode,
+        "comms_map_mode": args.comms_map_mode,
         "comms_dropout_min_steps": args.comms_dropout_min_steps,
         "comms_dropout_max_steps": args.comms_dropout_max_steps,
         "terrain_source":   args.terrain_source,
@@ -436,6 +443,7 @@ def main():
             )
             scenario_kwargs.update({
                 "comms_dropout_mode": args.comms_dropout_mode,
+                "comms_map_mode": args.comms_map_mode,
                 "comms_dropout_min_steps": args.comms_dropout_min_steps,
                 "comms_dropout_max_steps": args.comms_dropout_max_steps,
             })
@@ -466,6 +474,7 @@ def main():
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
             "comms_dropout_mode": args.comms_dropout_mode,
+            "comms_map_mode": args.comms_map_mode,
             "comms_dropout_min_steps": args.comms_dropout_min_steps,
             "comms_dropout_max_steps": args.comms_dropout_max_steps,
             "ugv_target_assignment_mode": "greedy_sticky",
@@ -493,6 +502,7 @@ def main():
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
             "comms_dropout_mode": args.comms_dropout_mode,
+            "comms_map_mode": args.comms_map_mode,
             "comms_dropout_min_steps": args.comms_dropout_min_steps,
             "comms_dropout_max_steps": args.comms_dropout_max_steps,
             "ugv_target_assignment_mode": "greedy_sticky",
