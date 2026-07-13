@@ -59,6 +59,42 @@ def _checkpoint_path(path: str | None) -> Path:
     return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
 
 
+def _normalize_active_range(
+    scenario_kwargs: dict,
+    *,
+    slot_key: str,
+    min_key: str,
+    max_key: str,
+    explicit_min: int | None,
+    explicit_max: int | None,
+) -> None:
+    slots = max(int(scenario_kwargs.get(slot_key, 0)), 0)
+    min_value = int(scenario_kwargs.get(min_key, slots)) if explicit_min is None else int(explicit_min)
+    max_value = int(scenario_kwargs.get(max_key, slots)) if explicit_max is None else int(explicit_max)
+    explicit = explicit_min is not None or explicit_max is not None
+    if min_value < 0 or max_value < min_value or max_value > slots:
+        if explicit:
+            raise ValueError(f"{min_key}/{max_key} must satisfy 0 <= min <= max <= {slot_key}")
+        min_value = slots
+        max_value = slots
+    scenario_kwargs[min_key] = min_value
+    scenario_kwargs[max_key] = max_value
+
+
+def _active_survivor_mask_for_env(scenario: WildfireSearchScenario, env_index: int = 0) -> np.ndarray:
+    slots = int(getattr(scenario, "n_survivors", 0))
+    active = getattr(scenario, "active_survivors", None)
+    if active is None:
+        return np.ones(slots, dtype=bool)
+    return active[env_index].detach().cpu().numpy().astype(bool)
+
+
+def _active_success_for_env(scenario: WildfireSearchScenario, env_index: int = 0) -> bool:
+    found = scenario.found_survivors[env_index].detach().cpu().numpy().astype(bool)
+    active = _active_survivor_mask_for_env(scenario, env_index)
+    return bool(np.logical_or(found, ~active).all())
+
+
 def _joint_schema_ugv_defaults() -> dict:
     _, _algo_args, env_args = build_args(
         num_env_steps=100,
@@ -173,6 +209,22 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
                 "decoy_reveal_end_step",
                 scenario_kwargs.get("survivor_reveal_end_step", 180),
             )
+    _normalize_active_range(
+        scenario_kwargs,
+        slot_key="n_survivors",
+        min_key="active_survivors_min",
+        max_key="active_survivors_max",
+        explicit_min=getattr(args, "active_survivors_min", None),
+        explicit_max=getattr(args, "active_survivors_max", None),
+    )
+    _normalize_active_range(
+        scenario_kwargs,
+        slot_key="n_decoys",
+        min_key="active_decoys_min",
+        max_key="active_decoys_max",
+        explicit_min=getattr(args, "active_decoys_min", None),
+        explicit_max=getattr(args, "active_decoys_max", None),
+    )
     scenario_kwargs.update(distance_kwargs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -2283,7 +2335,7 @@ def run_rollout(
                     speed_mps=speed_mps,
                 )
         min_distance = min(min_distance, dist_after_m)
-        if bool(scenario.found_survivors[0].all()):
+        if _active_success_for_env(scenario):
             confirmation_step = step
             break
 
@@ -2313,14 +2365,20 @@ def run_rollout(
         )
         for key, values in hyp_route_stall_penalty_abs.items()
     }
-    n_survivors = max(int(getattr(scenario, "n_survivors", 0)), 1)
-    confirmed_count = float(scenario.found_survivors[0].sum().item())
+    survivor_slots = max(int(getattr(scenario, "n_survivors", 0)), 0)
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
+    found = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+    confirmed_count = float(np.logical_and(found, active_survivor_mask).sum())
+    full_success = _active_success_for_env(scenario)
     return {
         "seed": seed,
-        "survivors": n_survivors,
+        "survivors": n_active_survivors,
+        "active_survivors": n_active_survivors,
+        "survivor_slots": survivor_slots,
         "confirmed": confirmed_count,
-        "confirmation_recall": confirmed_count / n_survivors,
-        "full_success": float(bool(scenario.found_survivors[0].all())),
+        "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "full_success": float(full_success),
         "diagnostic_ground_agent_index": int(ground_agent_idx),
         "diagnostic_ground_index": int(ground_index),
         "diagnostic_initial_target_index": int(initial_target_idx),
@@ -2621,18 +2679,24 @@ def run_failure_trace(
             **{f"after_{k}": v for k, v in cell_after.items()},
         })
 
-        if bool(scenario.found_survivors[0].all()):
+        if _active_success_for_env(scenario):
             break
 
     _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
-    n_survivors = max(int(getattr(scenario, "n_survivors", 0)), 1)
-    confirmed_count = float(scenario.found_survivors[0].sum().item())
+    survivor_slots = max(int(getattr(scenario, "n_survivors", 0)), 0)
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
+    found = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+    confirmed_count = float(np.logical_and(found, active_survivor_mask).sum())
+    full_success = _active_success_for_env(scenario)
     return {
         "seed": seed,
-        "survivors": n_survivors,
+        "survivors": n_active_survivors,
+        "active_survivors": n_active_survivors,
+        "survivor_slots": survivor_slots,
         "confirmed": confirmed_count,
-        "confirmation_recall": confirmed_count / n_survivors,
-        "full_success": float(bool(scenario.found_survivors[0].all())),
+        "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "full_success": float(full_success),
         "initial_distance_m": initial_distance,
         "final_distance_m": _distance_m(scenario, ground.state.pos, survivor.state.pos),
         "min_distance_m": min_distance,
@@ -2929,8 +2993,16 @@ def main() -> None:
                         help="Override UGV count. Default preserves the checkpoint manifest or diagnostic default.")
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or diagnostic default.")
+    parser.add_argument("--active-survivors-min", type=int, default=None,
+                        help="Minimum active true survivors sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-survivors-max", type=int, default=None,
+                        help="Maximum active true survivors sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--n-decoys", type=int, default=None,
                         help="Override decoy count. In joint-schema UGV diagnostics, decoys reveal over time as false-positive candidates.")
+    parser.add_argument("--active-decoys-min", type=int, default=None,
+                        help="Minimum active decoys sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-decoys-max", type=int, default=None,
+                        help="Maximum active decoys sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
     parser.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None)
     parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
@@ -3042,6 +3114,28 @@ def main() -> None:
         parser.error("--n-ugvs must be positive")
     if args.n_survivors is not None and args.n_survivors < 1:
         parser.error("--n-survivors must be positive")
+    if args.active_survivors_min is not None and args.active_survivors_min < 0:
+        parser.error("--active-survivors-min must be nonnegative")
+    if args.active_survivors_max is not None and args.active_survivors_max < 0:
+        parser.error("--active-survivors-max must be nonnegative")
+    if (
+        args.active_survivors_min is not None
+        and args.active_survivors_max is not None
+        and args.active_survivors_max < args.active_survivors_min
+    ):
+        parser.error("--active-survivors-max must be >= --active-survivors-min")
+    if args.n_decoys is not None and args.n_decoys < 0:
+        parser.error("--n-decoys must be nonnegative")
+    if args.active_decoys_min is not None and args.active_decoys_min < 0:
+        parser.error("--active-decoys-min must be nonnegative")
+    if args.active_decoys_max is not None and args.active_decoys_max < 0:
+        parser.error("--active-decoys-max must be nonnegative")
+    if (
+        args.active_decoys_min is not None
+        and args.active_decoys_max is not None
+        and args.active_decoys_max < args.active_decoys_min
+    ):
+        parser.error("--active-decoys-max must be >= --active-decoys-min")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
     if args.ugv_planner_patch_size is not None and (
@@ -3145,8 +3239,12 @@ def main() -> None:
             "joint_schema_ugv_diagnostic: "
             f"{scenario_kwargs.get('n_drones', 0)} UAVs, "
             f"{scenario_kwargs.get('n_ground', 0)} UGVs, "
-            f"{scenario_kwargs.get('n_survivors', 0)} survivors, "
-            f"{scenario_kwargs.get('n_decoys', 0)} decoys, "
+            f"{scenario_kwargs.get('n_survivors', 0)} survivor slots "
+            f"(active {scenario_kwargs.get('active_survivors_min', scenario_kwargs.get('n_survivors', 0))}"
+            f"..{scenario_kwargs.get('active_survivors_max', scenario_kwargs.get('n_survivors', 0))}), "
+            f"{scenario_kwargs.get('n_decoys', 0)} decoy slots "
+            f"(active {scenario_kwargs.get('active_decoys_min', scenario_kwargs.get('n_decoys', 0))}"
+            f"..{scenario_kwargs.get('active_decoys_max', scenario_kwargs.get('n_decoys', 0))}), "
             f"obs_schema=({scenario_kwargs.get('obs_schema_n_drones')}, "
             f"{scenario_kwargs.get('obs_schema_n_ground')}, "
             f"{scenario_kwargs.get('obs_schema_n_survivors')})"

@@ -15,7 +15,14 @@ from scripts.diagnose_uav_happo import (
     _scenario_kwargs as diagnose_uav_scenario_kwargs,
     _summarize_per_drone,
 )
+from scripts.diagnose_joint_happo import _scenario_kwargs as diagnose_joint_scenario_kwargs
+from scripts.diagnose_ugv_happo import _scenario_kwargs as diagnose_ugv_scenario_kwargs
 from scripts.train_happo_smoke import build_args
+
+
+class MissingNoneNamespace(types.SimpleNamespace):
+    def __getattr__(self, _name):
+        return None
 
 
 class HappoCheckpointTests(unittest.TestCase):
@@ -1259,6 +1266,124 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertTrue(default_scenario["disable_fire"])
         self.assertFalse(fire_scenario["disable_fire"])
+
+    def test_uav_diagnostics_normalizes_stale_active_ranges_after_slot_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 3,
+                        "n_ground": 0,
+                        "n_survivors": 8,
+                        "active_survivors_min": 3,
+                        "active_survivors_max": 8,
+                        "n_decoys": 4,
+                        "active_decoys_min": 2,
+                        "active_decoys_max": 4,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=123,
+                n_survivors=5,
+                n_decoys=1,
+                enable_fire=False,
+                terrain_cache_path=None,
+                local_map_patch_size=None,
+                drone_min_footprint_radius_m=None,
+            )
+
+            scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["active_survivors_min"], 5)
+        self.assertEqual(scenario["active_survivors_max"], 5)
+        self.assertEqual(scenario["n_decoys"], 1)
+        self.assertEqual(scenario["active_decoys_min"], 1)
+        self.assertEqual(scenario["active_decoys_max"], 1)
+
+    def test_joint_diagnostics_preserves_manifest_active_survivor_and_decoy_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 3,
+                        "n_ground": 2,
+                        "n_survivors": 8,
+                        "active_survivors_min": 3,
+                        "active_survivors_max": 8,
+                        "n_decoys": 4,
+                        "active_decoys_min": 0,
+                        "active_decoys_max": 2,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=300,
+                joint_survivor_diagnostic=False,
+                joint_schema_ugv_diagnostic=False,
+                joint_diagnostic_ugvs=2,
+                enable_fire=False,
+                disable_fire=False,
+                terrain_cache_path=None,
+                ugv_target_assignment_mode=None,
+            )
+
+            scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_survivors"], 8)
+        self.assertEqual(scenario["active_survivors_min"], 3)
+        self.assertEqual(scenario["active_survivors_max"], 8)
+        self.assertEqual(scenario["n_decoys"], 4)
+        self.assertEqual(scenario["active_decoys_min"], 0)
+        self.assertEqual(scenario["active_decoys_max"], 2)
+
+    def test_ugv_known_diagnostics_reset_stale_variable_survivor_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 0,
+                        "n_ground": 2,
+                        "n_survivors": 8,
+                        "active_survivors_min": 3,
+                        "active_survivors_max": 8,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=150,
+                joint_schema_ugv_diagnostic=False,
+                enable_fire=False,
+                terrain_cache_path=None,
+            )
+
+            scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_survivors"], 1)
+        self.assertEqual(scenario["active_survivors_min"], 1)
+        self.assertEqual(scenario["active_survivors_max"], 1)
 
     def test_uav_diagnostics_summarizes_per_drone_metrics(self):
         rows = [

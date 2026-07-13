@@ -48,6 +48,36 @@ def _checkpoint_path(path: str | None) -> Path:
     return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
 
 
+def _normalize_active_range(
+    scenario_kwargs: dict[str, Any],
+    *,
+    slot_key: str,
+    min_key: str,
+    max_key: str,
+    explicit_min: int | None,
+    explicit_max: int | None,
+) -> None:
+    slots = max(int(scenario_kwargs.get(slot_key, 0)), 0)
+    min_value = int(scenario_kwargs.get(min_key, slots)) if explicit_min is None else int(explicit_min)
+    max_value = int(scenario_kwargs.get(max_key, slots)) if explicit_max is None else int(explicit_max)
+    explicit = explicit_min is not None or explicit_max is not None
+    if min_value < 0 or max_value < min_value or max_value > slots:
+        if explicit:
+            raise ValueError(f"{min_key}/{max_key} must satisfy 0 <= min <= max <= {slot_key}")
+        min_value = slots
+        max_value = slots
+    scenario_kwargs[min_key] = min_value
+    scenario_kwargs[max_key] = max_value
+
+
+def _active_survivor_mask_for_env(scenario: WildfireSearchScenario, env_index: int = 0) -> np.ndarray:
+    slots = int(getattr(scenario, "n_survivors", 0))
+    active = getattr(scenario, "active_survivors", None)
+    if active is None:
+        return np.ones(slots, dtype=bool)
+    return active[env_index].detach().cpu().numpy().astype(bool)
+
+
 def _joint_defaults() -> dict[str, Any]:
     _, _algo_args, env_args = build_args(
         num_env_steps=100,
@@ -101,6 +131,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["n_survivors"] = int(args.n_survivors)
         if args.joint_schema_ugv_diagnostic:
             scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
+    if getattr(args, "n_decoys", None) is not None:
+        scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
     scenario_kwargs.setdefault("known_survivors_at_reset", False)
     scenario_kwargs.setdefault("drone_can_confirm", False)
     scenario_kwargs.setdefault("comms_dropout", 0.0)
@@ -118,6 +150,22 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["disable_fire"] = True
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
+    _normalize_active_range(
+        scenario_kwargs,
+        slot_key="n_survivors",
+        min_key="active_survivors_min",
+        max_key="active_survivors_max",
+        explicit_min=getattr(args, "active_survivors_min", None),
+        explicit_max=getattr(args, "active_survivors_max", None),
+    )
+    _normalize_active_range(
+        scenario_kwargs,
+        slot_key="n_decoys",
+        min_key="active_decoys_min",
+        max_key="active_decoys_max",
+        explicit_min=getattr(args, "active_decoys_min", None),
+        explicit_max=getattr(args, "active_decoys_max", None),
+    )
     return scenario_kwargs
 
 
@@ -192,12 +240,15 @@ def run_rollout(
     n_drones = int(scenario.n_drones)
     n_ground = int(scenario.n_ground)
     n_agents = int(scenario.n_agents)
-    n_survivors = int(scenario.n_survivors)
+    survivor_slots = int(scenario.n_survivors)
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    active_survivor_indices = np.flatnonzero(active_survivor_mask)
+    n_active_survivors = int(active_survivor_mask.sum())
     max_steps = int(scenario_kwargs["max_steps"])
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
 
-    first_scout_steps: list[int | None] = [None] * n_survivors
-    first_confirm_steps: list[int | None] = [None] * n_survivors
+    first_scout_steps: list[int | None] = [None] * survivor_slots
+    first_confirm_steps: list[int | None] = [None] * survivor_slots
     path_lengths_m = np.zeros(n_agents, dtype=float)
     time_series = _new_time_bins(max(int(time_bins), 1))
     pending_counts: list[float] = []
@@ -220,14 +271,14 @@ def run_rollout(
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
-        for survivor_idx in range(n_survivors):
+        for survivor_idx in active_survivor_indices:
             if scouted[survivor_idx] and first_scout_steps[survivor_idx] is None:
                 first_scout_steps[survivor_idx] = step + 1
             if confirmed[survivor_idx] and first_confirm_steps[survivor_idx] is None:
                 first_confirm_steps[survivor_idx] = step + 1
 
         info = scenario.info(env.agents[0])
-        pending = float(np.logical_and(scouted, ~confirmed).sum())
+        pending = float(np.logical_and(active_survivor_mask & scouted, ~confirmed).sum())
         pending_counts.append(pending)
         duplicate = _to_float(info.get("diagnostic/ugv_duplicate_assignment_fraction"))
         switches = _to_float(info.get("diagnostic/ugv_assignment_switches"))
@@ -252,8 +303,10 @@ def run_rollout(
             reward_terms[name].append(value)
             bin_row[f"reward_{name}"] += value
 
-    scout_count = sum(step is not None for step in first_scout_steps)
-    confirm_count = sum(step is not None for step in first_confirm_steps)
+    active_scout_steps = [first_scout_steps[idx] for idx in active_survivor_indices]
+    active_confirm_steps = [first_confirm_steps[idx] for idx in active_survivor_indices]
+    scout_count = sum(step is not None for step in active_scout_steps)
+    confirm_count = sum(step is not None for step in active_confirm_steps)
     latencies = [
         float(confirm_step - scout_step)
         for scout_step, confirm_step in zip(first_scout_steps, first_confirm_steps)
@@ -282,13 +335,15 @@ def run_rollout(
 
     return {
         "seed": int(seed),
-        "survivors": n_survivors,
+        "survivors": n_active_survivors,
+        "active_survivors": n_active_survivors,
+        "survivor_slots": survivor_slots,
         "scouted": int(scout_count),
         "confirmed": int(confirm_count),
-        "scout_recall": float(scout_count / max(n_survivors, 1)),
-        "confirm_recall": float(confirm_count / max(n_survivors, 1)),
-        "overall_success": bool(confirm_count == n_survivors),
-        "full_confirm_success": bool(confirm_count == n_survivors),
+        "scout_recall": float(scout_count / n_active_survivors) if n_active_survivors else 1.0,
+        "confirm_recall": float(confirm_count / n_active_survivors) if n_active_survivors else 1.0,
+        "overall_success": bool(confirm_count == n_active_survivors),
+        "full_confirm_success": bool(confirm_count == n_active_survivors),
         "first_scout_steps": first_scout_steps,
         "first_confirm_steps": first_confirm_steps,
         "scout_to_confirm_latencies_steps": latencies,
@@ -466,6 +521,16 @@ def main() -> None:
                         help="Override UGV count. Default preserves the checkpoint manifest or uses --joint-diagnostic-ugvs.")
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or uses 5.")
+    parser.add_argument("--active-survivors-min", type=int, default=None,
+                        help="Minimum active true survivors sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-survivors-max", type=int, default=None,
+                        help="Maximum active true survivors sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--n-decoys", type=int, default=None,
+                        help="Override fixed decoy slot count. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-decoys-min", type=int, default=None,
+                        help="Minimum active decoys sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-decoys-max", type=int, default=None,
+                        help="Maximum active decoys sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1020)))
     parser.add_argument("--terrain-cache-path", default=None)
@@ -504,6 +569,28 @@ def main() -> None:
         parser.error("--n-ugvs must be positive")
     if args.n_survivors is not None and args.n_survivors < 1:
         parser.error("--n-survivors must be positive")
+    if args.active_survivors_min is not None and args.active_survivors_min < 0:
+        parser.error("--active-survivors-min must be nonnegative")
+    if args.active_survivors_max is not None and args.active_survivors_max < 0:
+        parser.error("--active-survivors-max must be nonnegative")
+    if (
+        args.active_survivors_min is not None
+        and args.active_survivors_max is not None
+        and args.active_survivors_max < args.active_survivors_min
+    ):
+        parser.error("--active-survivors-max must be >= --active-survivors-min")
+    if args.n_decoys is not None and args.n_decoys < 0:
+        parser.error("--n-decoys must be nonnegative")
+    if args.active_decoys_min is not None and args.active_decoys_min < 0:
+        parser.error("--active-decoys-min must be nonnegative")
+    if args.active_decoys_max is not None and args.active_decoys_max < 0:
+        parser.error("--active-decoys-max must be nonnegative")
+    if (
+        args.active_decoys_min is not None
+        and args.active_decoys_max is not None
+        and args.active_decoys_max < args.active_decoys_min
+    ):
+        parser.error("--active-decoys-max must be >= --active-decoys-min")
     if args.joint_survivor_diagnostic and args.joint_schema_ugv_diagnostic:
         parser.error("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
@@ -524,7 +611,12 @@ def main() -> None:
         "scenario: "
         f"{scenario_kwargs.get('n_drones')} UAVs, "
         f"{scenario_kwargs.get('n_ground')} UGVs, "
-        f"{scenario_kwargs.get('n_survivors')} survivors, "
+        f"{scenario_kwargs.get('n_survivors')} survivor slots "
+        f"(active {scenario_kwargs.get('active_survivors_min', scenario_kwargs.get('n_survivors'))}"
+        f"..{scenario_kwargs.get('active_survivors_max', scenario_kwargs.get('n_survivors'))}), "
+        f"{scenario_kwargs.get('n_decoys', 0)} decoy slots "
+        f"(active {scenario_kwargs.get('active_decoys_min', scenario_kwargs.get('n_decoys', 0))}"
+        f"..{scenario_kwargs.get('active_decoys_max', scenario_kwargs.get('n_decoys', 0))}), "
         f"planner={scenario_kwargs.get('ugv_planner_hint')}, "
         f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}"
     )

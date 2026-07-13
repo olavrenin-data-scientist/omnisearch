@@ -57,6 +57,36 @@ def _checkpoint_path(path: str | None) -> Path:
     return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
 
 
+def _normalize_active_range(
+    scenario_kwargs: dict[str, Any],
+    *,
+    slot_key: str,
+    min_key: str,
+    max_key: str,
+    explicit_min: int | None,
+    explicit_max: int | None,
+) -> None:
+    slots = max(int(scenario_kwargs.get(slot_key, 0)), 0)
+    min_value = int(scenario_kwargs.get(min_key, slots)) if explicit_min is None else int(explicit_min)
+    max_value = int(scenario_kwargs.get(max_key, slots)) if explicit_max is None else int(explicit_max)
+    explicit = explicit_min is not None or explicit_max is not None
+    if min_value < 0 or max_value < min_value or max_value > slots:
+        if explicit:
+            raise ValueError(f"{min_key}/{max_key} must satisfy 0 <= min <= max <= {slot_key}")
+        min_value = slots
+        max_value = slots
+    scenario_kwargs[min_key] = min_value
+    scenario_kwargs[max_key] = max_value
+
+
+def _active_survivor_mask_for_env(scenario: WildfireSearchScenario, env_index: int = 0) -> np.ndarray:
+    slots = int(getattr(scenario, "n_survivors", 0))
+    active = getattr(scenario, "active_survivors", None)
+    if active is None:
+        return np.ones(slots, dtype=bool)
+    return active[env_index].detach().cpu().numpy().astype(bool)
+
+
 def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_training_manifest(checkpoint_dir)
     scenario_kwargs: dict[str, Any] = {}
@@ -137,6 +167,24 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["uav_overlap_penalty_normalization"] = (
             str(args.uav_overlap_penalty_normalization).replace("-", "_").lower()
         )
+    if getattr(args, "n_decoys", None) is not None:
+        scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
+    _normalize_active_range(
+        scenario_kwargs,
+        slot_key="n_survivors",
+        min_key="active_survivors_min",
+        max_key="active_survivors_max",
+        explicit_min=getattr(args, "active_survivors_min", None),
+        explicit_max=getattr(args, "active_survivors_max", None),
+    )
+    _normalize_active_range(
+        scenario_kwargs,
+        slot_key="n_decoys",
+        min_key="active_decoys_min",
+        max_key="active_decoys_max",
+        explicit_min=getattr(args, "active_decoys_min", None),
+        explicit_max=getattr(args, "active_decoys_max", None),
+    )
     return scenario_kwargs
 
 
@@ -176,9 +224,12 @@ def run_rollout(
         else None
     )
 
-    n_survivors = int(scenario.n_survivors)
-    first_scout_steps: list[int | None] = [None] * n_survivors
-    first_confirm_steps: list[int | None] = [None] * n_survivors
+    survivor_slots = int(scenario.n_survivors)
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    active_survivor_indices = np.flatnonzero(active_survivor_mask)
+    n_active_survivors = int(active_survivor_mask.sum())
+    first_scout_steps: list[int | None] = [None] * survivor_slots
+    first_confirm_steps: list[int | None] = [None] * survivor_slots
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     action_norms: list[float] = []
     displacement_m_values: list[float] = []
@@ -338,7 +389,7 @@ def run_rollout(
     diagnostic_steps = 0
     time_bins = _new_time_bins(TIME_BIN_COUNT)
     perception_time_bins = _new_time_bins(TIME_BIN_COUNT)
-    survivor_exposure_stats = _new_survivor_exposure_stats(n_survivors)
+    survivor_exposure_stats = _new_survivor_exposure_stats(survivor_slots)
 
     for step in range(int(scenario_kwargs["max_steps"])):
         prev_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool).copy()
@@ -781,8 +832,8 @@ def run_rollout(
         newly_scouted = post_scouted & ~prev_scouted
         drone_detections = (
             scenario.step_drone_detections[0].detach().cpu().numpy().astype(bool)
-            if scenario.n_drones > 0 and n_survivors > 0
-            else np.zeros((scenario.n_drones, n_survivors), dtype=bool)
+            if scenario.n_drones > 0 and survivor_slots > 0
+            else np.zeros((scenario.n_drones, survivor_slots), dtype=bool)
         )
         scout_credit = drone_detections & newly_scouted.reshape(1, -1)
         if full_diagnostics:
@@ -797,7 +848,8 @@ def run_rollout(
                 survivor_confidence_pre=pre_survivor_confidence,
                 survivor_confidence_post=post_survivor_confidence,
                 step=step + 1,
-                n_survivors=n_survivors,
+                n_survivors=survivor_slots,
+                active_survivor_mask=active_survivor_mask,
             )
             _append_time_bin(
                 perception_time_bins,
@@ -1688,27 +1740,45 @@ def run_rollout(
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         for survivor_idx, is_scouted in enumerate(scouted):
-            if is_scouted and first_scout_steps[survivor_idx] is None:
+            if (
+                survivor_idx < len(active_survivor_mask)
+                and active_survivor_mask[survivor_idx]
+                and is_scouted
+                and first_scout_steps[survivor_idx] is None
+            ):
                 first_scout_steps[survivor_idx] = step + 1
         confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
         for survivor_idx, is_confirmed in enumerate(confirmed):
-            if is_confirmed and first_confirm_steps[survivor_idx] is None:
+            if (
+                survivor_idx < len(active_survivor_mask)
+                and active_survivor_mask[survivor_idx]
+                and is_confirmed
+                and first_confirm_steps[survivor_idx] is None
+            ):
                 first_confirm_steps[survivor_idx] = step + 1
         if (
-            all(value is not None for value in first_scout_steps)
-            and all(value is not None for value in first_confirm_steps)
+            all(first_scout_steps[idx] is not None for idx in active_survivor_indices)
+            and all(first_confirm_steps[idx] is not None for idx in active_survivor_indices)
         ):
             break
 
-    scouted_count = sum(value is not None for value in first_scout_steps)
-    missed_count = n_survivors - scouted_count
-    scout_steps = [value for value in first_scout_steps if value is not None]
-    all_scouted_step = max(scout_steps) if scouted_count == n_survivors and scout_steps else None
-    confirmed_count = sum(value is not None for value in first_confirm_steps)
-    unconfirmed_count = n_survivors - confirmed_count
-    confirm_steps = [value for value in first_confirm_steps if value is not None]
+    active_scout_steps = [first_scout_steps[idx] for idx in active_survivor_indices]
+    active_confirm_steps = [first_confirm_steps[idx] for idx in active_survivor_indices]
+    scouted_count = sum(value is not None for value in active_scout_steps)
+    missed_count = n_active_survivors - scouted_count
+    scout_steps = [value for value in active_scout_steps if value is not None]
+    all_scouted_step = (
+        max(scout_steps)
+        if n_active_survivors > 0 and scouted_count == n_active_survivors and scout_steps
+        else (0 if n_active_survivors == 0 else None)
+    )
+    confirmed_count = sum(value is not None for value in active_confirm_steps)
+    unconfirmed_count = n_active_survivors - confirmed_count
+    confirm_steps = [value for value in active_confirm_steps if value is not None]
     all_confirmed_step = (
-        max(confirm_steps) if confirmed_count == n_survivors and confirm_steps else None
+        max(confirm_steps)
+        if n_active_survivors > 0 and confirmed_count == n_active_survivors and confirm_steps
+        else (0 if n_active_survivors == 0 else None)
     )
     final_coverage_fraction = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
     path_metrics = _path_metrics(
@@ -1747,6 +1817,11 @@ def run_rollout(
             survivor_exposure_stats,
             first_scout_steps,
         )
+        survivor_exposures = [
+            exposure
+            for exposure in survivor_exposures
+            if int(exposure.get("survivor", -1)) in set(int(idx) for idx in active_survivor_indices)
+        ]
         for exposure in survivor_exposures:
             survivor_idx = int(exposure.get("survivor", -1))
             exposure["final_confidence"] = (
@@ -1760,13 +1835,15 @@ def run_rollout(
     row = {
         "seed": int(seed),
         "max_steps": int(scenario_kwargs["max_steps"]),
-        "survivors": n_survivors,
+        "survivors": n_active_survivors,
+        "active_survivors": n_active_survivors,
+        "survivor_slots": survivor_slots,
         "scouted": scouted_count,
         "missed": missed_count,
-        "recall": scouted_count / n_survivors if n_survivors else 0.0,
+        "recall": scouted_count / n_active_survivors if n_active_survivors else 1.0,
         "confirmed": confirmed_count,
         "unconfirmed": unconfirmed_count,
-        "confirmation_recall": confirmed_count / n_survivors if n_survivors else 0.0,
+        "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
         "final_coverage_fraction": final_coverage_fraction,
         "final_confidence_mean": float(
             scenario.uav_confidence_grid[0].float().mean().detach().cpu().item()
@@ -1778,8 +1855,8 @@ def run_rollout(
             (scenario.uav_confidence_grid[0] >= 0.80).float().mean().detach().cpu().item()
         ),
         "final_survivor_confidence": final_survivor_confidence,
-        "full_success": float(scouted_count == n_survivors),
-        "full_confirmation_success": float(confirmed_count == n_survivors),
+        "full_success": float(scouted_count == n_active_survivors),
+        "full_confirmation_success": float(confirmed_count == n_active_survivors),
         "avg_scout_step": float(np.mean(scout_steps)) if scout_steps else math.nan,
         "avg_scout_time_s": float(np.mean(scout_steps) * step_seconds) if scout_steps else math.nan,
         "all_scouted_step": all_scouted_step,
@@ -2327,6 +2404,7 @@ def _update_survivor_exposure_stats(
     survivor_confidence_post: list[float],
     step: int,
     n_survivors: int,
+    active_survivor_mask: np.ndarray | None = None,
 ) -> dict[str, float]:
     probability = np.asarray(perception["probability"], dtype=float)
     visible = np.asarray(perception["visible"], dtype=bool)
@@ -2336,6 +2414,13 @@ def _update_survivor_exposure_stats(
     land_cover = np.asarray(perception["land_cover"], dtype=int).reshape(-1)
     detections = np.asarray(drone_detections, dtype=bool)
     n_survivors = max(int(n_survivors), 0)
+    if active_survivor_mask is None:
+        active_mask = np.ones(n_survivors, dtype=bool)
+    else:
+        active_mask = np.asarray(active_survivor_mask, dtype=bool).reshape(-1)[:n_survivors]
+        if active_mask.size < n_survivors:
+            active_mask = np.pad(active_mask, (0, n_survivors - active_mask.size), constant_values=False)
+    n_active_survivors = int(np.count_nonzero(active_mask))
 
     exposed_count = 0
     expected_scouts = 0.0
@@ -2345,10 +2430,14 @@ def _update_survivor_exposure_stats(
     best_step_norms: list[float] = []
     near_edge_exposed = 0
     central_exposed = 0
-    unscouted_count = int(np.count_nonzero(~prev_scouted))
+    unscouted_count = int(np.count_nonzero(active_mask & ~prev_scouted[:n_survivors]))
 
     for survivor_idx in range(n_survivors):
-        if survivor_idx >= len(stats) or bool(prev_scouted[survivor_idx]):
+        if (
+            survivor_idx >= len(stats)
+            or not bool(active_mask[survivor_idx])
+            or bool(prev_scouted[survivor_idx])
+        ):
             continue
         stat = stats[survivor_idx]
         if survivor_idx < land_cover.size:
@@ -2447,11 +2536,11 @@ def _update_survivor_exposure_stats(
         "exposed_unscouted_survivors": float(exposed_count),
         "exposed_unscouted_fraction": float(exposed_count / max(unscouted_count, 1)),
         "expected_scouts": expected_scouts,
-        "expected_scout_recall": float(expected_scouts / max(n_survivors, 1)),
+        "expected_scout_recall": float(expected_scouts / max(n_active_survivors, 1)),
         "actual_new_scouts": actual_new_scouts,
-        "actual_new_scout_recall": float(actual_new_scouts / max(n_survivors, 1)),
+        "actual_new_scout_recall": float(actual_new_scouts / max(n_active_survivors, 1)),
         "missed_detection_probability_mass": missed_probability_mass,
-        "missed_detection_recall_mass": float(missed_probability_mass / max(n_survivors, 1)),
+        "missed_detection_recall_mass": float(missed_probability_mass / max(n_active_survivors, 1)),
         "mean_exposed_detection_probability": _finite_mean(best_step_probabilities),
         "max_exposed_detection_probability": max(best_step_probabilities) if best_step_probabilities else math.nan,
         "mean_exposed_norm_distance": _finite_mean(best_step_norms),
@@ -7386,6 +7475,16 @@ def main() -> None:
                         help="Override UGV schema count for joint-schema UAV diagnostics.")
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or uses 5.")
+    parser.add_argument("--active-survivors-min", type=int, default=None,
+                        help="Minimum active true survivors sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-survivors-max", type=int, default=None,
+                        help="Maximum active true survivors sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--n-decoys", type=int, default=None,
+                        help="Override fixed decoy slot count. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-decoys-min", type=int, default=None,
+                        help="Minimum active decoys sampled per episode. Default preserves the checkpoint manifest.")
+    parser.add_argument("--active-decoys-max", type=int, default=None,
+                        help="Maximum active decoys sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--enable-fire", dest="enable_fire", action="store_true",
                         help="Enable fire/smoke dynamics during UAV diagnostics. Defaults to disabled.")
@@ -7429,6 +7528,28 @@ def main() -> None:
         parser.error("--n-ugvs must be positive")
     if args.n_survivors is not None and args.n_survivors < 1:
         parser.error("--n-survivors must be positive")
+    if args.active_survivors_min is not None and args.active_survivors_min < 0:
+        parser.error("--active-survivors-min must be nonnegative")
+    if args.active_survivors_max is not None and args.active_survivors_max < 0:
+        parser.error("--active-survivors-max must be nonnegative")
+    if (
+        args.active_survivors_min is not None
+        and args.active_survivors_max is not None
+        and args.active_survivors_max < args.active_survivors_min
+    ):
+        parser.error("--active-survivors-max must be >= --active-survivors-min")
+    if args.n_decoys is not None and args.n_decoys < 0:
+        parser.error("--n-decoys must be nonnegative")
+    if args.active_decoys_min is not None and args.active_decoys_min < 0:
+        parser.error("--active-decoys-min must be nonnegative")
+    if args.active_decoys_max is not None and args.active_decoys_max < 0:
+        parser.error("--active-decoys-max must be nonnegative")
+    if (
+        args.active_decoys_min is not None
+        and args.active_decoys_max is not None
+        and args.active_decoys_max < args.active_decoys_min
+    ):
+        parser.error("--active-decoys-max must be >= --active-decoys-min")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
     if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
@@ -7454,7 +7575,12 @@ def main() -> None:
         "scenario: "
         f"{scenario_kwargs['n_drones']} UAVs, "
         f"{scenario_kwargs['n_ground']} UGVs, "
-        f"{scenario_kwargs['n_survivors']} survivors, "
+        f"{scenario_kwargs['n_survivors']} survivor slots "
+        f"(active {scenario_kwargs.get('active_survivors_min', scenario_kwargs['n_survivors'])}"
+        f"..{scenario_kwargs.get('active_survivors_max', scenario_kwargs['n_survivors'])}), "
+        f"{scenario_kwargs.get('n_decoys', 0)} decoy slots "
+        f"(active {scenario_kwargs.get('active_decoys_min', scenario_kwargs.get('n_decoys', 0))}"
+        f"..{scenario_kwargs.get('active_decoys_max', scenario_kwargs.get('n_decoys', 0))}), "
         f"dt={scenario_kwargs.get('sim_step_seconds', 'scenario-default')}s"
     )
     if args.joint_schema_uav_diagnostic or args.joint_observation_schema:
