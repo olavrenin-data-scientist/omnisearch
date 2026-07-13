@@ -692,6 +692,91 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([1.0]))
         torch.testing.assert_close(scenario.metric_reward_drone_scout, torch.tensor([2.0]))
 
+    def test_disconnected_team_scout_reward_stays_with_direct_observer(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=1,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            drone_can_confirm=False,
+            comms_dropout=0.5,
+            r_team_scout=1.0,
+            r_drone_scout=2.0,
+            r_found_survivor=0.0,
+            r_ground_confirm=0.0,
+            r_drone_shaping=0.0,
+            r_ground_shaping=0.0,
+            r_ground_approach=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_coverage=0.0,
+            r_time_penalty=0.0,
+            r_pending_penalty=0.0,
+            r_ground_travel_cost=0.0,
+            r_drone_climb_cost=0.0,
+            drone_detection_quality=(1.0, 1.0, 1.0),
+            drone_cover_detection_factors=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            drone_energy_costs=(0.0, 0.0, 0.0),
+        )
+        env.reset()
+        scenario = env.scenario
+        drone, ground = env.agents
+        survivor = scenario._survivors[0]
+        drone.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ground.state.pos[:] = torch.tensor([[0.5, 0.5]])
+        survivor.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        drone.comms_up = torch.tensor([False])
+        ground.comms_up = torch.tensor([False])
+
+        scenario._compute_step_rewards()
+
+        self.assertTrue(bool(scenario.scouted_survivors[0, 0]))
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([3.0]))
+        torch.testing.assert_close(ground.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([0.5]))
+
+    def test_disconnected_team_confirm_reward_stays_with_direct_confirmer(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=1,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            drone_can_confirm=False,
+            comms_dropout=0.5,
+            r_team_scout=0.0,
+            r_drone_scout=0.0,
+            r_found_survivor=4.0,
+            r_ground_confirm=10.0,
+            r_drone_shaping=0.0,
+            r_ground_shaping=0.0,
+            r_ground_approach=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_coverage=0.0,
+            r_time_penalty=0.0,
+            r_pending_penalty=0.0,
+            r_ground_travel_cost=0.0,
+            r_drone_climb_cost=0.0,
+            drone_energy_costs=(0.0, 0.0, 0.0),
+        )
+        env.reset()
+        scenario = env.scenario
+        drone, ground = env.agents
+        survivor = scenario._survivors[0]
+        drone.state.pos[:] = torch.tensor([[-1.0, -1.0]])
+        ground.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        survivor.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, 1, 0] = True
+        drone.comms_up = torch.tensor([False])
+        ground.comms_up = torch.tensor([False])
+
+        scenario._compute_step_rewards()
+
+        self.assertTrue(bool(scenario.found_survivors[0, 0]))
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(ground.scenario_reward, torch.tensor([14.0]))
+        torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([2.0]))
+        torch.testing.assert_close(scenario.metric_reward_ground_confirm, torch.tensor([10.0]))
+
     def test_greedy_ugv_assignment_prefers_distinct_known_targets(self):
         env = self._diagnostic_env(
             n_ground=2,

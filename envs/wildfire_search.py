@@ -4830,17 +4830,6 @@ class WildfireSearchScenario(BaseScenario):
             torch.full_like(curr_ground_target_idx, -1),
         )
 
-        all_survivors_found_reward = (
-            all_survivors_found_now.float() * self.r_all_survivors_found
-        )
-        team_scout_reward = newly_scouted.float().sum(dim=1) * self.r_team_scout
-        team_reward = (
-            team_scout_reward
-            + newly_found.float().sum(dim=1) * self.r_found_survivor
-            + all_survivors_found_reward
-            + self.r_time_penalty
-        )
-
         scout_credit_mask    = drone_seen & newly_scouted.unsqueeze(1)
         scout_per_drone      = scout_credit_mask.float().sum(dim=2)         # [B, D]
 
@@ -4850,6 +4839,51 @@ class WildfireSearchScenario(BaseScenario):
         ground_within        = eligible_ground_confirmations
         confirm_credit_mask  = ground_within & newly_found.unsqueeze(1)
         confirm_per_ground   = confirm_credit_mask.float().sum(dim=2)       # [B, G]
+
+        comms_up = self._team_reward_comms_up_mask(device)
+        scout_actor_events = torch.zeros(
+            self.world.batch_dim,
+            self.n_agents,
+            self.n_survivors,
+            dtype=torch.bool,
+            device=device,
+        )
+        if self.n_drones > 0:
+            scout_actor_events[:, : self.n_drones, :] = scout_credit_mask
+        confirm_actor_events = torch.zeros_like(scout_actor_events)
+        if self.n_drones > 0:
+            confirm_actor_events[:, : self.n_drones, :] = drone_confirm_credit
+        if self.n_ground > 0:
+            confirm_actor_events[:, self.n_drones :, :] = confirm_credit_mask
+
+        team_scout_reward_by_agent = self._communication_gated_team_event_reward(
+            newly_scouted,
+            scout_actor_events,
+            float(self.r_team_scout),
+            comms_up,
+        )
+        team_confirm_reward_by_agent = self._communication_gated_team_event_reward(
+            newly_found,
+            confirm_actor_events,
+            float(self.r_found_survivor),
+            comms_up,
+        )
+        all_survivors_found_reward_by_agent = torch.zeros_like(team_confirm_reward_by_agent)
+        if self.r_all_survivors_found != 0.0:
+            all_found_recipients = (
+                comms_up | confirm_actor_events.any(dim=2)
+            ) & all_survivors_found_now.unsqueeze(1)
+            all_survivors_found_reward_by_agent = (
+                all_found_recipients.float() * float(self.r_all_survivors_found)
+            )
+        all_survivors_found_reward = all_survivors_found_reward_by_agent.mean(dim=1)
+        team_scout_reward = team_scout_reward_by_agent.mean(dim=1)
+        team_reward_by_agent = (
+            team_scout_reward_by_agent
+            + team_confirm_reward_by_agent
+            + all_survivors_found_reward_by_agent
+            + float(self.r_time_penalty)
+        )
 
         # Per-step pressure: number of scouted-but-unconfirmed survivors still
         # waiting. Applied to ground robots so idling while survivors are pending
@@ -5002,7 +5036,7 @@ class WildfireSearchScenario(BaseScenario):
         uav_coverage_threshold_reward = (
             coverage_threshold_crossed.float() * self.r_uav_coverage_threshold
         )
-        team_reward = team_reward + uav_coverage_threshold_reward
+        team_reward_by_agent = team_reward_by_agent + uav_coverage_threshold_reward.unsqueeze(1)
         (
             uav_move_coverage_reward,
             drone_displacement_m,
@@ -5041,7 +5075,7 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_new_scouts = newly_scouted.float().sum(dim=1)
         self.metric_new_confirmations = newly_found.float().sum(dim=1)
         self.metric_full_success = self.found_survivors.all(dim=1).float()
-        self.metric_reward_team = team_reward
+        self.metric_reward_team = team_reward_by_agent.mean(dim=1)
         self.metric_reward_all_survivors_found = all_survivors_found_reward
         self.metric_reward_team_scout = team_scout_reward
         self.metric_reward_pending_penalty = pending_penalty_reward
@@ -5284,7 +5318,7 @@ class WildfireSearchScenario(BaseScenario):
         ).float()
 
         for i, agent in enumerate(self.world.agents):
-            r = team_reward.clone()
+            r = team_reward_by_agent[:, i].clone()
             if agent.is_drone:
                 r = r + scout_per_drone[:, i] * self.r_drone_scout
                 r = r + confirm_per_drone[:, i] * self.r_drone_confirm
@@ -9029,6 +9063,59 @@ class WildfireSearchScenario(BaseScenario):
             ground_slice = slice(self.n_drones, self.n_agents)
             self.known_survivors_by_agent[:, ground_slice] |= ground_confirmations
             self.confirmed_survivors_by_agent[:, ground_slice] |= ground_confirmations
+
+    def _team_reward_comms_up_mask(self, device: torch.device) -> Tensor:
+        """Return the per-agent communication state used for immediate team rewards.
+
+        Team rewards are intentionally not replayed after reconnection. We use
+        the communication state sampled for the latest observation/action cycle;
+        direct observers are handled separately by the event actor mask.
+        """
+        if self.n_agents <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
+        if self.comms_dropout <= 0.0:
+            return torch.ones(
+                self.world.batch_dim,
+                self.n_agents,
+                dtype=torch.bool,
+                device=device,
+            )
+
+        states = []
+        for agent in self.world.agents:
+            comms_up = getattr(agent, "comms_up", None)
+            if comms_up is None:
+                states.append(torch.ones(self.world.batch_dim, dtype=torch.bool, device=device))
+            else:
+                states.append(comms_up.to(device=device, dtype=torch.bool).view(-1))
+        return torch.stack(states, dim=1)
+
+    def _communication_gated_team_event_reward(
+        self,
+        event_by_target: Tensor,
+        actor_events: Tensor,
+        reward_weight: float,
+        comms_up: Tensor,
+    ) -> Tensor:
+        """Distribute sparse team event rewards without leaking through dropout.
+
+        ``event_by_target`` marks newly scouted/confirmed survivors. ``actor_events``
+        marks the agents that directly observed those same events. An agent gets
+        the team reward for an event if it either directly observed the event or
+        was connected at that step.
+        """
+        if reward_weight == 0.0 or event_by_target.numel() == 0 or self.n_agents <= 0:
+            return torch.zeros(
+                self.world.batch_dim,
+                self.n_agents,
+                device=comms_up.device,
+                dtype=torch.float,
+            )
+        events = event_by_target.to(device=comms_up.device, dtype=torch.bool)
+        direct = actor_events.to(device=comms_up.device, dtype=torch.bool) & events.unsqueeze(1)
+        connected = comms_up.unsqueeze(-1) & events.unsqueeze(1)
+        recipients = direct | connected
+        return recipients.float().sum(dim=2) * float(reward_weight)
 
     def _communication_keep(self, agent: Agent) -> Tensor:
         """Sample one receiver-level communication state for this observation."""
