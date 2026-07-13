@@ -1,8 +1,8 @@
 {
   "clear": {
     "cv": {
-      "recall": 0.953,
-      "precision": 1.0,
+      "recall": 1.0,
+      "precision": 0.819,
       "fp_rate": 0.0,
       "vis_quality_factor": 1.0,
       "detections": 286,
@@ -27,14 +27,14 @@
       "false_positives": 0
     },
     "cv+thermal": {
-      "recall": 0.988,
+      "recall": 1.0,
       "precision": 1.0,
       "fp_rate": 0.0,
-      "cv_recall_contribution": 0.953,
+      "cv_recall_contribution": 1.0,
       "thermal_recall_contribution": 0.75
     },
     "cv+motion": {
-      "recall": 0.953,
+      "recall": 1.0,
       "precision": 1.0,
       "fp_rate": 0.0,
       "motion_recall": 0.333,
@@ -43,8 +43,8 @@
   },
   "light_smoke": {
     "cv": {
-      "recall": 0.567,
-      "precision": 1.0,
+      "recall": 0.975,
+      "precision": 0.72,
       "fp_rate": 0.0,
       "vis_quality_factor": 0.55,
       "detections": 170,
@@ -69,14 +69,14 @@
       "false_positives": 0
     },
     "cv+thermal": {
-      "recall": 0.835,
+      "recall": 0.99,
       "precision": 0.996,
       "fp_rate": 0.01,
-      "cv_recall_contribution": 0.567,
+      "cv_recall_contribution": 0.975,
       "thermal_recall_contribution": 0.62
     },
     "cv+motion": {
-      "recall": 0.567,
+      "recall": 0.975,
       "precision": 1.0,
       "fp_rate": 0.0,
       "motion_recall": 0.333,
@@ -85,8 +85,8 @@
   },
   "heavy_smoke": {
     "cv": {
-      "recall": 0.567,
-      "precision": 1.0,
+      "recall": 1.0,
+      "precision": 0.75,
       "fp_rate": 0.0,
       "vis_quality_factor": 0.55,
       "detections": 170,
@@ -111,14 +111,14 @@
       "false_positives": 0
     },
     "cv+thermal": {
-      "recall": 0.802,
+      "recall": 1.0,
       "precision": 0.996,
       "fp_rate": 0.01,
-      "cv_recall_contribution": 0.567,
+      "cv_recall_contribution": 1.0,
       "thermal_recall_contribution": 0.543
     },
     "cv+motion": {
-      "recall": 0.567,
+      "recall": 1.0,
       "precision": 1.0,
       "fp_rate": 0.0,
       "motion_recall": 0.333,
@@ -127,8 +127,8 @@
   },
   "active_fire": {
     "cv": {
-      "recall": 0.53,
-      "precision": 1.0,
+      "recall": 0.625,
+      "precision": 0.909,
       "fp_rate": 0.0,
       "vis_quality_factor": 0.525,
       "detections": 159,
@@ -153,14 +153,14 @@
       "false_positives": 0
     },
     "cv+thermal": {
-      "recall": 0.785,
+      "recall": 0.829,
       "precision": 0.992,
       "fp_rate": 0.02,
-      "cv_recall_contribution": 0.53,
+      "cv_recall_contribution": 0.625,
       "thermal_recall_contribution": 0.543
     },
     "cv+motion": {
-      "recall": 0.53,
+      "recall": 0.625,
       "precision": 1.0,
       "fp_rate": 0.0,
       "motion_recall": 0.333,
@@ -169,8 +169,8 @@
   },
   "burned_ground": {
     "cv": {
-      "recall": 0.647,
-      "precision": 1.0,
+      "recall": 0.65,
+      "precision": 0.85,
       "fp_rate": 0.0,
       "vis_quality_factor": 0.657,
       "detections": 194,
@@ -195,14 +195,14 @@
       "false_positives": 0
     },
     "cv+thermal": {
-      "recall": 0.658,
+      "recall": 0.661,
       "precision": 0.995,
       "fp_rate": 0.01,
-      "cv_recall_contribution": 0.647,
+      "cv_recall_contribution": 0.65,
       "thermal_recall_contribution": 0.03
     },
     "cv+motion": {
-      "recall": 0.647,
+      "recall": 0.65,
       "precision": 1.0,
       "fp_rate": 0.0,
       "motion_recall": 0.333,
@@ -211,8 +211,8 @@
   },
   "mixed": {
     "cv": {
-      "recall": 0.547,
-      "precision": 1.0,
+      "recall": 0.55,
+      "precision": 0.871,
       "fp_rate": 0.0,
       "vis_quality_factor": 0.54,
       "detections": 164,
@@ -237,14 +237,14 @@
       "false_positives": 0
     },
     "cv+thermal": {
-      "recall": 0.566,
+      "recall": 0.569,
       "precision": 0.994,
       "fp_rate": 0.01,
-      "cv_recall_contribution": 0.547,
+      "cv_recall_contribution": 0.55,
       "thermal_recall_contribution": 0.043
     },
     "cv+motion": {
-      "recall": 0.547,
+      "recall": 0.55,
       "precision": 1.0,
       "fp_rate": 0.0,
       "motion_recall": 0.333,

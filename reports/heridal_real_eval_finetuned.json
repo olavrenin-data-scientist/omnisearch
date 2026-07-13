@@ -1,0 +1,99 @@
+{
+  "dataset": "HERIDAL real aerial SAR (101 images, 337 GT boxes)",
+  "model": "models/survivor_heridal_yolov8s_1280.pt",
+  "match_iou": 0.15,
+  "results": {
+    "full_1280": {
+      "conf_0.05": {
+        "recall": 0.8576,
+        "recall_ci95": [
+          0.8162,
+          0.8909
+        ],
+        "precision": 0.5026,
+        "tp": 289,
+        "fp": 286,
+        "n_det": 575
+      },
+      "conf_0.15": {
+        "recall": 0.816,
+        "recall_ci95": [
+          0.7712,
+          0.8538
+        ],
+        "precision": 0.641,
+        "tp": 275,
+        "fp": 154,
+        "n_det": 429
+      },
+      "conf_0.35": {
+        "recall": 0.7181,
+        "recall_ci95": [
+          0.6678,
+          0.7635
+        ],
+        "precision": 0.7883,
+        "tp": 242,
+        "fp": 65,
+        "n_det": 307
+      },
+      "conf_0.5": {
+        "recall": 0.5935,
+        "recall_ci95": [
+          0.5403,
+          0.6446
+        ],
+        "precision": 0.8584,
+        "tp": 200,
+        "fp": 33,
+        "n_det": 233
+      }
+    },
+    "tiled_2x2_1280": {
+      "conf_0.05": {
+        "recall": 0.8783,
+        "recall_ci95": [
+          0.8391,
+          0.909
+        ],
+        "precision": 0.4217,
+        "tp": 296,
+        "fp": 406,
+        "n_det": 702
+      },
+      "conf_0.15": {
+        "recall": 0.8398,
+        "recall_ci95": [
+          0.7968,
+          0.8751
+        ],
+        "precision": 0.5615,
+        "tp": 283,
+        "fp": 221,
+        "n_det": 504
+      },
+      "conf_0.35": {
+        "recall": 0.7953,
+        "recall_ci95": [
+          0.749,
+          0.8349
+        ],
+        "precision": 0.7053,
+        "tp": 268,
+        "fp": 112,
+        "n_det": 380
+      },
+      "conf_0.5": {
+        "recall": 0.7092,
+        "recall_ci95": [
+          0.6586,
+          0.7551
+        ],
+        "precision": 0.766,
+        "tp": 239,
+        "fp": 73,
+        "n_det": 312
+      }
+    }
+  }
+}

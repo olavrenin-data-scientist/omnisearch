@@ -159,10 +159,13 @@ class SimulationCvAdapter:
         # (scripts/train_survivor_detector.py) is in-distribution and far more
         # confident. Pass an explicit --cv-person-model to override.
         if str(person_model) == "yolov8n.pt":
-            # Prefer the NAIP-trained model (real aerial backgrounds, far fewer
-            # false positives on real terrain), then the procedural-trained
-            # models, then stock.
-            for candidate in ("survivor_naip_yolov8s.pt", "survivor_yolov8s.pt", "survivor_yolov8n.pt"):
+            # Prefer the 1280px-native model (survivor_6k: 6,800 images with
+            # burned-ground bias, trained at imgsz 1280 so tiled 1280 deployment
+            # inference is in-distribution — recall 95% vs 72% for the 640px
+            # models under the deployment config). Older models are fallbacks.
+            # Pass an explicit --cv-person-model to override.
+            for candidate in ("survivor_yolov8s_1280.pt", "survivor_yolov8s.pt",
+                              "survivor_naip_yolov8s.pt", "survivor_yolov8n.pt"):
                 path = self.root / "models" / candidate
                 if path.exists():
                     self.person_model_name = str(path)

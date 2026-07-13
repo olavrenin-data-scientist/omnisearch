@@ -363,20 +363,20 @@ class TestAltitudePhysics:
         assert sizes[0] > sizes[1] > sizes[2]
 
     def test_known_values_at_default_config(self):
-        """Sanity check pixel sizes at the three default flight levels (640px, 65° FOV).
+        """Sanity check shoulder-width pixel sizes at the three flight levels (640px, 65° FOV).
 
-        With SURVIVOR_BODY_WIDTH_M=2.4 (full bounding box from above, matching
-        detection/simulation_adapter.py):
-          20m: footprint ≈ 25.5m → 2.4/25.5*640 ≈ 60 px
-          35m: footprint ≈ 44.6m → 2.4/44.6*640 ≈ 34 px
-          50m: footprint ≈ 63.7m → 2.4/63.7*640 ≈ 24 px
+        With the physical SURVIVOR_BODY_WIDTH_M=0.55 (shoulder width, top-down):
+          20m: footprint ≈ 25.5m → 0.55/25.5*640 ≈ 14 px
+          35m: footprint ≈ 44.6m → 0.55/44.6*640 ≈ 8 px
+          50m: footprint ≈ 63.7m → 0.55/63.7*640 ≈ 5.5 px
+        These are the short axis; survivors are genuinely tiny at altitude.
         """
         px_20 = altitude_to_survivor_px(20.0, image_size=640)
         px_35 = altitude_to_survivor_px(35.0, image_size=640)
         px_50 = altitude_to_survivor_px(50.0, image_size=640)
-        assert 45 < px_20 < 75, f"Expected ~60px at 20m, got {px_20:.1f}"
-        assert 25 < px_35 < 45, f"Expected ~34px at 35m, got {px_35:.1f}"
-        assert 18 < px_50 < 32, f"Expected ~24px at 50m, got {px_50:.1f}"
+        assert 10 < px_20 < 20, f"Expected ~14px at 20m, got {px_20:.1f}"
+        assert 5 < px_35 < 12, f"Expected ~8px at 35m, got {px_35:.1f}"
+        assert 3 < px_50 < 9, f"Expected ~5.5px at 50m, got {px_50:.1f}"
 
     def test_gsd_increases_with_altitude(self):
         """Ground sample distance must increase with altitude."""
@@ -414,11 +414,16 @@ class TestAltitudePhysics:
             meta = json.loads(json_files[0].read_text())
             assert "altitude_m" in meta
             assert "gsd_m" in meta
-            assert "survivor_base_px" in meta
+            assert "poses" in meta
+            assert "boxes" in meta
             assert DRONE_FLIGHT_LEVELS_M[0] <= meta["altitude_m"] <= DRONE_FLIGHT_LEVELS_M[-1]
+            for box in meta["boxes"]:
+                assert box["mask_iou"] >= 0.9   # tight boxes by construction
+                assert "w_m" in box and "h_m" in box
 
-    def test_legacy_mode_no_metadata(self):
-        """altitude_aware=False should NOT produce .json sidecars."""
+    def test_legacy_mode_metadata_has_null_gsd(self):
+        """Every frame gets a sidecar; legacy (non-altitude-aware) frames carry
+        gsd_m: null so the validator can flag them as physically unverifiable."""
         rng = _rng(7)
         cfg = WildfireEffectConfig()
         asset = Image.new("RGBA", (10, 20), (200, 100, 80, 255))
@@ -430,7 +435,12 @@ class TestAltitudePhysics:
                 altitude_aware=False,
             )
             json_files = list((out / "labels").glob("*.json"))
-            assert len(json_files) == 0
+            assert len(json_files) == 3
+            import json
+            for jf in json_files:
+                meta = json.loads(jf.read_text())
+                assert meta["gsd_m"] is None
+                assert meta["altitude_m"] is None
 
     def test_oblique_produces_taller_survivors(self):
         """Oblique camera tilt produces survivors taller than wide (not square blobs)."""
