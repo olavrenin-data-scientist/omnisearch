@@ -666,6 +666,41 @@ class SurvivorCommunicationTests(unittest.TestCase):
         _target_pos, targetable_after, _is_decoy = scenario._ugv_ground_target_candidates()
         self.assertFalse(bool(targetable_after[0, :, 1].any()))
 
+    def test_variable_active_decoys_mask_inactive_slots(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            n_decoys=4,
+            active_decoys_min=2,
+            active_decoys_max=2,
+            known_survivors_at_reset=False,
+            delayed_survivor_knowledge=True,
+            survivor_reveal_initial_count=0,
+            survivor_reveal_start_step=10,
+            survivor_reveal_end_step=10,
+            delayed_decoy_knowledge=True,
+            decoy_reveal_initial_count=4,
+            decoy_reveal_start_step=0,
+            decoy_reveal_end_step=0,
+        )
+        scenario = env.scenario
+
+        active = scenario.active_decoys[0]
+        self.assertEqual(int(active.sum().item()), 2)
+        self.assertTrue(torch.equal(scenario.scouted_decoys[0], active))
+        self.assertTrue(torch.equal(
+            scenario.known_decoys_by_agent[0, scenario.n_drones:, :],
+            active.unsqueeze(0).expand(scenario.n_ground, -1),
+        ))
+
+        _target_pos, targetable, is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertEqual(int(targetable[0, :, 1:].any(dim=0).sum().item()), 2)
+        self.assertEqual(int(is_decoy[0].sum().item()), 4)
+
+        info = scenario.info(env.agents[0])
+        torch.testing.assert_close(info["mission/n_active_decoys"], torch.tensor([2.0]))
+        torch.testing.assert_close(info["mission/n_decoy_oracle_revealed"], torch.tensor([2.0]))
+
     def test_ground_cannot_confirm_before_drone_scout(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario

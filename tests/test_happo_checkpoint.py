@@ -1625,12 +1625,18 @@ class HappoCheckpointTests(unittest.TestCase):
             n_survivors=8,
             active_survivors_min=3,
             active_survivors_max=8,
+            n_decoys=4,
+            active_decoys_min=0,
+            active_decoys_max=4,
         )
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["n_survivors"], 8)
         self.assertEqual(scenario["active_survivors_min"], 3)
         self.assertEqual(scenario["active_survivors_max"], 8)
+        self.assertEqual(scenario["n_decoys"], 4)
+        self.assertEqual(scenario["active_decoys_min"], 0)
+        self.assertEqual(scenario["active_decoys_max"], 4)
 
     def test_ugv_known_survivor_exact_distance_uses_min_equals_max(self):
         _, _, env_args = build_args(

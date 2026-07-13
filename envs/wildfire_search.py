@@ -152,6 +152,14 @@ class WildfireSearchScenario(BaseScenario):
         # landmarks to detect. When decoys are enabled, drones can falsely scout
         # them and UGVs can waste trips dismissing them.
         self.n_decoys = max(int(kwargs.pop("n_decoys", 0)), 0)
+        self.active_decoys_min = int(kwargs.pop("active_decoys_min", self.n_decoys))
+        self.active_decoys_max = int(kwargs.pop("active_decoys_max", self.n_decoys))
+        if self.active_decoys_min < 0:
+            raise ValueError("active_decoys_min must be nonnegative")
+        if self.active_decoys_max < self.active_decoys_min:
+            raise ValueError("active_decoys_max must be >= active_decoys_min")
+        if self.active_decoys_max > self.n_decoys:
+            raise ValueError("active_decoys_max must be <= n_decoys")
         self.drone_false_positive_rate = min(
             max(float(kwargs.pop("drone_false_positive_rate", 0.05)), 0.0),
             1.0,
@@ -1083,6 +1091,7 @@ class WildfireSearchScenario(BaseScenario):
         self.scouted_decoys = torch.zeros(
             batch_dim, self.n_decoys, dtype=torch.bool, device=device,
         )
+        self.active_decoys = torch.ones_like(self.scouted_decoys)
         self.dismissed_decoys = torch.zeros_like(self.scouted_decoys)
         self.known_decoys_by_agent = torch.zeros(
             batch_dim, self.n_agents, self.n_decoys, dtype=torch.bool, device=device,
@@ -2029,6 +2038,7 @@ class WildfireSearchScenario(BaseScenario):
 
         if env_index is None:
             self.active_survivors.fill_(True)
+            self.active_decoys.fill_(True)
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.step_drone_detections.zero_()
@@ -2078,6 +2088,7 @@ class WildfireSearchScenario(BaseScenario):
             envs_to_seed = range(self.world.batch_dim)
         else:
             self.active_survivors[env_index] = True
+            self.active_decoys[env_index] = True
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.step_drone_detections[env_index] = False
@@ -2130,8 +2141,9 @@ class WildfireSearchScenario(BaseScenario):
         for b in envs_to_seed:
             self._generate_terrain(b)
             self._sample_active_survivors(b)
+            self._sample_active_decoys(b)
             ScenarioUtils.spawn_entities_randomly(
-                entities=self._active_survivor_entities(b) + self._decoys + self.world.agents,
+                entities=self._active_survivor_entities(b) + self._active_decoy_entities(b) + self.world.agents,
                 world=self.world,
                 env_index=b,
                 min_dist_between_entities=(
@@ -2144,6 +2156,7 @@ class WildfireSearchScenario(BaseScenario):
             self._place_drones_jointly_uniform_interior(b)
             self._place_diagnostic_survivors_near_reference_agents(b)
             self._move_inactive_survivors_outside_map(b)
+            self._move_inactive_decoys_outside_map(b)
             if not self.disable_fire:
                 self._seed_initial_fire(b, H, W)
             if self.delayed_survivor_knowledge:
@@ -2193,6 +2206,14 @@ class WildfireSearchScenario(BaseScenario):
 
     def _active_survivor_count(self) -> Tensor:
         return self._active_survivor_mask().float().sum(dim=1)
+
+    def _active_decoy_mask(self) -> Tensor:
+        if hasattr(self, "active_decoys"):
+            return self.active_decoys
+        return torch.ones_like(self.scouted_decoys)
+
+    def _active_decoy_count(self) -> Tensor:
+        return self._active_decoy_mask().float().sum(dim=1)
 
     def _all_active_survivors_found(self) -> Tensor:
         active = self._active_survivor_mask()
@@ -2244,6 +2265,48 @@ class WildfireSearchScenario(BaseScenario):
                 all_pos[env_index] = offmap.to(device=all_pos.device, dtype=all_pos.dtype)
                 survivor.set_pos(all_pos, batch_index=None)
 
+    def _sample_active_decoys(self, env_index: int) -> None:
+        if self.n_decoys <= 0:
+            return
+        device = self.active_decoys.device
+        min_count = min(max(int(self.active_decoys_min), 0), self.n_decoys)
+        max_count = min(max(int(self.active_decoys_max), min_count), self.n_decoys)
+        if min_count == max_count:
+            count = min_count
+        else:
+            count = int(torch.randint(min_count, max_count + 1, (1,), device=device).item())
+        mask = torch.zeros(self.n_decoys, dtype=torch.bool, device=device)
+        if count > 0:
+            mask[torch.randperm(self.n_decoys, device=device)[:count]] = True
+        self.active_decoys[env_index] = mask
+
+    def _active_decoy_entities(self, env_index: int) -> list[Landmark]:
+        if self.n_decoys <= 0:
+            return []
+        active = self._active_decoy_mask()[env_index]
+        return [
+            decoy
+            for decoy_idx, decoy in enumerate(self._decoys)
+            if bool(active[decoy_idx].item())
+        ]
+
+    def _move_inactive_decoys_outside_map(self, env_index: int) -> None:
+        if self.n_decoys <= 0:
+            return
+        inactive = ~self._active_decoy_mask()[env_index]
+        if not bool(inactive.any().item()):
+            return
+        offmap = torch.tensor(
+            [self.x_semidim + 12.0 * self.agent_radius, self.y_semidim + 12.0 * self.agent_radius],
+            device=self.fire_grid.device,
+            dtype=torch.float32,
+        )
+        for decoy_idx, decoy in enumerate(self._decoys):
+            if bool(inactive[decoy_idx].item()):
+                all_pos = decoy.state.pos.clone()
+                all_pos[env_index] = offmap.to(device=all_pos.device, dtype=all_pos.dtype)
+                decoy.set_pos(all_pos, batch_index=None)
+
     def _initialize_known_survivors_at_reset(self, env_index: int) -> None:
         """Optionally start the episode with survivors known to ground agents."""
         if not self.known_survivors_at_reset or self.n_survivors <= 0:
@@ -2291,25 +2354,34 @@ class WildfireSearchScenario(BaseScenario):
         if not self.delayed_decoy_knowledge or self.n_decoys <= 0:
             return
         device = self.decoy_reveal_steps.device
-        count = int(self.n_decoys)
+        active_idx = torch.nonzero(
+            self._active_decoy_mask()[env_index],
+            as_tuple=False,
+        ).flatten()
+        count = int(active_idx.numel())
+        reveal_steps = torch.full((self.n_decoys,), -1, dtype=torch.long, device=device)
+        if count <= 0:
+            self.decoy_reveal_steps[env_index] = reveal_steps
+            return
         initial_count = min(int(self.decoy_reveal_initial_count), count)
-        reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
+        active_reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
         order = torch.randperm(count, device=device)
         if initial_count > 0:
-            reveal_steps[order[:initial_count]] = 0
+            active_reveal_steps[order[:initial_count]] = 0
         remaining = count - initial_count
         if remaining > 0:
             start = int(min(max(self.decoy_reveal_start_step, 0), self.max_steps))
             end = int(min(max(self.decoy_reveal_end_step, start), self.max_steps))
             edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
-            for k, decoy_idx in enumerate(order[initial_count:]):
+            for k, active_order_idx in enumerate(order[initial_count:]):
                 lo = int(torch.floor(edges[k]).item())
                 hi = int(torch.floor(edges[k + 1]).item())
                 if hi <= lo:
                     step = lo
                 else:
                     step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
-                reveal_steps[decoy_idx] = step
+                active_reveal_steps[active_order_idx] = step
+        reveal_steps[active_idx] = active_reveal_steps
         self.decoy_reveal_steps[env_index] = reveal_steps
 
     def _apply_delayed_survivor_reveals(self, env_index: int | None = None) -> None:
@@ -2354,6 +2426,7 @@ class WildfireSearchScenario(BaseScenario):
             & (self.decoy_reveal_steps[env_slice] <= steps)
             & ~self.decoy_oracle_revealed[env_slice]
             & ~self.dismissed_decoys[env_slice]
+            & self._active_decoy_mask()[env_slice]
         )
         if due.numel() == 0 or not bool(due.any().item()):
             return
@@ -2398,6 +2471,7 @@ class WildfireSearchScenario(BaseScenario):
                 ground_decoy_known
                 & self.scouted_decoys.unsqueeze(1)
                 & ~self.dismissed_decoys.unsqueeze(1)
+                & self._active_decoy_mask().unsqueeze(1)
             )
             target_pos_parts.append(decoy_pos)
             targetable_parts.append(decoy_targetable)
@@ -5013,6 +5087,7 @@ class WildfireSearchScenario(BaseScenario):
                 local_pending_decoys = (
                     self.known_decoys_by_agent[:, ground_slice, :]
                     & ~self.dismissed_decoys.unsqueeze(1)
+                    & self._active_decoy_mask().unsqueeze(1)
                 )
                 local_pending_targets = torch.cat(
                     (local_pending_survivors, local_pending_decoys),
@@ -5517,6 +5592,7 @@ class WildfireSearchScenario(BaseScenario):
 
         decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
         agent_decoy_dists = torch.cdist(agent_pos, decoy_pos)
+        active_decoys = self._active_decoy_mask()
 
         if self.n_drones > 0 and self.drone_false_positive_rate > 0.0:
             drone_decoy_dists = agent_decoy_dists[:, :self.n_drones, :]
@@ -5524,9 +5600,9 @@ class WildfireSearchScenario(BaseScenario):
             in_view = drone_decoy_dists <= footprint
             draw = torch.rand_like(drone_decoy_dists)
             false_det = in_view & (draw < self.drone_false_positive_rate)
-            false_det = false_det & ~self.dismissed_decoys.unsqueeze(1)
+            false_det = false_det & active_decoys.unsqueeze(1) & ~self.dismissed_decoys.unsqueeze(1)
             self.step_decoy_false_detections = false_det
-            newly_scouted_decoys = false_det.any(dim=1) & ~self.dismissed_decoys
+            newly_scouted_decoys = false_det.any(dim=1) & active_decoys & ~self.dismissed_decoys
             self.scouted_decoys = self.scouted_decoys | newly_scouted_decoys
             self.known_decoys_by_agent[:, :self.n_drones] |= false_det
         else:
@@ -5545,18 +5621,19 @@ class WildfireSearchScenario(BaseScenario):
             within = ground_decoy_dists < confirm_range
             investigatable = (
                 within
+                & active_decoys.unsqueeze(1)
                 & self.scouted_decoys.unsqueeze(1)
                 & ~self.dismissed_decoys.unsqueeze(1)
             )
             self.known_decoys_by_agent[:, self.n_drones:] |= investigatable
-            newly_dismissed = investigatable.any(dim=1) & ~self.dismissed_decoys
+            newly_dismissed = investigatable.any(dim=1) & active_decoys & ~self.dismissed_decoys
             self.dismissed_decoys = self.dismissed_decoys | newly_dismissed
             if bool(newly_dismissed.any().item()):
                 self._invalidate_ugv_assignment_cache()
             trips_per_ground = investigatable.float().sum(dim=2)
             decoy_penalty = trips_per_ground * self.r_decoy_pursuit_penalty
 
-        self.metric_false_positive_detections = self.scouted_decoys.float().sum(dim=1)
+        self.metric_false_positive_detections = (self.scouted_decoys & active_decoys).float().sum(dim=1)
         self.metric_false_positive_trips = newly_dismissed.float().sum(dim=1)
         return decoy_penalty
 
@@ -9358,12 +9435,13 @@ class WildfireSearchScenario(BaseScenario):
         decoy_known = None
         decoy_false_positive = None
         if has_decoys:
+            active_decoys = self._active_decoy_mask()
             local_decoy_known = self.known_decoys_by_agent[:, agent_idx]
-            team_decoy_known = self.known_decoys_by_agent.any(dim=1)
+            team_decoy_known = self.known_decoys_by_agent.any(dim=1) & active_decoys
             connected_decoys = comms_keep.expand_as(local_decoy_known)
-            decoy_known = torch.where(connected_decoys, team_decoy_known, local_decoy_known)
+            decoy_known = torch.where(connected_decoys, team_decoy_known, local_decoy_known & active_decoys)
             self.known_decoys_by_agent[:, agent_idx] = decoy_known
-            decoy_false_positive = decoy_known & self.dismissed_decoys
+            decoy_false_positive = decoy_known & self.dismissed_decoys & active_decoys
 
         assigned_to_me = None
         assigned_to_other = None
@@ -9385,7 +9463,11 @@ class WildfireSearchScenario(BaseScenario):
                 if has_decoys:
                     decoy_pos_for_assignment = torch.stack([d.state.pos for d in self._decoys], dim=1)
                     ground_decoy_known = self.known_decoys_by_agent[:, ground_slice]
-                    decoy_targetable = ground_decoy_known & ~self.dismissed_decoys.unsqueeze(1)
+                    decoy_targetable = (
+                        ground_decoy_known
+                        & ~self.dismissed_decoys.unsqueeze(1)
+                        & self._active_decoy_mask().unsqueeze(1)
+                    )
                     targetable = torch.cat((targetable, decoy_targetable), dim=2)
                     assignment_pos = torch.cat((assignment_pos, decoy_pos_for_assignment), dim=1)
                 ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
@@ -11806,7 +11888,10 @@ class WildfireSearchScenario(BaseScenario):
                 self.survivor_oracle_revealed & self._active_survivor_mask()
             ).sum(dim=1).float(),
             "mission/new_decoy_oracle_reveals": self.metric_decoy_oracle_reveals,
-            "mission/n_decoy_oracle_revealed": self.decoy_oracle_revealed.sum(dim=1).float(),
+            "mission/n_active_decoys": self._active_decoy_count(),
+            "mission/n_decoy_oracle_revealed": (
+                self.decoy_oracle_revealed & self._active_decoy_mask()
+            ).sum(dim=1).float(),
             "mission/new_confirmations": self.metric_new_confirmations,
             "mission/n_active_survivors": self._active_survivor_count(),
             "mission/n_scouted": (

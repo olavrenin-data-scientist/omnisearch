@@ -260,6 +260,8 @@ def build_args(
     active_survivors_min: int | None = None,
     active_survivors_max: int | None = None,
     n_decoys: int | None = None,
+    active_decoys_min: int | None = None,
+    active_decoys_max: int | None = None,
     delayed_survivor_knowledge: bool = False,
     survivor_reveal_schedule: str = "stratified_uniform",
     survivor_reveal_initial_count: int = 1,
@@ -380,6 +382,22 @@ def build_args(
     joint_drone_count = DEFAULT_JOINT_DIAG_DRONES if n_drones is None else max(int(n_drones), 0)
     joint_ugv_count = DEFAULT_JOINT_DIAG_UGVS if n_ugvs is None else max(int(n_ugvs), 0)
     decoy_count = 0 if n_decoys is None else max(int(n_decoys), 0)
+    active_decoys_min_arg = active_decoys_min
+    active_decoys_max_arg = active_decoys_max
+
+    def _active_decoy_range_for(slot_count: int) -> tuple[int, int]:
+        slots = max(int(slot_count), 0)
+        min_active = slots if active_decoys_min_arg is None else int(active_decoys_min_arg)
+        max_active = slots if active_decoys_max_arg is None else int(active_decoys_max_arg)
+        if min_active < 0:
+            raise ValueError("active_decoys_min must be nonnegative")
+        if max_active < min_active:
+            raise ValueError("active_decoys_max must be >= active_decoys_min")
+        if max_active > slots:
+            raise ValueError("active_decoys_max must be <= n_decoys")
+        return min_active, max_active
+
+    active_decoys_min, active_decoys_max = _active_decoy_range_for(decoy_count)
     if n_drones is not None:
         uav_diagnostic_drones = max(int(n_drones), 1)
     if n_ugvs is not None:
@@ -888,6 +906,8 @@ def build_args(
         "active_survivors_min": active_survivors_min,
         "active_survivors_max": active_survivors_max,
         "n_decoys":      decoy_count,
+        "active_decoys_min": active_decoys_min,
+        "active_decoys_max": active_decoys_max,
         "comms_dropout": comms_dropout,
         "comms_dropout_mode": comms_dropout_mode,
         "comms_map_mode": comms_map_mode,
@@ -1869,6 +1889,12 @@ def main():
     p.add_argument("--n-decoys", type=int, default=None,
                    help="Add this many decoy false-positive candidates. In --joint-schema-ugv-diagnostic, "
                         "decoys are revealed over time like oracle survivor scout events.")
+    p.add_argument("--active-decoys-min", type=int, default=None,
+                   help="Minimum active decoy slots sampled per env reset. "
+                        "Use with --n-decoys as the maximum decoy slot count.")
+    p.add_argument("--active-decoys-max", type=int, default=None,
+                   help="Maximum active decoy slots sampled per env reset. "
+                        "Example: --n-decoys 4 --active-decoys-min 0 --active-decoys-max 4.")
     p.add_argument("--delayed-survivor-knowledge", action="store_true",
                    help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
     p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
@@ -2429,6 +2455,8 @@ def main():
         p.error("--ugv-sticky-min-age-steps must be nonnegative")
     if args.n_survivors is not None and args.n_survivors < 1:
         p.error("--n-survivors must be positive")
+    if args.n_decoys is not None and args.n_decoys < 0:
+        p.error("--n-decoys must be nonnegative")
     if args.active_survivors_min is not None and args.active_survivors_min < 0:
         p.error("--active-survivors-min must be nonnegative")
     if args.active_survivors_max is not None and args.active_survivors_max < 0:
@@ -2439,6 +2467,21 @@ def main():
         and args.active_survivors_max < args.active_survivors_min
     ):
         p.error("--active-survivors-max must be >= --active-survivors-min")
+    if args.active_decoys_min is not None and args.active_decoys_min < 0:
+        p.error("--active-decoys-min must be nonnegative")
+    if args.active_decoys_max is not None and args.active_decoys_max < 0:
+        p.error("--active-decoys-max must be nonnegative")
+    if (
+        args.active_decoys_min is not None
+        and args.active_decoys_max is not None
+        and args.active_decoys_max < args.active_decoys_min
+    ):
+        p.error("--active-decoys-max must be >= --active-decoys-min")
+    decoy_slots = 0 if args.n_decoys is None else int(args.n_decoys)
+    if args.active_decoys_min is not None and args.active_decoys_min > decoy_slots:
+        p.error("--active-decoys-min must be <= --n-decoys")
+    if args.active_decoys_max is not None and args.active_decoys_max > decoy_slots:
+        p.error("--active-decoys-max must be <= --n-decoys")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
     if sum(
@@ -2760,6 +2803,12 @@ def main():
         f"{args.active_survivors_min if args.active_survivors_min is not None else 'all'}-"
         f"{args.active_survivors_max if args.active_survivors_max is not None else 'all'}"
     )
+    print(f" n_decoys: {args.n_decoys if args.n_decoys is not None else 'default'}")
+    print(
+        " active_decoys: "
+        f"{args.active_decoys_min if args.active_decoys_min is not None else 'all'}-"
+        f"{args.active_decoys_max if args.active_decoys_max is not None else 'all'}"
+    )
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(
         " survivor_reveal: "
@@ -2926,6 +2975,8 @@ def main():
         active_survivors_min = args.active_survivors_min,
         active_survivors_max = args.active_survivors_max,
         n_decoys = args.n_decoys,
+        active_decoys_min = args.active_decoys_min,
+        active_decoys_max = args.active_decoys_max,
         delayed_survivor_knowledge = bool(
             args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
         ),
