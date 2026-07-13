@@ -150,6 +150,15 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["disable_fire"] = True
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
+    for attr in (
+        "uav_decision_grid",
+        "uav_confidence_reward_grid",
+        "uav_frontier_global_grid",
+        "uav_coverage_reward_grid",
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            scenario_kwargs[attr] = int(value)
     _normalize_active_range(
         scenario_kwargs,
         slot_key="n_survivors",
@@ -536,6 +545,14 @@ def main() -> None:
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
+    parser.add_argument("--uav-decision-grid", type=int, default=None,
+                        help="Override UAV internal decision-map grid size. Default preserves checkpoint settings.")
+    parser.add_argument("--uav-confidence-reward-grid", type=int, default=None,
+                        help="Override UAV confidence reward/penalty/opportunity grid size.")
+    parser.add_argument("--uav-frontier-global-grid", type=int, default=None,
+                        help="Override the global leg grid size for local-global UAV frontier scoring.")
+    parser.add_argument("--uav-coverage-reward-grid", type=int, default=None,
+                        help="Override UAV binary coverage reward/overlap grid size.")
     parser.add_argument(
         "--ugv-target-assignment-mode",
         choices=(
@@ -595,6 +612,15 @@ def main() -> None:
         parser.error("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
+    for arg_name in (
+        "uav_decision_grid",
+        "uav_confidence_reward_grid",
+        "uav_frontier_global_grid",
+        "uav_coverage_reward_grid",
+    ):
+        value = getattr(args, arg_name)
+        if value is not None and (value < 0 or value == 1):
+            parser.error(f"--{arg_name.replace('_', '-')} must be 0 or at least 2")
 
     checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
     scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)

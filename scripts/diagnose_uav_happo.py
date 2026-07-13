@@ -167,6 +167,15 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["uav_overlap_penalty_normalization"] = (
             str(args.uav_overlap_penalty_normalization).replace("-", "_").lower()
         )
+    for attr in (
+        "uav_decision_grid",
+        "uav_confidence_reward_grid",
+        "uav_frontier_global_grid",
+        "uav_coverage_reward_grid",
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            scenario_kwargs[attr] = int(value)
     if getattr(args, "n_decoys", None) is not None:
         scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
     _normalize_active_range(
@@ -7501,6 +7510,15 @@ def main() -> None:
                         default=None,
                         help="Override overlap penalty normalization for diagnostic reward terms. "
                              "Default uses the checkpoint manifest, falling back to raw.")
+    parser.add_argument("--uav-decision-grid", type=int, default=None,
+                        help="Override UAV internal decision-map grid size for diagnostics. "
+                             "Default preserves checkpoint settings.")
+    parser.add_argument("--uav-confidence-reward-grid", type=int, default=None,
+                        help="Override UAV confidence reward/penalty/opportunity grid size for diagnostics.")
+    parser.add_argument("--uav-frontier-global-grid", type=int, default=None,
+                        help="Override the global leg grid size for local-global UAV frontier diagnostics.")
+    parser.add_argument("--uav-coverage-reward-grid", type=int, default=None,
+                        help="Override UAV binary coverage reward/overlap grid size for diagnostics.")
     parser.add_argument("--diagnostic-confidence-frontier-radius-m", type=float,
                         default=DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M,
                         help="Local radius for the shadow confidence local-global frontier usefulness "
@@ -7556,6 +7574,15 @@ def main() -> None:
         parser.error("--uav-start-min-separation-m must be nonnegative")
     if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
         parser.error("--uav-start-edge-margin-m must be nonnegative")
+    for arg_name in (
+        "uav_decision_grid",
+        "uav_confidence_reward_grid",
+        "uav_frontier_global_grid",
+        "uav_coverage_reward_grid",
+    ):
+        value = getattr(args, arg_name)
+        if value is not None and (value < 0 or value == 1):
+            parser.error(f"--{arg_name.replace('_', '-')} must be 0 or at least 2")
     if args.diagnostic_confidence_frontier_radius_m <= 0.0:
         parser.error("--diagnostic-confidence-frontier-radius-m must be positive")
     if (
