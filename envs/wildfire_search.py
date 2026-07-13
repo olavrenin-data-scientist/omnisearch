@@ -8388,6 +8388,110 @@ class WildfireSearchScenario(BaseScenario):
         )
         return features, selected_mask
 
+    def _uav_frontier_local_best_sector_features(
+        self,
+        positions: Tensor,
+        scores: Tensor,
+        *,
+        xs: Tensor,
+        ys: Tensor,
+        sector_width: float,
+        sectors: int,
+        radius: Tensor,
+        ideal_cells: Tensor | float,
+    ) -> Tensor:
+        """Best local frontier sector using only cells in a radius-sized patch."""
+        B, N, _ = positions.shape
+        G = int(scores.shape[-1])
+        device = positions.device
+        dtype = positions.dtype
+        if B == 0 or N == 0:
+            return torch.zeros(B, N, 4, device=device, dtype=dtype)
+
+        _, _, _, _, _, cell_width, cell_height, _ = self._uav_grid_geometry(device, dtype)
+        radius_tensor = radius.to(device=device, dtype=dtype)
+        max_radius = float(radius_tensor.detach().max().cpu().item()) if radius_tensor.numel() > 0 else 0.0
+        # Add two cells to cover positions near cell boundaries. Extra cells are
+        # masked by the exact radius check, so this preserves full-grid semantics.
+        rx = min(G - 1, int(math.ceil(max_radius / max(float(cell_width), 1e-12))) + 2)
+        ry = min(G - 1, int(math.ceil(max_radius / max(float(cell_height), 1e-12))) + 2)
+
+        offset_x = torch.arange(-rx, rx + 1, device=device).view(1, 1, 1, -1)
+        offset_y = torch.arange(-ry, ry + 1, device=device).view(1, 1, -1, 1)
+        center_gx, center_gy = self._positions_to_grid(positions)
+        gx_raw = center_gx.view(B, N, 1, 1) + offset_x
+        gy_raw = center_gy.view(B, N, 1, 1) + offset_y
+        valid = (gx_raw >= 0) & (gx_raw < G) & (gy_raw >= 0) & (gy_raw < G)
+        gx = gx_raw.clamp(0, G - 1)
+        gy = gy_raw.clamp(0, G - 1)
+        batch_idx = torch.arange(B, device=device).view(B, 1, 1, 1)
+
+        score_patch = scores.to(device=device, dtype=dtype)[batch_idx, gy, gx]
+        x_patch = xs[gx].expand_as(score_patch)
+        y_patch = ys[gy].expand_as(score_patch)
+        dx = x_patch - positions[..., X].view(B, N, 1, 1)
+        dy = y_patch - positions[..., Y].view(B, N, 1, 1)
+        dist_sq = dx.square() + dy.square()
+        radius_sq = radius_tensor.square().view(B, 1, 1, 1)
+        useful_any = valid & (dist_sq <= radius_sq) & (score_patch > 1e-9)
+
+        angles = torch.atan2(dy, dx)
+        sector_index = torch.floor((angles + math.pi) / sector_width).long().clamp(0, sectors - 1)
+        weighted = useful_any.to(dtype=dtype) * score_patch
+
+        flat_index = sector_index.reshape(B * N, -1)
+        flat_weight = weighted.reshape(B * N, -1)
+        sector_weight = torch.zeros(B * N, sectors, device=device, dtype=dtype)
+        sector_vec_x = torch.zeros_like(sector_weight)
+        sector_vec_y = torch.zeros_like(sector_weight)
+        sector_weight.scatter_add_(1, flat_index, flat_weight)
+        sector_vec_x.scatter_add_(1, flat_index, (dx * weighted).reshape(B * N, -1))
+        sector_vec_y.scatter_add_(1, flat_index, (dy * weighted).reshape(B * N, -1))
+
+        sector_weight = sector_weight.view(B, N, sectors)
+        sector_vec_x = sector_vec_x.view(B, N, sectors)
+        sector_vec_y = sector_vec_y.view(B, N, sectors)
+        nonzero = sector_weight > 0.0
+        safe_weight = sector_weight.clamp_min(1e-9)
+        vec_x = sector_vec_x / safe_weight
+        vec_y = sector_vec_y / safe_weight
+        vec_norm = torch.sqrt(vec_x.square() + vec_y.square()).clamp_min(1e-9)
+        sector_dirs = torch.stack((vec_x / vec_norm, vec_y / vec_norm), dim=-1)
+        sector_dirs = torch.where(nonzero.unsqueeze(-1), sector_dirs, torch.zeros_like(sector_dirs))
+        sector_distances = torch.where(
+            nonzero,
+            (vec_norm / radius_tensor.view(B, 1, 1).clamp_min(1e-9)).clamp(0.0, 1.0),
+            torch.zeros_like(sector_weight),
+        )
+        if torch.is_tensor(ideal_cells):
+            ideal = ideal_cells.to(device=device, dtype=dtype)
+        else:
+            ideal = torch.as_tensor(ideal_cells, device=device, dtype=dtype)
+        if ideal.ndim == 0:
+            ideal = ideal.view(1, 1, 1)
+        else:
+            ideal = ideal.view(B, 1, 1)
+        sector_scores = torch.where(
+            nonzero,
+            (sector_weight / ideal.clamp_min(1e-9)).clamp(0.0, 1.0),
+            torch.zeros_like(sector_weight),
+        )
+
+        best_score, best_sector = sector_scores.max(dim=-1)
+        has_score = best_score > 1e-9
+        gather_idx = best_sector.unsqueeze(-1)
+        best_dirs = torch.gather(
+            sector_dirs,
+            2,
+            best_sector.view(B, N, 1, 1).expand(B, N, 1, 2),
+        ).squeeze(2)
+        best_dist = torch.gather(sector_distances, 2, gather_idx).squeeze(-1)
+        features = torch.cat(
+            (best_dirs, best_dist.unsqueeze(-1), best_score.unsqueeze(-1)),
+            dim=-1,
+        )
+        return torch.where(has_score.unsqueeze(-1), features, torch.zeros_like(features))
+
     def _uav_frontier_nearest_other_ownership(
         self,
         positions: Tensor,
@@ -8468,15 +8572,14 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp_min(1.0)
         global_ideal_cells = max(float(G * G) / float(sectors), 1.0)
 
-        local_features, _ = self._uav_frontier_best_sector_features(
+        local_features = self._uav_frontier_local_best_sector_features(
             positions,
             frontier_scores,
-            x_grid=x_grid,
-            y_grid=y_grid,
+            xs=x_grid.reshape(-1),
+            ys=y_grid.reshape(-1),
             sector_width=sector_width,
             sectors=sectors,
             radius=local_radius_sim,
-            distance_scale=local_radius_sim,
             ideal_cells=local_ideal_cells,
         )
         out[:, :, :4] = local_features

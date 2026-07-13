@@ -1301,6 +1301,74 @@ class PhysicalUnitConversionTests(unittest.TestCase):
             )
             self.assertTrue(torch.all(actual[1] == 0.0))
 
+    def test_local_frontier_patch_matches_full_grid_sector_calculation(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=64)
+        scenario._world.batch_dim = 2
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_mode = "local_global"
+        scenario.uav_frontier_source = "confidence"
+        scenario.uav_frontier_obs_radius_m = 4.5
+        scenario.uav_confidence_grid = torch.ones(2, 64, 64)
+        scenario.uav_confidence_grid[0, 2:16, 3:20] = 0.0
+        scenario.uav_confidence_grid[0, 30:44, 40:62] = 0.25
+        scenario.uav_confidence_grid[1, 5:26, 45:63] = 0.1
+        scenario.uav_confidence_grid[1, 40:58, 6:28] = 0.0
+        scenario.coverage_grid = torch.zeros(2, 64, 64, dtype=torch.bool)
+        scenario.land_cover_grid = torch.zeros(2, 64, 64, dtype=torch.long)
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.09, 0.11])
+        positions = torch.tensor(
+            [
+                [[-0.91, -0.85], [0.72, -0.66], [0.15, 0.82]],
+                [[-0.75, 0.62], [0.05, -0.34], [0.88, 0.76]],
+            ],
+            dtype=torch.float32,
+        )
+
+        sectors = int(scenario.uav_frontier_sectors)
+        _, _, x_grid, y_grid, _, _, _, cell_area = scenario._uav_grid_geometry(
+            positions.device,
+            positions.dtype,
+        )
+        sim_units_per_meter = scenario.terrain_sim_units_per_meter.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).clamp_min(1e-9)
+        local_radius_sim = (
+            float(scenario.uav_frontier_obs_radius_m) * sim_units_per_meter
+        ).clamp_min(1e-9)
+        frontier_scores = scenario._uav_frontier_cell_scores(
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        sector_width, _ = scenario._uav_sector_geometry(sectors, positions.device, positions.dtype)
+        local_ideal_cells = (
+            math.pi * local_radius_sim.square() / cell_area / float(sectors)
+        ).clamp_min(1.0)
+
+        expected, _ = scenario._uav_frontier_best_sector_features(
+            positions,
+            frontier_scores,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            sector_width=sector_width,
+            sectors=sectors,
+            radius=local_radius_sim,
+            distance_scale=local_radius_sim,
+            ideal_cells=local_ideal_cells,
+        )
+        actual = scenario._uav_frontier_local_best_sector_features(
+            positions,
+            frontier_scores,
+            xs=x_grid.reshape(-1),
+            ys=y_grid.reshape(-1),
+            sector_width=sector_width,
+            sectors=sectors,
+            radius=local_radius_sim,
+            ideal_cells=local_ideal_cells,
+        )
+
+        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+
     def test_coverage_local_global_frontier_matches_loop_reference(self):
         scenario = self._coverage_scenario(n_drones=3, grid_size=16)
         scenario._world.batch_dim = 2
