@@ -2300,7 +2300,7 @@ def _survivor_confidence_values(scenario: WildfireSearchScenario) -> list[float]
         return []
     with torch.no_grad():
         surv_pos = torch.stack([survivor.state.pos for survivor in scenario._survivors], dim=1)
-        gx, gy = scenario._positions_to_grid(surv_pos)
+        gx, gy = scenario._positions_to_grid(surv_pos, grid_size=int(confidence_grid.shape[-1]))
         values = confidence_grid[0, gy[0], gx[0]].detach().cpu().numpy().astype(float)
     return [float(value) for value in values.reshape(-1)]
 

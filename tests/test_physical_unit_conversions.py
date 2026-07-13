@@ -177,6 +177,28 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         self.assertEqual(tuple(value.shape), (1, 1))
 
+    def test_uav_diagnostics_survivor_confidence_uses_confidence_grid_size(self):
+        from scripts.diagnose_uav_happo import _survivor_confidence_values
+
+        scenario = self._coverage_scenario(n_drones=1, grid_size=64)
+        scenario.fire_grid_size = 128
+        scenario.n_survivors = 1
+        scenario.uav_confidence_grid = torch.arange(64 * 64, dtype=torch.float32).view(1, 64, 64)
+        scenario._survivors = [
+            types.SimpleNamespace(
+                state=types.SimpleNamespace(
+                    pos=torch.tensor([[0.75, 0.0]], dtype=torch.float32),
+                ),
+            ),
+        ]
+
+        values = _survivor_confidence_values(scenario)
+
+        gx, gy = scenario._positions_to_grid(scenario._survivors[0].state.pos.unsqueeze(1), grid_size=64)
+        expected = float(scenario.uav_confidence_grid[0, gy[0, 0], gx[0, 0]].item())
+        self.assertEqual(len(values), 1)
+        self.assertEqual(values[0], expected)
+
     def test_legacy_floor_sim_overrides_take_precedence(self):
         scenario = self._scenario()
         scenario.drone_min_footprint_sim_override = 0.15
