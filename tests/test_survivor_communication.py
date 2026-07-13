@@ -424,6 +424,42 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(disconnected_again[0, 0, 0]), 1.0)
         self.assertEqual(float(disconnected_again[0, 1, 0]), 1.0)
 
+    def test_decoy_uses_unified_candidate_slot_with_false_positive_status(self):
+        env = self._diagnostic_env(
+            n_drones=1,
+            n_ground=1,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            n_decoys=1,
+        )
+        scenario = env.scenario
+        drone, ground = env.agents
+        survivor = scenario._survivors[0]
+        decoy = scenario._decoys[0]
+        ground.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        drone.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        survivor.state.pos[:] = torch.tensor([[0.25, 0.0]])
+        decoy.state.pos[:] = torch.tensor([[0.0, 0.25]])
+        scenario.known_survivors_by_agent.zero_()
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        scenario.scouted_decoys[0, 0] = True
+        scenario.known_decoys_by_agent[0, 0, 0] = True
+
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        pending = scenario._survivor_message_observations(ground, keep).view(1, 2, 8)
+        torch.testing.assert_close(pending[0, :, 0], torch.ones(2))
+        self.assertEqual(float(pending[0, 0, 6]), 0.0)
+        self.assertEqual(float(pending[0, 0, 7]), 0.0)
+        self.assertEqual(float(pending[0, 1, 6]), 0.0)
+        self.assertEqual(float(pending[0, 1, 7]), 0.0)
+
+        scenario.dismissed_decoys[0, 0] = True
+        dismissed = scenario._survivor_message_observations(ground, keep).view(1, 2, 8)
+        self.assertEqual(float(dismissed[0, 1, 0]), 1.0)
+        self.assertEqual(float(dismissed[0, 1, 6]), 0.0)
+        self.assertEqual(float(dismissed[0, 1, 7]), 1.0)
+
     def test_ground_cannot_confirm_before_drone_scout(self):
         env = self._env(n_survivors=1)
         scenario = env.scenario

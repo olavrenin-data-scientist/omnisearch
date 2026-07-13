@@ -5161,9 +5161,6 @@ class WildfireSearchScenario(BaseScenario):
             self.known_decoys_by_agent[:, self.n_drones:] |= investigatable
             newly_dismissed = investigatable.any(dim=1) & ~self.dismissed_decoys
             self.dismissed_decoys = self.dismissed_decoys | newly_dismissed
-            if bool(newly_dismissed.any().item()):
-                clear = newly_dismissed.unsqueeze(1).expand_as(self.known_decoys_by_agent)
-                self.known_decoys_by_agent = self.known_decoys_by_agent & ~clear
             trips_per_ground = investigatable.float().sum(dim=2)
             decoy_penalty = trips_per_ground * self.r_decoy_pursuit_penalty
 
@@ -8096,8 +8093,6 @@ class WildfireSearchScenario(BaseScenario):
             neighbor,
             survivor_messages,
         ]
-        if self.n_decoys > 0:
-            parts.append(self._decoy_message_observations(agent, comms_keep))
         if self.coverage_obs_grid > 0:
             if self.ugv_zero_uav_search_observations and not agent.is_drone:
                 parts.append(torch.zeros(
@@ -8523,13 +8518,17 @@ class WildfireSearchScenario(BaseScenario):
         return keep
 
     def _survivor_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
-        """Encode known survivor candidates.
+        """Encode known survivor/false-positive candidates.
 
         Base feature order is [known, dx, dy, ux, uy, distance_norm, confirmed].
+        If decoys are enabled, the same candidate block adds
+        [status_false_positive] after confirmed. True survivors always have
+        status_false_positive=0; decoys flip to 1 only after UGV investigation.
         When survivor_assignment_obs is enabled, two flags are appended:
         [assigned_to_me, assigned_to_other_ugv].
         """
         agent_idx = self.world.agents.index(agent)
+        has_decoys = self.n_decoys > 0
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
 
@@ -8544,28 +8543,52 @@ class WildfireSearchScenario(BaseScenario):
 
         obs_known = local_known
         obs_confirmed = local_confirmed
+        obs_false_positive = torch.zeros_like(obs_known)
+        decoy_known = None
+        decoy_false_positive = None
+        if has_decoys:
+            local_decoy_known = self.known_decoys_by_agent[:, agent_idx]
+            team_decoy_known = self.known_decoys_by_agent.any(dim=1)
+            connected_decoys = comms_keep.expand_as(local_decoy_known)
+            decoy_known = torch.where(connected_decoys, team_decoy_known, local_decoy_known)
+            self.known_decoys_by_agent[:, agent_idx] = decoy_known
+            decoy_false_positive = decoy_known & self.dismissed_decoys
+
         assigned_to_me = None
         assigned_to_other = None
+        decoy_assigned_to_me = None
+        decoy_assigned_to_other = None
         if self.survivor_assignment_obs:
             assigned_to_me = torch.zeros_like(obs_known)
             assigned_to_other = torch.zeros_like(obs_known)
-            if self.n_ground > 0 and self.n_survivors > 0:
+            if has_decoys:
+                decoy_assigned_to_me = torch.zeros_like(decoy_known)
+                decoy_assigned_to_other = torch.zeros_like(decoy_known)
+            if self.n_ground > 0 and (self.n_survivors > 0 or has_decoys):
                 ground_slice = slice(self.n_drones, self.n_agents)
                 ground_known = self.known_survivors_by_agent[:, ground_slice]
                 ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
                 targetable = ground_known & ~ground_confirmed
                 survivor_pos_for_assignment = torch.stack([s.state.pos for s in self._survivors], dim=1)
+                assignment_pos = survivor_pos_for_assignment
+                if has_decoys:
+                    decoy_pos_for_assignment = torch.stack([d.state.pos for d in self._decoys], dim=1)
+                    ground_decoy_known = self.known_decoys_by_agent[:, ground_slice]
+                    decoy_targetable = ground_decoy_known & ~self.dismissed_decoys.unsqueeze(1)
+                    targetable = torch.cat((targetable, decoy_targetable), dim=2)
+                    assignment_pos = torch.cat((assignment_pos, decoy_pos_for_assignment), dim=1)
                 ground_pos = torch.stack([a.state.pos for a in self.world.agents[ground_slice]], dim=1)
                 assigned_idx, _assigned_dist = self._ugv_assigned_target_indices(
                     ground_pos,
-                    survivor_pos_for_assignment,
+                    assignment_pos,
                     targetable,
                 )
                 assigned_valid = assigned_idx >= 0
+                n_assignment_targets = targetable.shape[2]
                 assignment_mask = torch.zeros(
                     self.world.batch_dim,
                     self.n_ground,
-                    self.n_survivors,
+                    n_assignment_targets,
                     dtype=torch.bool,
                     device=obs_known.device,
                 )
@@ -8576,13 +8599,19 @@ class WildfireSearchScenario(BaseScenario):
                 )
                 if not agent.is_drone:
                     ground_index = agent_idx - self.n_drones
-                    assigned_to_me = assignment_mask[:, ground_index]
+                    assigned_to_me = assignment_mask[:, ground_index, :self.n_survivors]
                     if self.n_ground > 1:
                         other_mask = assignment_mask.clone()
                         other_mask[:, ground_index, :] = False
-                        assigned_to_other = other_mask.any(dim=1)
+                        assigned_to_other = other_mask.any(dim=1)[:, :self.n_survivors]
+                    if has_decoys:
+                        decoy_assigned_to_me = assignment_mask[:, ground_index, self.n_survivors:]
+                        if self.n_ground > 1:
+                            decoy_assigned_to_other = other_mask.any(dim=1)[:, self.n_survivors:]
                 else:
-                    assigned_to_other = assignment_mask.any(dim=1)
+                    assigned_to_other = assignment_mask.any(dim=1)[:, :self.n_survivors]
+                    if has_decoys:
+                        decoy_assigned_to_other = assignment_mask.any(dim=1)[:, self.n_survivors:]
 
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
         relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
@@ -8591,16 +8620,16 @@ class WildfireSearchScenario(BaseScenario):
         unit_direction = relative_pos / dist_sim.clamp_min(1e-9)
         distance_m = dist_sim / self.terrain_sim_units_per_meter.view(-1, 1, 1).clamp_min(1e-9)
         distance_norm = distance_m / self.survivor_message_distance_scale_m
-        features = torch.cat(
-            [
-                obs_known.unsqueeze(-1).float(),
-                relative_pos,
-                unit_direction,
-                distance_norm,
-                obs_confirmed.unsqueeze(-1).float(),
-            ],
-            dim=-1,
-        )
+        feature_parts = [
+            obs_known.unsqueeze(-1).float(),
+            relative_pos,
+            unit_direction,
+            distance_norm,
+            obs_confirmed.unsqueeze(-1).float(),
+        ]
+        if has_decoys:
+            feature_parts.append(obs_false_positive.unsqueeze(-1).float())
+        features = torch.cat(feature_parts, dim=-1)
         if self.survivor_assignment_obs:
             features = torch.cat(
                 [
@@ -8619,36 +8648,37 @@ class WildfireSearchScenario(BaseScenario):
                 dtype=features.dtype,
             )
             features = torch.cat((features, pad), dim=1)
-        return features.flatten(start_dim=1)
 
-    def _decoy_message_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
-        """Encode known decoy reports, mirroring survivor candidate messages."""
-        agent_idx = self.world.agents.index(agent)
-        local_known = self.known_decoys_by_agent[:, agent_idx]
+        if has_decoys:
+            decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
+            decoy_relative_pos = decoy_pos - agent.state.pos.unsqueeze(1)
+            decoy_relative_pos = decoy_relative_pos * decoy_known.unsqueeze(-1).float()
+            decoy_dist_sim = torch.linalg.norm(decoy_relative_pos, dim=-1, keepdim=True)
+            decoy_unit_direction = decoy_relative_pos / decoy_dist_sim.clamp_min(1e-9)
+            decoy_distance_m = decoy_dist_sim / self.terrain_sim_units_per_meter.view(-1, 1, 1).clamp_min(1e-9)
+            decoy_distance_norm = decoy_distance_m / self.survivor_message_distance_scale_m
+            decoy_features = torch.cat(
+                [
+                    decoy_known.unsqueeze(-1).float(),
+                    decoy_relative_pos,
+                    decoy_unit_direction,
+                    decoy_distance_norm,
+                    torch.zeros_like(decoy_known.unsqueeze(-1).float()),
+                    decoy_false_positive.unsqueeze(-1).float(),
+                ],
+                dim=-1,
+            )
+            if self.survivor_assignment_obs:
+                decoy_features = torch.cat(
+                    [
+                        decoy_features,
+                        decoy_assigned_to_me.unsqueeze(-1).float(),
+                        decoy_assigned_to_other.unsqueeze(-1).float(),
+                    ],
+                    dim=-1,
+                )
+            features = torch.cat((features, decoy_features), dim=1)
 
-        team_known = self.known_decoys_by_agent.any(dim=1)
-        connected = comms_keep.expand_as(local_known)
-        local_known = torch.where(connected, team_known, local_known)
-        local_known = local_known & ~self.dismissed_decoys
-        self.known_decoys_by_agent[:, agent_idx] = local_known
-
-        decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
-        relative_pos = decoy_pos - agent.state.pos.unsqueeze(1)
-        relative_pos = relative_pos * local_known.unsqueeze(-1).float()
-        dist_sim = torch.linalg.norm(relative_pos, dim=-1, keepdim=True)
-        unit_direction = relative_pos / dist_sim.clamp_min(1e-9)
-        distance_m = dist_sim / self.terrain_sim_units_per_meter.view(-1, 1, 1).clamp_min(1e-9)
-        distance_norm = distance_m / self.survivor_message_distance_scale_m
-        features = torch.cat(
-            [
-                local_known.unsqueeze(-1).float(),
-                relative_pos,
-                unit_direction,
-                distance_norm,
-                torch.zeros_like(local_known.unsqueeze(-1).float()),
-            ],
-            dim=-1,
-        )
         return features.flatten(start_dim=1)
 
     def _local_fire_density(self, agent: Agent) -> Tensor:

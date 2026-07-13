@@ -70,9 +70,6 @@ def _process_decoy_false_positives(self, agent_pos, confirm_range, device):
         self.known_decoys_by_agent[:, self.n_drones:] |= investigatable
         newly_dismissed = investigatable.any(dim=1) & ~self.dismissed_decoys
         self.dismissed_decoys = self.dismissed_decoys | newly_dismissed
-        if newly_dismissed.any():
-            clear = newly_dismissed.unsqueeze(1).expand_as(self.known_decoys_by_agent)
-            self.known_decoys_by_agent = self.known_decoys_by_agent & ~clear
         trips_per_ground = (investigatable.float().sum(dim=2))
         decoy_penalty = trips_per_ground * self.r_decoy_pursuit_penalty
 
@@ -158,8 +155,8 @@ class TestDecoyFalsePositives:
         assert bool(s.dismissed_decoys[0, 0])
         assert float(s.metric_false_positive_trips[0]) == 1.0
         assert pytest.approx(float(penalty[0, 0])) == -2.0
-        # Dismissed decoy is dropped from everyone's local knowledge.
-        assert not s.known_decoys_by_agent.any()
+        # Dismissed decoy stays known so observation can mark it as a false positive.
+        assert bool(s.known_decoys_by_agent[0, 1, 0])
 
     def test_dismissed_decoy_not_retriggered(self):
         """Once dismissed, a decoy is never scouted again."""
