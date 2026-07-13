@@ -1,0 +1,24 @@
+{
+  "model": "models/survivor_yolov8s_1280_v2.pt",
+  "conf": 0.15,
+  "imgsz": 1280,
+  "n_images": 271,
+  "per_type": {
+    "animal": {
+      "hits": 5,
+      "total": 134,
+      "fp_rate": 0.0373
+    },
+    "colorful_object": {
+      "hits": 18,
+      "total": 141,
+      "fp_rate": 0.1277
+    },
+    "vehicle": {
+      "hits": 1,
+      "total": 257,
+      "fp_rate": 0.0039
+    }
+  },
+  "other_background_fps": 61
+}

@@ -1,0 +1,52 @@
+{
+  "model": "models/survivor_yolov8s.pt",
+  "conf": 0.15,
+  "imgsz": 640,
+  "match_iou": 0.15,
+  "n_frames": 138,
+  "note": "Scenario effects synthesized onto clear val frames with detection/wildfire_effects.py; effects composited over the full frame including survivor pixels (slightly pessimistic for fire/burn scenarios).",
+  "scenarios": {
+    "clear": {
+      "recall": 0.6943,
+      "precision": 0.6525,
+      "tp": 184,
+      "gt": 265,
+      "detections": 282
+    },
+    "light_smoke": {
+      "recall": 0.6717,
+      "precision": 0.7063,
+      "tp": 178,
+      "gt": 265,
+      "detections": 252
+    },
+    "heavy_smoke": {
+      "recall": 0.6717,
+      "precision": 0.7063,
+      "tp": 178,
+      "gt": 265,
+      "detections": 252
+    },
+    "active_fire": {
+      "recall": 0.5849,
+      "precision": 0.6739,
+      "tp": 155,
+      "gt": 265,
+      "detections": 230
+    },
+    "burned_ground": {
+      "recall": 0.5019,
+      "precision": 0.7964,
+      "tp": 133,
+      "gt": 265,
+      "detections": 167
+    },
+    "mixed": {
+      "recall": 0.6075,
+      "precision": 0.688,
+      "tp": 161,
+      "gt": 265,
+      "detections": 234
+    }
+  }
+}

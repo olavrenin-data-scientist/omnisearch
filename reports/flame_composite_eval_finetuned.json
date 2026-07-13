@@ -1,0 +1,505 @@
+{
+  "dataset": "FLAME3 real-smoke composites (230 frames, 483 people)",
+  "model": "models/survivor_heridal_yolov8s_1280.pt",
+  "match_iou": 0.15,
+  "results": {
+    "full_1280": {
+      "conf_0.05": {
+        "recall": 0.2919,
+        "recall_ci95": [
+          0.2531,
+          0.334
+        ],
+        "precision": 0.2108,
+        "tp": 141,
+        "n_gt": 483,
+        "fp_total": 528,
+        "fp_per_negative_frame": 2.975,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.3019,
+            "ci95": [
+              0.254,
+              0.3545
+            ],
+            "tp": 96,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.2734,
+            "ci95": [
+              0.2061,
+              0.3528
+            ],
+            "tp": 38,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.2692,
+            "ci95": [
+              0.137,
+              0.4608
+            ],
+            "tp": 7,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.15": {
+        "recall": 0.1822,
+        "recall_ci95": [
+          0.1503,
+          0.2191
+        ],
+        "precision": 0.2486,
+        "tp": 88,
+        "n_gt": 483,
+        "fp_total": 266,
+        "fp_per_negative_frame": 1.575,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.1981,
+            "ci95": [
+              0.158,
+              0.2454
+            ],
+            "tp": 63,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.1655,
+            "ci95": [
+              0.1129,
+              0.2361
+            ],
+            "tp": 23,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.0769,
+            "ci95": [
+              0.0214,
+              0.2414
+            ],
+            "tp": 2,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.35": {
+        "recall": 0.0973,
+        "recall_ci95": [
+          0.074,
+          0.127
+        ],
+        "precision": 0.25,
+        "tp": 47,
+        "n_gt": 483,
+        "fp_total": 141,
+        "fp_per_negative_frame": 0.95,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.1101,
+            "ci95": [
+              0.0802,
+              0.1492
+            ],
+            "tp": 35,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.0791,
+            "ci95": [
+              0.0448,
+              0.1362
+            ],
+            "tp": 11,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.0385,
+            "ci95": [
+              0.0068,
+              0.1889
+            ],
+            "tp": 1,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.5": {
+        "recall": 0.0663,
+        "recall_ci95": [
+          0.0473,
+          0.092
+        ],
+        "precision": 0.2581,
+        "tp": 32,
+        "n_gt": 483,
+        "fp_total": 92,
+        "fp_per_negative_frame": 0.525,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.0755,
+            "ci95": [
+              0.0512,
+              0.1098
+            ],
+            "tp": 24,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.0504,
+            "ci95": [
+              0.0246,
+              0.1003
+            ],
+            "tp": 7,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.0385,
+            "ci95": [
+              0.0068,
+              0.1889
+            ],
+            "tp": 1,
+            "n": 26
+          }
+        }
+      }
+    },
+    "tiled_2x2_1280": {
+      "conf_0.05": {
+        "recall": 0.5859,
+        "recall_ci95": [
+          0.5415,
+          0.629
+        ],
+        "precision": 0.223,
+        "tp": 283,
+        "n_gt": 483,
+        "fp_total": 986,
+        "fp_per_negative_frame": 4.75,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.5881,
+            "ci95": [
+              0.5332,
+              0.6408
+            ],
+            "tp": 187,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.5396,
+            "ci95": [
+              0.4568,
+              0.6203
+            ],
+            "tp": 75,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.8077,
+            "ci95": [
+              0.6212,
+              0.9149
+            ],
+            "tp": 21,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.15": {
+        "recall": 0.4928,
+        "recall_ci95": [
+          0.4484,
+          0.5372
+        ],
+        "precision": 0.3229,
+        "tp": 238,
+        "n_gt": 483,
+        "fp_total": 499,
+        "fp_per_negative_frame": 2.525,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.4969,
+            "ci95": [
+              0.4423,
+              0.5515
+            ],
+            "tp": 158,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.4604,
+            "ci95": [
+              0.3797,
+              0.5432
+            ],
+            "tp": 64,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.6154,
+            "ci95": [
+              0.4253,
+              0.7757
+            ],
+            "tp": 16,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.35": {
+        "recall": 0.381,
+        "recall_ci95": [
+          0.3387,
+          0.425
+        ],
+        "precision": 0.4412,
+        "tp": 184,
+        "n_gt": 483,
+        "fp_total": 233,
+        "fp_per_negative_frame": 1.225,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.3774,
+            "ci95": [
+              0.3258,
+              0.4318
+            ],
+            "tp": 120,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.3597,
+            "ci95": [
+              0.2847,
+              0.4423
+            ],
+            "tp": 50,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.5385,
+            "ci95": [
+              0.3546,
+              0.7124
+            ],
+            "tp": 14,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.5": {
+        "recall": 0.2836,
+        "recall_ci95": [
+          0.2453,
+          0.3254
+        ],
+        "precision": 0.4708,
+        "tp": 137,
+        "n_gt": 483,
+        "fp_total": 154,
+        "fp_per_negative_frame": 0.875,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.2673,
+            "ci95": [
+              0.2216,
+              0.3185
+            ],
+            "tp": 85,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.3022,
+            "ci95": [
+              0.232,
+              0.383
+            ],
+            "tp": 42,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.3846,
+            "ci95": [
+              0.2243,
+              0.5747
+            ],
+            "tp": 10,
+            "n": 26
+          }
+        }
+      }
+    },
+    "tiled_4x4_1280": {
+      "conf_0.05": {
+        "recall": 0.8137,
+        "recall_ci95": [
+          0.7765,
+          0.8459
+        ],
+        "precision": 0.146,
+        "tp": 393,
+        "n_gt": 483,
+        "fp_total": 2299,
+        "fp_per_negative_frame": 11.275,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.8082,
+            "ci95": [
+              0.7613,
+              0.8477
+            ],
+            "tp": 257,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.8058,
+            "ci95": [
+              0.7321,
+              0.8629
+            ],
+            "tp": 112,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.9231,
+            "ci95": [
+              0.7586,
+              0.9786
+            ],
+            "tp": 24,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.15": {
+        "recall": 0.7536,
+        "recall_ci95": [
+          0.7133,
+          0.79
+        ],
+        "precision": 0.2362,
+        "tp": 364,
+        "n_gt": 483,
+        "fp_total": 1177,
+        "fp_per_negative_frame": 5.775,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.739,
+            "ci95": [
+              0.6881,
+              0.7842
+            ],
+            "tp": 235,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.7698,
+            "ci95": [
+              0.6931,
+              0.8319
+            ],
+            "tp": 107,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.8462,
+            "ci95": [
+              0.6647,
+              0.9385
+            ],
+            "tp": 22,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.35": {
+        "recall": 0.6853,
+        "recall_ci95": [
+          0.6426,
+          0.7251
+        ],
+        "precision": 0.3625,
+        "tp": 331,
+        "n_gt": 483,
+        "fp_total": 582,
+        "fp_per_negative_frame": 2.9,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.6824,
+            "ci95": [
+              0.6293,
+              0.7311
+            ],
+            "tp": 217,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.6763,
+            "ci95": [
+              0.5946,
+              0.7484
+            ],
+            "tp": 94,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.7692,
+            "ci95": [
+              0.5795,
+              0.8897
+            ],
+            "tp": 20,
+            "n": 26
+          }
+        }
+      },
+      "conf_0.5": {
+        "recall": 0.6377,
+        "recall_ci95": [
+          0.5939,
+          0.6793
+        ],
+        "precision": 0.4731,
+        "tp": 308,
+        "n_gt": 483,
+        "fp_total": 343,
+        "fp_per_negative_frame": 1.9,
+        "by_smoke_band": {
+          "clear": {
+            "recall": 0.6352,
+            "ci95": [
+              0.581,
+              0.6862
+            ],
+            "tp": 202,
+            "n": 318
+          },
+          "light": {
+            "recall": 0.6187,
+            "ci95": [
+              0.5358,
+              0.6952
+            ],
+            "tp": 86,
+            "n": 139
+          },
+          "heavy": {
+            "recall": 0.7692,
+            "ci95": [
+              0.5795,
+              0.8897
+            ],
+            "tp": 20,
+            "n": 26
+          }
+        }
+      }
+    }
+  }
+}
