@@ -67,6 +67,10 @@ class PersonDetector:
         NMS IoU threshold.
     device :
         ``"cpu"``, ``"cuda"``, ``"mps"``, or ``None`` to let Ultralytics decide.
+    augment :
+        Enable test-time augmentation (TTA). Runs inference on flipped/scaled
+        versions and merges detections. Improves recall by +2-5% at the cost
+        of ~3x inference time.
     """
 
     def __init__(
@@ -75,6 +79,7 @@ class PersonDetector:
         conf: float = 0.25,
         iou: float = 0.7,
         device: str | None = None,
+        augment: bool = False,
     ):
         self.model = YOLO(model_name)
         # Sanity check: class 0 is 'person'. If not, the model isn't COCO-pretrained.
@@ -86,16 +91,20 @@ class PersonDetector:
         self.conf = conf
         self.iou = iou
         self.device = device
+        self.augment = bool(augment)
 
     def detect(self, image: ImageLike) -> PersonResult:
         # Ultralytics accepts PIL, ndarray, path, URL — pass through directly.
         # `classes=[PERSON_CLASS_ID]` filters to person only.
+        # When augment=True, Ultralytics applies test-time augmentation (TTA):
+        # flips and multi-scale inference with merged NMS results.
         results = self.model.predict(
             source=image,
             classes=[PERSON_CLASS_ID],
             conf=self.conf,
             iou=self.iou,
             device=self.device,
+            augment=self.augment,
             verbose=False,
         )
 

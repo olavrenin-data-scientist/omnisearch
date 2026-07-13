@@ -87,11 +87,16 @@ def test_survivor_detected_under_smoke():
     det.detector_backend = "yolo"; det.person_model_name = str(_FINETUNED); det.person_conf = 0.2
     det.person_iou = 0.6; det.person_imgsz = 1280; det.person_tiled = True; det.person_tile_grid = 2
     det.person_tile_overlap = 0.25; det.person_match_iou = 0.15; det.person_device = None
+    det.person_augment = False
     det._person_detector = None; det.image_size = SZ
 
     asset = Image.open(sorted(glob.glob(str(ROOT / "data/cv_assets/sard_grabcut/*.png")))[0]).convert("RGBA")
     bg = Image.fromarray(np.random.default_rng(2).integers(70, 120, (SZ, SZ, 3)).astype("uint8")).convert("RGB")
-    surv = 150; h = int(surv * asset.height / asset.width)
+    # 96px on a 1024px frame matches the largest realistic survivor size at the
+    # lowest flight level (20m, 65 deg FOV: 2.4m / 25.5m * 1024 ~ 96px). The model
+    # is trained altitude-aware (24-60px at 640px), so unrealistically large
+    # sizes (e.g. the old 150px) are out of distribution and must not be tested.
+    surv = 96; h = int(surv * asset.height / asset.width)
     s = asset.resize((surv, h), Image.Resampling.LANCZOS)
     bg.paste(s, (SZ // 2 - surv // 2, SZ // 2 - h // 2), s)
     gt = (SZ // 2 - surv // 2, SZ // 2 - h // 2, SZ // 2 + surv // 2, SZ // 2 + h // 2)

@@ -100,8 +100,19 @@ class SimulationCvAdapter:
         person_tile_overlap: float = 0.2,
         person_match_iou: float = 0.15,
         person_device: str | None = None,
+        person_augment: bool = False,
+        adaptive_conf: bool = False,
+        adaptive_conf_high_alt_m: float = 50.0,
+        adaptive_conf_low_alt_m: float = 20.0,
+        adaptive_conf_high_alt_threshold: float = 0.20,
+        adaptive_conf_low_alt_threshold: float = 0.45,
         render_wildfire_effects: bool = True,
         wildfire_effect_seed: int | None = None,
+        detection_mode: str = "cv",
+        thermal_seed: int | None = None,
+        thermal_detector: str = "physics",
+        camera_tilt_deg: float = 0.0,
+        person_height_m: float = 1.75,
         seed: int = 7,
         root: str | Path | None = None,
     ):
@@ -112,6 +123,13 @@ class SimulationCvAdapter:
         self.survivor_width_m = float(survivor_width_m)
         self.survivor_height_m = float(survivor_height_m)
         self.survivor_rotation_deg = float(survivor_rotation_deg)
+        # Oblique (side-angle) camera: tilt in degrees from nadir (0 = straight
+        # down). When tilted, survivors appear taller (partially upright) —
+        # matches the oblique training data from train_survivor_detector.py.
+        self.camera_tilt_deg = float(camera_tilt_deg)
+        if not 0.0 <= self.camera_tilt_deg <= 60.0:
+            raise ValueError(f"camera_tilt_deg must be in [0, 60], got {camera_tilt_deg}")
+        self.person_height_m = float(person_height_m)
         self.asset_resample = asset_resample
         self.render_wildfire_effects = bool(render_wildfire_effects)
         self.wildfire_effect_config = WildfireEffectConfig(
@@ -161,14 +179,60 @@ class SimulationCvAdapter:
         self.person_tile_overlap = min(max(float(person_tile_overlap), 0.0), 0.9)
         self.person_match_iou = float(person_match_iou)
         self.person_device = person_device
+        self.person_augment = bool(person_augment)
+        self.adaptive_conf = bool(adaptive_conf)
+        self.adaptive_conf_high_alt_m = float(adaptive_conf_high_alt_m)
+        self.adaptive_conf_low_alt_m = float(adaptive_conf_low_alt_m)
+        self.adaptive_conf_high_alt_threshold = float(adaptive_conf_high_alt_threshold)
+        self.adaptive_conf_low_alt_threshold = float(adaptive_conf_low_alt_threshold)
         self._person_detector = None  # lazily built on first yolo detection
-        # Ground-robot confirmation reuses the main detector. Empirically the
-        # stronger drone model (yolov8s) beats a dedicated nano model trained on
-        # large survivors — model capacity matters more than size-specialization,
-        # and the drone model's training already overlaps the close-range scale.
-        # A separate close-range model can still be supplied via person_model.
+
+        # UGV-specific detectors for ground confirmation. When trained weights
+        # exist (from scripts/train_ugv_detector.py), use them for the appropriate
+        # camera mode instead of the drone aerial model.
+        self.ugv_front_model_name = self._resolve_ugv_model("front")
+        self.ugv_mast_model_name = self._resolve_ugv_model("mast")
+        self._ugv_front_detector = None
+        self._ugv_mast_detector = None
+
+        # Legacy fallback: if no UGV-specific models exist, ground confirmation
+        # uses the drone model (previous behavior).
         self.ground_person_model_name = self.person_model_name
         self._ground_detector = None
+
+        # Multi-object tracker for temporal consistency across frames.
+        # Requires min_hits consecutive detections before confirming a track,
+        # which suppresses transient false positives.
+        self._tracker = None
+        self._tracker_enabled = False
+
+        # Detection mode: "cv" (pure CV, default), "thermal" (simulated TIR only),
+        # "cv+thermal" (sensor fusion), "motion" (frame differencing only),
+        # "cv+motion" (CV with motion confirmation/boost).
+        self.detection_mode = str(detection_mode).lower()
+        _valid_modes = ("cv", "thermal", "cv+thermal", "motion", "cv+motion")
+        if self.detection_mode not in _valid_modes:
+            raise ValueError(f"detection_mode must be one of {_valid_modes}, got {detection_mode!r}")
+        self._thermal_model = None
+        self._thermal_seed = int(thermal_seed if thermal_seed is not None else seed)
+        self._motion_detector = None
+
+        # Thermal detector backend: "physics" (closed-form probability model,
+        # default) or "yolo" (render a simulated TIR frame and run the trained
+        # thermal YOLOv8 from scripts/generate_thermal_dataset.py on it).
+        self.thermal_detector = str(thermal_detector).lower()
+        if self.thermal_detector not in ("physics", "yolo"):
+            raise ValueError(f"thermal_detector must be 'physics' or 'yolo', got {thermal_detector!r}")
+        self._thermal_yolo = None
+        self.thermal_model_name = None
+        if self.thermal_detector == "yolo":
+            path = self.root / "models" / "thermal_yolov8n.pt"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"thermal_detector='yolo' requires trained weights at {path}. "
+                    "Generate the dataset (scripts/generate_thermal_dataset.py) and train first."
+                )
+            self.thermal_model_name = str(path)
 
         terrain = np.load(self.terrain_cache_path, allow_pickle=False)
         try:
@@ -220,6 +284,217 @@ class SimulationCvAdapter:
         self._asset_order = list(range(len(self.human_assets)))
         self.rng.shuffle(self._asset_order)
 
+    def enable_tracking(
+        self,
+        *,
+        min_hits: int = 2,
+        lost_track_buffer: int = 5,
+        track_activation_threshold: float = 0.25,
+    ):
+        """Enable multi-object tracking for temporal FP suppression.
+
+        When enabled, detections from `render_and_detect` are passed through
+        ByteTrack. Only tracks with `min_hits` consecutive detections are
+        reported as confirmed, filtering out transient false positives.
+        """
+        from .tracker import SurvivorTracker
+        self._tracker = SurvivorTracker(
+            min_hits=min_hits,
+            lost_track_buffer=lost_track_buffer,
+            track_activation_threshold=track_activation_threshold,
+        )
+        self._tracker_enabled = True
+
+    def disable_tracking(self):
+        """Disable tracking and reset tracker state."""
+        self._tracker_enabled = False
+        if self._tracker is not None:
+            self._tracker.reset()
+
+    def reset_tracker(self):
+        """Reset tracker state (call between episodes)."""
+        if self._tracker is not None:
+            self._tracker.reset()
+
+    def _get_thermal_model(self):
+        """Lazily initialize the thermal sensor model."""
+        if self._thermal_model is None:
+            from .thermal_model import ThermalSensorModel, ThermalSensorConfig
+            self._thermal_model = ThermalSensorModel(
+                ThermalSensorConfig(seed=self._thermal_seed)
+            )
+        return self._thermal_model
+
+    def _run_thermal_detection(
+        self,
+        *,
+        drone: "SimDrone",
+        survivors: list,
+        wildfire_state: "SimWildfireState | None",
+        altitude_m: float,
+    ) -> list[dict]:
+        """Run simulated thermal detection on the current frame.
+
+        Two backends:
+          - "physics" (default): closed-form probability model on sim state.
+          - "yolo": render a simulated TIR frame and run the trained thermal
+            YOLOv8 (models/thermal_yolov8n.pt) over it.
+        """
+        if self.thermal_detector == "yolo":
+            return self._run_thermal_yolo_detection(
+                drone=drone,
+                survivors=survivors,
+                wildfire_state=wildfire_state,
+                altitude_m=altitude_m,
+            )
+        thermal = self._get_thermal_model()
+        survivor_dicts = [
+            {"index": s.index, "world_xy": s.world_xy} for s in survivors
+        ]
+        return thermal.detect_survivors(
+            drone_xy=drone.world_xy,
+            drone_altitude_m=altitude_m,
+            fov_deg=self.fov_deg,
+            survivors=survivor_dicts,
+            fire_grid=wildfire_state.fire_grid if wildfire_state else None,
+            fire_intensity_grid=wildfire_state.fire_intensity_grid if wildfire_state else None,
+            burned_grid=wildfire_state.burned_grid if wildfire_state else None,
+            smoke_grid=wildfire_state.smoke_grid if wildfire_state else None,
+            sim_units_per_meter=self.sim_units_per_meter,
+            grid_size=self.grid_size,
+        )
+
+    def _get_thermal_yolo(self):
+        """Lazily construct the thermal-image YOLOv8 detector."""
+        if self._thermal_yolo is None:
+            from .person_detector import PersonDetector
+            self._thermal_yolo = PersonDetector(
+                model_name=self.thermal_model_name,
+                conf=self.person_conf,
+                iou=self.person_iou,
+                device=self.person_device,
+            )
+        return self._thermal_yolo
+
+    def _run_thermal_yolo_detection(
+        self,
+        *,
+        drone: "SimDrone",
+        survivors: list,
+        wildfire_state: "SimWildfireState | None",
+        altitude_m: float,
+    ) -> list[dict]:
+        """Render a simulated TIR frame and run the trained thermal YOLO on it."""
+        from .thermal_renderer import render_thermal_frame
+
+        footprint_m = 2.0 * altitude_m * math.tan(math.radians(self.fov_deg) / 2.0)
+        footprint_world = footprint_m * self.sim_units_per_meter
+        body_radius_px = max(4, int(12 * (20.0 / max(altitude_m, 1.0))))
+
+        frame = render_thermal_frame(
+            image_size=self.image_size,
+            drone_xy=drone.world_xy,
+            footprint_world=footprint_world,
+            survivors=[{"world_xy": s.world_xy} for s in survivors],
+            fire_intensity_grid=wildfire_state.fire_intensity_grid if wildfire_state else None,
+            burned_grid=wildfire_state.burned_grid if wildfire_state else None,
+            grid_size=self.grid_size,
+            body_radius_px=body_radius_px,
+            seed=self._thermal_seed,
+        ).convert("RGB")
+
+        result = self._get_thermal_yolo().detect(frame)
+
+        # Convert YOLO boxes into thermal detection records (same schema as
+        # the physics model, so fusion and export work unchanged).
+        records = []
+        matched_indices: set[int] = set()
+        match_radius_world = footprint_world * 0.08
+        for det in result.detections:
+            box = det.box
+            cx = (box[0] + box[2]) * 0.5
+            cy = (box[1] + box[3]) * 0.5
+            rel = self._pixel_center_to_relative_world((cx, cy), footprint_world=footprint_world)
+            est_world = (drone.world_xy[0] + rel[0], drone.world_xy[1] + rel[1])
+            # Match to the nearest ground-truth survivor within radius.
+            best_idx, best_dist = None, match_radius_world
+            for s in survivors:
+                d = math.hypot(s.world_xy[0] - est_world[0], s.world_xy[1] - est_world[1])
+                if d < best_dist:
+                    best_idx, best_dist = s.index, d
+            if best_idx is not None:
+                matched_indices.add(best_idx)
+            records.append({
+                "survivor_index": best_idx,
+                "detected": True,
+                "confidence": round(float(det.confidence), 4),
+                "estimated_world_xy": [round(est_world[0], 6), round(est_world[1], 6)],
+                "bbox_xyxy": [int(v) for v in box],
+                "is_false_positive": best_idx is None,
+                "sensor_backend": "thermal_yolo",
+            })
+        # Survivors the thermal YOLO missed: emit non-detections so downstream
+        # consumers see the full ground-truth accounting like the physics model.
+        for s in survivors:
+            if s.index not in matched_indices:
+                records.append({
+                    "survivor_index": s.index,
+                    "detected": False,
+                    "confidence": 0.0,
+                    "sensor_backend": "thermal_yolo",
+                })
+        return records
+
+    def _get_motion_detector(self):
+        """Lazily initialize the motion detector."""
+        if self._motion_detector is None:
+            from .motion_detector import MotionDetector
+            self._motion_detector = MotionDetector()
+        return self._motion_detector
+
+    def _run_motion_detection(self, view: "Image.Image", drone_xy, footprint_world, smoke_load: float = 0.0) -> list[dict]:
+        """Run motion detection on the current rendered frame."""
+        motion = self._get_motion_detector()
+        return motion.detect(
+            view,
+            drone_xy=drone_xy,
+            footprint_world=footprint_world,
+            image_size=self.image_size,
+            smoke_load=smoke_load,
+        )
+
+    def _altitude_adjusted_conf(self, altitude_m: float) -> float:
+        """Compute confidence threshold interpolated by altitude.
+
+        At high altitude (small survivors, low YOLO confidence), use a lower
+        threshold to maintain recall. At low altitude (large, high-confidence
+        detections), use a higher threshold to suppress false positives.
+        """
+        if not self.adaptive_conf:
+            return self.person_conf
+        low_alt = self.adaptive_conf_low_alt_m
+        high_alt = self.adaptive_conf_high_alt_m
+        low_thresh = self.adaptive_conf_low_alt_threshold
+        high_thresh = self.adaptive_conf_high_alt_threshold
+        if altitude_m <= low_alt:
+            return low_thresh
+        if altitude_m >= high_alt:
+            return high_thresh
+        t = (altitude_m - low_alt) / (high_alt - low_alt)
+        return low_thresh + t * (high_thresh - low_thresh)
+
+    def _resolve_ugv_model(self, camera: str) -> str | None:
+        """Find trained UGV model weights for the given camera mode."""
+        candidates = {
+            "front": ["ugv_front_yolov8s.pt", "ugv_front_yolov8n.pt"],
+            "mast": ["ugv_mast_yolov8n.pt", "ugv_mast_yolov8s.pt"],
+        }
+        for name in candidates.get(camera, []):
+            path = self.root / "models" / name
+            if path.exists():
+                return str(path)
+        return None
+
     def _get_person_detector(self):
         """Lazily construct the YOLOv8 person detector on first use."""
         if self._person_detector is None:
@@ -229,8 +504,33 @@ class SimulationCvAdapter:
                 conf=self.person_conf,
                 iou=self.person_iou,
                 device=self.person_device,
+                augment=self.person_augment,
             )
         return self._person_detector
+
+    def _get_ugv_detector(self, camera: str):
+        """Lazily construct UGV-specific detector for front or mast camera."""
+        from .person_detector import PersonDetector
+        if camera == "front":
+            if self._ugv_front_detector is None and self.ugv_front_model_name:
+                self._ugv_front_detector = PersonDetector(
+                    model_name=self.ugv_front_model_name,
+                    conf=self.person_conf,
+                    iou=self.person_iou,
+                    device=self.person_device,
+                    augment=self.person_augment,
+                )
+            return self._ugv_front_detector
+        else:
+            if self._ugv_mast_detector is None and self.ugv_mast_model_name:
+                self._ugv_mast_detector = PersonDetector(
+                    model_name=self.ugv_mast_model_name,
+                    conf=self.person_conf,
+                    iou=self.person_iou,
+                    device=self.person_device,
+                    augment=self.person_augment,
+                )
+            return self._ugv_mast_detector
 
     @staticmethod
     def _iou(a, b) -> float:
@@ -274,7 +574,8 @@ class SimulationCvAdapter:
         if not self.person_tiled or self.person_tile_grid <= 1:
             res = detector.model.predict(
                 source=view, classes=[0], conf=self.person_conf, iou=self.person_iou,
-                imgsz=self.person_imgsz, device=self.person_device, verbose=False,
+                imgsz=self.person_imgsz, device=self.person_device,
+                augment=self.person_augment, verbose=False,
             )
             r = res[0] if res else None
             if r is not None and r.boxes is not None and len(r.boxes):
@@ -292,7 +593,8 @@ class SimulationCvAdapter:
                     tile = view.crop((x0, y0, x1, y1))
                     res = detector.model.predict(
                         source=tile, classes=[0], conf=self.person_conf, iou=self.person_iou,
-                        imgsz=self.person_imgsz, device=self.person_device, verbose=False,
+                        imgsz=self.person_imgsz, device=self.person_device,
+                        augment=self.person_augment, verbose=False,
                     )
                     r = res[0] if res else None
                     if r is None or r.boxes is None or not len(r.boxes):
@@ -302,8 +604,21 @@ class SimulationCvAdapter:
                         confs.append(float(c))
 
         merged = self._nms(boxes, confs, self.person_iou)
-        merged.sort(key=lambda bc: bc[1], reverse=True)
-        return merged
+        # Clip every box to the actual image boundary.  YOLO can return slightly
+        # out-of-bounds coordinates due to letter-boxing artefacts in the resize
+        # path, and tiled inference adds per-tile offsets that can push boxes past
+        # the right/bottom edge.  Drop degenerate boxes that collapse to zero area
+        # after clipping rather than passing them to the IoU matcher.
+        clipped: list[tuple[tuple, float]] = []
+        for (bx1, by1, bx2, by2), c in merged:
+            bx1 = max(0.0, min(float(W), bx1))
+            by1 = max(0.0, min(float(H), by1))
+            bx2 = max(0.0, min(float(W), bx2))
+            by2 = max(0.0, min(float(H), by2))
+            if bx2 > bx1 and by2 > by1:
+                clipped.append(((bx1, by1, bx2, by2), c))
+        clipped.sort(key=lambda bc: bc[1], reverse=True)
+        return clipped
 
     def _match_truth_index(self, box, truth_boxes, truth):
         """Return the survivor_index of the best-overlapping ground-truth box."""
@@ -374,7 +689,8 @@ class SimulationCvAdapter:
 
         truth: list[dict] = []
         truth_boxes: list[tuple[int, int, int, int]] = []
-        for survivor in survivors:
+        survivors_list = list(survivors)
+        for survivor in survivors_list:
             dx_world = survivor.world_xy[0] - drone.world_xy[0]
             dy_world = survivor.world_xy[1] - drone.world_xy[1]
             bbox = self._survivor_box(dx_world=dx_world, dy_world=dy_world, footprint_world=footprint_world)
@@ -408,7 +724,11 @@ class SimulationCvAdapter:
         # Build detections either from the renderer ground truth (preliminary
         # stub) or by running real computer vision over the rendered crop.
         if self.detector_backend == "yolo":
+            # Apply adaptive confidence threshold based on drone altitude.
+            prev_conf = self.person_conf
+            self.person_conf = self._altitude_adjusted_conf(altitude_m)
             cv_boxes = self._detect_people_cv(view)
+            self.person_conf = prev_conf
             detection_records = []
             for box, conf in cv_boxes:
                 cx = (box[0] + box[2]) * 0.5
@@ -458,24 +778,141 @@ class SimulationCvAdapter:
                     }
                 )
 
+        # Thermal / fusion detection modes.
+        # In "thermal" mode, CV detections are replaced by thermal results.
+        # In "cv+thermal" mode, both run and results are fused.
+        thermal_detections = None
+        if self.detection_mode in ("thermal", "cv+thermal"):
+            thermal_detections = self._run_thermal_detection(
+                drone=drone,
+                survivors=list(survivors_list),
+                wildfire_state=wildfire_state,
+                altitude_m=altitude_m,
+            )
+
+        if self.detection_mode == "thermal":
+            # Replace CV detections entirely with thermal results
+            detection_records = []
+            for td in thermal_detections:
+                if td.get("detected", False):
+                    detection_records.append({
+                        "class_name": "person",
+                        "confidence": td.get("confidence", 0.5),
+                        "bbox_xyxy": [0, 0, 0, 0],  # No pixel box for thermal
+                        "center_px": [self.image_size / 2, self.image_size / 2],
+                        "estimated_world_xy": td.get("estimated_world_xy", td.get("true_world_xy")),
+                        "matched_survivor_index": td.get("survivor_index"),
+                        "sensor": "thermal",
+                        "delta_t_k": td.get("delta_t_k"),
+                        "thermal_crossover": td.get("thermal_crossover", False),
+                        "detection_probability": td.get("detection_probability"),
+                    })
+        elif self.detection_mode == "cv+thermal":
+            from .thermal_model import fuse_cv_thermal
+            fused = fuse_cv_thermal(
+                cv_detections=detection_records,
+                thermal_detections=thermal_detections,
+                fusion_mode="union",
+            )
+            detection_records = fused
+
+        # Motion detection modes
+        motion_detections = None
+        if self.detection_mode in ("motion", "cv+motion"):
+            smoke_load = 0.0
+            if wildfire_state is not None and wildfire_state.smoke_grid is not None:
+                grid_h, grid_w = wildfire_state.smoke_grid.shape
+                half = footprint_world * 0.5
+                cx, cy = drone.world_xy
+                c0 = max(0, int(np.floor((cx - half + 1.0) * 0.5 * grid_w)))
+                c1 = min(grid_w, int(np.ceil((cx + half + 1.0) * 0.5 * grid_w)))
+                r0 = max(0, int(np.floor((cy - half + 1.0) * 0.5 * grid_h)))
+                r1 = min(grid_h, int(np.ceil((cy + half + 1.0) * 0.5 * grid_h)))
+                smoke_patch = wildfire_state.smoke_grid[r0:r1, c0:c1]
+                if smoke_patch.size > 0:
+                    smoke_load = float(smoke_patch.mean())
+
+            motion_detections = self._run_motion_detection(
+                view, drone.world_xy, footprint_world, smoke_load=smoke_load
+            )
+
+        if self.detection_mode == "motion":
+            # Replace CV detections with motion-only results
+            detection_records = []
+            for md in (motion_detections or []):
+                detection_records.append({
+                    "class_name": "person",
+                    "confidence": md["confidence"],
+                    "bbox_xyxy": md["bbox_xyxy"],
+                    "center_px": md["center_px"],
+                    "matched_survivor_index": None,
+                    "sensor": "motion",
+                    "area_px": md.get("area_px"),
+                    "detection_probability": md.get("detection_probability"),
+                })
+        elif self.detection_mode == "cv+motion":
+            from .motion_detector import fuse_cv_motion
+            fused = fuse_cv_motion(
+                cv_detections=detection_records,
+                motion_detections=motion_detections or [],
+                fusion_mode="boost",
+            )
+            detection_records = fused
+
+        # Apply multi-object tracking if enabled. Tracks accumulate hits over
+        # consecutive frames; only tracks exceeding min_hits are "confirmed",
+        # filtering transient false positives.
+        tracking_info = None
+        if self._tracker_enabled and self._tracker is not None:
+            tracked = self._tracker.update(detection_records)
+            confirmed_tracks = self._tracker.get_confirmed_tracks(tracked)
+            tracking_info = {
+                "active_tracks": len(tracked),
+                "confirmed_tracks": len(confirmed_tracks),
+                "frame": self._tracker.frame_count,
+                "tracks": [
+                    {
+                        "track_id": t.track_id,
+                        "bbox_xyxy": list(t.bbox_xyxy),
+                        "confidence": round(t.confidence, 4),
+                        "hit_count": t.hit_count,
+                        "confirmed": t.confirmed,
+                    }
+                    for t in tracked
+                ],
+            }
+            # Annotate detection records with track IDs
+            for det, trk in zip(detection_records, tracked):
+                det["track_id"] = trk.track_id
+                det["track_confirmed"] = trk.confirmed
+                det["track_hits"] = trk.hit_count
+
         saved_path = None
         if image_path is not None:
             out = Path(image_path)
             out.parent.mkdir(parents=True, exist_ok=True)
-            # Draw the detector's boxes + confidence onto the saved image so the
-            # CV is visible in the viewer's camera panel (green = detection).
             annotated = view.copy()
             if detection_records:
                 from PIL import ImageDraw
                 draw = ImageDraw.Draw(annotated)
                 for d in detection_records:
-                    x1, y1, x2, y2 = d["bbox_xyxy"]
-                    draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=3)
-                    draw.text((x1, max(0, y1 - 12)), f"{d['confidence']:.2f}", fill=(0, 255, 0))
+                    box = d.get("bbox_xyxy", [0, 0, 0, 0])
+                    if box != [0, 0, 0, 0]:
+                        x1, y1, x2, y2 = box
+                        color = (0, 255, 0) if d.get("track_confirmed", True) else (255, 165, 0)
+                        if d.get("sensor") == "thermal" or d.get("fusion_source") == "thermal_only":
+                            color = (255, 0, 255)  # Magenta for thermal-only
+                        elif d.get("fusion_source") == "both":
+                            color = (0, 255, 255)  # Cyan for fused
+                        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                        label = f"{d['confidence']:.2f}"
+                        if "track_id" in d:
+                            label = f"T{d['track_id']} {label}"
+                        draw.text((x1, max(0, y1 - 12)), label, fill=color)
             annotated.save(out)
             saved_path = str(out)
 
-        return {
+        result = {
             "name": drone.name,
             "drone_index": drone.index,
             "x": round(float(drone.world_xy[0]), 6),
@@ -491,11 +928,17 @@ class SimulationCvAdapter:
                 round(float(self.background_gsd_m_per_px[0]), 4),
                 round(float(self.background_gsd_m_per_px[1]), 4),
             ],
+            "detection_mode": self.detection_mode,
             "image_path": saved_path,
             "wildfire_effects": wildfire_stats,
             "truth": truth,
             "detections": detection_records,
         }
+        if thermal_detections is not None:
+            result["thermal_raw"] = thermal_detections
+        if tracking_info is not None:
+            result["tracking"] = tracking_info
+        return result
 
     def render_survivor_preview(
         self,
@@ -539,6 +982,7 @@ class SimulationCvAdapter:
         survivor: SimEntity,
         wildfire_state: SimWildfireState | None = None,
         view_radius_m: float = 4.0,
+        camera_mode: str = "auto",
         image_path: str | Path | None = None,
     ) -> dict:
         """Render a ground robot's close-range confirmation view and detect.
@@ -551,12 +995,34 @@ class SimulationCvAdapter:
         high-confidence. (The sim is top-down, so this is a close-range
         approximation of an eye-level confirmation, not a true perspective view.)
 
+        Parameters
+        ----------
+        camera_mode : str
+            Which UGV camera model to use for detection:
+            - "auto": use mast model if distance <= 15m, front model otherwise
+            - "front": UGV forward-looking camera (5-30m range)
+            - "mast": UGV elevated mast camera (3-15m range)
+            - "drone": legacy behavior using the drone aerial model
+
         Returns the per-frame detection record plus a ``confirmed`` flag and the
         robot-survivor distance in metres.
         """
+        dx_m = (robot.world_xy[0] - survivor.world_xy[0]) / self.sim_units_per_meter
+        dy_m = (robot.world_xy[1] - survivor.world_xy[1]) / self.sim_units_per_meter
+        distance_m = math.hypot(dx_m, dy_m)
+
+        # Resolve camera mode
+        if camera_mode == "auto":
+            if distance_m <= 15.0 and self.ugv_mast_model_name:
+                resolved_camera = "mast"
+            elif self.ugv_front_model_name:
+                resolved_camera = "front"
+            else:
+                resolved_camera = "drone"
+        else:
+            resolved_camera = camera_mode
+
         footprint_m = max(2.0 * float(view_radius_m), 1.0)
-        # Invert footprint_m = 2 * altitude_m * tan(fov/2) to get the pseudo
-        # camera "height" that yields this close-range footprint.
         altitude_m = footprint_m / (2.0 * math.tan(math.radians(self.fov_deg) / 2.0))
         pseudo_drone = SimDrone(
             index=-1,
@@ -564,15 +1030,29 @@ class SimulationCvAdapter:
             world_xy=survivor.world_xy,
             altitude_agl=float(altitude_m) * self.sim_units_per_meter,
         )
-        # The close-range survivor is large in frame, so single-pass inference
-        # is correct here — tiling would up-scale an already-large survivor past
-        # the detector's training scale and *lower* confidence. Also swap in the
-        # dedicated ground (large-survivor) detector when available.
+        # Close-range: disable tiling and swap in the appropriate detector.
         prev_tiled = self.person_tiled
         prev_detector = self._person_detector
         prev_model = self.person_model_name
         self.person_tiled = False
-        if self.ground_person_model_name != self.person_model_name:
+
+        if resolved_camera in ("front", "mast"):
+            ugv_det = self._get_ugv_detector(resolved_camera)
+            if ugv_det is not None:
+                self._person_detector = ugv_det
+                model_name = (self.ugv_front_model_name if resolved_camera == "front"
+                              else self.ugv_mast_model_name)
+                self.person_model_name = model_name or self.person_model_name
+            elif self.ground_person_model_name != self.person_model_name:
+                if self._ground_detector is None:
+                    from .person_detector import PersonDetector
+                    self._ground_detector = PersonDetector(
+                        model_name=self.ground_person_model_name, conf=self.person_conf,
+                        iou=self.person_iou, device=self.person_device,
+                    )
+                self._person_detector = self._ground_detector
+                self.person_model_name = self.ground_person_model_name
+        elif self.ground_person_model_name != self.person_model_name:
             if self._ground_detector is None:
                 from .person_detector import PersonDetector
                 self._ground_detector = PersonDetector(
@@ -581,6 +1061,7 @@ class SimulationCvAdapter:
                 )
             self._person_detector = self._ground_detector
             self.person_model_name = self.ground_person_model_name
+
         try:
             record = self.render_and_detect(
                 drone=pseudo_drone, survivors=[survivor],
@@ -590,9 +1071,7 @@ class SimulationCvAdapter:
             self.person_tiled = prev_tiled
             self._person_detector = prev_detector
             self.person_model_name = prev_model
-        dx_m = (robot.world_xy[0] - survivor.world_xy[0]) / self.sim_units_per_meter
-        dy_m = (robot.world_xy[1] - survivor.world_xy[1]) / self.sim_units_per_meter
-        distance_m = math.hypot(dx_m, dy_m)
+
         confirmed = any(
             d.get("matched_survivor_index") == survivor.index for d in record.get("detections", [])
         )
@@ -609,6 +1088,7 @@ class SimulationCvAdapter:
             "confidence": round(float(confidence), 4),
             "distance_m": round(float(distance_m), 3),
             "view_radius_m": round(float(view_radius_m), 3),
+            "camera_mode": resolved_camera,
             "image_path": record.get("image_path"),
             "detections": record.get("detections", []),
             "truth": record.get("truth", []),
@@ -779,7 +1259,18 @@ class SimulationCvAdapter:
         cx = self.image_size * 0.5 + (dx_world / footprint_world) * self.image_size
         cy = self.image_size * 0.5 - (dy_world / footprint_world) * self.image_size
         width_px = max(2, int(round(self.survivor_width_m * self.sim_units_per_meter / footprint_world * self.image_size)))
-        height_px = max(2, int(round(self.survivor_height_m * self.sim_units_per_meter / footprint_world * self.image_size)))
+        # Oblique camera: the person's standing height projects into the image,
+        # making the apparent bbox taller than the flat nadir footprint. Same
+        # physics as oblique_survivor_size() in train_survivor_detector.py.
+        if self.camera_tilt_deg > 0.0:
+            tilt_rad = math.radians(self.camera_tilt_deg)
+            apparent_height_m = (
+                self.person_height_m * math.sin(tilt_rad)
+                + self.survivor_height_m * math.cos(tilt_rad)
+            )
+        else:
+            apparent_height_m = self.survivor_height_m
+        height_px = max(2, int(round(apparent_height_m * self.sim_units_per_meter / footprint_world * self.image_size)))
         x1 = int(round(cx - width_px / 2))
         y1 = int(round(cy - height_px / 2))
         x2 = int(round(cx + width_px / 2))
