@@ -2194,9 +2194,6 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), 0)
         self.assertEqual(int(scenario.ugv_global_route_path_index[0, 0].item()), 3)
         self.assertFalse(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
-        self.assertEqual(float(scenario.metric_ugv_fire_replan_checks[0].item()), 1.0)
-        self.assertEqual(float(scenario.metric_ugv_fire_replan_kept[0].item()), 1.0)
-        self.assertEqual(float(scenario.metric_ugv_fire_replan_cleared[0].item()), 0.0)
 
     def test_fire_replan_policy_affected_clears_fire_intersecting_global_route(self):
         env = self._diagnostic_env(
@@ -2227,9 +2224,6 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertFalse(scenario.ugv_global_route_paths[0][0])
         self.assertEqual(int(scenario.ugv_global_route_target_idx[0, 0].item()), -1)
         self.assertTrue(bool(scenario.ugv_global_route_fire_replan_pending[0, 0].item()))
-        self.assertEqual(float(scenario.metric_ugv_fire_replan_checks[0].item()), 1.0)
-        self.assertEqual(float(scenario.metric_ugv_fire_replan_route_intersects_risk[0].item()), 1.0)
-        self.assertEqual(float(scenario.metric_ugv_fire_replan_cleared[0].item()), 1.0)
 
     def test_fire_replan_policy_lazy_keeps_far_route_fire_before_interval(self):
         env = self._diagnostic_env(

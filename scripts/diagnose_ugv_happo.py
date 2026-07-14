@@ -955,17 +955,6 @@ def _new_time_series() -> dict:
         "route_fire_buffer_cells": [],
         "route_replanned_after_fire": [],
         "route_fire_blocked_no_path": [],
-        "global_astar_replan_total": [],
-        "global_astar_replan_target_changed": [],
-        "global_astar_replan_no_cached_path": [],
-        "global_astar_replan_fire_pending": [],
-        "fire_replan_checks": [],
-        "fire_replan_always": [],
-        "fire_replan_near_risk": [],
-        "fire_replan_lazy_interval": [],
-        "fire_replan_route_intersects_risk": [],
-        "fire_replan_kept": [],
-        "fire_replan_cleared": [],
         "shadow_astar_valid": [],
         "shadow_astar_direct_blocked": [],
         "shadow_astar_detour_needed": [],
@@ -1096,33 +1085,6 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "route_fire_buffer_cells": _series_at(ts, "route_fire_buffer_cells", i),
                 "route_replanned_after_fire": _series_at(ts, "route_replanned_after_fire", i),
                 "route_fire_blocked_no_path": _series_at(ts, "route_fire_blocked_no_path", i),
-                "global_astar_replan_total": _series_at(ts, "global_astar_replan_total", i),
-                "global_astar_replan_target_changed": _series_at(
-                    ts,
-                    "global_astar_replan_target_changed",
-                    i,
-                ),
-                "global_astar_replan_no_cached_path": _series_at(
-                    ts,
-                    "global_astar_replan_no_cached_path",
-                    i,
-                ),
-                "global_astar_replan_fire_pending": _series_at(
-                    ts,
-                    "global_astar_replan_fire_pending",
-                    i,
-                ),
-                "fire_replan_checks": _series_at(ts, "fire_replan_checks", i),
-                "fire_replan_always": _series_at(ts, "fire_replan_always", i),
-                "fire_replan_near_risk": _series_at(ts, "fire_replan_near_risk", i),
-                "fire_replan_lazy_interval": _series_at(ts, "fire_replan_lazy_interval", i),
-                "fire_replan_route_intersects_risk": _series_at(
-                    ts,
-                    "fire_replan_route_intersects_risk",
-                    i,
-                ),
-                "fire_replan_kept": _series_at(ts, "fire_replan_kept", i),
-                "fire_replan_cleared": _series_at(ts, "fire_replan_cleared", i),
                 "shadow_astar_valid": _series_at(ts, "shadow_astar_valid", i),
                 "shadow_astar_direct_blocked": _series_at(ts, "shadow_astar_direct_blocked", i),
                 "shadow_astar_detour_needed": _series_at(ts, "shadow_astar_detour_needed", i),
@@ -1202,17 +1164,6 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "route_fire_buffer_cells",
             "route_replanned_after_fire",
             "route_fire_blocked_no_path",
-            "global_astar_replan_total",
-            "global_astar_replan_target_changed",
-            "global_astar_replan_no_cached_path",
-            "global_astar_replan_fire_pending",
-            "fire_replan_checks",
-            "fire_replan_always",
-            "fire_replan_near_risk",
-            "fire_replan_lazy_interval",
-            "fire_replan_route_intersects_risk",
-            "fire_replan_kept",
-            "fire_replan_cleared",
             "shadow_astar_valid",
             "shadow_astar_direct_blocked",
             "shadow_astar_detour_needed",
@@ -1353,19 +1304,6 @@ def _group_metric_summary(rows: list[dict]) -> dict:
         "mean_route_fire_buffer_cells",
         "route_replanned_after_fire_rate",
         "route_fire_blocked_no_path_fraction",
-        "global_astar_replan_total_count",
-        "global_astar_replan_rate",
-        "global_astar_replan_target_changed_count",
-        "global_astar_replan_no_cached_path_count",
-        "global_astar_replan_fire_pending_count",
-        "fire_replan_checks_count",
-        "fire_replan_always_count",
-        "fire_replan_near_risk_count",
-        "fire_replan_lazy_interval_count",
-        "fire_replan_route_intersects_risk_count",
-        "fire_replan_kept_count",
-        "fire_replan_cleared_count",
-        "fire_replan_cleared_rate",
         "shadow_astar_direction_detour_fraction",
         "shadow_astar_cost_detour_fraction",
         "shadow_astar_detour_stall_fraction_lt010",
@@ -1463,45 +1401,6 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         ),
         "mean_route_fire_blocked_no_path_fraction": _finite_mean(
             row.get("route_fire_blocked_no_path_fraction") for row in rows
-        ),
-        "mean_global_astar_replan_total_count": _finite_mean(
-            row.get("global_astar_replan_total_count") for row in rows
-        ),
-        "mean_global_astar_replan_rate": _finite_mean(
-            row.get("global_astar_replan_rate") for row in rows
-        ),
-        "mean_global_astar_replan_target_changed_count": _finite_mean(
-            row.get("global_astar_replan_target_changed_count") for row in rows
-        ),
-        "mean_global_astar_replan_no_cached_path_count": _finite_mean(
-            row.get("global_astar_replan_no_cached_path_count") for row in rows
-        ),
-        "mean_global_astar_replan_fire_pending_count": _finite_mean(
-            row.get("global_astar_replan_fire_pending_count") for row in rows
-        ),
-        "mean_fire_replan_checks_count": _finite_mean(
-            row.get("fire_replan_checks_count") for row in rows
-        ),
-        "mean_fire_replan_always_count": _finite_mean(
-            row.get("fire_replan_always_count") for row in rows
-        ),
-        "mean_fire_replan_near_risk_count": _finite_mean(
-            row.get("fire_replan_near_risk_count") for row in rows
-        ),
-        "mean_fire_replan_lazy_interval_count": _finite_mean(
-            row.get("fire_replan_lazy_interval_count") for row in rows
-        ),
-        "mean_fire_replan_route_intersects_risk_count": _finite_mean(
-            row.get("fire_replan_route_intersects_risk_count") for row in rows
-        ),
-        "mean_fire_replan_kept_count": _finite_mean(
-            row.get("fire_replan_kept_count") for row in rows
-        ),
-        "mean_fire_replan_cleared_count": _finite_mean(
-            row.get("fire_replan_cleared_count") for row in rows
-        ),
-        "mean_fire_replan_cleared_rate": _finite_mean(
-            row.get("fire_replan_cleared_rate") for row in rows
         ),
         "mean_shadow_astar_valid_fraction": _finite_mean(
             row["shadow_astar_valid_fraction"] for row in rows
@@ -1993,44 +1892,7 @@ def _plot_ugv_diagnostics(
     )
     axes[27].set_xlim(0.0, 1.0)
 
-    ax = axes[28]
-    replan_series = [
-        ("total", "global_astar_replan_total", "#2563eb"),
-        ("target", "global_astar_replan_target_changed", "#16a34a"),
-        ("empty cache", "global_astar_replan_no_cached_path", "#f97316"),
-        ("fire pending", "global_astar_replan_fire_pending", "#dc2626"),
-    ]
-    for label, key, color in replan_series:
-        y = [b[key] for b in bins]
-        if any(math.isfinite(float(v)) and abs(float(v)) > 1e-12 for v in y if v is not None):
-            ax.plot(x, y, marker="o", label=label, color=color)
-    ax.set_title("Time-Bin Global A* Replans")
-    ax.set_xlabel("episode fraction")
-    ax.set_ylabel("count / step")
-    ax.grid(True, alpha=0.25)
-    ax.legend(fontsize=7, ncol=2)
-
-    ax = axes[29]
-    fire_replan_series = [
-        ("checks", "fire_replan_checks", "#64748b"),
-        ("always", "fire_replan_always", "#7c3aed"),
-        ("near risk", "fire_replan_near_risk", "#dc2626"),
-        ("lazy interval", "fire_replan_lazy_interval", "#f97316"),
-        ("intersects", "fire_replan_route_intersects_risk", "#7c2d12"),
-        ("kept", "fire_replan_kept", "#16a34a"),
-        ("cleared", "fire_replan_cleared", "#2563eb"),
-    ]
-    for label, key, color in fire_replan_series:
-        y = [b[key] for b in bins]
-        if any(math.isfinite(float(v)) and abs(float(v)) > 1e-12 for v in y if v is not None):
-            ax.plot(x, y, marker="o", label=label, color=color)
-    ax.set_title("Time-Bin Fire Route Decisions")
-    ax.set_xlabel("episode fraction")
-    ax.set_ylabel("count / step")
-    ax.grid(True, alpha=0.25)
-    ax.legend(fontsize=7, ncol=2)
-
-    for ax in axes[30:]:
+    for ax in axes[28:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -2425,39 +2287,6 @@ def run_rollout(
         time_series["route_fire_blocked_no_path"].append(
             _metric_scalar(scenario, "metric_ugv_route_fire_blocked_no_path")
         )
-        time_series["global_astar_replan_total"].append(
-            _metric_scalar(scenario, "metric_ugv_global_astar_replan_total")
-        )
-        time_series["global_astar_replan_target_changed"].append(
-            _metric_scalar(scenario, "metric_ugv_global_astar_replan_target_changed")
-        )
-        time_series["global_astar_replan_no_cached_path"].append(
-            _metric_scalar(scenario, "metric_ugv_global_astar_replan_no_cached_path")
-        )
-        time_series["global_astar_replan_fire_pending"].append(
-            _metric_scalar(scenario, "metric_ugv_global_astar_replan_fire_pending")
-        )
-        time_series["fire_replan_checks"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_checks")
-        )
-        time_series["fire_replan_always"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_always")
-        )
-        time_series["fire_replan_near_risk"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_near_risk")
-        )
-        time_series["fire_replan_lazy_interval"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_lazy_interval")
-        )
-        time_series["fire_replan_route_intersects_risk"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_route_intersects_risk")
-        )
-        time_series["fire_replan_kept"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_kept")
-        )
-        time_series["fire_replan_cleared"].append(
-            _metric_scalar(scenario, "metric_ugv_fire_replan_cleared")
-        )
         time_series["shadow_astar_valid"].append(float(shadow_valid))
         time_series["shadow_astar_direct_blocked"].append(float(shadow_direct_blocked))
         time_series["shadow_astar_detour_needed"].append(float(shadow_detour_needed))
@@ -2634,27 +2463,6 @@ def run_rollout(
         "mean_route_fire_buffer_cells": _finite_mean(time_series["route_fire_buffer_cells"]),
         "route_replanned_after_fire_rate": _finite_mean(time_series["route_replanned_after_fire"]),
         "route_fire_blocked_no_path_fraction": _finite_mean(time_series["route_fire_blocked_no_path"]),
-        "global_astar_replan_total_count": _finite_sum(time_series["global_astar_replan_total"]),
-        "global_astar_replan_rate": _finite_mean(time_series["global_astar_replan_total"]),
-        "global_astar_replan_target_changed_count": _finite_sum(
-            time_series["global_astar_replan_target_changed"]
-        ),
-        "global_astar_replan_no_cached_path_count": _finite_sum(
-            time_series["global_astar_replan_no_cached_path"]
-        ),
-        "global_astar_replan_fire_pending_count": _finite_sum(
-            time_series["global_astar_replan_fire_pending"]
-        ),
-        "fire_replan_checks_count": _finite_sum(time_series["fire_replan_checks"]),
-        "fire_replan_always_count": _finite_sum(time_series["fire_replan_always"]),
-        "fire_replan_near_risk_count": _finite_sum(time_series["fire_replan_near_risk"]),
-        "fire_replan_lazy_interval_count": _finite_sum(time_series["fire_replan_lazy_interval"]),
-        "fire_replan_route_intersects_risk_count": _finite_sum(
-            time_series["fire_replan_route_intersects_risk"]
-        ),
-        "fire_replan_kept_count": _finite_sum(time_series["fire_replan_kept"]),
-        "fire_replan_cleared_count": _finite_sum(time_series["fire_replan_cleared"]),
-        "fire_replan_cleared_rate": _finite_mean(time_series["fire_replan_cleared"]),
         "shadow_astar_valid_fraction": (
             float(np.mean(shadow_astar_valid)) if shadow_astar_valid else 0.0
         ),

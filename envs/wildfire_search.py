@@ -1750,17 +1750,6 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_ugv_route_fire_buffer_cells = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_replanned_after_fire = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_fire_blocked_no_path = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_global_astar_replan_total = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_global_astar_replan_target_changed = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_global_astar_replan_no_cached_path = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_global_astar_replan_fire_pending = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_checks = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_always = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_near_risk = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_lazy_interval = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_route_intersects_risk = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_kept = torch.zeros(batch_dim, device=device)
-        self.metric_ugv_fire_replan_cleared = torch.zeros(batch_dim, device=device)
         self.metric_ugv_route_aware_active = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_stall_penalty = torch.zeros(batch_dim, device=device)
         self.metric_reward_ugv_route_progress_floor_penalty = torch.zeros(batch_dim, device=device)
@@ -1929,17 +1918,6 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_ugv_route_fire_buffer_cells,
             self.metric_ugv_route_replanned_after_fire,
             self.metric_ugv_route_fire_blocked_no_path,
-            self.metric_ugv_global_astar_replan_total,
-            self.metric_ugv_global_astar_replan_target_changed,
-            self.metric_ugv_global_astar_replan_no_cached_path,
-            self.metric_ugv_global_astar_replan_fire_pending,
-            self.metric_ugv_fire_replan_checks,
-            self.metric_ugv_fire_replan_always,
-            self.metric_ugv_fire_replan_near_risk,
-            self.metric_ugv_fire_replan_lazy_interval,
-            self.metric_ugv_fire_replan_route_intersects_risk,
-            self.metric_ugv_fire_replan_kept,
-            self.metric_ugv_fire_replan_cleared,
             self.metric_ugv_route_aware_active,
             self.metric_reward_ugv_stall_penalty,
             self.metric_reward_ugv_route_progress_floor_penalty,
@@ -3636,17 +3614,6 @@ class WildfireSearchScenario(BaseScenario):
             return
         self._invalidate_ugv_planner_layer_cache()
         if self.ugv_planner_fire_replan_policy == "always":
-            if hasattr(self, "ugv_global_route_paths"):
-                for env_index in range(self.world.batch_dim):
-                    active_routes = sum(
-                        1
-                        for ground_index in range(self.n_ground)
-                        if self.ugv_global_route_paths[env_index][ground_index]
-                    )
-                    if active_routes:
-                        self.metric_ugv_fire_replan_checks[env_index] += float(active_routes)
-                        self.metric_ugv_fire_replan_always[env_index] += float(active_routes)
-                        self.metric_ugv_fire_replan_cleared[env_index] += float(active_routes)
             self._invalidate_ugv_planner_route_cache(terrain_changed=True, fire_changed=True)
             return
         if not hasattr(self, "_ugv_planner_route_cache"):
@@ -3670,19 +3637,12 @@ class WildfireSearchScenario(BaseScenario):
                 path = self.ugv_global_route_paths[env_index][ground_index]
                 if not path:
                     continue
-                self.metric_ugv_fire_replan_checks[env_index] += 1.0
                 if self.ugv_planner_fire_replan_policy == "lazy":
-                    near_risk = self._ugv_global_route_near_risk(
+                    should_replan = self._ugv_global_route_near_risk(
                         env_index,
                         ground_index,
                         risk,
-                    )
-                    interval_due = self._ugv_global_route_lazy_replan_due(env_index, ground_index)
-                    should_replan = near_risk or interval_due
-                    if near_risk:
-                        self.metric_ugv_fire_replan_near_risk[env_index] += 1.0
-                    if interval_due:
-                        self.metric_ugv_fire_replan_lazy_interval[env_index] += 1.0
+                    ) or self._ugv_global_route_lazy_replan_due(env_index, ground_index)
                 else:
                     xs = torch.tensor(
                         [int(x) for x, _y in path],
@@ -3695,17 +3655,12 @@ class WildfireSearchScenario(BaseScenario):
                         device=self.fire_grid.device,
                     )
                     should_replan = bool(risk[ys, xs].any().item())
-                    if should_replan:
-                        self.metric_ugv_fire_replan_route_intersects_risk[env_index] += 1.0
                 if should_replan:
-                    self.metric_ugv_fire_replan_cleared[env_index] += 1.0
                     self._clear_ugv_global_route(
                         env_index,
                         ground_index,
                         fire_changed=True,
                     )
-                else:
-                    self.metric_ugv_fire_replan_kept[env_index] += 1.0
 
     # ------------------------------------------------------------------
     # Per-step hooks
@@ -10220,24 +10175,14 @@ class WildfireSearchScenario(BaseScenario):
             )
 
         current_target = int(target_idx)
-        cached_target = int(self.ugv_global_route_target_idx[env_index, ground_index].item())
-        no_cached_path = not self.ugv_global_route_paths[env_index][ground_index]
-        target_changed = cached_target != current_target
         needs_plan = (
-            target_changed
-            or no_cached_path
+            int(self.ugv_global_route_target_idx[env_index, ground_index].item()) != current_target
+            or not self.ugv_global_route_paths[env_index][ground_index]
         )
         if needs_plan:
             replanned_after_fire = bool(
                 self.ugv_global_route_fire_replan_pending[env_index, ground_index].item()
             )
-            self.metric_ugv_global_astar_replan_total[env_index] += 1.0
-            if target_changed:
-                self.metric_ugv_global_astar_replan_target_changed[env_index] += 1.0
-            if no_cached_path:
-                self.metric_ugv_global_astar_replan_no_cached_path[env_index] += 1.0
-            if replanned_after_fire:
-                self.metric_ugv_global_astar_replan_fire_pending[env_index] += 1.0
             self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = False
             self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
             plan = self._global_astar_plan_uncached_for_env(
@@ -12386,25 +12331,6 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_route_fire_buffer_cells": self.metric_ugv_route_fire_buffer_cells,
             "diagnostic/ugv_route_replanned_after_fire": self.metric_ugv_route_replanned_after_fire,
             "diagnostic/ugv_route_fire_blocked_no_path": self.metric_ugv_route_fire_blocked_no_path,
-            "diagnostic/ugv_global_astar_replan_total": self.metric_ugv_global_astar_replan_total,
-            "diagnostic/ugv_global_astar_replan_target_changed": (
-                self.metric_ugv_global_astar_replan_target_changed
-            ),
-            "diagnostic/ugv_global_astar_replan_no_cached_path": (
-                self.metric_ugv_global_astar_replan_no_cached_path
-            ),
-            "diagnostic/ugv_global_astar_replan_fire_pending": (
-                self.metric_ugv_global_astar_replan_fire_pending
-            ),
-            "diagnostic/ugv_fire_replan_checks": self.metric_ugv_fire_replan_checks,
-            "diagnostic/ugv_fire_replan_always": self.metric_ugv_fire_replan_always,
-            "diagnostic/ugv_fire_replan_near_risk": self.metric_ugv_fire_replan_near_risk,
-            "diagnostic/ugv_fire_replan_lazy_interval": self.metric_ugv_fire_replan_lazy_interval,
-            "diagnostic/ugv_fire_replan_route_intersects_risk": (
-                self.metric_ugv_fire_replan_route_intersects_risk
-            ),
-            "diagnostic/ugv_fire_replan_kept": self.metric_ugv_fire_replan_kept,
-            "diagnostic/ugv_fire_replan_cleared": self.metric_ugv_fire_replan_cleared,
             "diagnostic/ugv_route_aware_active": self.metric_ugv_route_aware_active,
             "diagnostic/ugv_action_alignment": self.metric_ugv_action_alignment,
             "diagnostic/ugv_movement_alignment": self.metric_ugv_movement_alignment,
