@@ -211,6 +211,7 @@ def build_args(
     reward_search: bool = False,
     reward_confirm: bool = False,
     recurrent: bool = False,
+    hidden_sizes: tuple[int, ...] | list[int] | None = None,
     model_dir: str | None = None,
     warmstart_uav_model_dir: str | None = None,
     warmstart_ugv_model_dir: str | None = None,
@@ -850,7 +851,7 @@ def build_args(
             "render_episodes": 1,
         },
         "model": {
-            "hidden_sizes":               [128, 128],
+            "hidden_sizes":               list(hidden_sizes or (128, 128)),
             "activation_func":            "relu",
             "use_feature_normalization":  True,
             "initialization_method":      "orthogonal_",
@@ -1768,6 +1769,9 @@ def main():
                    help="Warm-start the class-shared UGV actor from actor_agent0.pt in this models/ directory.")
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
+    p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
+                   help="Actor/critic MLP hidden layer sizes. Default: 128 128. "
+                        "Example: --hidden-sizes 256 256")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
                         "to avoid the do-nothing degenerate policy.")
@@ -2779,6 +2783,8 @@ def main():
         p.error("--num-env-steps must be positive")
     if episode_length <= 0:
         p.error("--episode-length must be positive")
+    if args.hidden_sizes is not None and any(size <= 0 for size in args.hidden_sizes):
+        p.error("--hidden-sizes values must be positive")
 
     if args.preset == "tuned":
         # Keep explicit user values, but upgrade defaults to convergence-oriented
@@ -2810,6 +2816,7 @@ def main():
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
     print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
+    print(f" hidden_sizes:   {args.hidden_sizes or [128, 128]}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
@@ -2974,6 +2981,7 @@ def main():
         reward_search = args.reward_search,
         reward_confirm = args.reward_confirm,
         recurrent = args.recurrent,
+        hidden_sizes = args.hidden_sizes,
         model_dir = args.model_dir,
         warmstart_uav_model_dir = args.warmstart_uav_model_dir,
         warmstart_ugv_model_dir = args.warmstart_ugv_model_dir,

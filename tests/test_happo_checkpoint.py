@@ -183,6 +183,19 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["model"]["critic_lr"], 5e-4)
         self.assertTrue(algo_args["train"]["use_linear_lr_decay"])
 
+    def test_build_args_exposes_hidden_sizes(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="hidden",
+            hidden_sizes=(256, 128, 64),
+        )
+
+        self.assertEqual(algo_args["model"]["hidden_sizes"], [256, 128, 64])
+
     def test_build_args_exposes_global_parameter_sharing(self):
         _, algo_args, _ = build_args(
             num_env_steps=100,
