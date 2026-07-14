@@ -2105,6 +2105,38 @@ class SurvivorCommunicationTests(unittest.TestCase):
             float(scenario.mobility_cost_grid[0, 64, 68].item()) + 30.0,
         )
 
+    def test_smoke_update_preserves_fire_mask_cache(self):
+        env = self._diagnostic_env(
+            disable_fire=False,
+            ugv_planner_hint="global_astar",
+            ugv_planner_fire_mode="block",
+            ugv_planner_smoke_cost=5.0,
+            ugv_planner_smolder_cost=3.0,
+            ugv_planner_fire_buffer_m=10.0,
+            ugv_planner_fire_buffer_cost=8.0,
+        )
+        scenario = env.scenario
+        scenario.fire_grid[0, 64, 64] = True
+        scenario.fire_intensity_grid[0, 64, 64] = 1.0
+        scenario._invalidate_ugv_planner_layer_cache()
+
+        first_mask = scenario._ugv_planner_fire_buffer_mask(0)
+        layer_version_before = int(scenario._ugv_planner_layer_cache_version)
+
+        scenario._update_smoke()
+        second_mask = scenario._ugv_planner_fire_buffer_mask(0)
+
+        self.assertIs(second_mask, first_mask)
+        self.assertGreater(
+            int(scenario._ugv_planner_layer_cache_version),
+            layer_version_before,
+        )
+
+        scenario._invalidate_ugv_planner_layer_cache()
+        rebuilt_mask = scenario._ugv_planner_fire_buffer_mask(0)
+
+        self.assertIsNot(rebuilt_mask, first_mask)
+
     def test_fire_changed_invalidation_marks_global_route_replan(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",

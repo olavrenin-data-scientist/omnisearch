@@ -1397,6 +1397,7 @@ class WildfireSearchScenario(BaseScenario):
         self._ugv_planner_route_cache: dict[tuple, tuple[tuple[int, int], bool, bool] | None] = {}
         self._ugv_planner_terrain_cache_version = 0
         self._ugv_planner_layer_cache_version = 0
+        self._ugv_planner_fire_mask_cache_version = 0
         self._ugv_static_planner_cache_version = 0
         self._ugv_planner_fire_buffer_mask_cache = {}
         self._ugv_planner_blocked_fire_mask_cache = {}
@@ -3199,15 +3200,32 @@ class WildfireSearchScenario(BaseScenario):
         if hasattr(self, "_ugv_global_heuristic_cache"):
             self._invalidate_ugv_global_heuristic_cache(env_index)
 
-    def _invalidate_ugv_planner_layer_cache(self, env_index: int | None = None) -> None:
+    def _invalidate_ugv_planner_fire_mask_cache(self, env_index: int | None = None) -> None:
         del env_index
-        self._ugv_planner_layer_cache_version = (
-            getattr(self, "_ugv_planner_layer_cache_version", 0) + 1
+        self._ugv_planner_fire_mask_cache_version = (
+            getattr(self, "_ugv_planner_fire_mask_cache_version", 0) + 1
         )
-        self._invalidate_ugv_assignment_cache()
         caches = (
             "_ugv_planner_fire_buffer_mask_cache",
             "_ugv_planner_blocked_fire_mask_cache",
+        )
+        for name in caches:
+            if hasattr(self, name):
+                getattr(self, name).clear()
+
+    def _invalidate_ugv_planner_layer_cache(
+        self,
+        env_index: int | None = None,
+        *,
+        fire_masks_changed: bool = True,
+    ) -> None:
+        del env_index
+        if fire_masks_changed:
+            self._invalidate_ugv_planner_fire_mask_cache()
+        self._ugv_planner_layer_cache_version = (
+            getattr(self, "_ugv_planner_layer_cache_version", 0) + 1
+        )
+        caches = (
             "_ugv_planner_layer_tensor_cache",
             "_ugv_planner_layer_array_cache",
         )
@@ -3255,7 +3273,7 @@ class WildfireSearchScenario(BaseScenario):
         }
 
     def _ugv_planner_fire_buffer_mask(self, env_index: int) -> Tensor:
-        version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
+        version = int(getattr(self, "_ugv_planner_fire_mask_cache_version", 0))
         key = (int(env_index), version)
         cache = getattr(self, "_ugv_planner_fire_buffer_mask_cache", None)
         if cache is None:
@@ -3285,7 +3303,7 @@ class WildfireSearchScenario(BaseScenario):
         return mask
 
     def _ugv_planner_blocked_fire_mask(self, env_index: int) -> Tensor:
-        version = int(getattr(self, "_ugv_planner_layer_cache_version", 0))
+        version = int(getattr(self, "_ugv_planner_fire_mask_cache_version", 0))
         key = (int(env_index), version)
         cache = getattr(self, "_ugv_planner_blocked_fire_mask_cache", None)
         if cache is None:
@@ -3792,8 +3810,11 @@ class WildfireSearchScenario(BaseScenario):
             smoke = smoke + self.wind_strength * (shifted - smoke)
 
         self.smoke_grid = smoke.clamp(0.0, 1.0)
-        if self.ugv_planner_fire_mode != "off":
-            self._invalidate_ugv_planner_layer_cache()
+        if (
+            self.ugv_planner_fire_mode != "off"
+            and (self.ugv_planner_smoke_cost > 0.0 or self.ugv_planner_smolder_cost > 0.0)
+        ):
+            self._invalidate_ugv_planner_layer_cache(fire_masks_changed=False)
 
     def _normalized_wind(self) -> tuple[float, float]:
         wind_x, wind_y = self.wind_direction
@@ -4127,7 +4148,6 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_target_assignment_mode,
             int(self.n_ground),
             int(self.n_survivors),
-            int(getattr(self, "_ugv_planner_layer_cache_version", 0)),
             int(getattr(self, "_ugv_static_planner_cache_version", 0)),
             int(getattr(self, "_ugv_planner_terrain_cache_version", 0)),
             str(ground_pos.device),
