@@ -529,7 +529,11 @@ class WildfireSearchScenario(BaseScenario):
             max(float(kwargs.pop("drone_heat_distortion_penalty", 0.20)), 0.0),
             1.0,
         )
-        self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.40)
+        # Zone Evaluation: Revealing Spatial Bias in Object Detection (TPAMI,
+        # 2024) reports outer-region AP commonly around 70-80% of center AP.
+        # It does not define a radial probability law, so 0.70 is used here as
+        # a conservative heuristic floor for the quadratic footprint model.
+        self.drone_edge_detection_floor = kwargs.pop("drone_edge_detection_floor", 0.70)
         self.uav_confidence_diagnostics = bool(kwargs.pop("uav_confidence_diagnostics", False))
         self.drone_safety_clearance_sim_override = kwargs.pop("drone_safety_clearance", None)
         self.drone_safety_clearance_m = max(

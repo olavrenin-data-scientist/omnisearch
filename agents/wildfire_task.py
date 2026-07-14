@@ -134,7 +134,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "drone_u_multiplier": DRONE_U_MULTIPLIER,
     "drone_flight_levels_m": DRONE_FLIGHT_LEVELS_M,
     "drone_cover_detection_factors": (1.0, 0.95, 0.75, 0.55, 0.45, 0.90),
-    "drone_edge_detection_floor": 0.40,
+    "drone_edge_detection_floor": 0.70,
     "drone_energy_costs": (0.0, 0.002, 0.006),
     "drone_safety_clearance_m": DRONE_SAFETY_CLEARANCE_M,
     "comms_dropout":      0.0,

@@ -201,12 +201,14 @@ If a survivor is within the footprint, detection is **stochastic**: a random dra
 
 | Factor | Formula | Physical meaning |
 |---|---|---|
-| Distance factor | `1 − (1 − 0.20) × (dist/footprint)²` | Detection is highest at nadir, falls quadratically toward the footprint edge with a 20% floor |
+| Distance factor | `1 − 0.30 × (dist/footprint)²` | Detection is highest at nadir and falls quadratically to a 70% edge floor |
 | Land cover factor | Per-class value (0.35–1.0) | Vegetation occlusion of the survivor |
 | Smoke/fire factor | Product of smoke, glare, and heat terms | Atmospheric degradation of the camera image |
 | Altitude quality | Interpolated from flight level | Proxy for image resolution and integration time |
 
 **Smoke attenuation:** `(1 − smoke_load)^1.24` — smoke intensity is interpreted as contrast loss from an atmospheric-transmission conversion. The exponent is fitted to the clear-normalized Faster R-CNN recalls reported by Liu et al. (2020), *Analysis of the Influence of Foggy Weather Environment on the Detection Effect of Machine Vision Obstacles*. Detection quality approaches zero as smoke becomes opaque.
+
+**Footprint-edge quality:** the 70% floor is motivated by *Zone Evaluation: Revealing Spatial Bias in Object Detection* (TPAMI, 2024), which reports that outer image regions often retain roughly 70–80% of center performance depending on detector and dataset. The paper reports region-wise AP rather than a radial probability function, so the quadratic radial form remains a simulator assumption.
 
 **Fire glare:** `1 − 0.35 × max(local_fire_intensity, fire_density_near_survivor)` — fire near the survivor degrades the image as though saturating the camera sensor.
 
