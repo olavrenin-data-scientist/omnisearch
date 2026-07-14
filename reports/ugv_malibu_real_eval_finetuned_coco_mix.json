@@ -1,0 +1,6 @@
+{
+  "weights": "models/ugv_front_yolov8s_real.pt",
+  "precision": 0.8875,
+  "recall": 0.6283185840707964,
+  "map50": 0.6210635747741973
+}
