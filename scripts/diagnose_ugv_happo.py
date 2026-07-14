@@ -41,20 +41,6 @@ REWARD_COMPONENTS = (
     "route_shortfall_penalty",
     "travel_penalty",
 )
-ROUTE_STALL_THRESHOLDS_M = (
-    ("le0", 0.0),
-    ("lt005", 0.05),
-    ("lt010", 0.10),
-    ("lt020", 0.20),
-)
-ROUTE_STALL_PENALTY_THRESHOLD_M = 0.10
-ROUTE_STALL_PENALTY_COEFFS = (
-    ("k001", 0.01),
-    ("k002", 0.02),
-    ("k005", 0.05),
-)
-
-
 def _checkpoint_path(path: str | None) -> Path:
     return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
 
@@ -917,14 +903,10 @@ def _new_time_series() -> dict:
     return {
         "step": [],
         "episode_fraction": [],
-        "distance_m": [],
         "progress_m": [],
         "movement_m": [],
         "speed_mps": [],
         "action_norm": [],
-        "raw_mean_norm": [],
-        "raw_oob": [],
-        "action_saturated": [],
         "action_target_alignment": [],
         "movement_target_alignment": [],
         "action_movement_alignment": [],
@@ -934,10 +916,6 @@ def _new_time_series() -> dict:
         "path_speed": [],
         "speed_limit_scale": [],
         "motion_correction_m": [],
-        "local_blocked_frac": [],
-        "local_mobility_mean": [],
-        "local_mobility_max": [],
-        "cell_speed": [],
         "within_confirm_range": [],
         "escape_route_active": [],
         "escape_route_enter": [],
@@ -955,30 +933,6 @@ def _new_time_series() -> dict:
         "route_fire_buffer_cells": [],
         "route_replanned_after_fire": [],
         "route_fire_blocked_no_path": [],
-        "shadow_astar_valid": [],
-        "shadow_astar_direct_blocked": [],
-        "shadow_astar_detour_needed": [],
-        "shadow_astar_direction_detour": [],
-        "shadow_astar_cost_detour": [],
-        "shadow_astar_target_alignment": [],
-        "shadow_astar_target_angle_deg": [],
-        "shadow_astar_cost_ratio": [],
-        "shadow_astar_direct_blocked_cells": [],
-        "shadow_astar_escape_mode": [],
-        "shadow_astar_exit_clearance_cells": [],
-        "shadow_astar_exit_openness": [],
-        "shadow_astar_target_corridor_blocked_fraction": [],
-        "shadow_astar_waypoint_distance_m": [],
-        "shadow_astar_action_alignment": [],
-        "shadow_astar_movement_alignment": [],
-        "shadow_astar_progress_m": [],
-        "shadow_astar_target_progress_m": [],
-        "shadow_astar_route_target_gap_m": [],
-        "shadow_astar_route_target_conflict": [],
-        "shadow_astar_detour_no_progress": [],
-        "shadow_astar_hyp_stall_penalty_abs": {
-            key: [] for key, _coeff in ROUTE_STALL_PENALTY_COEFFS
-        },
         "reward": {name: [] for name in REWARD_COMPONENTS},
     }
 
@@ -1041,20 +995,15 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
         ts = row.get("time_series", {})
         fractions = ts.get("episode_fraction", [])
         rewards = ts.get("reward", {})
-        stall_penalties = ts.get("shadow_astar_hyp_stall_penalty_abs", {})
         for i, frac in enumerate(fractions):
             if frac is None:
                 continue
             bin_idx = min(max(int(float(frac) * bins), 0), bins - 1)
             step = {
-                "distance_m": _series_at(ts, "distance_m", i),
                 "progress_m": _series_at(ts, "progress_m", i),
                 "movement_m": _series_at(ts, "movement_m", i),
                 "speed_mps": _series_at(ts, "speed_mps", i),
                 "action_norm": _series_at(ts, "action_norm", i),
-                "raw_mean_norm": _series_at(ts, "raw_mean_norm", i),
-                "raw_oob": _series_at(ts, "raw_oob", i),
-                "action_saturated": _series_at(ts, "action_saturated", i),
                 "action_target_alignment": _series_at(ts, "action_target_alignment", i),
                 "movement_target_alignment": _series_at(ts, "movement_target_alignment", i),
                 "action_movement_alignment": _series_at(ts, "action_movement_alignment", i),
@@ -1064,10 +1013,6 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "path_speed": _series_at(ts, "path_speed", i),
                 "speed_limit_scale": _series_at(ts, "speed_limit_scale", i),
                 "motion_correction_m": _series_at(ts, "motion_correction_m", i),
-                "local_blocked_frac": _series_at(ts, "local_blocked_frac", i),
-                "local_mobility_mean": _series_at(ts, "local_mobility_mean", i),
-                "local_mobility_max": _series_at(ts, "local_mobility_max", i),
-                "cell_speed": _series_at(ts, "cell_speed", i),
                 "within_confirm_range": _series_at(ts, "within_confirm_range", i),
                 "escape_route_active": _series_at(ts, "escape_route_active", i),
                 "escape_route_enter": _series_at(ts, "escape_route_enter", i),
@@ -1085,37 +1030,10 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
                 "route_fire_buffer_cells": _series_at(ts, "route_fire_buffer_cells", i),
                 "route_replanned_after_fire": _series_at(ts, "route_replanned_after_fire", i),
                 "route_fire_blocked_no_path": _series_at(ts, "route_fire_blocked_no_path", i),
-                "shadow_astar_valid": _series_at(ts, "shadow_astar_valid", i),
-                "shadow_astar_direct_blocked": _series_at(ts, "shadow_astar_direct_blocked", i),
-                "shadow_astar_detour_needed": _series_at(ts, "shadow_astar_detour_needed", i),
-                "shadow_astar_direction_detour": _series_at(ts, "shadow_astar_direction_detour", i),
-                "shadow_astar_cost_detour": _series_at(ts, "shadow_astar_cost_detour", i),
-                "shadow_astar_target_alignment": _series_at(ts, "shadow_astar_target_alignment", i),
-                "shadow_astar_target_angle_deg": _series_at(ts, "shadow_astar_target_angle_deg", i),
-                "shadow_astar_cost_ratio": _series_at(ts, "shadow_astar_cost_ratio", i),
-                "shadow_astar_direct_blocked_cells": _series_at(ts, "shadow_astar_direct_blocked_cells", i),
-                "shadow_astar_escape_mode": _series_at(ts, "shadow_astar_escape_mode", i),
-                "shadow_astar_exit_clearance_cells": _series_at(ts, "shadow_astar_exit_clearance_cells", i),
-                "shadow_astar_exit_openness": _series_at(ts, "shadow_astar_exit_openness", i),
-                "shadow_astar_target_corridor_blocked_fraction": _series_at(
-                    ts,
-                    "shadow_astar_target_corridor_blocked_fraction",
-                    i,
-                ),
-                "shadow_astar_waypoint_distance_m": _series_at(ts, "shadow_astar_waypoint_distance_m", i),
-                "shadow_astar_action_alignment": _series_at(ts, "shadow_astar_action_alignment", i),
-                "shadow_astar_movement_alignment": _series_at(ts, "shadow_astar_movement_alignment", i),
-                "shadow_astar_progress_m": _series_at(ts, "shadow_astar_progress_m", i),
-                "shadow_astar_target_progress_m": _series_at(ts, "shadow_astar_target_progress_m", i),
-                "shadow_astar_route_target_gap_m": _series_at(ts, "shadow_astar_route_target_gap_m", i),
-                "shadow_astar_route_target_conflict": _series_at(ts, "shadow_astar_route_target_conflict", i),
-                "shadow_astar_detour_no_progress": _series_at(ts, "shadow_astar_detour_no_progress", i),
             }
             for name in REWARD_COMPONENTS:
                 step[f"reward_abs_{name}"] = _series_at(rewards, name, i, absolute=True)
                 step[f"reward_{name}"] = _series_at(rewards, name, i)
-            for key, _coeff in ROUTE_STALL_PENALTY_COEFFS:
-                step[f"hyp_route_stall_penalty_abs_{key}"] = _series_at(stall_penalties, key, i)
             bucket_rows[bin_idx].append(step)
 
     out = []
@@ -1126,14 +1044,10 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "n_steps": len(bucket),
         }
         keys = (
-            "distance_m",
             "progress_m",
             "movement_m",
             "speed_mps",
             "action_norm",
-            "raw_mean_norm",
-            "raw_oob",
-            "action_saturated",
             "action_target_alignment",
             "movement_target_alignment",
             "action_movement_alignment",
@@ -1143,10 +1057,6 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "path_speed",
             "speed_limit_scale",
             "motion_correction_m",
-            "local_blocked_frac",
-            "local_mobility_mean",
-            "local_mobility_max",
-            "cell_speed",
             "within_confirm_range",
             "escape_route_active",
             "escape_route_enter",
@@ -1164,55 +1074,15 @@ def _time_bin_summary(rows: list[dict], bins: int) -> list[dict]:
             "route_fire_buffer_cells",
             "route_replanned_after_fire",
             "route_fire_blocked_no_path",
-            "shadow_astar_valid",
-            "shadow_astar_direct_blocked",
-            "shadow_astar_detour_needed",
-            "shadow_astar_direction_detour",
-            "shadow_astar_cost_detour",
-            "shadow_astar_target_alignment",
-            "shadow_astar_target_angle_deg",
-            "shadow_astar_cost_ratio",
-            "shadow_astar_direct_blocked_cells",
-            "shadow_astar_escape_mode",
-            "shadow_astar_exit_clearance_cells",
-            "shadow_astar_exit_openness",
-            "shadow_astar_target_corridor_blocked_fraction",
-            "shadow_astar_waypoint_distance_m",
-            "shadow_astar_action_alignment",
-            "shadow_astar_movement_alignment",
-            "shadow_astar_progress_m",
-            "shadow_astar_target_progress_m",
-            "shadow_astar_route_target_gap_m",
-            "shadow_astar_route_target_conflict",
-            "shadow_astar_detour_no_progress",
         )
         for key in keys:
             row[key] = _finite_mean(step.get(key) for step in bucket)
-        detour_steps = [
-            step
-            for step in bucket
-            if (step.get("shadow_astar_detour_needed") is not None and float(step["shadow_astar_detour_needed"]) > 0.5)
-        ]
-        detour_progress = _finite(step.get("shadow_astar_progress_m") for step in detour_steps)
-        for threshold_key, threshold_m in ROUTE_STALL_THRESHOLDS_M:
-            if detour_progress:
-                if threshold_m <= 0.0:
-                    value = np.mean([p <= 0.0 for p in detour_progress])
-                else:
-                    value = np.mean([p < threshold_m for p in detour_progress])
-                row[f"shadow_astar_detour_stall_fraction_{threshold_key}"] = float(value)
-            else:
-                row[f"shadow_astar_detour_stall_fraction_{threshold_key}"] = float("nan")
         for name in REWARD_COMPONENTS:
             row[f"reward_abs_{name}"] = _finite_mean(
                 step.get(f"reward_abs_{name}") for step in bucket
             )
             row[f"reward_{name}"] = _finite_mean(
                 step.get(f"reward_{name}") for step in bucket
-            )
-        for key, _coeff in ROUTE_STALL_PENALTY_COEFFS:
-            row[f"hyp_route_stall_penalty_abs_{key}"] = _finite_mean(
-                step.get(f"hyp_route_stall_penalty_abs_{key}") for step in bucket
             )
         out.append(row)
     return out
@@ -1244,25 +1114,9 @@ def _failure_labels(row: dict) -> list[str]:
         labels.append("weak_action")
     if float(row.get("mean_displacement_target_alignment", 0.0)) < 0.5:
         labels.append("poor_target_progress")
-    if float(row.get("mean_shadow_astar_movement_alignment", 0.0)) < 0.6:
-        labels.append("poor_astar_follow")
-    if float(row.get("shadow_astar_route_target_conflict_fraction", 0.0)) > 0.2:
-        labels.append("route_target_conflict")
-    if float(row.get("shadow_astar_detour_needed_fraction", 0.0)) > 0.4:
-        labels.append("detour_heavy")
-    if float(row.get("shadow_astar_direct_blocked_fraction", 0.0)) > 0.3:
-        labels.append("hard_blocked_direct")
-    if float(row.get("shadow_astar_direction_detour_fraction", 0.0)) > 0.3:
-        labels.append("direction_detour")
-    if float(row.get("shadow_astar_cost_detour_fraction", 0.0)) > 0.3:
-        labels.append("cost_detour")
-    if float(row.get("shadow_astar_detour_stall_fraction_lt010", 0.0)) > 0.2:
-        labels.append("detour_stall")
     if float(row.get("frac_near_zero_displacement", 0.0)) > 0.05:
         labels.append("near_zero_stall")
-    if float(row.get("mean_local_blocked_frac", 0.0)) > 0.25:
-        labels.append("obstacle_dense_local")
-    if float(row.get("mean_path_speed", 1.0)) < 0.65 or float(row.get("mean_cell_speed", 1.0)) < 0.75:
+    if float(row.get("mean_path_speed", 1.0)) < 0.65:
         labels.append("slow_terrain")
     if not labels:
         labels.append("other_failure")
@@ -1289,14 +1143,6 @@ def _group_metric_summary(rows: list[dict]) -> dict:
         "mean_action_norm",
         "mean_action_target_alignment",
         "mean_displacement_target_alignment",
-        "mean_shadow_astar_movement_alignment",
-        "shadow_astar_route_target_conflict_fraction",
-        "shadow_astar_detour_needed_fraction",
-        "shadow_astar_direct_blocked_fraction",
-        "shadow_astar_escape_mode_fraction",
-        "mean_shadow_astar_exit_clearance_cells",
-        "mean_shadow_astar_exit_openness",
-        "mean_shadow_astar_target_corridor_blocked_fraction",
         "global_route_valid_fraction",
         "mean_route_fire_cells",
         "mean_route_smoke_mean",
@@ -1304,14 +1150,7 @@ def _group_metric_summary(rows: list[dict]) -> dict:
         "mean_route_fire_buffer_cells",
         "route_replanned_after_fire_rate",
         "route_fire_blocked_no_path_fraction",
-        "shadow_astar_direction_detour_fraction",
-        "shadow_astar_cost_detour_fraction",
-        "shadow_astar_detour_stall_fraction_lt010",
-        "mean_shadow_astar_target_angle_deg",
-        "mean_shadow_astar_cost_ratio",
-        "mean_local_blocked_frac",
         "mean_path_speed",
-        "mean_cell_speed",
     )
     return {f"mean_{key}": _finite_mean(row.get(key) for row in rows) for key in keys}
 
@@ -1359,8 +1198,6 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
             row["mean_action_displacement_alignment"] for row in rows
         ),
         "mean_speed_mps": _finite_mean(row["mean_speed_mps"] for row in rows),
-        "mean_frac_raw_mean_oob": _finite_mean(row["frac_raw_mean_oob"] for row in rows),
-        "mean_frac_action_saturated": _finite_mean(row["frac_action_saturated"] for row in rows),
         "mean_frac_proposed_path_blocked": _finite_mean(
             row["frac_proposed_path_blocked"] for row in rows
         ),
@@ -1402,82 +1239,6 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         "mean_route_fire_blocked_no_path_fraction": _finite_mean(
             row.get("route_fire_blocked_no_path_fraction") for row in rows
         ),
-        "mean_shadow_astar_valid_fraction": _finite_mean(
-            row["shadow_astar_valid_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_direct_blocked_fraction": _finite_mean(
-            row["shadow_astar_direct_blocked_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_detour_needed_fraction": _finite_mean(
-            row["shadow_astar_detour_needed_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_direction_detour_fraction": _finite_mean(
-            row["shadow_astar_direction_detour_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_cost_detour_fraction": _finite_mean(
-            row["shadow_astar_cost_detour_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_target_alignment": _finite_mean(
-            row["mean_shadow_astar_target_alignment"] for row in rows
-        ),
-        "mean_shadow_astar_target_angle_deg": _finite_mean(
-            row["mean_shadow_astar_target_angle_deg"] for row in rows
-        ),
-        "mean_shadow_astar_cost_ratio": _finite_mean(
-            row["mean_shadow_astar_cost_ratio"] for row in rows
-        ),
-        "mean_shadow_astar_direct_blocked_cells": _finite_mean(
-            row["mean_shadow_astar_direct_blocked_cells"] for row in rows
-        ),
-        "mean_shadow_astar_escape_mode_fraction": _finite_mean(
-            row.get("shadow_astar_escape_mode_fraction") for row in rows
-        ),
-        "mean_shadow_astar_exit_clearance_cells": _finite_mean(
-            row.get("mean_shadow_astar_exit_clearance_cells") for row in rows
-        ),
-        "mean_shadow_astar_exit_openness": _finite_mean(
-            row.get("mean_shadow_astar_exit_openness") for row in rows
-        ),
-        "mean_shadow_astar_target_corridor_blocked_fraction": _finite_mean(
-            row.get("mean_shadow_astar_target_corridor_blocked_fraction") for row in rows
-        ),
-        "mean_shadow_astar_action_alignment": _finite_mean(
-            row["mean_shadow_astar_action_alignment"] for row in rows
-        ),
-        "mean_shadow_astar_movement_alignment": _finite_mean(
-            row["mean_shadow_astar_movement_alignment"] for row in rows
-        ),
-        "mean_shadow_astar_progress_m": _finite_mean(
-            row["mean_shadow_astar_progress_m"] for row in rows
-        ),
-        "mean_shadow_astar_detour_progress_m": _finite_mean(
-            row["mean_shadow_astar_detour_progress_m"] for row in rows
-        ),
-        "mean_shadow_astar_clear_progress_m": _finite_mean(
-            row["mean_shadow_astar_clear_progress_m"] for row in rows
-        ),
-        "mean_shadow_astar_target_progress_m": _finite_mean(
-            row["mean_shadow_astar_target_progress_m"] for row in rows
-        ),
-        "mean_shadow_astar_route_target_gap_m": _finite_mean(
-            row["mean_shadow_astar_route_target_gap_m"] for row in rows
-        ),
-        "mean_shadow_astar_route_target_conflict_fraction": _finite_mean(
-            row["shadow_astar_route_target_conflict_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_detour_no_progress_fraction": _finite_mean(
-            row["shadow_astar_detour_no_progress_fraction"] for row in rows
-        ),
-        "mean_shadow_astar_detour_stall_fraction_lt010": _finite_mean(
-            row["shadow_astar_detour_stall_fraction_lt010"] for row in rows
-        ),
-        "mean_hyp_route_stall_penalty_abs_k002": _finite_mean(
-            row["mean_hyp_route_stall_penalty_abs_k002"] for row in rows
-        ),
-        "mean_local_blocked_frac": _finite_mean(row["mean_local_blocked_frac"] for row in rows),
-        "mean_local_mobility_patch_mean": _finite_mean(row["mean_local_mobility_patch_mean"] for row in rows),
-        "mean_local_mobility_patch_max": _finite_mean(row["mean_local_mobility_patch_max"] for row in rows),
-        "mean_cell_speed": _finite_mean(row["mean_cell_speed"] for row in rows),
         "failure_label_counts": _label_counts(failure_rows),
         "success_group": _group_metric_summary(success_rows),
         "failure_group": _group_metric_summary(failure_rows),
@@ -1513,7 +1274,7 @@ def _plot_hist_by_success(ax, rows: list[dict], key: str, title: str, xlabel: st
         ax.axvline(float(np.mean(all_values)), color="black", lw=1.2, label="mean")
 
 
-def _plot_ugv_diagnostics(
+def _plot_ugv_diagnostics_legacy(
     rows: list[dict],
     summary: dict,
     output_path: Path,
@@ -1903,13 +1664,181 @@ def _plot_ugv_diagnostics(
     plt.close(fig)
 
 
+def _plot_ugv_diagnostics(
+    rows: list[dict],
+    summary: dict,
+    output_path: Path,
+    *,
+    deterministic: bool,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(6, 3, figsize=(15, 25), constrained_layout=True)
+    axes = axes.reshape(-1)
+
+    ax = axes[0]
+    successes = int(sum(1 for row in rows if row.get("full_success", 0.0) > 0.0))
+    failures = len(rows) - successes
+    ax.bar(["success", "failure"], [successes, failures], color=["#22c55e", "#ef4444"], alpha=0.8)
+    ax.set_title("Confirmation Outcome")
+    ax.set_ylabel("episodes")
+    ax.text(0.02, 0.95, f"success={summary['success_rate']:.2f}", transform=ax.transAxes, va="top")
+
+    _plot_hist_by_success(axes[1], rows, "final_distance_m", "Final Distance", "m")
+    _plot_hist_by_success(axes[2], rows, "min_distance_m", "Min Distance", "m")
+    _plot_hist_by_success(axes[3], rows, "confirmation_step", "Time To Confirm", "step")
+    _plot_hist_by_success(axes[4], rows, "path_length_m", "Path Length", "m")
+    _plot_hist_by_success(axes[5], rows, "path_to_initial_ratio", "Path / Initial Distance", "ratio")
+    _plot_hist_by_success(axes[6], rows, "mean_speed_mps", "Speed", "m/s")
+    _plot_hist_by_success(
+        axes[7],
+        rows,
+        "mean_action_target_alignment",
+        "Action Target Alignment",
+        "cosine",
+    )
+
+    bins = summary.get("time_bins", [])
+    x = [b["episode_fraction_mid"] for b in bins]
+
+    ax = axes[8]
+    ax.plot(x, [b["speed_mps"] for b in bins], marker="o", label="speed", color="#2563eb")
+    ax.plot(x, [b["movement_m"] for b in bins], marker="o", label="move/step", color="#0f766e")
+    ax.set_title("Time-Bin Movement")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("m/s or m/step")
+    ax2 = ax.twinx()
+    ax2.plot(x, [b["blocked"] for b in bins], marker="o", label="blocked", color="#ef4444")
+    ax2.plot(x, [b["speed_limited"] for b in bins], marker="o", label="speed limited", color="#f97316")
+    ax2.plot(x, [b["near_zero"] for b in bins], marker="o", label="near zero", color="#a855f7")
+    ax2.set_ylabel("fraction")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=8)
+
+    ax = axes[9]
+    reward_colors = {
+        "team": "#2563eb",
+        "ground_confirm": "#22c55e",
+        "progress": "#0f766e",
+        "movement_align": "#84cc16",
+        "approach": "#eab308",
+        "planner_progress": "#8b5cf6",
+        "stall_penalty": "#ef4444",
+        "route_floor_penalty": "#be123c",
+        "route_shortfall_penalty": "#7f1d1d",
+        "travel_penalty": "#111827",
+    }
+    for name in REWARD_COMPONENTS:
+        y = [b[f"reward_abs_{name}"] for b in bins]
+        if any(math.isfinite(float(v)) and abs(float(v)) > 1e-12 for v in y if v is not None):
+            ax.plot(x, y, marker="o", label=name.replace("_", " "), color=reward_colors.get(name))
+    ax.set_title("Time-Bin Reward Scale (mean abs)")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("abs reward/penalty per step")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=7, ncol=2)
+
+    ax = axes[10]
+    counts = summary.get("failure_label_counts", {})
+    if counts:
+        labels = list(counts)
+        values = [counts[label] for label in labels]
+        y_pos = np.arange(len(labels))
+        ax.barh(y_pos, values, color="#ef4444", alpha=0.75)
+        ax.set_yticks(y_pos, labels)
+        ax.invert_yaxis()
+        ax.set_xlabel("failed episodes")
+    else:
+        ax.text(0.5, 0.5, "no failures", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    ax.set_title("Failure Labels")
+
+    failure_bins = summary.get("failure_time_bins", [])
+    failure_x = [b["episode_fraction_mid"] for b in failure_bins]
+    ax = axes[11]
+    ax.plot(failure_x, [b["speed_mps"] for b in failure_bins], marker="o", label="speed", color="#2563eb")
+    ax.plot(failure_x, [b["movement_m"] for b in failure_bins], marker="o", label="move", color="#0f766e")
+    ax.plot(failure_x, [b["progress_m"] for b in failure_bins], marker="o", label="target progress", color="#16a34a")
+    ax.axhline(0.0, color="#64748b", lw=0.8)
+    ax.set_title("Failed Runs Movement")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("m/s or m/step")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
+
+    ax = axes[12]
+    ax.plot(x, [b["route_fire_cells"] for b in bins], marker="o", label="fire cells", color="#dc2626")
+    ax.plot(x, [b["route_fire_buffer_cells"] for b in bins], marker="o", label="buffer cells", color="#f97316")
+    ax.plot(x, [b["route_smoke_mean"] for b in bins], marker="o", label="smoke", color="#64748b")
+    ax.plot(x, [b["route_smolder_mean"] for b in bins], marker="o", label="smolder", color="#7c2d12")
+    ax.set_title("Time-Bin Route Fire Exposure")
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("cells or mean intensity")
+    ax2 = ax.twinx()
+    ax2.plot(x, [b["route_replanned_after_fire"] for b in bins], marker="x", linestyle="--", label="replan", color="#2563eb")
+    ax2.plot(x, [b["route_fire_blocked_no_path"] for b in bins], marker="x", linestyle="--", label="no path", color="#111827")
+    ax2.set_ylim(0.0, 1.0)
+    ax2.set_ylabel("fraction")
+    ax.grid(True, alpha=0.25)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=7, ncol=2)
+
+    _plot_hist_by_success(
+        axes[13],
+        rows,
+        "mean_route_fire_cells",
+        "Route Fire Exposure By Outcome",
+        "burning cells on route",
+    )
+
+    ax = axes[14]
+    route_fire_metrics = [
+        ("valid", "global_route_valid_fraction"),
+        ("replan", "route_replanned_after_fire_rate"),
+        ("no path", "route_fire_blocked_no_path_fraction"),
+        ("buffer", "mean_route_fire_buffer_cells"),
+    ]
+    ax.bar(
+        [label for label, _ in route_fire_metrics],
+        [_finite_mean(row.get(key) for row in rows) for _, key in route_fire_metrics],
+        color="#f97316",
+        alpha=0.75,
+    )
+    ax.set_title("Route Fire State")
+    ax.set_ylabel("fraction or cells")
+
+    _plot_hist_by_success(
+        axes[15],
+        rows,
+        "confirmation_recall",
+        "Confirmation Recall",
+        "confirmed / survivors",
+    )
+    axes[15].set_xlim(0.0, 1.0)
+
+    for ax in axes[16:]:
+        ax.axis("off")
+    fig.suptitle(
+        f"UGV HAPPO Diagnostics ({'deterministic' if deterministic else 'stochastic'}, n={len(rows)})",
+        fontsize=15,
+    )
+    fig.savefig(output_path, dpi=170)
+    plt.close(fig)
+
+
 def run_rollout(
     checkpoint_dir: Path,
     scenario_kwargs: dict,
     seed: int,
     deterministic: bool,
-    *,
-    shadow_planner: bool = True,
 ) -> dict:
     policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
     env = vmas.make_env(
@@ -1936,11 +1865,6 @@ def run_rollout(
     action_displacement_alignments: list[float] = []
     displacement_meters: list[float] = []
     action_norms: list[float] = []
-    saturated_actions: list[bool] = []
-    raw_mean_norms: list[float] = []
-    raw_mean_abs_max: list[float] = []
-    raw_mean_oob: list[bool] = []
-    raw_stds: list[float] = []
     proposed_path_blocked: list[bool] = []
     speed_limited: list[bool] = []
     path_speeds: list[float] = []
@@ -1949,52 +1873,12 @@ def run_rollout(
     corrected_displacements_m: list[float] = []
     actual_displacements_m: list[float] = []
     motion_corrections_m: list[float] = []
-    local_blocked_fracs: list[float] = []
-    local_mobility_means: list[float] = []
-    local_mobility_maxes: list[float] = []
-    cell_speeds: list[float] = []
     planner_buckets = {
         "all": _empty_planner_bucket(),
         "clear": _empty_planner_bucket(),
         "blocked": _empty_planner_bucket(),
     }
-    shadow_planner_buckets = {
-        "all": _empty_planner_bucket(),
-        "clear": _empty_planner_bucket(),
-        "blocked": _empty_planner_bucket(),
-        "detour": _empty_planner_bucket(),
-    }
     planner_total_steps = 0
-    shadow_planner_total_steps = 0
-    shadow_astar_valid: list[bool] = []
-    shadow_astar_direct_blocked: list[bool] = []
-    shadow_astar_detour_needed: list[bool] = []
-    shadow_astar_direction_detours: list[bool] = []
-    shadow_astar_cost_detours: list[bool] = []
-    shadow_astar_target_alignments: list[float] = []
-    shadow_astar_target_angles_deg: list[float] = []
-    shadow_astar_cost_ratios: list[float] = []
-    shadow_astar_direct_blocked_cells: list[int] = []
-    shadow_astar_escape_modes: list[bool] = []
-    shadow_astar_exit_clearance_cells: list[float] = []
-    shadow_astar_exit_openness: list[float] = []
-    shadow_astar_target_corridor_blocked_fractions: list[float] = []
-    shadow_astar_waypoint_distances_m: list[float] = []
-    shadow_astar_action_alignments: list[float] = []
-    shadow_astar_movement_alignments: list[float] = []
-    shadow_astar_progress_meters: list[float] = []
-    shadow_astar_detour_progress_meters: list[float] = []
-    shadow_astar_clear_progress_meters: list[float] = []
-    shadow_astar_target_progress_meters: list[float] = []
-    shadow_astar_route_target_gaps_m: list[float] = []
-    shadow_astar_route_target_conflicts: list[bool] = []
-    shadow_astar_detour_no_progress: list[bool] = []
-    shadow_astar_detour_stalls: dict[str, list[bool]] = {
-        key: [] for key, _threshold_m in ROUTE_STALL_THRESHOLDS_M
-    }
-    hyp_route_stall_penalty_abs: dict[str, list[float]] = {
-        key: [] for key, _coeff in ROUTE_STALL_PENALTY_COEFFS
-    }
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     max_steps = int(scenario_kwargs["max_steps"])
     time_series = _new_time_series()
@@ -2005,19 +1889,10 @@ def run_rollout(
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
         dist_before_m = _distance_m(scenario, pos_before, survivor_before)
-        cell_before = _ground_cell_diagnostics(scenario, pos_before)
-        shadow_hint = _shadow_astar_hint(scenario, pos_before, survivor_before) if shadow_planner else None
-        dist, obs_before = _actor_distribution(policy, env, agent_idx=ground_agent_idx, return_obs=True)
+        observations = [scenario.observation(agent) for agent in env.agents]
+        obs_before = observations[ground_agent_idx]
         planner_hint = _planner_hint_from_observation(scenario, obs_before)
-        raw_mean = dist.mean.detach().cpu().numpy()
-        raw_std = dist.stddev.detach().cpu().numpy()
-        raw_mean_norm = float(np.linalg.norm(raw_mean[0]))
-        raw_mean_norms.append(raw_mean_norm)
-        raw_mean_abs_max.append(float(np.max(np.abs(raw_mean[0]))))
-        raw_oob = bool(np.any(np.abs(raw_mean[0]) > 1.0))
-        raw_mean_oob.append(raw_oob)
-        raw_stds.append(float(np.mean(raw_std[0])))
-        actions = policy(env)
+        actions = policy.act_from_observations(observations)
         ground_action = actions[ground_agent_idx]
         action_target_alignment = _action_alignment(ground_action, ground.state.pos, survivor.state.pos)
         if action_target_alignment is not None:
@@ -2026,13 +1901,8 @@ def run_rollout(
         if planner_hint is not None:
             planner_vec, direct_blocked = planner_hint
             action_planner_alignment = _cosine_alignment(ground_action, planner_vec)
-        action_shadow_alignment = None
-        if shadow_hint and shadow_hint["valid"]:
-            action_shadow_alignment = _cosine_alignment(ground_action, shadow_hint["unit"])
         action_norm = float(torch.linalg.norm(ground_action, dim=-1)[0])
         action_norms.append(action_norm)
-        saturated = bool((ground_action.abs() >= 0.98).any().item())
-        saturated_actions.append(saturated)
         env.step(actions)
         blocked = bool(scenario.step_ugv_proposed_path_blocked[0, 0].item())
         proposed_path_blocked.append(blocked)
@@ -2070,159 +1940,13 @@ def run_rollout(
         displacement_meters.append(displacement_m)
         dist_after_m = _distance_m(scenario, ground.state.pos, survivor.state.pos)
         target_progress_m = dist_before_m - dist_after_m
-        shadow_movement_alignment = None
-        shadow_progress_m = None
-        shadow_route_target_gap_m = None
-        shadow_route_target_conflict = None
-        shadow_detour_no_progress = None
-        hyp_step_stall_penalty_abs = {key: 0.0 for key, _coeff in ROUTE_STALL_PENALTY_COEFFS}
-        shadow_valid = bool(shadow_hint and shadow_hint["valid"])
-        shadow_direct_blocked = bool(shadow_hint["direct_blocked"]) if shadow_valid else False
-        shadow_detour_needed = bool(shadow_hint["detour_needed"]) if shadow_valid else False
-        shadow_direction_detour = bool(shadow_hint["direction_detour"]) if shadow_valid else False
-        shadow_cost_detour = bool(shadow_hint["cost_detour"]) if shadow_valid else False
-        shadow_target_astar_alignment = (
-            float(shadow_hint["target_astar_alignment"])
-            if shadow_valid and shadow_hint["target_astar_alignment"] is not None
-            else None
-        )
-        shadow_target_astar_angle_deg = (
-            float(shadow_hint["target_astar_angle_deg"])
-            if shadow_valid and shadow_hint["target_astar_angle_deg"] is not None
-            else None
-        )
-        shadow_cost_ratio = (
-            float(shadow_hint["cost_ratio"])
-            if shadow_valid and shadow_hint["cost_ratio"] is not None
-            else None
-        )
-        shadow_direct_blocked_cell_count = int(shadow_hint["direct_blocked_cells"]) if shadow_valid else 0
-        shadow_escape_mode = bool(shadow_hint["escape_mode"]) if shadow_valid else False
-        shadow_exit_clearance_cells = (
-            float(shadow_hint["exit_clearance_cells"])
-            if shadow_valid and shadow_hint["exit_clearance_cells"] is not None
-            else None
-        )
-        shadow_exit_openness = (
-            float(shadow_hint["exit_openness"])
-            if shadow_valid and shadow_hint["exit_openness"] is not None
-            else None
-        )
-        shadow_target_corridor_blocked_fraction = (
-            float(shadow_hint["target_corridor_blocked_fraction"])
-            if shadow_valid and shadow_hint["target_corridor_blocked_fraction"] is not None
-            else None
-        )
-        shadow_waypoint_distance_m = (
-            float(shadow_hint["waypoint_distance_m"])
-            if shadow_valid and shadow_hint["waypoint_distance_m"] is not None
-            else None
-        )
-        if shadow_valid:
-            shadow_movement_alignment = _cosine_alignment(displacement, shadow_hint["unit"])
-            scale = float(scenario.terrain_sim_units_per_meter[0])
-            waypoint_pos = shadow_hint["waypoint_pos"]
-            before_wp_m = float(torch.linalg.norm(waypoint_pos - pos_before, dim=-1)[0].detach().cpu().item()) / max(scale, 1e-9)
-            after_wp_m = float(torch.linalg.norm(waypoint_pos - ground.state.pos, dim=-1)[0].detach().cpu().item()) / max(scale, 1e-9)
-            shadow_progress_m = before_wp_m - after_wp_m
-            shadow_route_target_gap_m = shadow_progress_m - target_progress_m
-            shadow_route_target_conflict = bool(
-                abs(shadow_progress_m) > 1e-6
-                and abs(target_progress_m) > 1e-6
-                and (shadow_progress_m * target_progress_m) < 0.0
-            )
-            shadow_astar_valid.append(True)
-            shadow_astar_direct_blocked.append(shadow_direct_blocked)
-            shadow_astar_detour_needed.append(shadow_detour_needed)
-            shadow_astar_direction_detours.append(shadow_direction_detour)
-            shadow_astar_cost_detours.append(shadow_cost_detour)
-            shadow_astar_direct_blocked_cells.append(shadow_direct_blocked_cell_count)
-            shadow_astar_escape_modes.append(shadow_escape_mode)
-            if shadow_exit_clearance_cells is not None:
-                shadow_astar_exit_clearance_cells.append(shadow_exit_clearance_cells)
-            if shadow_exit_openness is not None:
-                shadow_astar_exit_openness.append(shadow_exit_openness)
-            if shadow_target_corridor_blocked_fraction is not None:
-                shadow_astar_target_corridor_blocked_fractions.append(
-                    shadow_target_corridor_blocked_fraction
-                )
-            if shadow_target_astar_alignment is not None:
-                shadow_astar_target_alignments.append(shadow_target_astar_alignment)
-            if shadow_target_astar_angle_deg is not None:
-                shadow_astar_target_angles_deg.append(shadow_target_astar_angle_deg)
-            if shadow_cost_ratio is not None:
-                shadow_astar_cost_ratios.append(shadow_cost_ratio)
-            if shadow_waypoint_distance_m is not None:
-                shadow_astar_waypoint_distances_m.append(shadow_waypoint_distance_m)
-            if action_shadow_alignment is not None:
-                shadow_astar_action_alignments.append(action_shadow_alignment)
-            if shadow_movement_alignment is not None:
-                shadow_astar_movement_alignments.append(shadow_movement_alignment)
-            shadow_astar_progress_meters.append(shadow_progress_m)
-            shadow_astar_target_progress_meters.append(target_progress_m)
-            shadow_astar_route_target_gaps_m.append(shadow_route_target_gap_m)
-            shadow_astar_route_target_conflicts.append(shadow_route_target_conflict)
-            if shadow_detour_needed:
-                shadow_astar_detour_progress_meters.append(shadow_progress_m)
-                shadow_detour_no_progress = bool(shadow_progress_m <= 0.0)
-                shadow_astar_detour_no_progress.append(shadow_detour_no_progress)
-                for key, threshold_m in ROUTE_STALL_THRESHOLDS_M:
-                    if threshold_m <= 0.0:
-                        shadow_astar_detour_stalls[key].append(bool(shadow_progress_m <= 0.0))
-                    else:
-                        shadow_astar_detour_stalls[key].append(bool(shadow_progress_m < threshold_m))
-                stall_m = max(0.0, ROUTE_STALL_PENALTY_THRESHOLD_M - shadow_progress_m)
-                stall_scale = float(getattr(scenario, "ugv_planner_progress_scale_m", 1.0))
-                stall_fraction = min(max(stall_m / max(stall_scale, 1e-9), 0.0), 1.0)
-                for key, coeff in ROUTE_STALL_PENALTY_COEFFS:
-                    hyp_step_stall_penalty_abs[key] = float(coeff) * stall_fraction
-            else:
-                shadow_astar_clear_progress_meters.append(shadow_progress_m)
-            shadow_planner_total_steps += 1
-            speed_mps = displacement_m / step_seconds
-            for bucket_name in ("all", "blocked" if shadow_direct_blocked else "clear"):
-                _record_planner_bucket(
-                    shadow_planner_buckets[bucket_name],
-                    action_target=action_target_alignment,
-                    movement_target=disp_alignment,
-                    action_planner=action_shadow_alignment,
-                    movement_planner=shadow_movement_alignment,
-                    speed_mps=speed_mps,
-                )
-            if shadow_detour_needed:
-                _record_planner_bucket(
-                    shadow_planner_buckets["detour"],
-                    action_target=action_target_alignment,
-                    movement_target=disp_alignment,
-                    action_planner=action_shadow_alignment,
-                    movement_planner=shadow_movement_alignment,
-                    speed_mps=speed_mps,
-                )
-        else:
-            shadow_astar_valid.append(False)
-            shadow_astar_direct_blocked.append(False)
-            shadow_astar_detour_needed.append(False)
-            shadow_astar_direction_detours.append(False)
-            shadow_astar_cost_detours.append(False)
-            shadow_astar_direct_blocked_cells.append(0)
-            shadow_astar_escape_modes.append(False)
-        for key, value in hyp_step_stall_penalty_abs.items():
-            hyp_route_stall_penalty_abs[key].append(value)
         reward_components = _reward_components(scenario)
-        local_blocked_fracs.append(float(cell_before["blocked_frac"]))
-        local_mobility_means.append(float(cell_before["mobility_patch_mean"]))
-        local_mobility_maxes.append(float(cell_before["mobility_patch_max"]))
-        cell_speeds.append(float(cell_before["cell_speed"]))
         time_series["step"].append(step)
         time_series["episode_fraction"].append((step + 1) / max_steps)
-        time_series["distance_m"].append(dist_after_m)
         time_series["progress_m"].append(target_progress_m)
         time_series["movement_m"].append(displacement_m)
         time_series["speed_mps"].append(displacement_m / step_seconds)
         time_series["action_norm"].append(action_norm)
-        time_series["raw_mean_norm"].append(raw_mean_norm)
-        time_series["raw_oob"].append(float(raw_oob))
-        time_series["action_saturated"].append(float(saturated))
         _append_optional(time_series["action_target_alignment"], action_target_alignment)
         _append_optional(time_series["movement_target_alignment"], disp_alignment)
         _append_optional(time_series["action_movement_alignment"], action_disp_alignment)
@@ -2232,10 +1956,6 @@ def run_rollout(
         time_series["path_speed"].append(path_speed)
         time_series["speed_limit_scale"].append(speed_limit_scale)
         time_series["motion_correction_m"].append(motion_correction_m)
-        time_series["local_blocked_frac"].append(float(cell_before["blocked_frac"]))
-        time_series["local_mobility_mean"].append(float(cell_before["mobility_patch_mean"]))
-        time_series["local_mobility_max"].append(float(cell_before["mobility_patch_max"]))
-        time_series["cell_speed"].append(float(cell_before["cell_speed"]))
         time_series["within_confirm_range"].append(
             _metric_scalar(scenario, "metric_ugv_within_confirm_range")
         )
@@ -2287,38 +2007,6 @@ def run_rollout(
         time_series["route_fire_blocked_no_path"].append(
             _metric_scalar(scenario, "metric_ugv_route_fire_blocked_no_path")
         )
-        time_series["shadow_astar_valid"].append(float(shadow_valid))
-        time_series["shadow_astar_direct_blocked"].append(float(shadow_direct_blocked))
-        time_series["shadow_astar_detour_needed"].append(float(shadow_detour_needed))
-        time_series["shadow_astar_direction_detour"].append(float(shadow_direction_detour))
-        time_series["shadow_astar_cost_detour"].append(float(shadow_cost_detour))
-        _append_optional(time_series["shadow_astar_target_alignment"], shadow_target_astar_alignment)
-        _append_optional(time_series["shadow_astar_target_angle_deg"], shadow_target_astar_angle_deg)
-        _append_optional(time_series["shadow_astar_cost_ratio"], shadow_cost_ratio)
-        time_series["shadow_astar_direct_blocked_cells"].append(float(shadow_direct_blocked_cell_count))
-        time_series["shadow_astar_escape_mode"].append(float(shadow_escape_mode))
-        _append_optional(time_series["shadow_astar_exit_clearance_cells"], shadow_exit_clearance_cells)
-        _append_optional(time_series["shadow_astar_exit_openness"], shadow_exit_openness)
-        _append_optional(
-            time_series["shadow_astar_target_corridor_blocked_fraction"],
-            shadow_target_corridor_blocked_fraction,
-        )
-        _append_optional(time_series["shadow_astar_waypoint_distance_m"], shadow_waypoint_distance_m)
-        _append_optional(time_series["shadow_astar_action_alignment"], action_shadow_alignment)
-        _append_optional(time_series["shadow_astar_movement_alignment"], shadow_movement_alignment)
-        _append_optional(time_series["shadow_astar_progress_m"], shadow_progress_m)
-        _append_optional(time_series["shadow_astar_target_progress_m"], target_progress_m if shadow_valid else None)
-        _append_optional(time_series["shadow_astar_route_target_gap_m"], shadow_route_target_gap_m)
-        _append_optional(
-            time_series["shadow_astar_route_target_conflict"],
-            float(shadow_route_target_conflict) if shadow_route_target_conflict is not None else None,
-        )
-        _append_optional(
-            time_series["shadow_astar_detour_no_progress"],
-            float(shadow_detour_no_progress) if shadow_detour_no_progress is not None else None,
-        )
-        for key, value in hyp_step_stall_penalty_abs.items():
-            time_series["shadow_astar_hyp_stall_penalty_abs"][key].append(value)
         for name in REWARD_COMPONENTS:
             time_series["reward"][name].append(reward_components.get(name, 0.0))
         if planner_hint is not None:
@@ -2353,18 +2041,6 @@ def run_rollout(
         if confirmation_step is not None
         else None
     )
-    detour_stall_fractions = {
-        f"shadow_astar_detour_stall_fraction_{key}": (
-            float(np.mean(values)) if values else 0.0
-        )
-        for key, values in shadow_astar_detour_stalls.items()
-    }
-    hyp_route_stall_penalty_means = {
-        f"mean_hyp_route_stall_penalty_abs_{key}": (
-            float(np.mean(values)) if values else 0.0
-        )
-        for key, values in hyp_route_stall_penalty_abs.items()
-    }
     survivor_slots = max(int(getattr(scenario, "n_survivors", 0)), 0)
     active_survivor_mask = _active_survivor_mask_for_env(scenario)
     n_active_survivors = int(active_survivor_mask.sum())
@@ -2416,11 +2092,6 @@ def run_rollout(
             float(np.mean([d < 0.05 for d in displacement_meters])) if displacement_meters else 0.0
         ),
         "mean_action_norm": float(np.mean(action_norms)) if action_norms else 0.0,
-        "frac_action_saturated": float(np.mean(saturated_actions)) if saturated_actions else 0.0,
-        "mean_raw_mean_norm": float(np.mean(raw_mean_norms)) if raw_mean_norms else 0.0,
-        "mean_raw_mean_abs_max": float(np.mean(raw_mean_abs_max)) if raw_mean_abs_max else 0.0,
-        "frac_raw_mean_oob": float(np.mean(raw_mean_oob)) if raw_mean_oob else 0.0,
-        "mean_raw_std": float(np.mean(raw_stds)) if raw_stds else 0.0,
         "frac_proposed_path_blocked": float(np.mean(proposed_path_blocked)) if proposed_path_blocked else 0.0,
         "frac_speed_limited": float(np.mean(speed_limited)) if speed_limited else 0.0,
         "mean_path_speed": float(np.mean(path_speeds)) if path_speeds else 0.0,
@@ -2435,14 +2106,8 @@ def run_rollout(
             float(np.mean(actual_displacements_m)) if actual_displacements_m else 0.0
         ),
         "mean_motion_correction_m": float(np.mean(motion_corrections_m)) if motion_corrections_m else 0.0,
-        "mean_local_blocked_frac": float(np.mean(local_blocked_fracs)) if local_blocked_fracs else 0.0,
-        "mean_local_mobility_patch_mean": float(np.mean(local_mobility_means)) if local_mobility_means else 0.0,
-        "mean_local_mobility_patch_max": float(np.mean(local_mobility_maxes)) if local_mobility_maxes else 0.0,
-        "mean_cell_speed": float(np.mean(cell_speeds)) if cell_speeds else 0.0,
         "planner_total_steps": planner_total_steps,
         "planner_buckets": planner_buckets,
-        "shadow_planner_total_steps": shadow_planner_total_steps,
-        "shadow_planner_buckets": shadow_planner_buckets,
         "escape_route_active_fraction": _finite_mean(time_series["escape_route_active"]),
         "escape_route_enter_count": _finite_sum(time_series["escape_route_enter"]),
         "escape_route_exit_count": _finite_sum(time_series["escape_route_exit"]),
@@ -2463,79 +2128,6 @@ def run_rollout(
         "mean_route_fire_buffer_cells": _finite_mean(time_series["route_fire_buffer_cells"]),
         "route_replanned_after_fire_rate": _finite_mean(time_series["route_replanned_after_fire"]),
         "route_fire_blocked_no_path_fraction": _finite_mean(time_series["route_fire_blocked_no_path"]),
-        "shadow_astar_valid_fraction": (
-            float(np.mean(shadow_astar_valid)) if shadow_astar_valid else 0.0
-        ),
-        "shadow_astar_direct_blocked_fraction": (
-            float(np.mean(shadow_astar_direct_blocked)) if shadow_astar_direct_blocked else 0.0
-        ),
-        "shadow_astar_detour_needed_fraction": (
-            float(np.mean(shadow_astar_detour_needed)) if shadow_astar_detour_needed else 0.0
-        ),
-        "shadow_astar_direction_detour_fraction": (
-            float(np.mean(shadow_astar_direction_detours)) if shadow_astar_direction_detours else 0.0
-        ),
-        "shadow_astar_cost_detour_fraction": (
-            float(np.mean(shadow_astar_cost_detours)) if shadow_astar_cost_detours else 0.0
-        ),
-        "mean_shadow_astar_target_alignment": (
-            float(np.mean(shadow_astar_target_alignments)) if shadow_astar_target_alignments else 0.0
-        ),
-        "mean_shadow_astar_target_angle_deg": (
-            float(np.mean(shadow_astar_target_angles_deg)) if shadow_astar_target_angles_deg else 0.0
-        ),
-        "mean_shadow_astar_cost_ratio": (
-            float(np.mean(shadow_astar_cost_ratios)) if shadow_astar_cost_ratios else 0.0
-        ),
-        "mean_shadow_astar_direct_blocked_cells": (
-            float(np.mean(shadow_astar_direct_blocked_cells)) if shadow_astar_direct_blocked_cells else 0.0
-        ),
-        "shadow_astar_escape_mode_fraction": (
-            float(np.mean(shadow_astar_escape_modes)) if shadow_astar_escape_modes else 0.0
-        ),
-        "mean_shadow_astar_exit_clearance_cells": (
-            float(np.mean(shadow_astar_exit_clearance_cells)) if shadow_astar_exit_clearance_cells else 0.0
-        ),
-        "mean_shadow_astar_exit_openness": (
-            float(np.mean(shadow_astar_exit_openness)) if shadow_astar_exit_openness else 0.0
-        ),
-        "mean_shadow_astar_target_corridor_blocked_fraction": (
-            float(np.mean(shadow_astar_target_corridor_blocked_fractions))
-            if shadow_astar_target_corridor_blocked_fractions
-            else 0.0
-        ),
-        "mean_shadow_astar_waypoint_distance_m": (
-            float(np.mean(shadow_astar_waypoint_distances_m)) if shadow_astar_waypoint_distances_m else 0.0
-        ),
-        "mean_shadow_astar_action_alignment": (
-            float(np.mean(shadow_astar_action_alignments)) if shadow_astar_action_alignments else 0.0
-        ),
-        "mean_shadow_astar_movement_alignment": (
-            float(np.mean(shadow_astar_movement_alignments)) if shadow_astar_movement_alignments else 0.0
-        ),
-        "mean_shadow_astar_progress_m": (
-            float(np.mean(shadow_astar_progress_meters)) if shadow_astar_progress_meters else 0.0
-        ),
-        "mean_shadow_astar_detour_progress_m": (
-            float(np.mean(shadow_astar_detour_progress_meters)) if shadow_astar_detour_progress_meters else 0.0
-        ),
-        "mean_shadow_astar_clear_progress_m": (
-            float(np.mean(shadow_astar_clear_progress_meters)) if shadow_astar_clear_progress_meters else 0.0
-        ),
-        "mean_shadow_astar_target_progress_m": (
-            float(np.mean(shadow_astar_target_progress_meters)) if shadow_astar_target_progress_meters else 0.0
-        ),
-        "mean_shadow_astar_route_target_gap_m": (
-            float(np.mean(shadow_astar_route_target_gaps_m)) if shadow_astar_route_target_gaps_m else 0.0
-        ),
-        "shadow_astar_route_target_conflict_fraction": (
-            float(np.mean(shadow_astar_route_target_conflicts)) if shadow_astar_route_target_conflicts else 0.0
-        ),
-        "shadow_astar_detour_no_progress_fraction": (
-            float(np.mean(shadow_astar_detour_no_progress)) if shadow_astar_detour_no_progress else 0.0
-        ),
-        **detour_stall_fractions,
-        **hyp_route_stall_penalty_means,
         "time_series": time_series,
     }
 
@@ -3105,8 +2697,6 @@ def main() -> None:
                         help="Optional path to write structured diagnostic rows and summary.")
     parser.add_argument("--plots-output", default=None,
                         help="Optional path to write diagnostic distribution/time-bin plots.")
-    parser.add_argument("--shadow-ugv-planner", action=argparse.BooleanOptionalAction, default=True,
-                        help="Compute local A* diagnostics without changing the actor observation.")
     args = parser.parse_args()
     if args.n_drones is not None and args.n_drones < 1:
         parser.error("--n-drones must be positive")
@@ -3265,7 +2855,6 @@ def main() -> None:
         f"escape_stall={scenario_kwargs.get('ugv_escape_stall_steps', 5)} "
         f"escape_max={scenario_kwargs.get('ugv_escape_max_steps', 15)}"
     )
-    print(f"shadow_ugv_planner: {bool(args.shadow_ugv_planner)}")
     print("-" * 72)
 
     rows = [
@@ -3274,7 +2863,6 @@ def main() -> None:
             scenario_kwargs,
             seed,
             deterministic=not args.stochastic,
-            shadow_planner=bool(args.shadow_ugv_planner),
         )
         for seed in args.seeds
     ]
@@ -3295,20 +2883,9 @@ def main() -> None:
             f"disp_toward={row['frac_displacement_toward_target']:.3f} "
             f"act_disp={row['mean_action_displacement_alignment']:.3f} "
             f"speed={row['mean_speed_mps']:.2f}m/s "
-            f"sat={row['frac_action_saturated']:.3f} "
-            f"raw_oob={row['frac_raw_mean_oob']:.3f} "
             f"blocked={row['frac_proposed_path_blocked']:.3f} "
             f"speedlim={row['frac_speed_limited']:.3f} "
-            f"corr={row['mean_motion_correction_m']:.2f}m "
-            f"astar_align={row['mean_shadow_astar_movement_alignment']:.3f} "
-            f"astar_angle={row['mean_shadow_astar_target_angle_deg']:.1f}deg "
-            f"astar_blocked={row['shadow_astar_direct_blocked_fraction']:.3f} "
-            f"astar_detour={row['shadow_astar_detour_needed_fraction']:.3f} "
-            f"dir_detour={row['shadow_astar_direction_detour_fraction']:.3f} "
-            f"cost_detour={row['shadow_astar_cost_detour_fraction']:.3f} "
-            f"rt_conflict={row['shadow_astar_route_target_conflict_fraction']:.3f} "
-            f"route_stall010={row['shadow_astar_detour_stall_fraction_lt010']:.3f} "
-            f"route_pen002={row['mean_hyp_route_stall_penalty_abs_k002']:.4f}"
+            f"corr={row['mean_motion_correction_m']:.2f}m"
             + (
                 f" labels={','.join(row.get('failure_labels', []))}"
                 if row.get("full_success", 0.0) <= 0.0
@@ -3336,11 +2913,6 @@ def main() -> None:
         f"speed={np.mean([r['mean_speed_mps'] for r in rows]):.2f}m/s "
         f"near_zero={np.mean([r['frac_near_zero_displacement'] for r in rows]):.3f} "
         f"action_norm={np.mean([r['mean_action_norm'] for r in rows]):.3f} "
-        f"sat={np.mean([r['frac_action_saturated'] for r in rows]):.3f} "
-        f"raw_mean_norm={np.mean([r['mean_raw_mean_norm'] for r in rows]):.3f} "
-        f"raw_absmax={np.mean([r['mean_raw_mean_abs_max'] for r in rows]):.3f} "
-        f"raw_oob={np.mean([r['frac_raw_mean_oob'] for r in rows]):.3f} "
-        f"raw_std={np.mean([r['mean_raw_std'] for r in rows]):.3f} "
         f"blocked={np.mean([r['frac_proposed_path_blocked'] for r in rows]):.3f} "
         f"speedlim={np.mean([r['frac_speed_limited'] for r in rows]):.3f} "
         f"path_speed={np.mean([r['mean_path_speed'] for r in rows]):.3f} "
@@ -3348,21 +2920,7 @@ def main() -> None:
         f"proposed_move={np.mean([r['mean_proposed_displacement_m'] for r in rows]):.2f}m "
         f"corrected_move={np.mean([r['mean_corrected_displacement_m'] for r in rows]):.2f}m "
         f"actual_move={np.mean([r['mean_actual_displacement_m'] for r in rows]):.2f}m "
-        f"correction={np.mean([r['mean_motion_correction_m'] for r in rows]):.2f}m "
-        f"shadow_astar_valid={summary['mean_shadow_astar_valid_fraction']:.3f} "
-        f"shadow_astar_blocked={summary['mean_shadow_astar_direct_blocked_fraction']:.3f} "
-        f"shadow_astar_detour={summary['mean_shadow_astar_detour_needed_fraction']:.3f} "
-        f"shadow_dir_detour={summary['mean_shadow_astar_direction_detour_fraction']:.3f} "
-        f"shadow_cost_detour={summary['mean_shadow_astar_cost_detour_fraction']:.3f} "
-        f"shadow_astar_angle={summary['mean_shadow_astar_target_angle_deg']:.1f}deg "
-        f"shadow_cost_ratio={summary['mean_shadow_astar_cost_ratio']:.2f} "
-        f"shadow_astar_align={summary['mean_shadow_astar_movement_alignment']:.3f} "
-        f"shadow_astar_progress={summary['mean_shadow_astar_progress_m']:.2f}m "
-        f"detour_progress={summary['mean_shadow_astar_detour_progress_m']:.2f}m "
-        f"detour_no_progress={summary['mean_shadow_astar_detour_no_progress_fraction']:.3f} "
-        f"detour_stall010={summary['mean_shadow_astar_detour_stall_fraction_lt010']:.3f} "
-        f"route_target_conflict={summary['mean_shadow_astar_route_target_conflict_fraction']:.3f} "
-        f"hyp_route_pen002={summary['mean_hyp_route_stall_penalty_abs_k002']:.4f}"
+        f"correction={np.mean([r['mean_motion_correction_m'] for r in rows]):.2f}m"
     )
     if summary.get("failure_label_counts"):
         print("-" * 72)
@@ -3373,22 +2931,6 @@ def main() -> None:
     failed_rows = [row for row in rows if row["full_success"] <= 0.0]
     if failed_rows:
         _print_planner_alignment_table("planner alignment by A* direct-path state, failures only:", failed_rows)
-    _print_planner_alignment_table(
-        "shadow A* alignment by local route state:",
-        rows,
-        buckets_key="shadow_planner_buckets",
-        total_steps_key="shadow_planner_total_steps",
-        labels=(("all", "all"), ("clear", "clear"), ("blocked", "blocked"), ("detour", "detour")),
-    )
-    if failed_rows:
-        _print_planner_alignment_table(
-            "shadow A* alignment by local route state, failures only:",
-            failed_rows,
-            buckets_key="shadow_planner_buckets",
-            total_steps_key="shadow_planner_total_steps",
-            labels=(("all", "all"), ("clear", "clear"), ("blocked", "blocked"), ("detour", "detour")),
-        )
-
     print("-" * 72)
     print("fixed-command one-step motion probe:")
     for name, mean_m, std_m in run_action_magnitude_probe(checkpoint_dir, scenario_kwargs, args.seeds):
@@ -3438,7 +2980,6 @@ def main() -> None:
             "deterministic": not args.stochastic,
             "steps": int(args.steps),
             "seeds": list(args.seeds),
-            "shadow_ugv_planner": bool(args.shadow_ugv_planner),
             "scenario_kwargs": scenario_kwargs,
             "summary": summary,
             "rows": rows,
