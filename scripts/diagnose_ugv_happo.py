@@ -3069,11 +3069,11 @@ def main() -> None:
                         default=None,
                         help="Override the checkpoint's UGV planner fire mode.")
     parser.add_argument("--ugv-planner-fire-replan-policy",
-                        choices=("always", "affected", "lazy"),
+                        choices=("always", "affected", "lazy", "threshold_lazy"),
                         default=None,
                         help="Override when fire-aware UGV global routes are replanned after fire spread.")
     parser.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=None,
-                        help="Override lazy fire-aware global route replan interval.")
+                        help="Override lazy/threshold-lazy fire-aware global route replan interval.")
     parser.add_argument("--ugv-planner-fire-cost", type=float, default=None,
                         help="Override active-fire planner cost.")
     parser.add_argument("--ugv-planner-fire-block-threshold", type=float, default=None,

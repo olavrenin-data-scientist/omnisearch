@@ -137,11 +137,11 @@ def main():
                    default=None,
                    help="Override the UGV planner fire mode for trajectory export.")
     p.add_argument("--ugv-planner-fire-replan-policy",
-                   choices=("always", "affected", "lazy"),
+                   choices=("always", "affected", "lazy", "threshold_lazy"),
                    default=None,
                    help="Override when fire-aware UGV global routes are replanned after fire spread.")
     p.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=None,
-                   help="Override lazy fire-aware global route replan interval.")
+                   help="Override lazy/threshold-lazy fire-aware global route replan interval.")
     p.add_argument("--ugv-global-planner-heuristic",
                    choices=("euclidean", "terrain"),
                    default=None,

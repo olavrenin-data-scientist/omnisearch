@@ -512,8 +512,16 @@ def build_args(
     if ugv_planner_fire_mode not in {"off", "cost", "block"}:
         raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
     ugv_planner_fire_replan_policy = str(ugv_planner_fire_replan_policy).replace("-", "_")
-    if ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
-        raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
+    if ugv_planner_fire_replan_policy not in {
+        "always",
+        "affected",
+        "lazy",
+        "threshold_lazy",
+    }:
+        raise ValueError(
+            "ugv_planner_fire_replan_policy must be one of: "
+            "always, affected, lazy, threshold_lazy"
+        )
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     if ugv_target_assignment_mode is None:
         ugv_target_assignment_mode = (
@@ -1702,14 +1710,16 @@ def main():
                    help="Fire treatment for UGV A* planners. off ignores fire; cost adds fire/smoke costs; "
                         "block treats active fire as non-traversable and uses soft smoke/buffer costs.")
     p.add_argument("--ugv-planner-fire-replan-policy",
-                   choices=("always", "affected", "lazy"),
+                   choices=("always", "affected", "lazy", "threshold_lazy"),
                    default="always",
                    help="When fire-aware planning is enabled, always replan on fire spread or only when "
                         "active fire/buffer touches the cached global route. lazy only replans when "
-                        "the near route segment is risky or the interval expires.")
+                        "the near route segment is risky or the interval expires. threshold_lazy "
+                        "immediately replans only when the near route crosses fire at or above the "
+                        "block threshold; softer fire/smoke/buffer changes wait for the interval.")
     p.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=15,
-                   help="For --ugv-planner-fire-replan-policy lazy, maximum fire-change steps "
-                        "between full global replans.")
+                   help="For lazy and threshold_lazy fire replan policies, maximum fire-change "
+                        "steps between full global replans.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=25.0,
                    help="Additional movement cost for active fire cells in cost mode.")
     p.add_argument("--ugv-planner-fire-block-threshold", type=float, default=0.0,

@@ -374,8 +374,16 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_planner_fire_replan_policy = str(
             kwargs.pop("ugv_planner_fire_replan_policy", "always"),
         ).replace("-", "_")
-        if self.ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
-            raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
+        if self.ugv_planner_fire_replan_policy not in {
+            "always",
+            "affected",
+            "lazy",
+            "threshold_lazy",
+        }:
+            raise ValueError(
+                "ugv_planner_fire_replan_policy must be one of: "
+                "always, affected, lazy, threshold_lazy"
+            )
         self.ugv_planner_fire_replan_interval_steps = max(
             int(kwargs.pop("ugv_planner_fire_replan_interval_steps", 15)),
             1,
@@ -3628,20 +3636,28 @@ class WildfireSearchScenario(BaseScenario):
             return
 
         for env_index in range(self.world.batch_dim):
-            risk = self.fire_grid[env_index].bool()
-            if self.ugv_planner_fire_buffer_m > 0.0 and self.ugv_planner_fire_buffer_cost > 0.0:
-                risk = risk | self._ugv_planner_fire_buffer_mask(env_index)
-            if not bool(risk.any().item()):
+            if self.ugv_planner_fire_replan_policy == "threshold_lazy":
+                immediate_risk = self._ugv_planner_blocked_fire_mask(env_index)
+                risk = immediate_risk
+            else:
+                risk = self.fire_grid[env_index].bool()
+                if self.ugv_planner_fire_buffer_m > 0.0 and self.ugv_planner_fire_buffer_cost > 0.0:
+                    risk = risk | self._ugv_planner_fire_buffer_mask(env_index)
+                immediate_risk = risk
+            if (
+                self.ugv_planner_fire_replan_policy != "threshold_lazy"
+                and not bool(risk.any().item())
+            ):
                 continue
             for ground_index in range(self.n_ground):
                 path = self.ugv_global_route_paths[env_index][ground_index]
                 if not path:
                     continue
-                if self.ugv_planner_fire_replan_policy == "lazy":
+                if self.ugv_planner_fire_replan_policy in {"lazy", "threshold_lazy"}:
                     should_replan = self._ugv_global_route_near_risk(
                         env_index,
                         ground_index,
-                        risk,
+                        immediate_risk,
                     ) or self._ugv_global_route_lazy_replan_due(env_index, ground_index)
                 else:
                     xs = torch.tensor(
