@@ -1280,6 +1280,43 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(default_scenario["disable_fire"])
         self.assertFalse(fire_scenario["disable_fire"])
 
+    def test_uav_diagnostics_can_override_communication_dropout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "comms_dropout": 0.4,
+                        "comms_dropout_mode": "bursty",
+                        "comms_dropout_min_steps": 7,
+                        "comms_dropout_max_steps": 11,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=123,
+                comms_dropout=None,
+                comms_dropout_mode=None,
+            )
+
+            default_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            args.comms_dropout = 0.3
+            args.comms_dropout_mode = "iid"
+            override_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(default_scenario["comms_dropout"], 0.0)
+        self.assertEqual(default_scenario["comms_dropout_mode"], "bursty")
+        self.assertEqual(default_scenario["comms_dropout_min_steps"], 7)
+        self.assertEqual(default_scenario["comms_dropout_max_steps"], 11)
+        self.assertEqual(override_scenario["comms_dropout"], 0.3)
+        self.assertEqual(override_scenario["comms_dropout_mode"], "iid")
+
     def test_uav_diagnostics_normalizes_stale_active_ranges_after_slot_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"

@@ -112,13 +112,19 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "known_survivors_at_reset": False,
         "drone_can_confirm": True,
         "disable_fire": not bool(getattr(args, "enable_fire", False)),
-        "comms_dropout": 0.0,
+        "comms_dropout": float(
+            0.0
+            if getattr(args, "comms_dropout", None) is None
+            else args.comms_dropout
+        ),
         "uav_confidence_diagnostics": True,
         "uav_cleanup_target_diagnostics": (
             str(getattr(args, "diagnostic_level", "full")).replace("-", "_").lower() == "full"
             or bool(getattr(args, "include_cleanup_target_diagnostics", False))
         ),
     })
+    if getattr(args, "comms_dropout_mode", None) is not None:
+        scenario_kwargs["comms_dropout_mode"] = str(args.comms_dropout_mode).replace("-", "_")
     joint_observation_schema = bool(
         getattr(args, "joint_schema_uav_diagnostic", False)
         or getattr(args, "joint_observation_schema", False)
@@ -7500,6 +7506,12 @@ def main() -> None:
     parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
                         help="Disable fire/smoke dynamics during UAV diagnostics.")
     parser.set_defaults(enable_fire=False)
+    parser.add_argument("--comms-dropout", type=float, default=None,
+                        help="Communication dropout probability during evaluation. "
+                             "Omitted or 0 preserves the full-communication diagnostic default.")
+    parser.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default=None,
+                        help="Communication dropout process. Omitted preserves the checkpoint mode, "
+                             "falling back to iid for legacy checkpoints.")
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=None)
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
                         help="Override checkpoint UAV start min separation in meters; pass 0 to disable.")
@@ -7570,6 +7582,14 @@ def main() -> None:
         parser.error("--active-decoys-max must be >= --active-decoys-min")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
+    if (
+        args.comms_dropout is not None
+        and (
+            not math.isfinite(args.comms_dropout)
+            or not 0.0 <= args.comms_dropout <= 1.0
+        )
+    ):
+        parser.error("--comms-dropout must be finite and between 0 and 1")
     if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
         parser.error("--uav-start-min-separation-m must be nonnegative")
     if args.uav_start_edge_margin_m is not None and args.uav_start_edge_margin_m < 0.0:
@@ -7621,6 +7641,13 @@ def main() -> None:
         "uav starts: "
         f"min_sep={scenario_kwargs.get('uav_start_min_separation_m', 0.0)}m "
         f"edge_margin={scenario_kwargs.get('uav_start_edge_margin_m', 0.0)}m"
+    )
+    print(
+        "communications: "
+        f"dropout={scenario_kwargs.get('comms_dropout', 0.0)} "
+        f"mode={scenario_kwargs.get('comms_dropout_mode', 'iid')} "
+        f"burst_steps={scenario_kwargs.get('comms_dropout_min_steps', 5)}"
+        f"..{scenario_kwargs.get('comms_dropout_max_steps', 15)}"
     )
     print(
         "uav overlap penalty: "
