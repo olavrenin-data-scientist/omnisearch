@@ -488,13 +488,19 @@ class WildfireSearchScenario(BaseScenario):
             if drone_flight_levels_override is not None
             else tuple(float(v) for v in drone_flight_levels_m)
         )
+        legacy_detection_factors = kwargs.pop("drone_detection_factors", None)
         drone_detection_quality = kwargs.pop(
             "drone_detection_quality",
-            kwargs.pop("drone_detection_factors", (0.95, 0.75, 0.55)),
+            legacy_detection_factors,
         )
         drone_energy_costs = kwargs.pop("drone_energy_costs", (0.0, 0.002, 0.006))
-        if not (len(drone_flight_levels) == len(drone_detection_quality) == len(drone_energy_costs)):
-            raise ValueError("drone flight levels, detection quality, and energy costs must align")
+        if len(drone_flight_levels) != len(drone_energy_costs):
+            raise ValueError("drone flight levels and energy costs must align")
+        if (
+            drone_detection_quality is not None
+            and len(drone_flight_levels) != len(drone_detection_quality)
+        ):
+            raise ValueError("drone flight levels and detection quality must align")
         if len(drone_flight_levels) < 2:
             raise ValueError("drone_flight_levels must contain at least two values for continuous interpolation")
         self.drone_flight_levels_sim_override = drone_flight_levels_override is not None
@@ -1297,7 +1303,22 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.object_fire_fuel = torch.tensor(object_fire_fuel, dtype=torch.float, device=device)
         self.drone_flight_levels = torch.tensor(drone_flight_levels, dtype=torch.float, device=device)
-        self.drone_detection_quality = torch.tensor(drone_detection_quality, dtype=torch.float, device=device)
+        self.drone_detection_quality_override = (
+            torch.tensor(drone_detection_quality, dtype=torch.float, device=device)
+            if drone_detection_quality is not None
+            else None
+        )
+        if self.drone_detection_quality_override is None:
+            quality_altitudes_m = torch.tensor(
+                self.drone_flight_levels_m,
+                dtype=torch.float,
+                device=device,
+            )
+            self.drone_detection_quality = self._fitted_drone_altitude_quality(quality_altitudes_m)
+            self.drone_altitude_quality_model = "sambolek_ivasickos_2021_fit"
+        else:
+            self.drone_detection_quality = self.drone_detection_quality_override
+            self.drone_altitude_quality_model = "legacy_level_interpolation"
         self.drone_cover_detection_factors = torch.tensor(
             drone_cover_detection_factors, dtype=torch.float, device=device,
         )
@@ -7897,7 +7918,11 @@ class WildfireSearchScenario(BaseScenario):
     def _refresh_drone_altitude_bins(self, env_indices: Tensor | None = None) -> None:
         altitude = self.drone_altitude if env_indices is None else self.drone_altitude[env_indices]
         levels = self.drone_flight_levels_by_env if env_indices is None else self.drone_flight_levels_by_env[env_indices]
-        level, quality, energy = self._continuous_altitude_properties(altitude, levels)
+        level, quality, energy = self._continuous_altitude_properties(
+            altitude,
+            levels,
+            env_indices,
+        )
         if env_indices is None:
             self.drone_altitude_level = level
             self.drone_altitude_quality = quality
@@ -7921,12 +7946,23 @@ class WildfireSearchScenario(BaseScenario):
             max_altitude = self.drone_max_altitude_by_env[env_indices].to(device=device).view(-1, 1)
         return min_altitude.expand(shape), max_altitude.expand(shape)
 
-    def _continuous_altitude_properties(self, altitude: Tensor, levels: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    @staticmethod
+    def _fitted_drone_altitude_quality(altitude_m: Tensor) -> Tensor:
+        # Shifted-Weibull fit to the altitude/detection values reported by
+        # Sambolek and Ivasic-Kos, IEEE Access, 2021 (15/30/45/60/75 m).
+        excess_altitude_m = (altitude_m - 30.0).clamp_min(0.0)
+        return torch.exp(-0.00238255 * excess_altitude_m.pow(1.26540149))
+
+    def _continuous_altitude_properties(
+        self,
+        altitude: Tensor,
+        levels: Tensor,
+        env_indices: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
         if levels.ndim == 1:
             levels = levels.view(*((1,) * altitude.ndim), -1).expand(*altitude.shape, -1)
         elif levels.ndim == 2:
             levels = levels.unsqueeze(1).expand(-1, altitude.shape[1], -1)
-        quality_values = self.drone_detection_quality
         energy_values = self.drone_energy_costs
         level_idx = (altitude.unsqueeze(-1) - levels).abs().argmin(dim=-1)
         hi = (altitude.unsqueeze(-1) > levels).sum(dim=-1).clamp(max=levels.shape[-1] - 1)
@@ -7935,7 +7971,17 @@ class WildfireSearchScenario(BaseScenario):
         lower = levels.gather(-1, lo.unsqueeze(-1)).squeeze(-1)
         span = (upper - lower).clamp_min(1e-6)
         weight = torch.where(hi == lo, torch.zeros_like(altitude), (altitude - lower) / span)
-        quality = quality_values[lo] + weight * (quality_values[hi] - quality_values[lo])
+        if self.drone_detection_quality_override is None:
+            sim_units_per_meter = (
+                self.terrain_sim_units_per_meter
+                if env_indices is None
+                else self.terrain_sim_units_per_meter[env_indices]
+            ).to(device=altitude.device, dtype=altitude.dtype)
+            altitude_m = altitude / sim_units_per_meter.view(-1, 1).clamp_min(1e-9)
+            quality = self._fitted_drone_altitude_quality(altitude_m)
+        else:
+            quality_values = self.drone_detection_quality_override
+            quality = quality_values[lo] + weight * (quality_values[hi] - quality_values[lo])
         energy = energy_values[lo] + weight * (energy_values[hi] - energy_values[lo])
         return level_idx.long(), quality, energy
 

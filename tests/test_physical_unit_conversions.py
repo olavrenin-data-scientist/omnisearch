@@ -140,6 +140,29 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(footprint.item()), 50.0 * scale, places=7)
         self.assertLess(float(footprint.item()), 0.12)
 
+    def test_fitted_drone_altitude_quality_matches_source_values(self):
+        altitude_m = torch.tensor([15.0, 30.0, 45.0, 60.0, 75.0])
+
+        quality = WildfireSearchScenario._fitted_drone_altitude_quality(altitude_m)
+
+        source_values = torch.tensor([1.0, 1.0, 0.92, 0.85, 0.74])
+        torch.testing.assert_close(quality, source_values, atol=0.02, rtol=0.0)
+        self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
+    def test_fitted_drone_altitude_quality_uses_physical_meters(self):
+        scenario = WildfireSearchScenario()
+        scenario.drone_detection_quality_override = None
+        scenario.drone_energy_costs = torch.tensor([0.0, 0.002, 0.006])
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.004, 0.002])
+        altitude_m = torch.tensor([15.0, 30.0, 45.0, 60.0, 75.0])
+        altitude = altitude_m.unsqueeze(0) * scenario.terrain_sim_units_per_meter.unsqueeze(1)
+        levels_m = torch.tensor([15.0, 45.0, 75.0])
+        levels = levels_m.unsqueeze(0) * scenario.terrain_sim_units_per_meter.unsqueeze(1)
+
+        _, quality, _ = scenario._continuous_altitude_properties(altitude, levels)
+
+        torch.testing.assert_close(quality[0], quality[1], atol=1e-7, rtol=1e-7)
+
     def test_uav_detection_probability_uses_confidence_grid_size(self):
         scenario = self._coverage_scenario(n_drones=1, grid_size=16)
         scenario.fire_grid_size = 64
