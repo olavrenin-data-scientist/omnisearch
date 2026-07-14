@@ -140,8 +140,8 @@ def run_cv_simulation(
     smoke_val = float(grids["smoke_grid"].mean())
     fire_val = float(grids["fire_intensity_grid"].mean())
 
-    # Smoke attenuation for visible: exp(-1.4 * smoke_load) with floor 0.55
-    smoke_factor = max(np.exp(-1.4 * smoke_val), 0.55)
+    # Match the simulator's Liu et al. (2020) atmospheric-transmission fit.
+    smoke_factor = max(1.0 - smoke_val, 0.0) ** 1.24
     # Fire glare
     fire_glare = 1.0 - 0.35 * fire_val
     # Combined visible degradation

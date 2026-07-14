@@ -206,7 +206,7 @@ If a survivor is within the footprint, detection is **stochastic**: a random dra
 | Smoke/fire factor | Product of smoke, glare, and heat terms | Atmospheric degradation of the camera image |
 | Altitude quality | Interpolated from flight level | Proxy for image resolution and integration time |
 
-**Smoke attenuation:** `max(exp(−1.4 × smoke_load), 0.55)` — exponential Beer-Lambert transmittance with a floor (even in heavy smoke, a minimal detection chance remains).
+**Smoke attenuation:** `(1 − smoke_load)^1.24` — smoke intensity is interpreted as contrast loss from an atmospheric-transmission conversion. The exponent is fitted to the clear-normalized Faster R-CNN recalls reported by Liu et al. (2020), *Analysis of the Influence of Foggy Weather Environment on the Detection Effect of Machine Vision Obstacles*. Detection quality approaches zero as smoke becomes opaque.
 
 **Fire glare:** `1 − 0.35 × max(local_fire_intensity, fire_density_near_survivor)` — fire near the survivor degrades the image as though saturating the camera sensor.
 

@@ -324,7 +324,8 @@ def _terrain_record(scenario, env_index: int) -> dict:
         ],
         "drone_altitude_quality_model": str(scenario.drone_altitude_quality_model),
         "drone_perception_path_samples": int(scenario.drone_perception_path_samples),
-        "drone_smoke_extinction": round(float(scenario.drone_smoke_extinction), 4),
+        "drone_smoke_quality_model": str(scenario.drone_smoke_quality_model),
+        "drone_smoke_quality_exponent": round(float(scenario.drone_smoke_quality_exponent), 4),
         "drone_fire_glare_penalty": round(float(scenario.drone_fire_glare_penalty), 4),
         "drone_heat_distortion_penalty": round(float(scenario.drone_heat_distortion_penalty), 4),
         "drone_cover_detection_factors": [

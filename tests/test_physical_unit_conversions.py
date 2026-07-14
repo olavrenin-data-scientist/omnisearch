@@ -163,6 +163,19 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         torch.testing.assert_close(quality[0], quality[1], atol=1e-7, rtol=1e-7)
 
+    def test_fitted_drone_smoke_quality_has_no_opaque_smoke_floor(self):
+        scenario = WildfireSearchScenario()
+        scenario.drone_smoke_quality_exponent = 1.24
+        smoke_intensity = torch.tensor([0.0, 0.25, 0.50, 0.80, 1.0])
+
+        quality = scenario._drone_smoke_quality(smoke_intensity)
+
+        expected = (1.0 - smoke_intensity).clamp_min(0.0).pow(1.24)
+        torch.testing.assert_close(quality, expected, atol=1e-7, rtol=1e-7)
+        self.assertEqual(float(quality[0]), 1.0)
+        self.assertEqual(float(quality[-1]), 0.0)
+        self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
     def test_uav_detection_probability_uses_confidence_grid_size(self):
         scenario = self._coverage_scenario(n_drones=1, grid_size=16)
         scenario.fire_grid_size = 64
@@ -705,8 +718,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.fire_intensity_grid = torch.linspace(1.0, 0.0, 32 * 32).view(1, 32, 32)
         scenario.fire_grid = scenario.fire_intensity_grid > 0.72
         scenario.drone_perception_path_samples = 5
-        scenario.drone_smoke_detection_factor = 0.55
-        scenario.drone_smoke_extinction = 1.4
         scenario.drone_fire_glare_penalty = 0.35
         scenario.drone_heat_distortion_penalty = 0.20
         scenario.drone_altitude = torch.tensor([[0.22, 0.18]], dtype=torch.float32)
@@ -1896,8 +1907,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         )
         scenario.fire_grid = scenario.fire_intensity_grid > 0.35
         scenario.drone_perception_path_samples = 5
-        scenario.drone_smoke_detection_factor = 0.55
-        scenario.drone_smoke_extinction = 1.4
         scenario.drone_fire_glare_penalty = 0.35
         scenario.drone_heat_distortion_penalty = 0.25
         scenario._invalidate_uav_terrain_caches()

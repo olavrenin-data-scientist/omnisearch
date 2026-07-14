@@ -58,6 +58,7 @@ OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE = range(3)
 DEFAULT_GROUND_APPROACH_REWARD = 0.05
 DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
+DRONE_SMOKE_QUALITY_EXPONENT = 1.24
 UGV_PLANNER_HINT_DIM = 5
 UGV_LOCAL_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
 UGV_PLANNER_HINT_MODES = UGV_LOCAL_PLANNER_HINT_MODES | {"global_astar"}
@@ -513,9 +514,13 @@ class WildfireSearchScenario(BaseScenario):
             water_value=0.95,
             name="drone_cover_detection_factors",
         )
-        self.drone_smoke_detection_factor = kwargs.pop("drone_smoke_detection_factor", 0.55)
+        # Consume the retired smoke-floor/extinction settings so old scenario
+        # configurations remain loadable under the fitted smoke-quality model.
+        kwargs.pop("drone_smoke_detection_factor", None)
         self.drone_perception_path_samples = max(int(kwargs.pop("drone_perception_path_samples", 8)), 2)
-        self.drone_smoke_extinction = max(float(kwargs.pop("drone_smoke_extinction", 1.4)), 0.0)
+        kwargs.pop("drone_smoke_extinction", None)
+        self.drone_smoke_quality_exponent = DRONE_SMOKE_QUALITY_EXPONENT
+        self.drone_smoke_quality_model = "liu_2020_transmission_fit"
         self.drone_fire_glare_penalty = min(
             max(float(kwargs.pop("drone_fire_glare_penalty", 0.35)), 0.0),
             1.0,
@@ -5905,6 +5910,15 @@ class WildfireSearchScenario(BaseScenario):
                 records.append(record)
             return records
 
+    def _drone_smoke_quality(self, smoke_intensity: Tensor) -> Tensor:
+        # Interpret smoke intensity as contrast loss from a physically motivated
+        # atmospheric-transmission conversion. The exponent is fitted to the
+        # clear-normalized Faster R-CNN recalls reported by Liu et al. (2020),
+        # "Analysis of the Influence of Foggy Weather Environment on the
+        # Detection Effect of Machine Vision Obstacles."
+        exponent = getattr(self, "drone_smoke_quality_exponent", DRONE_SMOKE_QUALITY_EXPONENT)
+        return (1.0 - smoke_intensity).clamp_min(0.0).pow(exponent)
+
     def _drone_fire_smoke_visibility_factor(self, drone_pos: Tensor, surv_pos: Tensor) -> Tensor:
         """Attenuate camera detections by smoke, flame glare, and heat shimmer."""
         path = self._sample_pair_paths(drone_pos, surv_pos, self.drone_perception_path_samples)
@@ -5914,9 +5928,7 @@ class WildfireSearchScenario(BaseScenario):
         smoke_mean = smoke_path.mean(dim=-1)
         target_smoke = smoke_path[..., -1]
         smoke_load = 0.65 * smoke_mean + 0.35 * target_smoke
-        smoke_factor = torch.exp(-self.drone_smoke_extinction * smoke_load)
-        smoke_floor = torch.full_like(smoke_factor, float(self.drone_smoke_detection_factor))
-        smoke_factor = torch.maximum(smoke_factor, smoke_floor)
+        smoke_factor = self._drone_smoke_quality(smoke_load)
 
         target_fire_density = self._local_fire_density_at_positions(surv_pos).unsqueeze(1)
         fire_path_mean = fire_path.mean(dim=-1)
@@ -6481,9 +6493,7 @@ class WildfireSearchScenario(BaseScenario):
         smoke_mean = smoke_path.mean(dim=-1)
         target_smoke = smoke_path[..., -1]
         smoke_load = 0.65 * smoke_mean + 0.35 * target_smoke
-        smoke_factor = torch.exp(-self.drone_smoke_extinction * smoke_load)
-        smoke_floor = torch.full_like(smoke_factor, float(self.drone_smoke_detection_factor))
-        smoke_factor = torch.maximum(smoke_factor, smoke_floor)
+        smoke_factor = self._drone_smoke_quality(smoke_load)
 
         gx = ((cell_pos[..., X] + self.x_semidim) / (2 * self.x_semidim) * self.fire_grid_size).clamp(
             1, self.fire_grid_size - 2,
