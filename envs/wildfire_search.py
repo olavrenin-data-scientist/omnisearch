@@ -62,7 +62,11 @@ DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 DRONE_SMOKE_QUALITY_EXPONENT = 1.24
 DRONE_RGB_THERMAL_SMOKE_ETA = 0.6
-DRONE_RGB_THERMAL_ENVIRONMENT_BOOST = 1.15
+# Thermal adds a bounded residual background/camouflage benefit for RGB+thermal
+# sensing. The 1.30 factor is a conservative simulator-level proxy motivated by
+# multimodal RGB/thermal detection gains reported in arXiv:2203.04567 and
+# IEEE LRA DOI 10.1109/LRA.2019.2900907; occlusion-heavy terrain remains capped.
+DRONE_RGB_THERMAL_ENVIRONMENT_BOOST = 1.30
 DRONE_PERCEPTION_MODE_ALIASES = {
     "rgb": "rgb",
     "eo": "rgb",

@@ -19,10 +19,12 @@ model calibrated and avoids multiplying several weakly supported penalties.
 The simulator exposes two abstract UAV perception modes: `rgb` and
 `rgb_thermal`. The first RGB+thermal implementation keeps the RGB altitude and
 footprint-range factors unchanged, applies a bounded environment improvement
-`q_environment_rgb_thermal = min(1, 1.15 * q_environment_rgb)`, and modifies
+`q_environment_rgb_thermal = min(1, 1.30 * q_environment_rgb)`, and modifies
 smoke quality as `q_smoke_rgb_thermal = eta + (1 - eta) * q_smoke_rgb`, with
 `eta = 0.6`. Thermal-specific heat-crossover terms should be calibrated
-separately before changing the remaining factors.
+separately before changing the remaining factors. The environment boost is a
+conservative proxy for RGB/thermal camouflage and background gains, referencing
+arXiv:2203.04567 and IEEE LRA DOI 10.1109/LRA.2019.2900907.
 
 ## Per-Step Detection Model
 

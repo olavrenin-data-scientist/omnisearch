@@ -201,7 +201,7 @@ The abstract UAV perception mode defaults to `rgb`. A second mode,
 `rgb_thermal`, is available for experiments with an RGB+thermal sensor stack.
 In the current calibration step, `rgb_thermal` keeps the RGB altitude and range
 factors, uses a bounded environment boost
-`q_environment = min(1, 1.15 * q_environment_rgb)`, and uses a less
+`q_environment = min(1, 1.30 * q_environment_rgb)`, and uses a less
 smoke-sensitive quality `q_smoke = 0.6 + 0.4 * q_smoke_rgb`. Thermal-specific
 heat-crossover terms are left for a later calibration.
 
@@ -220,7 +220,7 @@ If a survivor is within the footprint, detection is **stochastic**: a random dra
 
 **Environment quality:** terrain factors are ordered as `road, open, brush, forest, rock, water` and currently use `(1.00, 1.00, 0.71, 0.56, 0.86, 0.78)`. Road and open terrain are treated as unobstructed. Brush and forest follow the medium/high vegetation classes from SAVIOUR 2024 as an empirical terrain-quality proxy. Rock is treated as low-to-medium clutter. Water uses the SeaDronesSee swimmer AP50 reference as a compact proxy for glare, wave clutter, partial submersion, and maritime background ambiguity.
 
-**RGB+thermal environment boost:** RGB+thermal uses `min(1, 1.15 × q_environment_rgb)`. This represents a modest thermal benefit for camouflage/background contrast while keeping occlusion-heavy classes bounded and preventing any factor from exceeding 1.
+**RGB+thermal environment boost:** RGB+thermal uses `min(1, 1.30 × q_environment_rgb)`. This represents a modest thermal benefit for camouflage/background contrast while keeping occlusion-heavy classes bounded and preventing any factor from exceeding 1. The factor is a conservative simulator-level proxy motivated by multimodal RGB/thermal detection gains reported in arXiv:2203.04567 and IEEE LRA DOI 10.1109/LRA.2019.2900907.
 
 **Fire glare:** `1 − 0.35 × max(local_fire_intensity, fire_density_near_survivor)` — fire near the survivor degrades the image as though saturating the camera sensor.
 

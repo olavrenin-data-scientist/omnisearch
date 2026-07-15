@@ -132,7 +132,7 @@ boost
 \[
     q_{\mathrm{environment}}^{\mathrm{RGB+Thermal}}
     =
-    \min(1,\;1.15\,q_{\mathrm{environment}}^{\mathrm{RGB}}),
+    \min(1,\;1.30\,q_{\mathrm{environment}}^{\mathrm{RGB}}),
 \]
 and changes the smoke term to
 \[
@@ -142,7 +142,9 @@ and changes the smoke term to
     \qquad \eta = 0.6.
 \]
 Thermal-specific body/background contrast and heat-crossover terms are deferred
-to a separate calibration.
+to a separate calibration. The environment boost is a conservative proxy for
+RGB/thermal camouflage and background gains, referencing arXiv:2203.04567 and
+IEEE LRA DOI 10.1109/LRA.2019.2900907.
 
 \subsection{Cumulative Inspection Confidence}
 

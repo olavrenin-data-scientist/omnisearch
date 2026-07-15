@@ -196,7 +196,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
     def test_rgb_thermal_environment_factor_applies_bounded_boost(self):
         scenario = self._coverage_scenario(n_drones=1, grid_size=6)
         scenario.drone_perception_mode = "rgb_thermal"
-        scenario.drone_rgb_thermal_environment_boost = 1.15
+        scenario.drone_rgb_thermal_environment_boost = 1.30
         scenario.drone_environment_detection_factors = torch.tensor(
             [1.0, 1.0, 0.71, 0.56, 0.86, 0.78],
             dtype=torch.float32,
@@ -210,7 +210,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
             grid_size=6,
         )[0, 0]
 
-        expected_values = (scenario.drone_environment_detection_factors * 1.15).clamp(max=1.0)
+        expected_values = (scenario.drone_environment_detection_factors * 1.30).clamp(max=1.0)
         expected = expected_values[scenario.land_cover_grid[0]]
         torch.testing.assert_close(factor, expected, atol=1e-7, rtol=1e-7)
         self.assertEqual(float(expected_values[0]), 1.0)
