@@ -5976,7 +5976,8 @@ class WildfireSearchScenario(BaseScenario):
         # atmospheric-transmission conversion. The exponent is fitted to the
         # clear-normalized Faster R-CNN recalls reported by Liu et al. (2020),
         # "Analysis of the Influence of Foggy Weather Environment on the
-        # Detection Effect of Machine Vision Obstacles."
+        # Detection Effect of Machine Vision Obstacles." For wildfire smoke
+        # visibility context, see Fire Technology DOI 10.1007/s10694-023-01470-z.
         exponent = getattr(self, "drone_smoke_quality_exponent", DRONE_SMOKE_QUALITY_EXPONENT)
         rgb_quality = (1.0 - smoke_intensity).clamp_min(0.0).pow(exponent)
         if getattr(self, "drone_perception_mode", "rgb") != "rgb_thermal":
