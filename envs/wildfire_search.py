@@ -5982,6 +5982,10 @@ class WildfireSearchScenario(BaseScenario):
         rgb_quality = (1.0 - smoke_intensity).clamp_min(0.0).pow(exponent)
         if getattr(self, "drone_perception_mode", "rgb") != "rgb_thermal":
             return rgb_quality
+        # RGB+thermal smoke quality keeps a residual thermal sensing term, following
+        # traditional sensor-reliability fusion intuition (Castanedo, 2013,
+        # DOI 10.1155/2013/704504) and RGB/thermal perception discussions such
+        # as Zheng et al. (2024).
         eta = float(getattr(self, "drone_rgb_thermal_smoke_eta", DRONE_RGB_THERMAL_SMOKE_ETA))
         return (eta + (1.0 - eta) * rgb_quality).clamp(0.0, 1.0)
 
