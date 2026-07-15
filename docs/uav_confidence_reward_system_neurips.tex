@@ -125,6 +125,10 @@ setting they are
 for the simulator's ordered cover categories. Importantly, Eq.~\ref{eq:instant_detection}
 does not depend on true survivor positions and is therefore not a privileged
 reward.
+The implementation also exposes an \texttt{rgb\_thermal} sensor-stack mode for
+RGB+thermal experiments. In the current calibration step this mode uses the
+same probability factors as \texttt{rgb}; thermal-specific contrast and smoke
+penetration terms are deferred to a separate calibration.
 
 \subsection{Cumulative Inspection Confidence}
 

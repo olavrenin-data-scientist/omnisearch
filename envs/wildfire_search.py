@@ -36,6 +36,7 @@ from envs.wildfire_defaults import (
     DRONE_CAMERA_FOV_DEG,
     DRONE_ENVIRONMENT_DETECTION_FACTORS,
     DRONE_FLIGHT_LEVELS_M,
+    DRONE_PERCEPTION_MODE,
     DRONE_SAFETY_CLEARANCE_M,
     DRONE_SPEED_MPS,
     DRONE_U_MULTIPLIER,
@@ -60,6 +61,16 @@ DEFAULT_GROUND_APPROACH_REWARD = 0.05
 DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 DRONE_SMOKE_QUALITY_EXPONENT = 1.24
+DRONE_PERCEPTION_MODE_ALIASES = {
+    "rgb": "rgb",
+    "eo": "rgb",
+    "rgb_thermal": "rgb_thermal",
+    "rgb+thermal": "rgb_thermal",
+    "rgb-thermal": "rgb_thermal",
+    "eo_ir": "rgb_thermal",
+    "eo+ir": "rgb_thermal",
+    "eo-ir": "rgb_thermal",
+}
 UGV_PLANNER_HINT_DIM = 5
 UGV_LOCAL_PLANNER_HINT_MODES = {"local_astar", "local_escape_astar"}
 UGV_PLANNER_HINT_MODES = UGV_LOCAL_PLANNER_HINT_MODES | {"global_astar"}
@@ -82,6 +93,16 @@ def _scipy_sparse_tools():
         return None
     _SCIPY_SPARSE_TOOLS = (csr_matrix, dijkstra)
     return _SCIPY_SPARSE_TOOLS
+
+
+def _normalize_drone_perception_mode(value: str | None) -> str:
+    mode = str(DRONE_PERCEPTION_MODE if value is None else value).strip().lower()
+    mode = mode.replace(" ", "_")
+    normalized = DRONE_PERCEPTION_MODE_ALIASES.get(mode)
+    if normalized is None:
+        valid = ", ".join(sorted(DRONE_PERCEPTION_MODE_ALIASES))
+        raise ValueError(f"drone_perception_mode must be one of: {valid}")
+    return normalized
 
 
 def _land_cover_values(values, *, water_value: float, name: str) -> tuple[float, ...]:
@@ -507,6 +528,14 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("drone_flight_levels must contain at least two values for continuous interpolation")
         self.drone_flight_levels_sim_override = drone_flight_levels_override is not None
         self.drone_flight_levels_m = tuple(max(float(v), 0.0) for v in drone_flight_levels_m)
+        # rgb_thermal is intentionally an alias of rgb until the thermal
+        # probability terms are separately calibrated.
+        self.drone_perception_mode = _normalize_drone_perception_mode(
+            kwargs.pop("drone_perception_mode", DRONE_PERCEPTION_MODE),
+        )
+        self.drone_perception_sensor_stack = (
+            ("rgb", "thermal") if self.drone_perception_mode == "rgb_thermal" else ("rgb",)
+        )
         legacy_cover_detection_factors = kwargs.pop("drone_cover_detection_factors", None)
         drone_environment_detection_factors = kwargs.pop(
             "drone_environment_detection_factors",

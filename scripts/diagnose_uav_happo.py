@@ -162,6 +162,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
     if args.local_map_patch_size is not None:
         scenario_kwargs["local_map_patch_size"] = int(args.local_map_patch_size)
+    if getattr(args, "drone_perception_mode", None) is not None:
+        scenario_kwargs["drone_perception_mode"] = (
+            str(args.drone_perception_mode).replace("+", "_").replace("-", "_")
+        )
     if args.drone_min_footprint_radius_m is not None:
         scenario_kwargs.pop("drone_min_footprint", None)
         scenario_kwargs["drone_min_footprint_m"] = max(float(args.drone_min_footprint_radius_m), 0.0)
@@ -7522,6 +7526,10 @@ def main() -> None:
                         help="Communication dropout process. Omitted preserves the checkpoint mode, "
                              "falling back to iid for legacy checkpoints.")
     parser.add_argument("--drone-min-footprint-radius-m", type=float, default=None)
+    parser.add_argument("--drone-perception-mode",
+                        choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
+                        default=None,
+                        help="Override abstract UAV perception mode. rgb_thermal currently aliases rgb.")
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
                         help="Override checkpoint UAV start min separation in meters; pass 0 to disable.")
     parser.add_argument("--uav-start-edge-margin-m", type=float, default=None,
@@ -7658,6 +7666,7 @@ def main() -> None:
         f"burst_steps={scenario_kwargs.get('comms_dropout_min_steps', 5)}"
         f"..{scenario_kwargs.get('comms_dropout_max_steps', 15)}"
     )
+    print(f"drone_perception_mode: {scenario_kwargs.get('drone_perception_mode', 'rgb')}")
     print(
         "uav overlap penalty: "
         f"normalization={scenario_kwargs.get('uav_overlap_penalty_normalization', 'raw')}"

@@ -217,6 +217,7 @@ def build_args(
     warmstart_ugv_model_dir: str | None = None,
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
+    drone_perception_mode: str = "rgb",
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int | None = None,
     confirm_requires_los: bool = False,
@@ -968,6 +969,7 @@ def build_args(
         "decoy_reveal_start_step": survivor_reveal_start_step,
         "decoy_reveal_end_step": survivor_reveal_end_step,
         "drone_min_footprint_m": drone_min_footprint_m,
+        "drone_perception_mode": str(drone_perception_mode).replace("+", "_").replace("-", "_"),
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
         "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
@@ -1795,6 +1797,11 @@ def main():
     p.add_argument("--drone-flight-levels-m", default=None,
                    help="Comma-separated flight altitudes in meters (>=2 values), e.g. '50,80,100'. "
                         "Higher altitude => larger scout footprint.")
+    p.add_argument("--drone-perception-mode",
+                   choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
+                   default="rgb",
+                   help="Abstract UAV perception sensor stack. rgb_thermal currently uses the same "
+                        "probability equations and values as rgb until thermal terms are calibrated.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
     p.add_argument("--coverage-obs-grid", type=int, default=None,
@@ -2940,6 +2947,7 @@ def main():
     print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
     print(f" uav_confidence_overlap_mode: {args.uav_confidence_overlap_mode}")
     print(f" uav_confidence_overlap_allowed_regret: {args.uav_confidence_overlap_allowed_regret}")
+    print(f" drone_perception_mode: {args.drone_perception_mode}")
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
@@ -2997,6 +3005,7 @@ def main():
         warmstart_ugv_model_dir = args.warmstart_ugv_model_dir,
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
+        drone_perception_mode = args.drone_perception_mode,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
         confirm_requires_los = args.confirm_requires_los,

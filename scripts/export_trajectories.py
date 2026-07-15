@@ -208,6 +208,12 @@ def main():
         help="Downward drone camera field of view in degrees.",
     )
     p.add_argument(
+        "--drone-perception-mode",
+        choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
+        default=None,
+        help="Abstract UAV perception mode for manual exports. rgb_thermal currently aliases rgb.",
+    )
+    p.add_argument(
         "--ground-confirmation-range-m",
         type=float,
         default=None,
@@ -414,6 +420,10 @@ def main():
         "ground_speed_mps": args.ground_speed_mps,
         "ground_accel_mps2": args.ground_accel_mps2,
     }
+    if args.drone_perception_mode is not None:
+        scenario_kwargs["drone_perception_mode"] = (
+            args.drone_perception_mode.replace("+", "_").replace("-", "_")
+        )
     if args.ground_u_multiplier is not None:
         scenario_kwargs["ground_u_multiplier"] = args.ground_u_multiplier
 

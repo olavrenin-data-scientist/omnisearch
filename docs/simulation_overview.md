@@ -197,6 +197,12 @@ At 30 m AGL, this gives a radius of about 32 m; at 90 m, about 96 m. A survivor 
 
 ### 6.2 Detection Probability
 
+The abstract UAV perception mode defaults to `rgb`. A second mode,
+`rgb_thermal`, is available for experiments with an RGB+thermal sensor stack.
+In the current calibration step, `rgb_thermal` intentionally uses the same
+equations and values as `rgb`; thermal-specific contrast, smoke penetration,
+and heat-crossover terms are left for a later calibration.
+
 If a survivor is within the footprint, detection is **stochastic**: a random draw against a probability that is the product of four independent factors:
 
 | Factor | Formula | Physical meaning |

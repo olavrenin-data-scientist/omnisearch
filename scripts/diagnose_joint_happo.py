@@ -160,6 +160,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
+    if getattr(args, "drone_perception_mode", None) is not None:
+        scenario_kwargs["drone_perception_mode"] = (
+            str(args.drone_perception_mode).replace("+", "_").replace("-", "_")
+        )
     if args.enable_fire:
         scenario_kwargs["disable_fire"] = False
     elif args.disable_fire:
@@ -950,6 +954,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1020)))
     parser.add_argument("--terrain-cache-path", default=None)
+    parser.add_argument("--drone-perception-mode",
+                        choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
+                        default=None,
+                        help="Override abstract UAV perception mode. rgb_thermal currently aliases rgb.")
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
     parser.add_argument("--uav-decision-grid", type=int, default=None,
@@ -1051,7 +1059,8 @@ def main() -> None:
         f"(active {scenario_kwargs.get('active_decoys_min', scenario_kwargs.get('n_decoys', 0))}"
         f"..{scenario_kwargs.get('active_decoys_max', scenario_kwargs.get('n_decoys', 0))}), "
         f"planner={scenario_kwargs.get('ugv_planner_hint')}, "
-        f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}"
+        f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}, "
+        f"drone_perception={scenario_kwargs.get('drone_perception_mode', 'rgb')}"
     )
     print(f"steps: {args.steps}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
