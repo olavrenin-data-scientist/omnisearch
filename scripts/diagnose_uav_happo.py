@@ -166,6 +166,14 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["drone_perception_mode"] = (
             str(args.drone_perception_mode).replace("+", "_").replace("-", "_")
         )
+    if getattr(args, "drone_flight_levels_m", None):
+        levels = tuple(
+            float(value)
+            for value in str(args.drone_flight_levels_m).split(",")
+            if value.strip()
+        )
+        if levels:
+            scenario_kwargs["drone_flight_levels_m"] = levels
     if args.drone_min_footprint_radius_m is not None:
         scenario_kwargs.pop("drone_min_footprint", None)
         scenario_kwargs["drone_min_footprint_m"] = max(float(args.drone_min_footprint_radius_m), 0.0)
@@ -7530,6 +7538,8 @@ def main() -> None:
                         choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                         default=None,
                         help="Override abstract UAV perception mode. rgb_thermal changes only smoke quality.")
+    parser.add_argument("--drone-flight-levels-m", default=None,
+                        help="Comma-separated UAV flight altitudes in meters, e.g. 30,50,75.")
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
                         help="Override checkpoint UAV start min separation in meters; pass 0 to disable.")
     parser.add_argument("--uav-start-edge-margin-m", type=float, default=None,
