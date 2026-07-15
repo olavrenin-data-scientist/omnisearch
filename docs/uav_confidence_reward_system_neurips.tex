@@ -127,8 +127,14 @@ does not depend on true survivor positions and is therefore not a privileged
 reward.
 The implementation also exposes an \texttt{rgb\_thermal} sensor-stack mode for
 RGB+thermal experiments. In the current calibration step this mode keeps the
-same range, environment, and flight factors as \texttt{rgb}, but changes the
-smoke term to
+same range and flight factors as \texttt{rgb}, applies a bounded environment
+boost
+\[
+    q_{\mathrm{environment}}^{\mathrm{RGB+Thermal}}
+    =
+    \min(1,\;1.15\,q_{\mathrm{environment}}^{\mathrm{RGB}}),
+\]
+and changes the smoke term to
 \[
     q_{\mathrm{smoke}}^{\mathrm{RGB+Thermal}}
     =

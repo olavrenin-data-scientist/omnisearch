@@ -199,9 +199,10 @@ At 30 m AGL, this gives a radius of about 32 m; at 90 m, about 96 m. A survivor 
 
 The abstract UAV perception mode defaults to `rgb`. A second mode,
 `rgb_thermal`, is available for experiments with an RGB+thermal sensor stack.
-In the current calibration step, `rgb_thermal` keeps the RGB altitude, range,
-and environment factors, but uses a less smoke-sensitive quality
-`q_smoke = 0.6 + 0.4 * q_smoke_rgb`. Thermal-specific background contrast and
+In the current calibration step, `rgb_thermal` keeps the RGB altitude and range
+factors, uses a bounded environment boost
+`q_environment = min(1, 1.15 * q_environment_rgb)`, and uses a less
+smoke-sensitive quality `q_smoke = 0.6 + 0.4 * q_smoke_rgb`. Thermal-specific
 heat-crossover terms are left for a later calibration.
 
 If a survivor is within the footprint, detection is **stochastic**: a random draw against a probability that is the product of four independent factors:
@@ -218,6 +219,8 @@ If a survivor is within the footprint, detection is **stochastic**: a random dra
 **Footprint-edge quality:** the 70% floor is motivated by *Zone Evaluation: Revealing Spatial Bias in Object Detection* (TPAMI, 2024), which reports that outer image regions often retain roughly 70–80% of center performance depending on detector and dataset. The paper reports region-wise AP rather than a radial probability function, so the quadratic radial form remains a simulator assumption.
 
 **Environment quality:** terrain factors are ordered as `road, open, brush, forest, rock, water` and currently use `(1.00, 1.00, 0.71, 0.56, 0.86, 0.78)`. Road and open terrain are treated as unobstructed. Brush and forest follow the medium/high vegetation classes from SAVIOUR 2024 as an empirical terrain-quality proxy. Rock is treated as low-to-medium clutter. Water uses the SeaDronesSee swimmer AP50 reference as a compact proxy for glare, wave clutter, partial submersion, and maritime background ambiguity.
+
+**RGB+thermal environment boost:** RGB+thermal uses `min(1, 1.15 × q_environment_rgb)`. This represents a modest thermal benefit for camouflage/background contrast while keeping occlusion-heavy classes bounded and preventing any factor from exceeding 1.
 
 **Fire glare:** `1 − 0.35 × max(local_fire_intensity, fire_density_near_survivor)` — fire near the survivor degrades the image as though saturating the camera sensor.
 

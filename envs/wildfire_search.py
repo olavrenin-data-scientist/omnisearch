@@ -62,6 +62,7 @@ DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 DRONE_SMOKE_QUALITY_EXPONENT = 1.24
 DRONE_RGB_THERMAL_SMOKE_ETA = 0.6
+DRONE_RGB_THERMAL_ENVIRONMENT_BOOST = 1.15
 DRONE_PERCEPTION_MODE_ALIASES = {
     "rgb": "rgb",
     "eo": "rgb",
@@ -538,6 +539,10 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_rgb_thermal_smoke_eta = min(
             max(float(kwargs.pop("drone_rgb_thermal_smoke_eta", DRONE_RGB_THERMAL_SMOKE_ETA)), 0.0),
             1.0,
+        )
+        self.drone_rgb_thermal_environment_boost = max(
+            float(kwargs.pop("drone_rgb_thermal_environment_boost", DRONE_RGB_THERMAL_ENVIRONMENT_BOOST)),
+            0.0,
         )
         legacy_cover_detection_factors = kwargs.pop("drone_cover_detection_factors", None)
         drone_environment_detection_factors = kwargs.pop(
@@ -6322,6 +6327,15 @@ class WildfireSearchScenario(BaseScenario):
         if factors is None:
             factors = getattr(self, "drone_cover_detection_factors")
         factors = factors.to(device=device, dtype=dtype)
+        if getattr(self, "drone_perception_mode", "rgb") == "rgb_thermal":
+            boost = float(
+                getattr(
+                    self,
+                    "drone_rgb_thermal_environment_boost",
+                    DRONE_RGB_THERMAL_ENVIRONMENT_BOOST,
+                ),
+            )
+            factors = (factors * boost).clamp(max=1.0)
         if G == int(self.fire_grid_size):
             cover_index = self.land_cover_grid.to(device=device)
         else:

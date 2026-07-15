@@ -193,6 +193,29 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(quality[-1]), 0.6, places=6)
         self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
 
+    def test_rgb_thermal_environment_factor_applies_bounded_boost(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=6)
+        scenario.drone_perception_mode = "rgb_thermal"
+        scenario.drone_rgb_thermal_environment_boost = 1.15
+        scenario.drone_environment_detection_factors = torch.tensor(
+            [1.0, 1.0, 0.71, 0.56, 0.86, 0.78],
+            dtype=torch.float32,
+        )
+        scenario.drone_cover_detection_factors = scenario.drone_environment_detection_factors
+        scenario.land_cover_grid = torch.arange(36, dtype=torch.long).view(1, 6, 6) % 6
+
+        factor = scenario._uav_environment_detection_factor(
+            torch.device("cpu"),
+            torch.float32,
+            grid_size=6,
+        )[0, 0]
+
+        expected_values = (scenario.drone_environment_detection_factors * 1.15).clamp(max=1.0)
+        expected = expected_values[scenario.land_cover_grid[0]]
+        torch.testing.assert_close(factor, expected, atol=1e-7, rtol=1e-7)
+        self.assertEqual(float(expected_values[0]), 1.0)
+        self.assertEqual(float(expected_values[1]), 1.0)
+
     def test_uav_detection_probability_uses_confidence_grid_size(self):
         scenario = self._coverage_scenario(n_drones=1, grid_size=16)
         scenario.fire_grid_size = 64
