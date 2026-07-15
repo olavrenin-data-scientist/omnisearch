@@ -79,6 +79,8 @@ DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
 DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M = 150.0
 DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
+DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M = (30.0, 50.0, 75.0)
+DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE = "rgb_thermal"
 DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
 DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M = 30.0
 DEFAULT_UGV_DIAG_LR = 2.5e-4
@@ -116,6 +118,7 @@ DEFAULT_UAV_FRONTIER_SECTORS = 8
 DEFAULT_UAV_FRONTIER_TOP_K = 2
 DEFAULT_UAV_FRONTIER_OWNERSHIP = True
 DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE = "fixed_hold"
+DEFAULT_HAPPO_HIDDEN_SIZES = (256, 256)
 
 
 def _resolve_uav_reward_defaults(
@@ -217,7 +220,7 @@ def build_args(
     warmstart_ugv_model_dir: str | None = None,
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
-    drone_perception_mode: str = "rgb",
+    drone_perception_mode: str | None = None,
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int | None = None,
     confirm_requires_los: bool = False,
@@ -415,6 +418,15 @@ def build_args(
         or joint_survivor_diagnostic
         or joint_schema_ugv_diagnostic
     )
+    uav_joint_search_diagnostic = joint_schema_uav_diagnostic or joint_survivor_diagnostic
+    if drone_perception_mode is None:
+        drone_perception_mode = (
+            DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE
+            if uav_joint_search_diagnostic
+            else "rgb"
+        )
+    if drone_flight_levels_m is None and uav_joint_search_diagnostic:
+        drone_flight_levels_m = DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M
     ugv_global_diagnostic = (
         ugv_known_survivor_diagnostic
         or joint_survivor_diagnostic
@@ -860,7 +872,7 @@ def build_args(
             "render_episodes": 1,
         },
         "model": {
-            "hidden_sizes":               list(hidden_sizes or (128, 128)),
+            "hidden_sizes":               list(hidden_sizes or DEFAULT_HAPPO_HIDDEN_SIZES),
             "activation_func":            "relu",
             "use_feature_normalization":  True,
             "initialization_method":      "orthogonal_",
@@ -1782,7 +1794,7 @@ def main():
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
-                   help="Actor/critic MLP hidden layer sizes. Default: 128 128. "
+                   help="Actor/critic MLP hidden layer sizes. Default: 256 256. "
                         "Example: --hidden-sizes 256 256")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
@@ -1799,9 +1811,10 @@ def main():
                         "Higher altitude => larger scout footprint.")
     p.add_argument("--drone-perception-mode",
                    choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
-                   default="rgb",
+                   default=None,
                    help="Abstract UAV perception sensor stack. rgb_thermal keeps RGB altitude/range/"
-                        "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6.")
+                        "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6. "
+                        "Joint UAV diagnostics default to rgb_thermal; other modes default to rgb.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
     p.add_argument("--coverage-obs-grid", type=int, default=None,
@@ -2591,6 +2604,15 @@ def main():
         drone_flight_levels_m = tuple(
             float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
         )
+    uav_joint_search_diagnostic = args.joint_schema_uav_diagnostic or args.joint_survivor_diagnostic
+    if drone_flight_levels_m is None and uav_joint_search_diagnostic:
+        drone_flight_levels_m = DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M
+    if args.drone_perception_mode is None:
+        args.drone_perception_mode = (
+            DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE
+            if uav_joint_search_diagnostic
+            else "rgb"
+        )
 
     uav_search_diagnostic = (
         args.uav_survivor_diagnostic
@@ -2833,7 +2855,7 @@ def main():
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
     print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
-    print(f" hidden_sizes:   {args.hidden_sizes or [128, 128]}")
+    print(f" hidden_sizes:   {args.hidden_sizes or list(DEFAULT_HAPPO_HIDDEN_SIZES)}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
@@ -2948,6 +2970,10 @@ def main():
     print(f" uav_confidence_overlap_mode: {args.uav_confidence_overlap_mode}")
     print(f" uav_confidence_overlap_allowed_regret: {args.uav_confidence_overlap_allowed_regret}")
     print(f" drone_perception_mode: {args.drone_perception_mode}")
+    print(
+        " drone_flight_levels_m: "
+        f"{list(drone_flight_levels_m) if drone_flight_levels_m is not None else 'default'}"
+    )
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
