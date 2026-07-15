@@ -126,9 +126,17 @@ for the simulator's ordered cover categories. Importantly, Eq.~\ref{eq:instant_d
 does not depend on true survivor positions and is therefore not a privileged
 reward.
 The implementation also exposes an \texttt{rgb\_thermal} sensor-stack mode for
-RGB+thermal experiments. In the current calibration step this mode uses the
-same probability factors as \texttt{rgb}; thermal-specific contrast and smoke
-penetration terms are deferred to a separate calibration.
+RGB+thermal experiments. In the current calibration step this mode keeps the
+same range, environment, and flight factors as \texttt{rgb}, but changes the
+smoke term to
+\[
+    q_{\mathrm{smoke}}^{\mathrm{RGB+Thermal}}
+    =
+    \eta + (1-\eta) q_{\mathrm{smoke}}^{\mathrm{RGB}},
+    \qquad \eta = 0.6.
+\]
+Thermal-specific body/background contrast and heat-crossover terms are deferred
+to a separate calibration.
 
 \subsection{Cumulative Inspection Confidence}
 

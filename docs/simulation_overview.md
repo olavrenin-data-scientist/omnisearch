@@ -199,9 +199,10 @@ At 30 m AGL, this gives a radius of about 32 m; at 90 m, about 96 m. A survivor 
 
 The abstract UAV perception mode defaults to `rgb`. A second mode,
 `rgb_thermal`, is available for experiments with an RGB+thermal sensor stack.
-In the current calibration step, `rgb_thermal` intentionally uses the same
-equations and values as `rgb`; thermal-specific contrast, smoke penetration,
-and heat-crossover terms are left for a later calibration.
+In the current calibration step, `rgb_thermal` keeps the RGB altitude, range,
+and environment factors, but uses a less smoke-sensitive quality
+`q_smoke = 0.6 + 0.4 * q_smoke_rgb`. Thermal-specific background contrast and
+heat-crossover terms are left for a later calibration.
 
 If a survivor is within the footprint, detection is **stochastic**: a random draw against a probability that is the product of four independent factors:
 
@@ -212,7 +213,7 @@ If a survivor is within the footprint, detection is **stochastic**: a random dra
 | Smoke/fire factor | Product of smoke, glare, and heat terms | Atmospheric degradation of the camera image |
 | Altitude quality | Interpolated from flight level | Proxy for image resolution and integration time |
 
-**Smoke attenuation:** `(1 − smoke_load)^1.24` — smoke intensity is interpreted as contrast loss from an atmospheric-transmission conversion. The exponent is fitted to the clear-normalized Faster R-CNN recalls reported by Liu et al. (2020), *Analysis of the Influence of Foggy Weather Environment on the Detection Effect of Machine Vision Obstacles*. Detection quality approaches zero as smoke becomes opaque.
+**Smoke attenuation:** RGB uses `(1 − smoke_load)^1.24` — smoke intensity is interpreted as contrast loss from an atmospheric-transmission conversion. The exponent is fitted to the clear-normalized Faster R-CNN recalls reported by Liu et al. (2020), *Analysis of the Influence of Foggy Weather Environment on the Detection Effect of Machine Vision Obstacles*. Detection quality approaches zero as smoke becomes opaque. RGB+thermal uses `0.6 + 0.4 * q_smoke_rgb`, representing partial thermal robustness to visible smoke while keeping all other factors unchanged.
 
 **Footprint-edge quality:** the 70% floor is motivated by *Zone Evaluation: Revealing Spatial Bias in Object Detection* (TPAMI, 2024), which reports that outer image regions often retain roughly 70–80% of center performance depending on detector and dataset. The paper reports region-wise AP rather than a radial probability function, so the quadratic radial form remains a simulator assumption.
 

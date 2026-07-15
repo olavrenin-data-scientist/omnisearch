@@ -61,6 +61,7 @@ DEFAULT_GROUND_APPROACH_REWARD = 0.05
 DEFAULT_GROUND_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
 DEFAULT_GROUND_APPROACH_MILESTONE_REWARD_FRACTIONS = (0.4, 0.5, 0.6, 0.8, 1.0)
 DRONE_SMOKE_QUALITY_EXPONENT = 1.24
+DRONE_RGB_THERMAL_SMOKE_ETA = 0.6
 DRONE_PERCEPTION_MODE_ALIASES = {
     "rgb": "rgb",
     "eo": "rgb",
@@ -528,13 +529,15 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("drone_flight_levels must contain at least two values for continuous interpolation")
         self.drone_flight_levels_sim_override = drone_flight_levels_override is not None
         self.drone_flight_levels_m = tuple(max(float(v), 0.0) for v in drone_flight_levels_m)
-        # rgb_thermal is intentionally an alias of rgb until the thermal
-        # probability terms are separately calibrated.
         self.drone_perception_mode = _normalize_drone_perception_mode(
             kwargs.pop("drone_perception_mode", DRONE_PERCEPTION_MODE),
         )
         self.drone_perception_sensor_stack = (
             ("rgb", "thermal") if self.drone_perception_mode == "rgb_thermal" else ("rgb",)
+        )
+        self.drone_rgb_thermal_smoke_eta = min(
+            max(float(kwargs.pop("drone_rgb_thermal_smoke_eta", DRONE_RGB_THERMAL_SMOKE_ETA)), 0.0),
+            1.0,
         )
         legacy_cover_detection_factors = kwargs.pop("drone_cover_detection_factors", None)
         drone_environment_detection_factors = kwargs.pop(
@@ -554,7 +557,11 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_perception_path_samples = max(int(kwargs.pop("drone_perception_path_samples", 8)), 2)
         kwargs.pop("drone_smoke_extinction", None)
         self.drone_smoke_quality_exponent = DRONE_SMOKE_QUALITY_EXPONENT
-        self.drone_smoke_quality_model = "liu_2020_transmission_fit"
+        self.drone_smoke_quality_model = (
+            "rgb_thermal_eta_blend"
+            if self.drone_perception_mode == "rgb_thermal"
+            else "liu_2020_transmission_fit"
+        )
         self.drone_fire_glare_penalty = min(
             max(float(kwargs.pop("drone_fire_glare_penalty", 0.35)), 0.0),
             1.0,
@@ -5962,7 +5969,11 @@ class WildfireSearchScenario(BaseScenario):
         # "Analysis of the Influence of Foggy Weather Environment on the
         # Detection Effect of Machine Vision Obstacles."
         exponent = getattr(self, "drone_smoke_quality_exponent", DRONE_SMOKE_QUALITY_EXPONENT)
-        return (1.0 - smoke_intensity).clamp_min(0.0).pow(exponent)
+        rgb_quality = (1.0 - smoke_intensity).clamp_min(0.0).pow(exponent)
+        if getattr(self, "drone_perception_mode", "rgb") != "rgb_thermal":
+            return rgb_quality
+        eta = float(getattr(self, "drone_rgb_thermal_smoke_eta", DRONE_RGB_THERMAL_SMOKE_ETA))
+        return (eta + (1.0 - eta) * rgb_quality).clamp(0.0, 1.0)
 
     def _drone_fire_smoke_visibility_factor(self, drone_pos: Tensor, surv_pos: Tensor) -> Tensor:
         """Attenuate camera detections by smoke, flame glare, and heat shimmer."""

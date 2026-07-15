@@ -165,6 +165,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
     def test_fitted_drone_smoke_quality_has_no_opaque_smoke_floor(self):
         scenario = WildfireSearchScenario()
+        scenario.drone_perception_mode = "rgb"
         scenario.drone_smoke_quality_exponent = 1.24
         smoke_intensity = torch.tensor([0.0, 0.25, 0.50, 0.80, 1.0])
 
@@ -174,6 +175,22 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         torch.testing.assert_close(quality, expected, atol=1e-7, rtol=1e-7)
         self.assertEqual(float(quality[0]), 1.0)
         self.assertEqual(float(quality[-1]), 0.0)
+        self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
+    def test_rgb_thermal_smoke_quality_blends_rgb_with_eta_floor(self):
+        scenario = WildfireSearchScenario()
+        scenario.drone_perception_mode = "rgb_thermal"
+        scenario.drone_smoke_quality_exponent = 1.24
+        scenario.drone_rgb_thermal_smoke_eta = 0.6
+        smoke_intensity = torch.tensor([0.0, 0.25, 0.50, 0.80, 1.0])
+
+        quality = scenario._drone_smoke_quality(smoke_intensity)
+
+        rgb_quality = (1.0 - smoke_intensity).clamp_min(0.0).pow(1.24)
+        expected = 0.6 + 0.4 * rgb_quality
+        torch.testing.assert_close(quality, expected, atol=1e-7, rtol=1e-7)
+        self.assertEqual(float(quality[0]), 1.0)
+        self.assertAlmostEqual(float(quality[-1]), 0.6, places=6)
         self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
 
     def test_uav_detection_probability_uses_confidence_grid_size(self):

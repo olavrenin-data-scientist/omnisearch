@@ -17,11 +17,11 @@ future spatial occlusion model, but it keeps the current RGB abstract perception
 model calibrated and avoids multiplying several weakly supported penalties.
 
 The simulator exposes two abstract UAV perception modes: `rgb` and
-`rgb_thermal`. In the first RGB+thermal implementation step, `rgb_thermal` is a
-named sensor-stack mode that intentionally reuses the same equations and values
-as `rgb`. Thermal-specific terms for smoke penetration, body/background thermal
-contrast, and heat crossover should be calibrated separately before changing the
-probability model.
+`rgb_thermal`. The first RGB+thermal implementation keeps the RGB altitude,
+footprint-range, and environment factors unchanged, but modifies smoke quality:
+`q_smoke_rgb_thermal = eta + (1 - eta) * q_smoke_rgb`, with `eta = 0.6`.
+Thermal-specific body/background contrast and heat-crossover terms should be
+calibrated separately before changing the remaining factors.
 
 ## Per-Step Detection Model
 

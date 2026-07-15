@@ -211,7 +211,7 @@ def main():
         "--drone-perception-mode",
         choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
         default=None,
-        help="Abstract UAV perception mode for manual exports. rgb_thermal currently aliases rgb.",
+        help="Abstract UAV perception mode for manual exports. rgb_thermal changes only smoke quality.",
     )
     p.add_argument(
         "--ground-confirmation-range-m",

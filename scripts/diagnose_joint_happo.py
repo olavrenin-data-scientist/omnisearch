@@ -957,7 +957,7 @@ def main() -> None:
     parser.add_argument("--drone-perception-mode",
                         choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                         default=None,
-                        help="Override abstract UAV perception mode. rgb_thermal currently aliases rgb.")
+                        help="Override abstract UAV perception mode. rgb_thermal changes only smoke quality.")
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
     parser.add_argument("--uav-decision-grid", type=int, default=None,

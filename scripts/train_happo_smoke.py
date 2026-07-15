@@ -1800,8 +1800,8 @@ def main():
     p.add_argument("--drone-perception-mode",
                    choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                    default="rgb",
-                   help="Abstract UAV perception sensor stack. rgb_thermal currently uses the same "
-                        "probability equations and values as rgb until thermal terms are calibrated.")
+                   help="Abstract UAV perception sensor stack. rgb_thermal keeps RGB altitude/range/"
+                        "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
     p.add_argument("--coverage-obs-grid", type=int, default=None,
