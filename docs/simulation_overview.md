@@ -197,16 +197,30 @@ At 30 m AGL, this gives a radius of about 32 m; at 90 m, about 96 m. A survivor 
 
 ### 6.2 Detection Probability
 
+The abstract UAV perception mode defaults to `rgb`. A second mode,
+`rgb_thermal`, is available for experiments with an RGB+thermal sensor stack.
+In the current calibration step, `rgb_thermal` keeps the RGB altitude and range
+factors, uses a bounded environment boost
+`q_environment = min(1, 1.30 * q_environment_rgb)`, and uses a less
+smoke-sensitive quality `q_smoke = 0.6 + 0.4 * q_smoke_rgb`. Thermal-specific
+heat-crossover terms are left for a later calibration.
+
 If a survivor is within the footprint, detection is **stochastic**: a random draw against a probability that is the product of four independent factors:
 
 | Factor | Formula | Physical meaning |
 |---|---|---|
-| Distance factor | `1 − (1 − 0.20) × (dist/footprint)²` | Detection is highest at nadir, falls quadratically toward the footprint edge with a 20% floor |
-| Land cover factor | Per-class value (0.35–1.0) | Vegetation occlusion of the survivor |
+| Distance factor | `1 − 0.30 × (dist/footprint)²` | Detection is highest at nadir and falls quadratically to a 70% edge floor |
+| Environment factor | Per-class value | Terrain, clutter, concealment, and water-background effects |
 | Smoke/fire factor | Product of smoke, glare, and heat terms | Atmospheric degradation of the camera image |
 | Altitude quality | Interpolated from flight level | Proxy for image resolution and integration time |
 
-**Smoke attenuation:** `max(exp(−1.4 × smoke_load), 0.55)` — exponential Beer-Lambert transmittance with a floor (even in heavy smoke, a minimal detection chance remains).
+**Smoke attenuation:** RGB uses `(1 − smoke_load)^1.24` — smoke intensity is interpreted as contrast loss from an atmospheric-transmission conversion. The exponent is fitted to the clear-normalized Faster R-CNN recalls reported by Liu et al. (2020), *Analysis of the Influence of Foggy Weather Environment on the Detection Effect of Machine Vision Obstacles*. Detection quality approaches zero as smoke becomes opaque. RGB+thermal uses `0.6 + 0.4 * q_smoke_rgb`, representing partial thermal robustness to visible smoke while keeping all other factors unchanged.
+
+**Footprint-edge quality:** the 70% floor is motivated by *Zone Evaluation: Revealing Spatial Bias in Object Detection* (TPAMI, 2024), which reports that outer image regions often retain roughly 70–80% of center performance depending on detector and dataset. The paper reports region-wise AP rather than a radial probability function, so the quadratic radial form remains a simulator assumption.
+
+**Environment quality:** terrain factors are ordered as `road, open, brush, forest, rock, water` and currently use `(1.00, 1.00, 0.71, 0.56, 0.86, 0.78)`. Road and open terrain are treated as unobstructed. Brush and forest follow the medium/high vegetation classes from SAVIOUR 2024 as an empirical terrain-quality proxy. Rock is treated as low-to-medium clutter. Water uses the SeaDronesSee swimmer AP50 reference as a compact proxy for glare, wave clutter, partial submersion, and maritime background ambiguity.
+
+**RGB+thermal environment boost:** RGB+thermal uses `min(1, 1.30 × q_environment_rgb)`. This represents a modest thermal benefit for camouflage/background contrast while keeping occlusion-heavy classes bounded and preventing any factor from exceeding 1. The factor is a conservative simulator-level proxy motivated by multimodal RGB/thermal detection gains reported in arXiv:2203.04567 and IEEE LRA DOI 10.1109/LRA.2019.2900907.
 
 **Fire glare:** `1 − 0.35 × max(local_fire_intensity, fire_density_near_survivor)` — fire near the survivor degrades the image as though saturating the camera sensor.
 

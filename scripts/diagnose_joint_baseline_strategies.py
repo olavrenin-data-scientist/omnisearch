@@ -701,7 +701,11 @@ def _parse_args() -> argparse.Namespace:
                         ),
                         default=None)
     parser.add_argument("--ugv-planner-fire-mode", choices=("off", "cost", "block"), default=None)
-    parser.add_argument("--ugv-planner-fire-replan-policy", choices=("always", "affected", "lazy"), default=None)
+    parser.add_argument(
+        "--ugv-planner-fire-replan-policy",
+        choices=("always", "affected", "lazy", "threshold_lazy"),
+        default=None,
+    )
     parser.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=None)
     parser.add_argument("--ugv-planner-fire-cost", type=float, default=None)
     parser.add_argument("--ugv-planner-fire-block-threshold", type=float, default=None)

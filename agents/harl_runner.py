@@ -793,11 +793,16 @@ def _build_diagnostic_happo_runner_class():
 
             scenario_kwargs = self.env_args.get("scenario_kwargs", {})
             n_survivors = int(scenario_kwargs.get("n_survivors", 0))
+            n_decoys = int(scenario_kwargs.get("n_decoys", 0))
             action_transform = str(self.env_args.get("action_transform", "clip"))
             survivor_message_distance_scale_m = float(
-            scenario_kwargs.get("survivor_message_distance_scale_m", 100.0),
+                scenario_kwargs.get("survivor_message_distance_scale_m", 100.0),
             )
-            survivor_message_dim = 7 + 2 * bool(scenario_kwargs.get("survivor_assignment_obs", False))
+            survivor_message_dim = (
+                7
+                + int(n_decoys > 0)
+                + 2 * bool(scenario_kwargs.get("survivor_assignment_obs", False))
+            )
 
             for group_index in group_order:
                 members = list(update_groups[group_index])
@@ -818,7 +823,7 @@ def _build_diagnostic_happo_runner_class():
                     _advantage_alignment_diagnostics(
                         group_buffer,
                         group_advantages,
-                        n_survivors=n_survivors,
+                        n_survivors=n_survivors + n_decoys,
                         action_transform=action_transform,
                         survivor_message_distance_scale_m=survivor_message_distance_scale_m,
                         survivor_message_dim=survivor_message_dim,

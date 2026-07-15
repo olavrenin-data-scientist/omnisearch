@@ -140,6 +140,141 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(float(footprint.item()), 50.0 * scale, places=7)
         self.assertLess(float(footprint.item()), 0.12)
 
+    def test_fitted_drone_altitude_quality_matches_source_values(self):
+        altitude_m = torch.tensor([15.0, 30.0, 45.0, 60.0, 75.0])
+
+        quality = WildfireSearchScenario._fitted_drone_altitude_quality(altitude_m)
+
+        source_values = torch.tensor([1.0, 1.0, 0.92, 0.85, 0.74])
+        torch.testing.assert_close(quality, source_values, atol=0.02, rtol=0.0)
+        self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
+    def test_fitted_drone_altitude_quality_uses_physical_meters(self):
+        scenario = WildfireSearchScenario()
+        scenario.drone_detection_quality_override = None
+        scenario.drone_energy_costs = torch.tensor([0.0, 0.002, 0.006])
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.004, 0.002])
+        altitude_m = torch.tensor([15.0, 30.0, 45.0, 60.0, 75.0])
+        altitude = altitude_m.unsqueeze(0) * scenario.terrain_sim_units_per_meter.unsqueeze(1)
+        levels_m = torch.tensor([15.0, 45.0, 75.0])
+        levels = levels_m.unsqueeze(0) * scenario.terrain_sim_units_per_meter.unsqueeze(1)
+
+        _, quality, _ = scenario._continuous_altitude_properties(altitude, levels)
+
+        torch.testing.assert_close(quality[0], quality[1], atol=1e-7, rtol=1e-7)
+
+    def test_fitted_drone_smoke_quality_has_no_opaque_smoke_floor(self):
+        scenario = WildfireSearchScenario()
+        scenario.drone_perception_mode = "rgb"
+        scenario.drone_smoke_quality_exponent = 1.24
+        smoke_intensity = torch.tensor([0.0, 0.25, 0.50, 0.80, 1.0])
+
+        quality = scenario._drone_smoke_quality(smoke_intensity)
+
+        expected = (1.0 - smoke_intensity).clamp_min(0.0).pow(1.24)
+        torch.testing.assert_close(quality, expected, atol=1e-7, rtol=1e-7)
+        self.assertEqual(float(quality[0]), 1.0)
+        self.assertEqual(float(quality[-1]), 0.0)
+        self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
+    def test_rgb_thermal_smoke_quality_blends_rgb_with_eta_floor(self):
+        scenario = WildfireSearchScenario()
+        scenario.drone_perception_mode = "rgb_thermal"
+        scenario.drone_smoke_quality_exponent = 1.24
+        scenario.drone_rgb_thermal_smoke_eta = 0.6
+        smoke_intensity = torch.tensor([0.0, 0.25, 0.50, 0.80, 1.0])
+
+        quality = scenario._drone_smoke_quality(smoke_intensity)
+
+        rgb_quality = (1.0 - smoke_intensity).clamp_min(0.0).pow(1.24)
+        expected = 0.6 + 0.4 * rgb_quality
+        torch.testing.assert_close(quality, expected, atol=1e-7, rtol=1e-7)
+        self.assertEqual(float(quality[0]), 1.0)
+        self.assertAlmostEqual(float(quality[-1]), 0.6, places=6)
+        self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
+    def test_rgb_thermal_environment_factor_applies_bounded_boost(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=6)
+        scenario.drone_perception_mode = "rgb_thermal"
+        scenario.drone_rgb_thermal_environment_boost = 1.30
+        scenario.drone_environment_detection_factors = torch.tensor(
+            [1.0, 1.0, 0.71, 0.56, 0.86, 0.78],
+            dtype=torch.float32,
+        )
+        scenario.drone_cover_detection_factors = scenario.drone_environment_detection_factors
+        scenario.land_cover_grid = torch.arange(36, dtype=torch.long).view(1, 6, 6) % 6
+
+        factor = scenario._uav_environment_detection_factor(
+            torch.device("cpu"),
+            torch.float32,
+            grid_size=6,
+        )[0, 0]
+
+        expected_values = (scenario.drone_environment_detection_factors * 1.30).clamp(max=1.0)
+        expected = expected_values[scenario.land_cover_grid[0]]
+        torch.testing.assert_close(factor, expected, atol=1e-7, rtol=1e-7)
+        self.assertEqual(float(expected_values[0]), 1.0)
+        self.assertEqual(float(expected_values[1]), 1.0)
+
+    def test_uav_detection_probability_uses_confidence_grid_size(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=16)
+        scenario.fire_grid_size = 64
+        scenario.uav_confidence_map_grid_size = 16
+        scenario.uav_confidence_grid = torch.zeros(1, 16, 16)
+        scenario.land_cover_grid = torch.zeros(1, 64, 64, dtype=torch.long)
+
+        probability, visible = scenario._uav_cell_detection_probability(
+            torch.zeros(1, 1, 2)
+        )
+
+        self.assertEqual(tuple(probability.shape), (1, 1, 16, 16))
+        self.assertEqual(tuple(visible.shape), (1, 1, 16, 16))
+
+    def test_uav_coverage_reward_uses_coverage_grid_size(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=16)
+        scenario.fire_grid_size = 64
+        scenario.uav_coverage_map_grid_size = 16
+        scenario.coverage_grid = torch.zeros(1, 16, 16, dtype=torch.bool)
+        drone_pos = torch.zeros(1, 1, 2)
+
+        coverage_new, *_ = scenario._coverage_reward(drone_pos)
+
+        self.assertEqual(tuple(scenario.coverage_grid.shape), (1, 16, 16))
+        self.assertGreater(float(coverage_new[0, 0]), 0.0)
+        self.assertLessEqual(float(coverage_new[0, 0]), 1.0)
+
+    def test_grid_values_at_positions_infers_grid_size(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=64)
+        scenario.fire_grid_size = 128
+        grid = torch.arange(64 * 64, dtype=torch.float32).view(1, 64, 64)
+        pos = torch.tensor([[[0.75, 0.0]]], dtype=torch.float32)
+
+        value = scenario._grid_values_at_positions(grid, pos)
+
+        self.assertEqual(tuple(value.shape), (1, 1))
+
+    def test_uav_diagnostics_survivor_confidence_uses_confidence_grid_size(self):
+        from scripts.diagnose_uav_happo import _survivor_confidence_values
+
+        scenario = self._coverage_scenario(n_drones=1, grid_size=64)
+        scenario.fire_grid_size = 128
+        scenario.n_survivors = 1
+        scenario.uav_confidence_grid = torch.arange(64 * 64, dtype=torch.float32).view(1, 64, 64)
+        scenario._survivors = [
+            types.SimpleNamespace(
+                state=types.SimpleNamespace(
+                    pos=torch.tensor([[0.75, 0.0]], dtype=torch.float32),
+                ),
+            ),
+        ]
+
+        values = _survivor_confidence_values(scenario)
+
+        gx, gy = scenario._positions_to_grid(scenario._survivors[0].state.pos.unsqueeze(1), grid_size=64)
+        expected = float(scenario.uav_confidence_grid[0, gy[0, 0], gx[0, 0]].item())
+        self.assertEqual(len(values), 1)
+        self.assertEqual(values[0], expected)
+
     def test_legacy_floor_sim_overrides_take_precedence(self):
         scenario = self._scenario()
         scenario.drone_min_footprint_sim_override = 0.15
@@ -188,6 +323,12 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_frontier_sectors = 8
         scenario.uav_frontier_top_k = 2
         scenario.uav_frontier_ownership = False
+        scenario.uav_decision_grid = 0
+        scenario.uav_confidence_reward_grid = 0
+        scenario.uav_frontier_global_grid = 0
+        scenario.uav_coverage_reward_grid = 0
+        scenario.uav_confidence_map_grid_size = grid_size
+        scenario.uav_coverage_map_grid_size = grid_size
         scenario.r_uav_confidence = 0.0
         scenario.r_uav_confidence_move = 0.0
         scenario.r_uav_confidence_overlap = 0.0
@@ -541,14 +682,97 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         B = previous.shape[0]
         D = scenario.n_drones
         flat_pos, altitude_quality, footprint = scenario._uav_confidence_stencil_candidates(previous)
-        probability, _ = scenario._uav_cell_detection_probability(
+        probability, _ = self._reference_uav_cell_detection_probability_full_grid(
+            scenario,
             flat_pos,
             altitude_quality=altitude_quality,
             footprint=footprint,
+            grid_size=previous.shape[-1],
         )
         candidate_gain = (1.0 - previous).clamp(0.0, 1.0).unsqueeze(1) * probability
         weighted_gain = (confidence_weight.unsqueeze(1) * candidate_gain).mean(dim=(-1, -2))
         return weighted_gain.view(B, D, 8).max(dim=2).values
+
+    def _reference_uav_cell_detection_probability_full_grid(
+        self,
+        scenario,
+        drone_pos,
+        *,
+        altitude_quality=None,
+        footprint=None,
+        grid_size=None,
+    ):
+        B, N, _ = drone_pos.shape
+        G = int(scenario.uav_confidence_map_grid_size if grid_size is None else grid_size)
+        device = drone_pos.device
+        dtype = drone_pos.dtype
+        xs, ys, _, _, cell_pos, _, _, _ = scenario._uav_grid_geometry(
+            device,
+            dtype,
+            grid_size=G,
+        )
+        center_dx = xs.view(1, 1, 1, G) - drone_pos[..., 0].view(B, N, 1, 1)
+        center_dy = ys.view(1, 1, G, 1) - drone_pos[..., 1].view(B, N, 1, 1)
+        center_dist = torch.sqrt(center_dx.square() + center_dy.square())
+        if footprint is None:
+            footprint = scenario._drone_camera_ranges()
+        footprint = footprint.to(device=device, dtype=dtype).view(B, N, 1, 1)
+        visible = center_dist <= footprint
+        normalized_distance = (center_dist / footprint.clamp_min(1e-6)).clamp(0.0, 1.0)
+        distance_factor = (
+            1.0
+            - (1.0 - float(scenario.drone_edge_detection_floor))
+            * normalized_distance.square()
+        )
+        cover_factor = scenario._uav_land_cover_detection_factor(device, dtype, grid_size=G)
+        if altitude_quality is None:
+            altitude_quality = scenario.drone_altitude_quality
+        altitude_quality = altitude_quality.to(device=device, dtype=dtype).view(B, N, 1, 1)
+        if scenario.disable_fire:
+            fire_smoke_factor = torch.ones(B, N, G, G, device=device, dtype=dtype)
+        else:
+            full_cell_pos = cell_pos.expand(B, -1, -1).to(device=device, dtype=dtype)
+            fire_smoke_factor = scenario._drone_fire_smoke_visibility_factor(
+                drone_pos,
+                full_cell_pos,
+            ).view(B, N, G, G).to(dtype=dtype)
+        probability = (
+            altitude_quality
+            * distance_factor
+            * cover_factor
+            * fire_smoke_factor
+        ).clamp(0.0, 1.0)
+        return torch.where(visible, probability, torch.zeros_like(probability)), visible
+
+    def test_uav_cell_detection_probability_fire_patch_matches_full_grid(self):
+        scenario = self._coverage_scenario(n_drones=2, grid_size=16)
+        scenario.fire_grid_size = 32
+        scenario.uav_confidence_map_grid_size = 16
+        scenario.disable_fire = False
+        scenario.land_cover_grid = torch.arange(32 * 32, dtype=torch.long).view(1, 32, 32) % 6
+        scenario.drone_cover_detection_factors = torch.tensor(
+            [1.0, 0.85, 0.70, 0.55, 0.40, 0.25, 0.10, 0.05],
+            dtype=torch.float32,
+        )
+        scenario.smoke_grid = torch.linspace(0.0, 1.0, 32 * 32).view(1, 32, 32)
+        scenario.fire_intensity_grid = torch.linspace(1.0, 0.0, 32 * 32).view(1, 32, 32)
+        scenario.fire_grid = scenario.fire_intensity_grid > 0.72
+        scenario.drone_perception_path_samples = 5
+        scenario.drone_fire_glare_penalty = 0.35
+        scenario.drone_heat_distortion_penalty = 0.20
+        scenario.drone_altitude = torch.tensor([[0.22, 0.18]], dtype=torch.float32)
+        scenario.drone_altitude_quality = torch.tensor([[0.91, 0.73]], dtype=torch.float32)
+        positions = torch.tensor([[[0.74, -0.63], [-0.76, 0.71]]], dtype=torch.float32)
+
+        expected_probability, expected_visible = self._reference_uav_cell_detection_probability_full_grid(
+            scenario,
+            positions,
+            grid_size=16,
+        )
+        probability, visible = scenario._uav_cell_detection_probability(positions, grid_size=16)
+
+        torch.testing.assert_close(visible, expected_visible)
+        torch.testing.assert_close(probability, expected_probability, atol=1e-6, rtol=1e-6)
 
     def test_coverage_uses_camera_footprint(self):
         scenario = self._coverage_scenario()
@@ -599,6 +823,24 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(float(revisit_overlap[0, 0]), 1.0)
         self.assertEqual(float(revisit_outside.sum()), 0.0)
         self.assertEqual(float(revisit_inter_uav.sum()), 0.0)
+
+    def test_per_agent_coverage_reward_uses_private_known_map(self):
+        scenario = self._coverage_scenario(n_drones=1, grid_size=16)
+        scenario.comms_map_mode = "per_agent"
+        scenario.n_agents = 1
+        scenario.comm_agent_coverage_grid = torch.zeros(1, 1, 16, 16, dtype=torch.bool)
+        scenario.comm_team_coverage_grid = torch.zeros_like(scenario.coverage_grid)
+        scenario.coverage_grid[:] = True
+        scenario.drone_altitude = torch.tensor([[0.10]])
+        positions = torch.zeros(1, 1, 2)
+
+        private_credit, private_overlap, *_ = scenario._coverage_reward(
+            positions,
+            known_coverage=scenario._uav_coverage_maps_for_reward(),
+        )
+
+        self.assertGreater(float(private_credit[0, 0]), 0.0)
+        self.assertEqual(float(private_overlap[0, 0]), 0.0)
 
     def test_total_episode_coverage_credit_is_bounded(self):
         scenario = self._coverage_scenario(grid_size=16)
@@ -1283,6 +1525,74 @@ class PhysicalUnitConversionTests(unittest.TestCase):
             )
             self.assertTrue(torch.all(actual[1] == 0.0))
 
+    def test_local_frontier_patch_matches_full_grid_sector_calculation(self):
+        scenario = self._coverage_scenario(n_drones=3, grid_size=64)
+        scenario._world.batch_dim = 2
+        scenario.uav_frontier_obs = True
+        scenario.uav_frontier_mode = "local_global"
+        scenario.uav_frontier_source = "confidence"
+        scenario.uav_frontier_obs_radius_m = 4.5
+        scenario.uav_confidence_grid = torch.ones(2, 64, 64)
+        scenario.uav_confidence_grid[0, 2:16, 3:20] = 0.0
+        scenario.uav_confidence_grid[0, 30:44, 40:62] = 0.25
+        scenario.uav_confidence_grid[1, 5:26, 45:63] = 0.1
+        scenario.uav_confidence_grid[1, 40:58, 6:28] = 0.0
+        scenario.coverage_grid = torch.zeros(2, 64, 64, dtype=torch.bool)
+        scenario.land_cover_grid = torch.zeros(2, 64, 64, dtype=torch.long)
+        scenario.terrain_sim_units_per_meter = torch.tensor([0.09, 0.11])
+        positions = torch.tensor(
+            [
+                [[-0.91, -0.85], [0.72, -0.66], [0.15, 0.82]],
+                [[-0.75, 0.62], [0.05, -0.34], [0.88, 0.76]],
+            ],
+            dtype=torch.float32,
+        )
+
+        sectors = int(scenario.uav_frontier_sectors)
+        _, _, x_grid, y_grid, _, _, _, cell_area = scenario._uav_grid_geometry(
+            positions.device,
+            positions.dtype,
+        )
+        sim_units_per_meter = scenario.terrain_sim_units_per_meter.to(
+            device=positions.device,
+            dtype=positions.dtype,
+        ).clamp_min(1e-9)
+        local_radius_sim = (
+            float(scenario.uav_frontier_obs_radius_m) * sim_units_per_meter
+        ).clamp_min(1e-9)
+        frontier_scores = scenario._uav_frontier_cell_scores(
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+        sector_width, _ = scenario._uav_sector_geometry(sectors, positions.device, positions.dtype)
+        local_ideal_cells = (
+            math.pi * local_radius_sim.square() / cell_area / float(sectors)
+        ).clamp_min(1.0)
+
+        expected, _ = scenario._uav_frontier_best_sector_features(
+            positions,
+            frontier_scores,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            sector_width=sector_width,
+            sectors=sectors,
+            radius=local_radius_sim,
+            distance_scale=local_radius_sim,
+            ideal_cells=local_ideal_cells,
+        )
+        actual = scenario._uav_frontier_local_best_sector_features(
+            positions,
+            frontier_scores,
+            xs=x_grid.reshape(-1),
+            ys=y_grid.reshape(-1),
+            sector_width=sector_width,
+            sectors=sectors,
+            radius=local_radius_sim,
+            ideal_cells=local_ideal_cells,
+        )
+
+        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+
     def test_coverage_local_global_frontier_matches_loop_reference(self):
         scenario = self._coverage_scenario(n_drones=3, grid_size=16)
         scenario._world.batch_dim = 2
@@ -1443,6 +1753,29 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertAlmostEqual(
             float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
             1.0,
+            places=6,
+        )
+
+    def test_per_agent_confidence_overlap_uses_private_map(self):
+        scenario = self._coverage_scenario(grid_size=16)
+        scenario.comms_map_mode = "per_agent"
+        scenario.n_agents = 1
+        scenario.comm_agent_confidence_grid = torch.zeros(1, 1, 16, 16)
+        scenario.comm_team_confidence_grid = torch.zeros_like(scenario.uav_confidence_grid)
+        scenario.r_uav_confidence_overlap = 0.2
+        scenario.uav_confidence_overlap_threshold = 0.5
+        scenario.uav_confidence_grid.fill_(1.0)
+        drone_pos = torch.zeros(1, 1, 2)
+
+        private_penalty = scenario._uav_confidence_overlap_penalty(
+            drone_pos,
+            previous=scenario._uav_confidence_maps_for_reward(),
+        )
+
+        self.assertAlmostEqual(float(private_penalty[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(
+            float(scenario.metric_uav_confidence_overlap_fraction_by_drone[0, 0]),
+            0.0,
             places=6,
         )
 
@@ -1614,8 +1947,6 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         )
         scenario.fire_grid = scenario.fire_intensity_grid > 0.35
         scenario.drone_perception_path_samples = 5
-        scenario.drone_smoke_detection_factor = 0.55
-        scenario.drone_smoke_extinction = 1.4
         scenario.drone_fire_glare_penalty = 0.35
         scenario.drone_heat_distortion_penalty = 0.25
         scenario._invalidate_uav_terrain_caches()

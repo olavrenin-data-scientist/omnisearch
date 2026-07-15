@@ -194,6 +194,10 @@ def build_args(
     comms_dropout:  float,
     entropy_coef:   float,
     exp_name:       str,
+    comms_dropout_mode: str = "iid",
+    comms_map_mode: str = "global",
+    comms_dropout_min_steps: int = 5,
+    comms_dropout_max_steps: int = 15,
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
     linear_lr_decay: bool | None = None,
@@ -207,11 +211,13 @@ def build_args(
     reward_search: bool = False,
     reward_confirm: bool = False,
     recurrent: bool = False,
+    hidden_sizes: tuple[int, ...] | list[int] | None = None,
     model_dir: str | None = None,
     warmstart_uav_model_dir: str | None = None,
     warmstart_ugv_model_dir: str | None = None,
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
+    drone_perception_mode: str = "rgb",
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int | None = None,
     confirm_requires_los: bool = False,
@@ -229,6 +235,10 @@ def build_args(
     uav_frontier_sectors: int = DEFAULT_UAV_FRONTIER_SECTORS,
     uav_frontier_top_k: int = DEFAULT_UAV_FRONTIER_TOP_K,
     uav_frontier_ownership: bool = DEFAULT_UAV_FRONTIER_OWNERSHIP,
+    uav_decision_grid: int = 0,
+    uav_confidence_reward_grid: int = 0,
+    uav_frontier_global_grid: int = 0,
+    uav_coverage_reward_grid: int = 0,
     uav_cleanup_target_obs: bool | None = None,
     uav_cleanup_target_grid: int = 16,
     uav_cleanup_target_hold_steps: int = 15,
@@ -253,6 +263,11 @@ def build_args(
     n_drones: int | None = None,
     n_ugvs: int | None = None,
     n_survivors: int | None = None,
+    active_survivors_min: int | None = None,
+    active_survivors_max: int | None = None,
+    n_decoys: int | None = None,
+    active_decoys_min: int | None = None,
+    active_decoys_max: int | None = None,
     delayed_survivor_knowledge: bool = False,
     survivor_reveal_schedule: str = "stratified_uniform",
     survivor_reveal_initial_count: int = 1,
@@ -354,8 +369,41 @@ def build_args(
         if n_survivors is None
         else max(int(n_survivors), 1)
     )
+    active_survivors_min_arg = active_survivors_min
+    active_survivors_max_arg = active_survivors_max
+
+    def _active_survivor_range_for(slot_count: int) -> tuple[int, int]:
+        slots = max(int(slot_count), 0)
+        min_active = slots if active_survivors_min_arg is None else int(active_survivors_min_arg)
+        max_active = slots if active_survivors_max_arg is None else int(active_survivors_max_arg)
+        if min_active < 0:
+            raise ValueError("active_survivors_min must be nonnegative")
+        if max_active < min_active:
+            raise ValueError("active_survivors_max must be >= active_survivors_min")
+        if max_active > slots:
+            raise ValueError("active_survivors_max must be <= n_survivors")
+        return min_active, max_active
+
+    active_survivors_min, active_survivors_max = _active_survivor_range_for(survivor_count)
     joint_drone_count = DEFAULT_JOINT_DIAG_DRONES if n_drones is None else max(int(n_drones), 0)
     joint_ugv_count = DEFAULT_JOINT_DIAG_UGVS if n_ugvs is None else max(int(n_ugvs), 0)
+    decoy_count = 0 if n_decoys is None else max(int(n_decoys), 0)
+    active_decoys_min_arg = active_decoys_min
+    active_decoys_max_arg = active_decoys_max
+
+    def _active_decoy_range_for(slot_count: int) -> tuple[int, int]:
+        slots = max(int(slot_count), 0)
+        min_active = slots if active_decoys_min_arg is None else int(active_decoys_min_arg)
+        max_active = slots if active_decoys_max_arg is None else int(active_decoys_max_arg)
+        if min_active < 0:
+            raise ValueError("active_decoys_min must be nonnegative")
+        if max_active < min_active:
+            raise ValueError("active_decoys_max must be >= active_decoys_min")
+        if max_active > slots:
+            raise ValueError("active_decoys_max must be <= n_decoys")
+        return min_active, max_active
+
+    active_decoys_min, active_decoys_max = _active_decoy_range_for(decoy_count)
     if n_drones is not None:
         uav_diagnostic_drones = max(int(n_drones), 1)
     if n_ugvs is not None:
@@ -465,8 +513,16 @@ def build_args(
     if ugv_planner_fire_mode not in {"off", "cost", "block"}:
         raise ValueError("ugv_planner_fire_mode must be one of: off, cost, block")
     ugv_planner_fire_replan_policy = str(ugv_planner_fire_replan_policy).replace("-", "_")
-    if ugv_planner_fire_replan_policy not in {"always", "affected", "lazy"}:
-        raise ValueError("ugv_planner_fire_replan_policy must be one of: always, affected, lazy")
+    if ugv_planner_fire_replan_policy not in {
+        "always",
+        "affected",
+        "lazy",
+        "threshold_lazy",
+    }:
+        raise ValueError(
+            "ugv_planner_fire_replan_policy must be one of: "
+            "always, affected, lazy, threshold_lazy"
+        )
     ugv_planner_fire_replan_interval_steps = max(int(ugv_planner_fire_replan_interval_steps), 1)
     if ugv_target_assignment_mode is None:
         ugv_target_assignment_mode = (
@@ -804,7 +860,7 @@ def build_args(
             "render_episodes": 1,
         },
         "model": {
-            "hidden_sizes":               [128, 128],
+            "hidden_sizes":               list(hidden_sizes or (128, 128)),
             "activation_func":            "relu",
             "use_feature_normalization":  True,
             "initialization_method":      "orthogonal_",
@@ -861,7 +917,16 @@ def build_args(
         "n_drones":      joint_drone_count,
         "n_ground":      joint_ugv_count,
         "n_survivors":   survivor_count,
+        "active_survivors_min": active_survivors_min,
+        "active_survivors_max": active_survivors_max,
+        "n_decoys":      decoy_count,
+        "active_decoys_min": active_decoys_min,
+        "active_decoys_max": active_decoys_max,
         "comms_dropout": comms_dropout,
+        "comms_dropout_mode": comms_dropout_mode,
+        "comms_map_mode": comms_map_mode,
+        "comms_dropout_min_steps": comms_dropout_min_steps,
+        "comms_dropout_max_steps": comms_dropout_max_steps,
         "fire_grid_size": fire_grid_size,
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
@@ -898,7 +963,13 @@ def build_args(
         "survivor_reveal_initial_count": survivor_reveal_initial_count,
         "survivor_reveal_start_step": survivor_reveal_start_step,
         "survivor_reveal_end_step": survivor_reveal_end_step,
+        "delayed_decoy_knowledge": bool(joint_schema_ugv_diagnostic and decoy_count > 0),
+        "decoy_reveal_schedule": survivor_reveal_schedule,
+        "decoy_reveal_initial_count": 0,
+        "decoy_reveal_start_step": survivor_reveal_start_step,
+        "decoy_reveal_end_step": survivor_reveal_end_step,
         "drone_min_footprint_m": drone_min_footprint_m,
+        "drone_perception_mode": str(drone_perception_mode).replace("+", "_").replace("-", "_"),
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
         "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
@@ -991,6 +1062,26 @@ def build_args(
     uav_frontier_top_k = int(uav_frontier_top_k)
     if uav_frontier_top_k < 1 or uav_frontier_top_k > uav_frontier_sectors:
         raise ValueError("uav_frontier_top_k must be in [1, uav_frontier_sectors]")
+    uav_decision_grid = int(uav_decision_grid)
+    if uav_decision_grid < 0 or uav_decision_grid == 1:
+        raise ValueError("uav_decision_grid must be 0 or at least 2")
+    uav_confidence_reward_grid = int(uav_confidence_reward_grid)
+    if uav_confidence_reward_grid < 0 or uav_confidence_reward_grid == 1:
+        raise ValueError("uav_confidence_reward_grid must be 0 or at least 2")
+    uav_frontier_global_grid = int(uav_frontier_global_grid)
+    if uav_frontier_global_grid < 0 or uav_frontier_global_grid == 1:
+        raise ValueError("uav_frontier_global_grid must be 0 or at least 2")
+    uav_coverage_reward_grid = int(uav_coverage_reward_grid)
+    if uav_coverage_reward_grid < 0 or uav_coverage_reward_grid == 1:
+        raise ValueError("uav_coverage_reward_grid must be 0 or at least 2")
+    if uav_decision_grid > 0:
+        scenario_kwargs["uav_decision_grid"] = uav_decision_grid
+    if uav_confidence_reward_grid > 0:
+        scenario_kwargs["uav_confidence_reward_grid"] = uav_confidence_reward_grid
+    if uav_frontier_global_grid > 0:
+        scenario_kwargs["uav_frontier_global_grid"] = uav_frontier_global_grid
+    if uav_coverage_reward_grid > 0:
+        scenario_kwargs["uav_coverage_reward_grid"] = uav_coverage_reward_grid
     uav_frontier_alignment_reward = float(uav_frontier_alignment_reward)
     if uav_frontier_alignment_reward < 0.0:
         raise ValueError("uav_frontier_alignment_reward must be nonnegative")
@@ -1142,6 +1233,8 @@ def build_args(
         raise ValueError("Choose only one diagnostic mode: UGV, UAV, joint-schema UAV, joint, or joint-schema UGV")
 
     if ugv_known_survivor_diagnostic:
+        ugv_known_survivor_count = 1 if n_survivors is None else survivor_count
+        ugv_active_min, ugv_active_max = _active_survivor_range_for(ugv_known_survivor_count)
         distance_kwargs = {}
         if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
             pass
@@ -1169,10 +1262,12 @@ def build_args(
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1 if n_ugvs is None else max(int(n_ugvs), 1),
-            "n_survivors": 1 if n_survivors is None else survivor_count,
+            "n_survivors": ugv_known_survivor_count,
+            "active_survivors_min": ugv_active_min,
+            "active_survivors_max": ugv_active_max,
             "known_survivors_at_reset": True,
             "disable_fire": not bool(enable_fire),
-            "comms_dropout": 0.0,
+            "comms_dropout": comms_dropout,
             "r_found_survivor": 10.0,
             "r_drone_scout": 0.0,
             "r_ground_confirm": 4.0,
@@ -1214,7 +1309,7 @@ def build_args(
             "known_survivors_at_reset": False,
             "drone_can_confirm": True,
             "disable_fire": not bool(enable_fire),
-            "comms_dropout": 0.0,
+            "comms_dropout": comms_dropout,
             "r_found_survivor": found_reward,
             "r_all_survivors_found": all_survivors_reward,
             "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
@@ -1293,7 +1388,7 @@ def build_args(
             "known_survivors_at_reset": False,
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
-            "comms_dropout": 0.0,
+            "comms_dropout": comms_dropout,
             "ugv_target_assignment_mode": ugv_target_assignment_mode,
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
             "survivor_assignment_obs": True,
@@ -1355,18 +1450,24 @@ def build_args(
             "n_drones": 0,
             "n_ground": joint_ugv_count,
             "n_survivors": survivor_count,
+            "n_decoys": decoy_count,
             "obs_schema_n_drones": joint_drone_count,
             "obs_schema_n_ground": joint_ugv_count,
             "obs_schema_n_survivors": survivor_count,
             "known_survivors_at_reset": False,
             "delayed_survivor_knowledge": True,
+            "delayed_decoy_knowledge": decoy_count > 0,
             "survivor_reveal_schedule": survivor_reveal_schedule,
             "survivor_reveal_initial_count": int(survivor_reveal_initial_count),
             "survivor_reveal_start_step": int(survivor_reveal_start_step),
             "survivor_reveal_end_step": int(survivor_reveal_end_step),
+            "decoy_reveal_schedule": survivor_reveal_schedule,
+            "decoy_reveal_initial_count": 0,
+            "decoy_reveal_start_step": int(survivor_reveal_start_step),
+            "decoy_reveal_end_step": int(survivor_reveal_end_step),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
-            "comms_dropout": 0.0,
+            "comms_dropout": comms_dropout,
             "ugv_target_assignment_mode": ugv_target_assignment_mode,
             "ugv_zero_uav_search_observations": True,
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
@@ -1429,10 +1530,12 @@ def build_args(
     obs_dim_n_survivors = int(
         scenario_kwargs.get("obs_schema_n_survivors", scenario_kwargs["n_survivors"])
     )
+    obs_dim_n_decoys = int(scenario_kwargs.get("n_decoys", 0))
     algo_args["model"]["terrain_cnn_single_obs_dim"] = wildfire_single_observation_dim(
         local_map_patch_size=int(local_map_patch_size),
         n_agents=obs_dim_n_agents,
         n_survivors=obs_dim_n_survivors,
+        n_decoys=obs_dim_n_decoys,
         ugv_planner_hint=ugv_planner_hint,
         ugv_planner_detour_obs=bool(ugv_planner_detour_obs),
         coverage_obs_grid=int(coverage_obs_grid),
@@ -1469,6 +1572,16 @@ def main():
     p.add_argument("--seed",           type=int,   default=1)
     p.add_argument("--comms-dropout",  type=float, default=0.0,
                    help="Per-step prob each agent's comms are dropped (default: 0.0).")
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
+                   help="Communication dropout process: iid preserves one-step Bernoulli dropout; "
+                        "bursty creates temporary outages with resync on reconnect.")
+    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global",
+                   help="Coverage/confidence map observation memory: global preserves current shared maps; "
+                        "per_agent gives each agent a private map that syncs only when comms are up.")
+    p.add_argument("--comms-dropout-min-steps", type=int, default=5,
+                   help="Minimum outage duration in steps for --comms-dropout-mode bursty.")
+    p.add_argument("--comms-dropout-max-steps", type=int, default=15,
+                   help="Maximum outage duration in steps for --comms-dropout-mode bursty.")
     p.add_argument("--entropy-coef",   type=float, default=0.01,
                    help="Higher (0.05+) encourages exploration — helps break "
                         "the drones-at-corners action-saturation pathology.")
@@ -1599,14 +1712,16 @@ def main():
                    help="Fire treatment for UGV A* planners. off ignores fire; cost adds fire/smoke costs; "
                         "block treats active fire as non-traversable and uses soft smoke/buffer costs.")
     p.add_argument("--ugv-planner-fire-replan-policy",
-                   choices=("always", "affected", "lazy"),
+                   choices=("always", "affected", "lazy", "threshold_lazy"),
                    default="always",
                    help="When fire-aware planning is enabled, always replan on fire spread or only when "
                         "active fire/buffer touches the cached global route. lazy only replans when "
-                        "the near route segment is risky or the interval expires.")
+                        "the near route segment is risky or the interval expires. threshold_lazy "
+                        "immediately replans only when the near route crosses fire at or above the "
+                        "block threshold; softer fire/smoke/buffer changes wait for the interval.")
     p.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=15,
-                   help="For --ugv-planner-fire-replan-policy lazy, maximum fire-change steps "
-                        "between full global replans.")
+                   help="For lazy and threshold_lazy fire replan policies, maximum fire-change "
+                        "steps between full global replans.")
     p.add_argument("--ugv-planner-fire-cost", type=float, default=25.0,
                    help="Additional movement cost for active fire cells in cost mode.")
     p.add_argument("--ugv-planner-fire-block-threshold", type=float, default=0.0,
@@ -1666,6 +1781,9 @@ def main():
                    help="Warm-start the class-shared UGV actor from actor_agent0.pt in this models/ directory.")
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
+    p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
+                   help="Actor/critic MLP hidden layer sizes. Default: 128 128. "
+                        "Example: --hidden-sizes 256 256")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
                         "to avoid the do-nothing degenerate policy.")
@@ -1679,6 +1797,11 @@ def main():
     p.add_argument("--drone-flight-levels-m", default=None,
                    help="Comma-separated flight altitudes in meters (>=2 values), e.g. '50,80,100'. "
                         "Higher altitude => larger scout footprint.")
+    p.add_argument("--drone-perception-mode",
+                   choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
+                   default="rgb",
+                   help="Abstract UAV perception sensor stack. rgb_thermal keeps RGB altitude/range/"
+                        "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
     p.add_argument("--coverage-obs-grid", type=int, default=None,
@@ -1734,6 +1857,18 @@ def main():
                    help="Number of angular sectors for --uav-frontier-mode sector_topk.")
     p.add_argument("--uav-frontier-top-k", type=int, default=DEFAULT_UAV_FRONTIER_TOP_K,
                    help="How many sector candidates to expose in --uav-frontier-mode sector_topk.")
+    p.add_argument("--uav-decision-grid", type=int, default=0,
+                   help="Fallback UAV internal decision-map grid size for reward/frontier calculations. "
+                        "0 keeps the existing fire-grid resolution. Specific grid flags below override it.")
+    p.add_argument("--uav-confidence-reward-grid", type=int, default=0,
+                   help="Grid size for UAV confidence reward/penalty/opportunity maps. "
+                        "0 keeps the existing fire-grid resolution or --uav-decision-grid fallback.")
+    p.add_argument("--uav-frontier-global-grid", type=int, default=0,
+                   help="Grid size for the global leg of local-global UAV frontier scoring. "
+                        "0 keeps the current source-map resolution or --uav-decision-grid fallback.")
+    p.add_argument("--uav-coverage-reward-grid", type=int, default=0,
+                   help="Grid size for UAV binary coverage reward/overlap maps. "
+                        "0 keeps the existing fire-grid resolution or --uav-decision-grid fallback.")
     p.set_defaults(uav_frontier_ownership=DEFAULT_UAV_FRONTIER_OWNERSHIP)
     p.add_argument("--uav-frontier-ownership", dest="uav_frontier_ownership", action="store_true",
                    help="Ownership-weight sector scores by which UAV is closest to uncovered cells.")
@@ -1802,6 +1937,21 @@ def main():
     p.add_argument("--n-survivors", type=int, default=None,
                    help="Override the number of survivors for training/diagnostic scenarios. "
                         "Joint-schema modes use the same value for the survivor observation schema.")
+    p.add_argument("--active-survivors-min", type=int, default=None,
+                   help="Minimum active survivor slots sampled per env reset. "
+                        "Use with --n-survivors as the maximum slot count.")
+    p.add_argument("--active-survivors-max", type=int, default=None,
+                   help="Maximum active survivor slots sampled per env reset. "
+                        "Example: --n-survivors 8 --active-survivors-min 3 --active-survivors-max 8.")
+    p.add_argument("--n-decoys", type=int, default=None,
+                   help="Add this many decoy false-positive candidates. In --joint-schema-ugv-diagnostic, "
+                        "decoys are revealed over time like oracle survivor scout events.")
+    p.add_argument("--active-decoys-min", type=int, default=None,
+                   help="Minimum active decoy slots sampled per env reset. "
+                        "Use with --n-decoys as the maximum decoy slot count.")
+    p.add_argument("--active-decoys-max", type=int, default=None,
+                   help="Maximum active decoy slots sampled per env reset. "
+                        "Example: --n-decoys 4 --active-decoys-min 0 --active-decoys-max 4.")
     p.add_argument("--delayed-survivor-knowledge", action="store_true",
                    help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
     p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
@@ -2086,6 +2236,13 @@ def main():
     )
     if not 0.0 <= args.comms_dropout <= 1.0:
         p.error("--comms-dropout must be in [0, 1]")
+    args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
+    if args.comms_map_mode not in {"global", "per_agent"}:
+        p.error("--comms-map-mode must be one of: global, per_agent")
+    if args.comms_dropout_min_steps < 1:
+        p.error("--comms-dropout-min-steps must be >= 1")
+    if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
+        p.error("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
     if args.entropy_coef < 0.0:
         p.error("--entropy-coef must be nonnegative")
     if args.lr <= 0.0:
@@ -2130,6 +2287,14 @@ def main():
         p.error("--uav-frontier-sectors must be at least 2")
     if args.uav_frontier_top_k < 1 or args.uav_frontier_top_k > args.uav_frontier_sectors:
         p.error("--uav-frontier-top-k must be in [1, --uav-frontier-sectors]")
+    if args.uav_decision_grid < 0 or args.uav_decision_grid == 1:
+        p.error("--uav-decision-grid must be 0 or at least 2")
+    if args.uav_confidence_reward_grid < 0 or args.uav_confidence_reward_grid == 1:
+        p.error("--uav-confidence-reward-grid must be 0 or at least 2")
+    if args.uav_frontier_global_grid < 0 or args.uav_frontier_global_grid == 1:
+        p.error("--uav-frontier-global-grid must be 0 or at least 2")
+    if args.uav_coverage_reward_grid < 0 or args.uav_coverage_reward_grid == 1:
+        p.error("--uav-coverage-reward-grid must be 0 or at least 2")
     if args.uav_cleanup_target_grid < 2:
         p.error("--uav-cleanup-target-grid must be at least 2")
     if args.uav_cleanup_target_hold_steps < 1:
@@ -2355,6 +2520,33 @@ def main():
         p.error("--ugv-sticky-min-age-steps must be nonnegative")
     if args.n_survivors is not None and args.n_survivors < 1:
         p.error("--n-survivors must be positive")
+    if args.n_decoys is not None and args.n_decoys < 0:
+        p.error("--n-decoys must be nonnegative")
+    if args.active_survivors_min is not None and args.active_survivors_min < 0:
+        p.error("--active-survivors-min must be nonnegative")
+    if args.active_survivors_max is not None and args.active_survivors_max < 0:
+        p.error("--active-survivors-max must be nonnegative")
+    if (
+        args.active_survivors_min is not None
+        and args.active_survivors_max is not None
+        and args.active_survivors_max < args.active_survivors_min
+    ):
+        p.error("--active-survivors-max must be >= --active-survivors-min")
+    if args.active_decoys_min is not None and args.active_decoys_min < 0:
+        p.error("--active-decoys-min must be nonnegative")
+    if args.active_decoys_max is not None and args.active_decoys_max < 0:
+        p.error("--active-decoys-max must be nonnegative")
+    if (
+        args.active_decoys_min is not None
+        and args.active_decoys_max is not None
+        and args.active_decoys_max < args.active_decoys_min
+    ):
+        p.error("--active-decoys-max must be >= --active-decoys-min")
+    decoy_slots = 0 if args.n_decoys is None else int(args.n_decoys)
+    if args.active_decoys_min is not None and args.active_decoys_min > decoy_slots:
+        p.error("--active-decoys-min must be <= --n-decoys")
+    if args.active_decoys_max is not None and args.active_decoys_max > decoy_slots:
+        p.error("--active-decoys-max must be <= --n-decoys")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
     if sum(
@@ -2608,6 +2800,8 @@ def main():
         p.error("--num-env-steps must be positive")
     if episode_length <= 0:
         p.error("--episode-length must be positive")
+    if args.hidden_sizes is not None and any(size <= 0 for size in args.hidden_sizes):
+        p.error("--hidden-sizes values must be positive")
 
     if args.preset == "tuned":
         # Keep explicit user values, but upgrade defaults to convergence-oriented
@@ -2627,12 +2821,19 @@ def main():
     print(f" episode_length: {episode_length}")
     print(f" seed:           {args.seed}")
     print(f" comms_dropout:  {args.comms_dropout}")
+    print(f" comms_dropout_mode: {args.comms_dropout_mode}")
+    print(f" comms_map_mode: {args.comms_map_mode}")
+    print(
+        " comms_dropout_burst_steps: "
+        f"{args.comms_dropout_min_steps}-{args.comms_dropout_max_steps}"
+    )
     print(f" entropy_coef:   {args.entropy_coef}")
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
     print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
+    print(f" hidden_sizes:   {args.hidden_sizes or [128, 128]}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
@@ -2646,6 +2847,10 @@ def main():
     print(f" uav_frontier_source: {args.uav_frontier_source}")
     print(f" uav_frontier_sectors: {args.uav_frontier_sectors}")
     print(f" uav_frontier_top_k: {args.uav_frontier_top_k}")
+    print(f" uav_decision_grid: {args.uav_decision_grid}")
+    print(f" uav_confidence_reward_grid: {args.uav_confidence_reward_grid}")
+    print(f" uav_frontier_global_grid: {args.uav_frontier_global_grid}")
+    print(f" uav_coverage_reward_grid: {args.uav_coverage_reward_grid}")
     print(f" uav_frontier_ownership: {args.uav_frontier_ownership}")
     print(f" uav_cleanup_target_obs: {args.uav_cleanup_target_obs}")
     print(f" uav_cleanup_target_grid: {args.uav_cleanup_target_grid}")
@@ -2665,6 +2870,17 @@ def main():
     print(f" joint_survivor_diagnostic: {args.joint_survivor_diagnostic}")
     print(f" joint_schema_ugv_diagnostic: {args.joint_schema_ugv_diagnostic}")
     print(f" n_survivors: {args.n_survivors if args.n_survivors is not None else 'default'}")
+    print(
+        " active_survivors: "
+        f"{args.active_survivors_min if args.active_survivors_min is not None else 'all'}-"
+        f"{args.active_survivors_max if args.active_survivors_max is not None else 'all'}"
+    )
+    print(f" n_decoys: {args.n_decoys if args.n_decoys is not None else 'default'}")
+    print(
+        " active_decoys: "
+        f"{args.active_decoys_min if args.active_decoys_min is not None else 'all'}-"
+        f"{args.active_decoys_max if args.active_decoys_max is not None else 'all'}"
+    )
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(
         " survivor_reveal: "
@@ -2731,6 +2947,7 @@ def main():
     print(f" uav_confidence_overlap_penalty: {args.uav_confidence_overlap_penalty}")
     print(f" uav_confidence_overlap_mode: {args.uav_confidence_overlap_mode}")
     print(f" uav_confidence_overlap_allowed_regret: {args.uav_confidence_overlap_allowed_regret}")
+    print(f" drone_perception_mode: {args.drone_perception_mode}")
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
@@ -2762,6 +2979,10 @@ def main():
         episode_length = episode_length,
         seed           = args.seed,
         comms_dropout  = args.comms_dropout,
+        comms_dropout_mode = args.comms_dropout_mode,
+        comms_map_mode = args.comms_map_mode,
+        comms_dropout_min_steps = args.comms_dropout_min_steps,
+        comms_dropout_max_steps = args.comms_dropout_max_steps,
         entropy_coef   = args.entropy_coef,
         lr             = args.lr,
         critic_lr      = args.critic_lr,
@@ -2778,11 +2999,13 @@ def main():
         reward_search = args.reward_search,
         reward_confirm = args.reward_confirm,
         recurrent = args.recurrent,
+        hidden_sizes = args.hidden_sizes,
         model_dir = args.model_dir,
         warmstart_uav_model_dir = args.warmstart_uav_model_dir,
         warmstart_ugv_model_dir = args.warmstart_ugv_model_dir,
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
+        drone_perception_mode = args.drone_perception_mode,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
         confirm_requires_los = args.confirm_requires_los,
@@ -2800,6 +3023,10 @@ def main():
         uav_frontier_sectors = args.uav_frontier_sectors,
         uav_frontier_top_k = args.uav_frontier_top_k,
         uav_frontier_ownership = args.uav_frontier_ownership,
+        uav_decision_grid = args.uav_decision_grid,
+        uav_confidence_reward_grid = args.uav_confidence_reward_grid,
+        uav_frontier_global_grid = args.uav_frontier_global_grid,
+        uav_coverage_reward_grid = args.uav_coverage_reward_grid,
         uav_cleanup_target_obs = args.uav_cleanup_target_obs,
         uav_cleanup_target_grid = args.uav_cleanup_target_grid,
         uav_cleanup_target_hold_steps = args.uav_cleanup_target_hold_steps,
@@ -2824,6 +3051,11 @@ def main():
         n_drones = args.n_drones,
         n_ugvs = args.n_ugvs,
         n_survivors = args.n_survivors,
+        active_survivors_min = args.active_survivors_min,
+        active_survivors_max = args.active_survivors_max,
+        n_decoys = args.n_decoys,
+        active_decoys_min = args.active_decoys_min,
+        active_decoys_max = args.active_decoys_max,
         delayed_survivor_knowledge = bool(
             args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
         ),

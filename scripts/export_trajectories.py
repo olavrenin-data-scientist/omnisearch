@@ -101,6 +101,14 @@ def main():
              "0.0 = perfect radio, 0.3 = visible dropouts in viewer, "
              "0.8 = mostly broken.",
     )
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
+                   help="Communication dropout process for trajectory export.")
+    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global",
+                   help="Coverage/confidence map observation memory for HAPPO export.")
+    p.add_argument("--comms-dropout-min-steps", type=int, default=5,
+                   help="Minimum outage duration for --comms-dropout-mode bursty.")
+    p.add_argument("--comms-dropout-max-steps", type=int, default=15,
+                   help="Maximum outage duration for --comms-dropout-mode bursty.")
     p.add_argument("--enable-fire", action="store_true",
                    help="Enable fire in exported trajectories when the merged scenario disables it.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
@@ -129,11 +137,11 @@ def main():
                    default=None,
                    help="Override the UGV planner fire mode for trajectory export.")
     p.add_argument("--ugv-planner-fire-replan-policy",
-                   choices=("always", "affected", "lazy"),
+                   choices=("always", "affected", "lazy", "threshold_lazy"),
                    default=None,
                    help="Override when fire-aware UGV global routes are replanned after fire spread.")
     p.add_argument("--ugv-planner-fire-replan-interval-steps", type=int, default=None,
-                   help="Override lazy fire-aware global route replan interval.")
+                   help="Override lazy/threshold-lazy fire-aware global route replan interval.")
     p.add_argument("--ugv-global-planner-heuristic",
                    choices=("euclidean", "terrain"),
                    default=None,
@@ -198,6 +206,12 @@ def main():
         type=float,
         default=DRONE_CAMERA_FOV_DEG,
         help="Downward drone camera field of view in degrees.",
+    )
+    p.add_argument(
+        "--drone-perception-mode",
+        choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
+        default=None,
+        help="Abstract UAV perception mode for manual exports. rgb_thermal changes only smoke quality.",
     )
     p.add_argument(
         "--ground-confirmation-range-m",
@@ -364,6 +378,13 @@ def main():
         raise SystemExit("--joint-diagnostic-ugvs must be positive")
     if args.joint_survivor_diagnostic and args.joint_schema_ugv_diagnostic:
         raise SystemExit("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
+    if args.comms_dropout_min_steps < 1:
+        raise SystemExit("--comms-dropout-min-steps must be >= 1")
+    if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
+        raise SystemExit("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
+    args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
+    if args.comms_map_mode not in {"global", "per_agent"}:
+        raise SystemExit("--comms-map-mode must be one of: global, per_agent")
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
@@ -371,6 +392,8 @@ def main():
     print(f" Steps:         {args.steps}")
     print(f" Grid:          {args.grid_size}x{args.grid_size}")
     print(f" Comms dropout: {args.comms_dropout}")
+    print(f" Comms mode:    {args.comms_dropout_mode}")
+    print(f" Comms maps:    {args.comms_map_mode}")
     print(f" Terrain:       {args.terrain_source}")
     print("-" * 60)
 
@@ -380,6 +403,10 @@ def main():
         "y_semidim":        args.y_semidim,
         "fire_grid_size":   args.grid_size,
         "comms_dropout":    args.comms_dropout,
+        "comms_dropout_mode": args.comms_dropout_mode,
+        "comms_map_mode": args.comms_map_mode,
+        "comms_dropout_min_steps": args.comms_dropout_min_steps,
+        "comms_dropout_max_steps": args.comms_dropout_max_steps,
         "terrain_source":   args.terrain_source,
         "terrain_place":    args.terrain_place,
         "terrain_cache_dir": args.terrain_cache_dir,
@@ -393,6 +420,10 @@ def main():
         "ground_speed_mps": args.ground_speed_mps,
         "ground_accel_mps2": args.ground_accel_mps2,
     }
+    if args.drone_perception_mode is not None:
+        scenario_kwargs["drone_perception_mode"] = (
+            args.drone_perception_mode.replace("+", "_").replace("-", "_")
+        )
     if args.ground_u_multiplier is not None:
         scenario_kwargs["ground_u_multiplier"] = args.ground_u_multiplier
 
@@ -420,6 +451,12 @@ def main():
                 max_steps=args.steps,
                 comms_dropout=args.comms_dropout,
             )
+            scenario_kwargs.update({
+                "comms_dropout_mode": args.comms_dropout_mode,
+                "comms_map_mode": args.comms_map_mode,
+                "comms_dropout_min_steps": args.comms_dropout_min_steps,
+                "comms_dropout_max_steps": args.comms_dropout_max_steps,
+            })
             print(f" HAPPO env:     restored from {happo_checkpoint.parent.name}")
         else:
             print(" HAPPO env:     legacy checkpoint (no saved training config)")
@@ -446,6 +483,10 @@ def main():
             "known_survivors_at_reset": False,
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
+            "comms_dropout_mode": args.comms_dropout_mode,
+            "comms_map_mode": args.comms_map_mode,
+            "comms_dropout_min_steps": args.comms_dropout_min_steps,
+            "comms_dropout_max_steps": args.comms_dropout_max_steps,
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_assigned_target_obs_only": False,
             "survivor_assignment_obs": True,
@@ -470,6 +511,10 @@ def main():
             "survivor_reveal_end_step": 180,
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
+            "comms_dropout_mode": args.comms_dropout_mode,
+            "comms_map_mode": args.comms_map_mode,
+            "comms_dropout_min_steps": args.comms_dropout_min_steps,
+            "comms_dropout_max_steps": args.comms_dropout_max_steps,
             "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_assigned_target_obs_only": False,
             "survivor_assignment_obs": True,

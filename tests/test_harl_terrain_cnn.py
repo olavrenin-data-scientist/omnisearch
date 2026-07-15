@@ -130,6 +130,23 @@ class HARLTerrainCNNTests(unittest.TestCase):
         )
         self.assertEqual(with_astar_route, base + 4)
 
+        with_decoys = wildfire_single_observation_dim(
+            local_map_patch_size=7,
+            n_agents=1,
+            n_survivors=1,
+            n_decoys=2,
+        )
+        self.assertEqual(with_decoys, base - 7 + 3 * 8)
+
+        with_decoys_and_assignment = wildfire_single_observation_dim(
+            local_map_patch_size=7,
+            n_agents=1,
+            n_survivors=1,
+            n_decoys=2,
+            survivor_assignment_obs=True,
+        )
+        self.assertEqual(with_decoys_and_assignment, base - 7 + 3 * 10)
+
     def test_enabled_encoder_replaces_patch_with_embedding(self):
         patch_size = 7
         obs_dim = wildfire_single_observation_dim(

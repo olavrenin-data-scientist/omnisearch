@@ -41,6 +41,7 @@ def wildfire_single_observation_dim(
     local_map_patch_size: int,
     n_agents: int,
     n_survivors: int,
+    n_decoys: int = 0,
     ugv_planner_hint: str = "none",
     ugv_planner_detour_obs: bool = False,
     coverage_obs_grid: int = 0,
@@ -74,9 +75,11 @@ def wildfire_single_observation_dim(
     )
     uav_cleanup_target_obs_dim = UAV_CLEANUP_TARGET_OBS_DIM if bool(uav_cleanup_target_obs) else 0
     uav_astar_route_obs_dim = UAV_ASTAR_ROUTE_OBS_DIM if bool(uav_astar_route_obs) else 0
-    survivor_message_dim = SURVIVOR_MESSAGE_BASE_DIM + (
+    decoys_enabled = max(int(n_decoys), 0) > 0
+    survivor_message_dim = SURVIVOR_MESSAGE_BASE_DIM + int(decoys_enabled) + (
         SURVIVOR_ASSIGNMENT_OBS_DIM if bool(survivor_assignment_obs) else 0
     )
+    candidate_slots = max(int(n_survivors), 0) + max(int(n_decoys), 0)
     return (
         4  # own pos + velocity
         + 12  # lidar or drone dummy lidar
@@ -87,7 +90,7 @@ def wildfire_single_observation_dim(
         + 2  # flight state
         + BOUNDARY_OBS_DIM  # distances to left, right, bottom, top boundary
         + max(int(n_agents) - 1, 0) * 2  # teammate relative positions
-        + max(int(n_survivors), 0) * survivor_message_dim  # survivor messages
+        + candidate_slots * survivor_message_dim  # survivor/decoy candidate messages
         + coverage_obs_dim  # optional downsampled team coverage map + global fraction
         + local_coverage_obs_dim  # optional pooled local coverage map around this agent
         + confidence_obs_dim  # optional downsampled UAV inspection-confidence map + global mean

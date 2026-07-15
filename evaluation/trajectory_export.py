@@ -318,16 +318,28 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "ground_max_speed_sim": round(float(getattr(scenario, "ground_max_speed_sim", 0.0)), 8),
         "ground_u_multiplier": round(float(getattr(scenario, "ground_u_multiplier", 0.0)), 4),
         "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
+        "drone_perception_mode": str(getattr(scenario, "drone_perception_mode", "rgb")),
+        "drone_perception_sensor_stack": list(getattr(scenario, "drone_perception_sensor_stack", ("rgb",))),
         "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range_by_env[env_index]), 6),
         "drone_detection_quality": [
             round(float(v), 4) for v in scenario.drone_detection_quality.cpu().tolist()
         ],
+        "drone_altitude_quality_model": str(scenario.drone_altitude_quality_model),
         "drone_perception_path_samples": int(scenario.drone_perception_path_samples),
-        "drone_smoke_extinction": round(float(scenario.drone_smoke_extinction), 4),
+        "drone_smoke_quality_model": str(scenario.drone_smoke_quality_model),
+        "drone_smoke_quality_exponent": round(float(scenario.drone_smoke_quality_exponent), 4),
+        "drone_rgb_thermal_smoke_eta": round(float(getattr(scenario, "drone_rgb_thermal_smoke_eta", 0.6)), 4),
+        "drone_rgb_thermal_environment_boost": round(
+            float(getattr(scenario, "drone_rgb_thermal_environment_boost", 1.30)),
+            4,
+        ),
         "drone_fire_glare_penalty": round(float(scenario.drone_fire_glare_penalty), 4),
         "drone_heat_distortion_penalty": round(float(scenario.drone_heat_distortion_penalty), 4),
+        "drone_environment_detection_factors": [
+            round(float(v), 4) for v in scenario.drone_environment_detection_factors.cpu().tolist()
+        ],
         "drone_cover_detection_factors": [
-            round(float(v), 4) for v in scenario.drone_cover_detection_factors.cpu().tolist()
+            round(float(v), 4) for v in scenario.drone_environment_detection_factors.cpu().tolist()
         ],
         "wind_direction": [round(float(v), 4) for v in scenario.wind_direction],
         "wind_strength": round(float(scenario.wind_strength), 4),

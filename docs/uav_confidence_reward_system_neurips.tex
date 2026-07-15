@@ -98,7 +98,7 @@ footprint of UAV \(i\) at time \(t\). The instantaneous probability that UAV
     =
     \mathbb{I}[x \in \foot_{i,t}]
     \; q_{\mathrm{range}}(d_{i,t}(x))
-    \; q_{\mathrm{cover}}(x)
+    \; q_{\mathrm{environment}}(x)
     \; q_{\mathrm{smoke}}(x,t)
     \; q_{\mathrm{flight}}(i,t),
     \label{eq:instant_detection}
@@ -109,21 +109,42 @@ center to cell \(x\). We use the quadratic range model
     q_{\mathrm{range}}(d)
     =
     1 - (1 - q_{\min}) d^2,
-    \qquad q_{\min}=0.40,
+    \qquad q_{\min}=0.70,
     \label{eq:range_model}
 \end{equation}
 so central passes retain high detection probability and edge passes remain
-useful but substantially weaker. The cover factors are RGB-only detection
-factors derived from the terrain cover class. In the current realistic RGB
+useful but weaker. The environment factors are RGB-only detection
+factors derived from terrain class and interpreted as aggregate terrain,
+background, clutter, and concealment effects. In the current realistic RGB
 setting they are
 \begin{equation}
-    q_{\mathrm{cover}} \in
-    (1.00, 0.95, 0.75, 0.55, 0.45, 0.90),
-    \label{eq:cover_factors}
+    q_{\mathrm{environment}} \in
+    (1.00, 1.00, 0.71, 0.56, 0.86, 0.78),
+    \label{eq:environment_factors}
 \end{equation}
 for the simulator's ordered cover categories. Importantly, Eq.~\ref{eq:instant_detection}
 does not depend on true survivor positions and is therefore not a privileged
 reward.
+The implementation also exposes an \texttt{rgb\_thermal} sensor-stack mode for
+RGB+thermal experiments. In the current calibration step this mode keeps the
+same range and flight factors as \texttt{rgb}, applies a bounded environment
+boost
+\[
+    q_{\mathrm{environment}}^{\mathrm{RGB+Thermal}}
+    =
+    \min(1,\;1.30\,q_{\mathrm{environment}}^{\mathrm{RGB}}),
+\]
+and changes the smoke term to
+\[
+    q_{\mathrm{smoke}}^{\mathrm{RGB+Thermal}}
+    =
+    \eta + (1-\eta) q_{\mathrm{smoke}}^{\mathrm{RGB}},
+    \qquad \eta = 0.6.
+\]
+Thermal-specific body/background contrast and heat-crossover terms are deferred
+to a separate calibration. The environment boost is a conservative proxy for
+RGB/thermal camouflage and background gains, referencing arXiv:2203.04567 and
+IEEE LRA DOI 10.1109/LRA.2019.2900907.
 
 \subsection{Cumulative Inspection Confidence}
 

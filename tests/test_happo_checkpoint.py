@@ -15,7 +15,14 @@ from scripts.diagnose_uav_happo import (
     _scenario_kwargs as diagnose_uav_scenario_kwargs,
     _summarize_per_drone,
 )
+from scripts.diagnose_joint_happo import _scenario_kwargs as diagnose_joint_scenario_kwargs
+from scripts.diagnose_ugv_happo import _scenario_kwargs as diagnose_ugv_scenario_kwargs
 from scripts.train_happo_smoke import build_args
+
+
+class MissingNoneNamespace(types.SimpleNamespace):
+    def __getattr__(self, _name):
+        return None
 
 
 class HappoCheckpointTests(unittest.TestCase):
@@ -175,6 +182,19 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["model"]["lr"], 2.5e-4)
         self.assertEqual(algo_args["model"]["critic_lr"], 5e-4)
         self.assertTrue(algo_args["train"]["use_linear_lr_decay"])
+
+    def test_build_args_exposes_hidden_sizes(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="hidden",
+            hidden_sizes=(256, 128, 64),
+        )
+
+        self.assertEqual(algo_args["model"]["hidden_sizes"], [256, 128, 64])
 
     def test_build_args_exposes_global_parameter_sharing(self):
         _, algo_args, _ = build_args(
@@ -464,7 +484,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
         self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 100.0)
         self.assertTrue(scenario["disable_fire"])
-        self.assertEqual(scenario["comms_dropout"], 0.0)
+        self.assertEqual(scenario["comms_dropout"], 0.5)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_drone_shaping"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
@@ -578,7 +598,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
         self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
         self.assertTrue(scenario["disable_fire"])
-        self.assertEqual(scenario["comms_dropout"], 0.0)
+        self.assertEqual(scenario["comms_dropout"], 0.5)
         self.assertEqual(scenario["r_drone_scout"], 2.0)
         self.assertEqual(scenario["r_drone_shaping"], 0.0)
         self.assertEqual(scenario["r_ground_confirm"], 0.0)
@@ -738,7 +758,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertFalse(scenario["known_survivors_at_reset"])
         self.assertFalse(scenario["drone_can_confirm"])
         self.assertTrue(scenario["disable_fire"])
-        self.assertEqual(scenario["comms_dropout"], 0.0)
+        self.assertEqual(scenario["comms_dropout"], 0.5)
         self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_sticky")
         self.assertFalse(scenario["ugv_assigned_target_obs_only"])
         self.assertTrue(scenario["survivor_assignment_obs"])
@@ -954,6 +974,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_found_survivor"], 4.0)
         self.assertEqual(scenario["r_pending_penalty"], -0.02)
         self.assertEqual(scenario["r_ugv_route_progress_shortfall_penalty"], 0.10)
+        self.assertEqual(scenario["comms_dropout"], 0.5)
         self.assertEqual(scenario["r_team_scout"], 0.0)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
         self.assertEqual(scenario["r_coverage"], 0.0)
@@ -1008,6 +1029,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         self.assertTrue(algo_args["algo"]["share_param"])
         self.assertFalse(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertEqual(env_args["scenario_kwargs"]["comms_dropout"], 0.5)
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["n_drones"], 3)
         self.assertEqual(scenario["n_ground"], 0)
@@ -1258,6 +1280,161 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(default_scenario["disable_fire"])
         self.assertFalse(fire_scenario["disable_fire"])
 
+    def test_uav_diagnostics_can_override_communication_dropout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "comms_dropout": 0.4,
+                        "comms_dropout_mode": "bursty",
+                        "comms_dropout_min_steps": 7,
+                        "comms_dropout_max_steps": 11,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=123,
+                comms_dropout=None,
+                comms_dropout_mode=None,
+            )
+
+            default_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            args.comms_dropout = 0.3
+            args.comms_dropout_mode = "iid"
+            override_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(default_scenario["comms_dropout"], 0.0)
+        self.assertEqual(default_scenario["comms_dropout_mode"], "bursty")
+        self.assertEqual(default_scenario["comms_dropout_min_steps"], 7)
+        self.assertEqual(default_scenario["comms_dropout_max_steps"], 11)
+        self.assertEqual(override_scenario["comms_dropout"], 0.3)
+        self.assertEqual(override_scenario["comms_dropout_mode"], "iid")
+
+    def test_uav_diagnostics_normalizes_stale_active_ranges_after_slot_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 3,
+                        "n_ground": 0,
+                        "n_survivors": 8,
+                        "active_survivors_min": 3,
+                        "active_survivors_max": 8,
+                        "n_decoys": 4,
+                        "active_decoys_min": 2,
+                        "active_decoys_max": 4,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=123,
+                n_survivors=5,
+                n_decoys=1,
+                enable_fire=False,
+                terrain_cache_path=None,
+                local_map_patch_size=None,
+                drone_min_footprint_radius_m=None,
+            )
+
+            scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_survivors"], 5)
+        self.assertEqual(scenario["active_survivors_min"], 5)
+        self.assertEqual(scenario["active_survivors_max"], 5)
+        self.assertEqual(scenario["n_decoys"], 1)
+        self.assertEqual(scenario["active_decoys_min"], 1)
+        self.assertEqual(scenario["active_decoys_max"], 1)
+
+    def test_joint_diagnostics_preserves_manifest_active_survivor_and_decoy_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 3,
+                        "n_ground": 2,
+                        "n_survivors": 8,
+                        "active_survivors_min": 3,
+                        "active_survivors_max": 8,
+                        "n_decoys": 4,
+                        "active_decoys_min": 0,
+                        "active_decoys_max": 2,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=300,
+                joint_survivor_diagnostic=False,
+                joint_schema_ugv_diagnostic=False,
+                joint_diagnostic_ugvs=2,
+                enable_fire=False,
+                disable_fire=False,
+                terrain_cache_path=None,
+                ugv_target_assignment_mode=None,
+            )
+
+            scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_survivors"], 8)
+        self.assertEqual(scenario["active_survivors_min"], 3)
+        self.assertEqual(scenario["active_survivors_max"], 8)
+        self.assertEqual(scenario["n_decoys"], 4)
+        self.assertEqual(scenario["active_decoys_min"], 0)
+        self.assertEqual(scenario["active_decoys_max"], 2)
+
+    def test_ugv_known_diagnostics_reset_stale_variable_survivor_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 0,
+                        "n_ground": 2,
+                        "n_survivors": 8,
+                        "active_survivors_min": 3,
+                        "active_survivors_max": 8,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=150,
+                joint_schema_ugv_diagnostic=False,
+                enable_fire=False,
+                terrain_cache_path=None,
+            )
+
+            scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+
+        self.assertEqual(scenario["n_survivors"], 1)
+        self.assertEqual(scenario["active_survivors_min"], 1)
+        self.assertEqual(scenario["active_survivors_max"], 1)
+
     def test_uav_diagnostics_summarizes_per_drone_metrics(self):
         rows = [
             {
@@ -1487,6 +1664,27 @@ class HappoCheckpointTests(unittest.TestCase):
             0.02,
         )
 
+    def test_can_set_uav_decision_grids(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="uav_decision_grids",
+            joint_schema_uav_diagnostic=True,
+            uav_decision_grid=64,
+            uav_confidence_reward_grid=64,
+            uav_frontier_global_grid=32,
+            uav_coverage_reward_grid=128,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["uav_decision_grid"], 64)
+        self.assertEqual(scenario["uav_confidence_reward_grid"], 64)
+        self.assertEqual(scenario["uav_frontier_global_grid"], 32)
+        self.assertEqual(scenario["uav_coverage_reward_grid"], 128)
+
     def test_rejects_negative_uav_team_confidence_reward(self):
         with self.assertRaises(ValueError):
             build_args(
@@ -1607,6 +1805,34 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
         self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
         self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
+        self.assertEqual(scenario["n_survivors"], 1)
+        self.assertEqual(scenario["active_survivors_min"], 1)
+        self.assertEqual(scenario["active_survivors_max"], 1)
+
+    def test_build_args_exposes_variable_active_survivor_range(self):
+        _, _, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="variable_survivors",
+            joint_survivor_diagnostic=True,
+            n_survivors=8,
+            active_survivors_min=3,
+            active_survivors_max=8,
+            n_decoys=4,
+            active_decoys_min=0,
+            active_decoys_max=4,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["n_survivors"], 8)
+        self.assertEqual(scenario["active_survivors_min"], 3)
+        self.assertEqual(scenario["active_survivors_max"], 8)
+        self.assertEqual(scenario["n_decoys"], 4)
+        self.assertEqual(scenario["active_decoys_min"], 0)
+        self.assertEqual(scenario["active_decoys_max"], 4)
 
     def test_ugv_known_survivor_exact_distance_uses_min_equals_max(self):
         _, _, env_args = build_args(
