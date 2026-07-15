@@ -98,7 +98,7 @@ footprint of UAV \(i\) at time \(t\). The instantaneous probability that UAV
     =
     \mathbb{I}[x \in \foot_{i,t}]
     \; q_{\mathrm{range}}(d_{i,t}(x))
-    \; q_{\mathrm{cover}}(x)
+    \; q_{\mathrm{environment}}(x)
     \; q_{\mathrm{smoke}}(x,t)
     \; q_{\mathrm{flight}}(i,t),
     \label{eq:instant_detection}
@@ -109,17 +109,18 @@ center to cell \(x\). We use the quadratic range model
     q_{\mathrm{range}}(d)
     =
     1 - (1 - q_{\min}) d^2,
-    \qquad q_{\min}=0.40,
+    \qquad q_{\min}=0.70,
     \label{eq:range_model}
 \end{equation}
 so central passes retain high detection probability and edge passes remain
-useful but substantially weaker. The cover factors are RGB-only detection
-factors derived from the terrain cover class. In the current realistic RGB
+useful but weaker. The environment factors are RGB-only detection
+factors derived from terrain class and interpreted as aggregate terrain,
+background, clutter, and concealment effects. In the current realistic RGB
 setting they are
 \begin{equation}
-    q_{\mathrm{cover}} \in
-    (1.00, 0.95, 0.75, 0.55, 0.45, 0.90),
-    \label{eq:cover_factors}
+    q_{\mathrm{environment}} \in
+    (1.00, 1.00, 0.71, 0.56, 0.86, 0.78),
+    \label{eq:environment_factors}
 \end{equation}
 for the simulator's ordered cover categories. Importantly, Eq.~\ref{eq:instant_detection}
 does not depend on true survivor positions and is therefore not a privileged

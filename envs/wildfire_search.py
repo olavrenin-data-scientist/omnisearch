@@ -34,6 +34,7 @@ from vmas.simulator.utils import Color, ScenarioUtils
 
 from envs.wildfire_defaults import (
     DRONE_CAMERA_FOV_DEG,
+    DRONE_ENVIRONMENT_DETECTION_FACTORS,
     DRONE_FLIGHT_LEVELS_M,
     DRONE_SAFETY_CLEARANCE_M,
     DRONE_SPEED_MPS,
@@ -506,13 +507,17 @@ class WildfireSearchScenario(BaseScenario):
             raise ValueError("drone_flight_levels must contain at least two values for continuous interpolation")
         self.drone_flight_levels_sim_override = drone_flight_levels_override is not None
         self.drone_flight_levels_m = tuple(max(float(v), 0.0) for v in drone_flight_levels_m)
-        drone_cover_detection_factors = kwargs.pop(
-            "drone_cover_detection_factors", (1.0, 0.95, 0.75, 0.55, 0.45, 0.90),
+        legacy_cover_detection_factors = kwargs.pop("drone_cover_detection_factors", None)
+        drone_environment_detection_factors = kwargs.pop(
+            "drone_environment_detection_factors",
+            legacy_cover_detection_factors
+            if legacy_cover_detection_factors is not None
+            else DRONE_ENVIRONMENT_DETECTION_FACTORS,
         )
-        drone_cover_detection_factors = _land_cover_values(
-            drone_cover_detection_factors,
+        drone_environment_detection_factors = _land_cover_values(
+            drone_environment_detection_factors,
             water_value=0.95,
-            name="drone_cover_detection_factors",
+            name="drone_environment_detection_factors",
         )
         # Consume the retired smoke-floor/extinction settings so old scenario
         # configurations remain loadable under the fitted smoke-quality model.
@@ -1328,9 +1333,11 @@ class WildfireSearchScenario(BaseScenario):
         else:
             self.drone_detection_quality = self.drone_detection_quality_override
             self.drone_altitude_quality_model = "legacy_level_interpolation"
-        self.drone_cover_detection_factors = torch.tensor(
-            drone_cover_detection_factors, dtype=torch.float, device=device,
+        self.drone_environment_detection_factors = torch.tensor(
+            drone_environment_detection_factors, dtype=torch.float, device=device,
         )
+        # Backward-compatible alias for old checkpoints/configs and plotting code.
+        self.drone_cover_detection_factors = self.drone_environment_detection_factors
         self.drone_energy_costs = torch.tensor(drone_energy_costs, dtype=torch.float, device=device)
         self.drone_min_altitude = float(self.drone_flight_levels.min().item())
         self.drone_max_altitude = float(self.drone_flight_levels.max().item())
@@ -1427,7 +1434,7 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_grid_geometry_cache = {}
         self._uav_sector_geometry_cache = {}
         self._uav_stencil_direction_cache = {}
-        self._uav_land_cover_factor_cache = {}
+        self._uav_environment_factor_cache = {}
         self._uav_frontier_feature_cache = {}
         self._uav_local_confidence_obs_cache = {}
         self._uav_cleanup_target_geometry_cache = {}
@@ -5832,6 +5839,7 @@ class WildfireSearchScenario(BaseScenario):
                 "visible": torch.zeros(shape, dtype=torch.bool, device=self.fire_grid.device),
                 "footprint": torch.zeros(self.world.batch_dim, 0, dtype=torch.float, device=self.fire_grid.device),
                 "distance_factor": probability,
+                "environment_factor": probability,
                 "cover_factor": probability,
                 "fire_smoke_factor": probability,
                 "altitude_quality": probability,
@@ -5847,18 +5855,19 @@ class WildfireSearchScenario(BaseScenario):
         gx, gy = self._positions_to_grid(surv_pos)
         b_idx = torch.arange(self.world.batch_dim, device=surv_pos.device).view(-1, 1).expand_as(gx)
         survivor_cover = self.land_cover_grid[b_idx, gy, gx]
-        cover_factor = self.drone_cover_detection_factors[survivor_cover].unsqueeze(1)
+        environment_factor = self.drone_environment_detection_factors[survivor_cover].unsqueeze(1)
         fire_smoke_factor = self._drone_fire_smoke_visibility_factor(drone_pos, surv_pos)
         altitude_quality = self.drone_altitude_quality.unsqueeze(-1)
 
-        probability = (altitude_quality * distance_factor * cover_factor * fire_smoke_factor).clamp(0.0, 1.0)
+        probability = (altitude_quality * distance_factor * environment_factor * fire_smoke_factor).clamp(0.0, 1.0)
         probability = torch.where(visible, probability, torch.zeros_like(probability))
         return {
             "probability": probability,
             "visible": visible,
             "footprint": footprint.squeeze(-1),
             "distance_factor": distance_factor,
-            "cover_factor": cover_factor.expand(-1, self.n_drones, -1),
+            "environment_factor": environment_factor.expand(-1, self.n_drones, -1),
+            "cover_factor": environment_factor.expand(-1, self.n_drones, -1),
             "fire_smoke_factor": fire_smoke_factor,
             "altitude_quality": altitude_quality.expand(-1, -1, self.n_survivors),
             "survivor_cover": survivor_cover,
@@ -5902,7 +5911,10 @@ class WildfireSearchScenario(BaseScenario):
                         "visible": bool(components["visible"][env_index, drone_idx, survivor_idx].detach().cpu().item()),
                         "probability": scalar(components["probability"][env_index, drone_idx, survivor_idx]),
                         "distance_factor": scalar(components["distance_factor"][env_index, drone_idx, survivor_idx]),
-                        "cover_factor": scalar(components["cover_factor"][env_index, drone_idx, survivor_idx]),
+                        "environment_factor": scalar(
+                            components["environment_factor"][env_index, drone_idx, survivor_idx],
+                        ),
+                        "cover_factor": scalar(components["environment_factor"][env_index, drone_idx, survivor_idx]),
                         "fire_smoke_factor": scalar(
                             components["fire_smoke_factor"][env_index, drone_idx, survivor_idx],
                         ),
@@ -6116,8 +6128,8 @@ class WildfireSearchScenario(BaseScenario):
             self.comm_map_last_sync_step.fill_(-1)
 
     def _invalidate_uav_terrain_caches(self) -> None:
-        if hasattr(self, "_uav_land_cover_factor_cache"):
-            self._uav_land_cover_factor_cache.clear()
+        if hasattr(self, "_uav_environment_factor_cache"):
+            self._uav_environment_factor_cache.clear()
         self._uav_terrain_cache_version = getattr(self, "_uav_terrain_cache_version", 0) + 1
         self._invalidate_uav_runtime_caches()
 
@@ -6248,25 +6260,28 @@ class WildfireSearchScenario(BaseScenario):
         self._uav_stencil_direction_cache[key] = directions
         return directions
 
-    def _uav_land_cover_detection_factor(
+    def _uav_environment_detection_factor(
         self,
         device: torch.device,
         dtype: torch.dtype,
         grid_size: int | None = None,
     ) -> Tensor:
-        if not hasattr(self, "_uav_land_cover_factor_cache"):
-            self._uav_land_cover_factor_cache = {}
+        if not hasattr(self, "_uav_environment_factor_cache"):
+            self._uav_environment_factor_cache = {}
         G = int(self.fire_grid_size if grid_size is None else grid_size)
         key = (
             getattr(self, "_uav_terrain_cache_version", 0),
             G,
             *self._device_cache_key(device, dtype),
         )
-        cached = self._uav_land_cover_factor_cache.get(key)
+        cached = self._uav_environment_factor_cache.get(key)
         if cached is not None:
             return cached
 
-        cover_factors = self.drone_cover_detection_factors.to(device=device, dtype=dtype)
+        factors = getattr(self, "drone_environment_detection_factors", None)
+        if factors is None:
+            factors = getattr(self, "drone_cover_detection_factors")
+        factors = factors.to(device=device, dtype=dtype)
         if G == int(self.fire_grid_size):
             cover_index = self.land_cover_grid.to(device=device)
         else:
@@ -6276,9 +6291,17 @@ class WildfireSearchScenario(BaseScenario):
                 self.land_cover_grid.to(device=device),
                 pos,
             ).long().view(self.world.batch_dim, G, G)
-        cover_factor = cover_factors[cover_index].unsqueeze(1)
-        self._uav_land_cover_factor_cache[key] = cover_factor
-        return cover_factor
+        environment_factor = factors[cover_index].unsqueeze(1)
+        self._uav_environment_factor_cache[key] = environment_factor
+        return environment_factor
+
+    def _uav_land_cover_detection_factor(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        grid_size: int | None = None,
+    ) -> Tensor:
+        return self._uav_environment_detection_factor(device, dtype, grid_size=grid_size)
 
     def _uav_cell_detection_probability(
         self,
@@ -6326,12 +6349,12 @@ class WildfireSearchScenario(BaseScenario):
         visible = center_dist <= footprint_grid
         normalized_distance = (center_dist / footprint_grid.clamp_min(1e-6)).clamp(0.0, 1.0)
         distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
-        cover_factor = self._uav_land_cover_detection_factor(device, dtype, grid_size=G)
+        environment_factor = self._uav_environment_detection_factor(device, dtype, grid_size=G)
         altitude_quality_grid = altitude_quality.view(B, N, 1, 1)
         probability = (
             altitude_quality_grid
             * distance_factor
-            * cover_factor
+            * environment_factor
         ).clamp(0.0, 1.0)
         return torch.where(visible, probability, torch.zeros_like(probability)), visible
 
@@ -6378,8 +6401,8 @@ class WildfireSearchScenario(BaseScenario):
         normalized_distance = (center_dist / footprint_patch.clamp_min(1e-6)).clamp(0.0, 1.0)
         distance_factor = 1.0 - (1.0 - float(self.drone_edge_detection_floor)) * normalized_distance.square()
 
-        cover_factor = self._uav_land_cover_detection_factor(device, dtype, grid_size=G)[:, 0]
-        cover_patch = cover_factor[batch_idx, gy, gx]
+        environment_factor = self._uav_environment_detection_factor(device, dtype, grid_size=G)[:, 0]
+        environment_patch = environment_factor[batch_idx, gy, gx]
         patch_cell_pos = torch.stack(
             (
                 xs[gx].expand_as(center_dist),
@@ -6394,7 +6417,7 @@ class WildfireSearchScenario(BaseScenario):
         probability_patch = (
             altitude_quality.view(B, N, 1, 1)
             * distance_factor
-            * cover_patch
+            * environment_patch
             * fire_smoke_factor
         ).clamp(0.0, 1.0)
         probability_patch = torch.where(
@@ -6560,8 +6583,8 @@ class WildfireSearchScenario(BaseScenario):
 
         previous_patch = previous[batch_idx, gy, gx]
         confidence_weight_patch = confidence_weight[batch_idx, gy, gx]
-        cover_factor = self._uav_land_cover_detection_factor(device, dtype, grid_size=G)[:, 0]
-        cover_patch = cover_factor[batch_idx, gy, gx]
+        environment_factor = self._uav_environment_detection_factor(device, dtype, grid_size=G)[:, 0]
+        environment_patch = environment_factor[batch_idx, gy, gx]
 
         center_dx = xs[gx] - flat_pos[..., X].view(B, C, 1, 1)
         center_dy = ys[gy] - flat_pos[..., Y].view(B, C, 1, 1)
@@ -6587,7 +6610,7 @@ class WildfireSearchScenario(BaseScenario):
         probability = (
             altitude_quality.to(device=device, dtype=dtype).view(B, C, 1, 1)
             * distance_factor
-            * cover_patch
+            * environment_patch
             * fire_smoke_factor
         ).clamp(0.0, 1.0)
         probability = torch.where(visible, probability, torch.zeros_like(probability))

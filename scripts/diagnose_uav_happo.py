@@ -2343,6 +2343,7 @@ def _new_survivor_exposure_stats(n_survivors: int) -> list[dict[str, Any]]:
             "scout_norm_distance": math.nan,
             "scout_margin_m": math.nan,
             "scout_distance_factor": math.nan,
+            "scout_environment_factor": math.nan,
             "scout_cover_factor": math.nan,
             "scout_fire_smoke_factor": math.nan,
             "scout_altitude_quality": math.nan,
@@ -2368,6 +2369,7 @@ def _drone_perception_snapshot(
             "norm_distance": np.full(shape, math.inf, dtype=float),
             "margin_m": np.full(shape, -math.inf, dtype=float),
             "distance_factor": np.zeros(shape, dtype=float),
+            "environment_factor": np.zeros(shape, dtype=float),
             "cover_factor": np.zeros(shape, dtype=float),
             "fire_smoke_factor": np.zeros(shape, dtype=float),
             "altitude_quality": np.zeros(shape, dtype=float),
@@ -2401,7 +2403,8 @@ def _drone_perception_snapshot(
         "norm_distance": norm_distance,
         "margin_m": margin_m,
         "distance_factor": components["distance_factor"][0].detach().cpu().numpy().astype(float),
-        "cover_factor": components["cover_factor"][0].detach().cpu().numpy().astype(float),
+        "environment_factor": components["environment_factor"][0].detach().cpu().numpy().astype(float),
+        "cover_factor": components["environment_factor"][0].detach().cpu().numpy().astype(float),
         "fire_smoke_factor": components["fire_smoke_factor"][0].detach().cpu().numpy().astype(float),
         "altitude_quality": components["altitude_quality"][0].detach().cpu().numpy().astype(float),
         "land_cover": components["survivor_cover"][0].detach().cpu().numpy().astype(int),
@@ -2538,7 +2541,12 @@ def _update_survivor_exposure_stats(
             stat["scout_norm_distance"] = float(norm_distance[detected_choice, survivor_idx])
             stat["scout_margin_m"] = float(margin_m[detected_choice, survivor_idx])
             stat["scout_distance_factor"] = float(perception["distance_factor"][detected_choice, survivor_idx])
-            stat["scout_cover_factor"] = float(perception["cover_factor"][detected_choice, survivor_idx])
+            stat["scout_environment_factor"] = float(
+                perception["environment_factor"][detected_choice, survivor_idx],
+            )
+            stat["scout_cover_factor"] = float(
+                perception["environment_factor"][detected_choice, survivor_idx],
+            )
             stat["scout_fire_smoke_factor"] = float(perception["fire_smoke_factor"][detected_choice, survivor_idx])
             stat["scout_altitude_quality"] = float(perception["altitude_quality"][detected_choice, survivor_idx])
             if survivor_idx < len(survivor_confidence_pre):
@@ -2622,6 +2630,7 @@ def _finalize_survivor_exposure_stats(
             "scout_norm_distance": float(stat["scout_norm_distance"]),
             "scout_margin_m": float(stat["scout_margin_m"]),
             "scout_distance_factor": float(stat["scout_distance_factor"]),
+            "scout_environment_factor": float(stat["scout_environment_factor"]),
             "scout_cover_factor": float(stat["scout_cover_factor"]),
             "scout_fire_smoke_factor": float(stat["scout_fire_smoke_factor"]),
             "scout_altitude_quality": float(stat["scout_altitude_quality"]),

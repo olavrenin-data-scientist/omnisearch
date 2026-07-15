@@ -26,6 +26,7 @@ from torchrl.envs.libs.vmas import VmasEnv
 
 from envs.wildfire_defaults import (
     DRONE_CAMERA_FOV_DEG,
+    DRONE_ENVIRONMENT_DETECTION_FACTORS,
     DRONE_FLIGHT_LEVELS_M,
     DRONE_SAFETY_CLEARANCE_M,
     DRONE_SPEED_MPS,
@@ -133,7 +134,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "drone_speed_mps": DRONE_SPEED_MPS,
     "drone_u_multiplier": DRONE_U_MULTIPLIER,
     "drone_flight_levels_m": DRONE_FLIGHT_LEVELS_M,
-    "drone_cover_detection_factors": (1.0, 0.95, 0.75, 0.55, 0.45, 0.90),
+    "drone_environment_detection_factors": DRONE_ENVIRONMENT_DETECTION_FACTORS,
     "drone_edge_detection_floor": 0.70,
     "drone_energy_costs": (0.0, 0.002, 0.006),
     "drone_safety_clearance_m": DRONE_SAFETY_CLEARANCE_M,

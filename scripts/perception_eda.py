@@ -128,6 +128,9 @@ def _collect_records(data: dict) -> list[dict]:
                     "visible": bool(survivor.get("visible", False)),
                     "probability": _float_or_nan(survivor.get("probability")),
                     "distance_factor": _float_or_nan(survivor.get("distance_factor")),
+                    "environment_factor": _float_or_nan(
+                        survivor.get("environment_factor", survivor.get("cover_factor")),
+                    ),
                     "cover_factor": _float_or_nan(survivor.get("cover_factor")),
                     "fire_smoke_factor": _float_or_nan(survivor.get("fire_smoke_factor")),
                     "altitude_quality": _float_or_nan(survivor.get("altitude_quality")),
@@ -187,7 +190,7 @@ def _plot_component_boxes(records: list[dict]) -> dict:
     components = [
         ("altitude_quality", "altitude quality"),
         ("distance_factor", "distance factor"),
-        ("cover_factor", "cover factor"),
+        ("environment_factor", "environment factor"),
         ("fire_smoke_factor", "fire/smoke factor"),
         ("probability", "final probability"),
     ]
@@ -252,7 +255,7 @@ def _plot_component_time_series(records: list[dict]) -> dict:
     components = [
         ("probability", "final p"),
         ("distance_factor", "distance"),
-        ("cover_factor", "cover"),
+        ("environment_factor", "environment"),
         ("fire_smoke_factor", "fire/smoke"),
         ("altitude_quality", "altitude"),
     ]

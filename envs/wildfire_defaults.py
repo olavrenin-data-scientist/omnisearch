@@ -1,6 +1,7 @@
 """Canonical physical defaults shared by all wildfire environment entrypoints."""
 
 DRONE_CAMERA_FOV_DEG = 90.0
+DRONE_ENVIRONMENT_DETECTION_FACTORS = (1.0, 1.0, 0.71, 0.56, 0.86, 0.78)
 DRONE_FLIGHT_LEVELS_M = (20.0, 35.0, 50.0)
 DRONE_SAFETY_CLEARANCE_M = 3.0
 DRONE_SPEED_MPS = 10.0

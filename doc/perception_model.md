@@ -1,28 +1,20 @@
-# Probabilistic UAV Perception: Background and Occlusion
+# Probabilistic UAV Perception: Environment Factor
 
 ## Purpose
 
-This document defines a literature-informed treatment of background and physical
-occlusion for the abstract probabilistic UAV survivor-perception model. The goal
-is not to reproduce a particular computer-vision detector. Instead, the model
-should provide an interpretable probability that a survivor would be detected
-during one UAV observation while avoiding unsupported terrain-specific
-constants.
+This document defines the literature-informed terrain multiplier for the
+abstract probabilistic UAV survivor-perception model. The goal is not to
+reproduce a particular computer-vision detector. Instead, the model should
+provide an interpretable probability that a survivor would be detected during
+one UAV observation while avoiding unsupported terrain-specific constants.
 
-The central design decision is to model **background clutter** and **physical
-occlusion** separately:
-
-- **Background** changes how visually distinct a visible person is from the
-  surrounding scene. Its effect depends on sensor modality, temperature,
-  lighting, clothing, season, and detector training.
-- **Occlusion** is the fraction of the person's visible projection hidden by
-  vegetation or another object. It can be estimated spatially from vegetation
-  or canopy data and converted into a detection multiplier.
-
-Conflating the two effects in a single land-cover factor makes values difficult
-to interpret and can double-count vegetation. For example, applying both a low
-`forest` background factor and a canopy-occlusion factor would penalize the same
-forest twice.
+The implemented simulator uses a single categorical multiplier,
+`q_environment`, for land-cover effects. It intentionally bundles terrain,
+background clutter, concealment, vegetation, and water-surface ambiguity into
+one factor because the current terrain cache does not expose separate canopy,
+submersion, glare, pose, or contrast fields. This is less mechanistic than a
+future spatial occlusion model, but it keeps the current RGB abstract perception
+model calibrated and avoids multiplying several weakly supported penalties.
 
 ## Per-Step Detection Model
 
@@ -34,8 +26,7 @@ p_{i,t}(x) =
 q_{\mathrm{base}}
 q_{\mathrm{altitude}}
 q_{\mathrm{range}}
-q_{\mathrm{background}}
-q_{\mathrm{occlusion}}
+q_{\mathrm{environment}}
 q_{\mathrm{fire}},
 \]
 
@@ -47,9 +38,8 @@ $[0,1]$. This decomposition has two useful properties:
    and the confidence-map update, preventing the observation and reward models
    from disagreeing.
 
-This document changes only the interpretation and proposed values of
-`q_background` and `q_occlusion`. Altitude, footprint-relative range, and
-fire/smoke terms require their own calibration.
+This document covers `q_environment` only. Altitude, footprint-relative range,
+and fire/smoke terms are calibrated separately.
 
 ## Evidence From Existing Studies
 
@@ -135,92 +125,39 @@ occlusion. It is more appropriate for a lying or injured person than for a
 standing person whose upper body may remain visible above brush. If pose is not
 modeled, the resulting uncertainty should be acknowledged.
 
-### Compatibility fallback: land-cover-derived occlusion
+## Implemented Categorical `q_environment`
 
-Existing terrain caches may contain only categorical land cover. For those
-caches, use the following explicit fallback assumptions:
+The current terrain cache stores categorical land cover rather than measured
+canopy, submersion, glare, or body-visibility fields. For this reason, the
+implemented RGB abstract model uses one categorical environment factor:
 
-| Land-cover class | Assumed occlusion | Resulting multiplier | Reasoning |
-|---|---:|---:|---|
-| Road | 0% | 1.000 | The road surface does not physically cover the target. Visual contrast belongs to the background term. |
-| Open ground | 5% | 0.992 | Represents sparse incidental vegetation while remaining effectively unoccluded. This is an engineering prior, not a measured class mean. |
-| Brush | 25% | 0.814 | Places brush below the terrain builder's forest canopy threshold and within Baur's still-detectable transition region. This is a fallback prior. |
-| Forest | 35% | 0.531 | Matches the approximate canopy threshold used to identify forest and the midpoint of Baur's steep transition. Dense forest should use a larger measured value instead. |
-| Rock | 0% | 1.000 | Rock may create camouflage or thermal crossover, but it does not itself occlude a nadir-visible target. |
-| Water | 0% background occlusion | 1.000 | Water background is not body occlusion. A person in water requires a separate submersion/visibility term. |
+| Land-cover class | Evidence mapping | Implemented `q_environment` |
+|---|---|---:|
+| Road | Low vegetation / unobstructed reference | 1.00 |
+| Open ground | Low vegetation / unobstructed reference | 1.00 |
+| Brush | SAVIOUR 2024 medium vegetation probability-of-detection proxy | 0.71 |
+| Forest | SAVIOUR 2024 high vegetation probability-of-detection proxy | 0.56 |
+| Rock | Average of low and medium clutter classes | 0.86 |
+| Water | SeaDronesSee swimmer AP50 reference | 0.78 |
 
-These values are deliberately separated into an assumed occlusion percentage
-and a literature-derived conversion. The assumed percentages must not be cited
-as measurements from Baur et al.
-
-## Recommended Background Factors
-
-For the current RGB abstract model, use neutral background factors until a
-terrain-stratified human dataset has been evaluated:
-
-| Land-cover class | Proposed `q_background` |
-|---|---:|
-| Road | 1.00 |
-| Open ground | 1.00 |
-| Brush | 1.00 |
-| Forest | 1.00 |
-| Rock | 1.00 |
-| Water | 1.00 |
-
-This does **not** claim that backgrounds are equally difficult. It states that
-the available studies do not justify stable, sensor-independent multipliers.
-Vegetation difficulty is already represented by `q_occlusion`. Assigning
-additional values such as `forest=0.55` would double-count vegetation unless
-that factor had been calibrated specifically as residual clutter after
-controlling for occlusion.
-
-Future background calibration should stratify held-out aerial human detections
-by terrain class and fit relative recall after controlling for occlusion,
-altitude, footprint position, pose, smoke, and lighting. Thermal operation must
-have a separate model: WiSARD and MONET show that hot rock, sand, road, or other
-surfaces can reduce thermal contrast, while the same backgrounds may remain
-usable in RGB.
-
-## Proposed Values To Use
-
-The recommended first implementation is:
+The simulator stores these values in land-cover order
+`road, open, brush, forest, rock, water`:
 
 ```text
-occlusion_curve                 = baur_normalized
-occlusion_percent_road          = 0
-occlusion_percent_open          = 5
-occlusion_percent_brush         = 25
-occlusion_percent_forest        = 35
-occlusion_percent_rock          = 0
-occlusion_percent_water         = 0
-
-background_factor_road          = 1.00
-background_factor_open          = 1.00
-background_factor_brush         = 1.00
-background_factor_forest        = 1.00
-background_factor_rock          = 1.00
-background_factor_water         = 1.00
+q_environment = (1.00, 1.00, 0.71, 0.56, 0.86, 0.78)
 ```
 
-The resulting compatibility multipliers are approximately:
+SAVIOUR-style probability of detection should be interpreted as an operational
+terrain-quality proxy rather than pure physical occlusion. It likely includes
+altitude, viewing geometry, camera/operator performance, repeated viewing, and
+environmental concealment. SeaDronesSee likewise reports detector AP rather
+than a Bernoulli detection probability; the water value is therefore a compact
+proxy for glare, wave clutter, partial submersion, and maritime background
+ambiguity.
 
-```text
-road=1.000, open=0.992, brush=0.814,
-forest=0.531, rock=1.000, water=1.000
-```
-
-The source and confidence of each part are different:
-
-- The **curve coefficients** come directly from Baur et al.
-- The **land-cover occlusion percentages** are transparent engineering priors
-  for old categorical caches. They should be replaced by spatial canopy or
-  vegetation visibility whenever that data is available.
-- The **background factors of 1.0** are intentional neutral values. They avoid
-  inserting unsupported terrain penalties and prevent double-counting.
-- The **forest result of approximately 0.53** should be treated as a
-  conservative single-pass RGB prior. Operational search probability can be
-  much higher after repeated views, adaptive revisits, thermal sensing, or
-  occlusion-removal methods.
+The Baur occlusion curve above remains useful for a future spatial canopy model,
+but it is not multiplied into the current `q_environment` values. Applying both
+would double-count vegetation difficulty.
 
 At minimum, report sensitivity experiments with brush and forest occlusion
 shifted by plus or minus 10 percentage points. The policy should not be claimed
@@ -229,16 +166,16 @@ plausible uncertainty range.
 
 ## Implementation Requirements
 
-1. Use the same `q_occlusion` and `q_background` in survivor detection and the
-   confidence-map update.
-2. Store or expose the estimated occlusion percentage separately from the final
-   probability for diagnostics.
-3. Do not apply both the legacy land-cover detection factors and the new
-   occlusion multiplier.
-4. Preserve a categorical fallback for old terrain caches, but prefer a
-   continuous canopy/visibility array in newly built caches.
-5. Report detection, misses, and confidence gain by occlusion bin and terrain
-   class so the assumptions can later be replaced by measured calibration.
+1. Use the same `q_environment` in survivor detection and the confidence-map
+   update.
+2. Expose `q_environment` separately from the final probability in diagnostics.
+3. Preserve the legacy `drone_cover_detection_factors` config key as an alias
+   for old scenario files, but use `drone_environment_detection_factors` as the
+   canonical name.
+4. Do not additionally multiply the Baur occlusion curve into the current
+   categorical environment factors.
+5. Prefer measured canopy, submersion, glare, or visibility arrays in future
+   terrain caches, then replace the categorical multiplier with a spatial model.
 6. Treat repeated observations as correlated in future refinements; multiplying
    independent per-step Bernoulli misses can otherwise make cumulative
    confidence rise too quickly during nearly identical consecutive frames.
