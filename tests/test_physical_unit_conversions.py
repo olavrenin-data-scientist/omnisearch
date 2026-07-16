@@ -63,6 +63,18 @@ def _install_vmas_stubs() -> None:
 _install_vmas_stubs()
 
 from envs.wildfire_search import WildfireSearchScenario  # noqa: E402
+from terrain.real_terrain import (  # noqa: E402
+    DEFAULT_BRUSH_HEIGHT_M,
+    DEFAULT_FOREST_HEIGHT_M,
+    DEFAULT_HOUSE_HEIGHT_M,
+    LAND_BRUSH,
+    LAND_FOREST,
+    LAND_OPEN,
+    OBJECT_HOUSE,
+    OBJECT_NONE,
+    OBJECT_TREE,
+    _apply_standard_obstacle_heights,
+)
 
 
 class _Entity:
@@ -192,6 +204,30 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         self.assertEqual(float(quality[0]), 1.0)
         self.assertAlmostEqual(float(quality[-1]), 0.6, places=6)
         self.assertTrue(bool(torch.all(quality[:-1] >= quality[1:])))
+
+    def test_standard_obstacle_heights_are_physical_defaults(self):
+        land_cover = torch.tensor(
+            [[LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_OPEN]],
+            dtype=torch.long,
+        ).numpy()
+        obstacle_type = torch.tensor(
+            [[OBJECT_NONE, OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE]],
+            dtype=torch.long,
+        ).numpy()
+        obstacle_height = torch.zeros(1, 4).numpy()
+        sim_units_per_meter = 0.004
+
+        normalized = _apply_standard_obstacle_heights(
+            land_cover=land_cover,
+            obstacle_type=obstacle_type,
+            obstacle_height=obstacle_height,
+            sim_units_per_meter=sim_units_per_meter,
+        )
+
+        self.assertAlmostEqual(float(normalized[0, 0]), 0.0)
+        self.assertAlmostEqual(float(normalized[0, 1]), DEFAULT_BRUSH_HEIGHT_M * sim_units_per_meter)
+        self.assertAlmostEqual(float(normalized[0, 2]), DEFAULT_FOREST_HEIGHT_M * sim_units_per_meter)
+        self.assertAlmostEqual(float(normalized[0, 3]), DEFAULT_HOUSE_HEIGHT_M * sim_units_per_meter)
 
     def test_rgb_thermal_environment_factor_applies_bounded_boost(self):
         scenario = self._coverage_scenario(n_drones=1, grid_size=6)

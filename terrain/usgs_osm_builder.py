@@ -17,6 +17,9 @@ import json
 import numpy as np
 
 from .real_terrain import (
+    DEFAULT_BRUSH_HEIGHT_M,
+    DEFAULT_FOREST_HEIGHT_M,
+    DEFAULT_HOUSE_HEIGHT_M,
     LAND_BRUSH,
     LAND_FOREST,
     LAND_OPEN,
@@ -26,6 +29,7 @@ from .real_terrain import (
     OBJECT_HOUSE,
     OBJECT_NONE,
     OBJECT_TREE,
+    _apply_standard_obstacle_heights,
     _default_cache_path,
 )
 from .landfire_client import (
@@ -48,7 +52,7 @@ OSM_WATER_TAGS = {
     "waterway": ["riverbank", "dock"],
 }
 
-DEFAULT_BUILDING_HEIGHT_M = 7.0
+DEFAULT_BUILDING_HEIGHT_M = DEFAULT_HOUSE_HEIGHT_M
 
 
 def build_real_terrain_cache(
@@ -226,6 +230,13 @@ def build_real_terrain_cache(
     buildable_buildings = building_mask & ~road_mask
     obstacle_type[buildable_buildings] = OBJECT_HOUSE
     obstacle_height[buildable_buildings] = float(building_height_sim)
+    obstacle_height = _apply_standard_obstacle_heights(
+        land_cover=land_cover,
+        obstacle_type=obstacle_type,
+        obstacle_height=obstacle_height,
+        sim_units_per_meter=sim_units_per_meter,
+    )
+    obstacle_height[buildable_buildings] = float(building_height_sim)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     source = source_note or (
@@ -246,6 +257,9 @@ def build_real_terrain_cache(
         building_height_m=building_height_m,
         building_height_sim=building_height_sim,
         building_height_source=building_height_source,
+        brush_height_m=DEFAULT_BRUSH_HEIGHT_M,
+        forest_height_m=DEFAULT_FOREST_HEIGHT_M,
+        house_height_m=DEFAULT_HOUSE_HEIGHT_M,
         osm_timeout=osm_timeout,
         fuel_source=fuel_source,
         source_cache_dir=source_cache_dir,
@@ -311,6 +325,9 @@ def _build_cache_metadata(
     building_height_m: float,
     building_height_sim: float,
     building_height_source: str,
+    brush_height_m: float,
+    forest_height_m: float,
+    house_height_m: float,
     osm_timeout: int,
     fuel_source: str,
     source_cache_dir: str | Path,
@@ -352,6 +369,9 @@ def _build_cache_metadata(
             "building_height_m": float(building_height_m),
             "building_height_sim": float(building_height_sim),
             "building_height_source": building_height_source,
+            "brush_height_m": float(brush_height_m),
+            "forest_height_m": float(forest_height_m),
+            "house_height_m": float(house_height_m),
             "fuel_source": fuel_source,
             "source_cache_dir": str(source_cache_dir),
         },
@@ -472,6 +492,17 @@ def _cache_matches_options(
         except (TypeError, ValueError):
             height_matches = False
         if not height_matches:
+            return False
+    expected_standard_heights = {
+        "brush_height_m": DEFAULT_BRUSH_HEIGHT_M,
+        "forest_height_m": DEFAULT_FOREST_HEIGHT_M,
+        "house_height_m": DEFAULT_HOUSE_HEIGHT_M,
+    }
+    for key, expected in expected_standard_heights.items():
+        try:
+            if abs(float(params.get(key)) - float(expected)) > 1e-6:
+                return False
+        except (TypeError, ValueError):
             return False
     return True
 
