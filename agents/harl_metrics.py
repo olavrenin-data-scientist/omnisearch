@@ -14,6 +14,7 @@ ADDITIVE_ENV_METRICS = (
     "reward/drone_scout",
     "reward/drone_progress",
     "reward/uav_inefficient_move",
+    "reward/uav_fire_footprint",
     "reward/ugv_progress",
     "reward/ugv_approach",
     "reward/ugv_movement_alignment",
@@ -55,6 +56,7 @@ ADDITIVE_DIAGNOSTIC_METRICS = (
     "diagnostic/ugv_route_progress_floor_shortfall_m",
     "diagnostic/ugv_action_alignment",
     "diagnostic/ugv_movement_alignment",
+    "diagnostic/uav_fire_footprint_fraction",
     "diagnostic/uav_steps_with_target_in_footprint",
 )
 

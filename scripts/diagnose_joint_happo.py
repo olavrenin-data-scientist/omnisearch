@@ -43,6 +43,7 @@ UAV_REWARD_COMPONENTS = (
     ("uav_overlap", "reward/uav_overlap"),
     ("uav_inter_overlap", "reward/uav_inter_uav_overlap"),
     ("uav_outside", "reward/uav_outside_footprint"),
+    ("uav_fire", "reward/uav_fire_footprint"),
 )
 
 UGV_REWARD_COMPONENTS = (
@@ -166,6 +167,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         )
     if getattr(args, "uav_fire_block_threshold", None) is not None:
         scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
+    if getattr(args, "uav_fire_footprint_penalty", None) is not None:
+        scenario_kwargs["r_uav_fire_footprint"] = float(args.uav_fire_footprint_penalty)
+    if getattr(args, "uav_fire_penalty_threshold", None) is not None:
+        scenario_kwargs["uav_fire_penalty_threshold"] = float(args.uav_fire_penalty_threshold)
     if args.enable_fire:
         scenario_kwargs["disable_fire"] = False
     elif args.disable_fire:
@@ -963,6 +968,10 @@ def main() -> None:
     parser.add_argument("--uav-fire-block-threshold", type=float, default=None,
                         help="If set, mark UAV local blocked-observation cells as blocked when "
                              "fire intensity >= this threshold. Omitted preserves checkpoint/default.")
+    parser.add_argument("--uav-fire-footprint-penalty", type=float, default=None,
+                        help="Override per-UAV active-fire footprint penalty scale.")
+    parser.add_argument("--uav-fire-penalty-threshold", type=float, default=None,
+                        help="Override active-fire threshold for --uav-fire-footprint-penalty.")
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
     parser.add_argument("--uav-decision-grid", type=int, default=None,
@@ -1020,6 +1029,10 @@ def main() -> None:
         parser.error("--n-decoys must be nonnegative")
     if args.uav_fire_block_threshold is not None and args.uav_fire_block_threshold > 1.0:
         parser.error("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
+    if args.uav_fire_footprint_penalty is not None and args.uav_fire_footprint_penalty < 0.0:
+        parser.error("--uav-fire-footprint-penalty must be nonnegative")
+    if args.uav_fire_penalty_threshold is not None and args.uav_fire_penalty_threshold > 1.0:
+        parser.error("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
     if args.active_decoys_min is not None and args.active_decoys_min < 0:
         parser.error("--active-decoys-min must be nonnegative")
     if args.active_decoys_max is not None and args.active_decoys_max < 0:
@@ -1068,7 +1081,9 @@ def main() -> None:
         f"planner={scenario_kwargs.get('ugv_planner_hint')}, "
         f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}, "
         f"drone_perception={scenario_kwargs.get('drone_perception_mode', 'rgb')}, "
-        f"uav_fire_block_threshold={scenario_kwargs.get('uav_fire_block_threshold', -1.0)}"
+        f"uav_fire_block_threshold={scenario_kwargs.get('uav_fire_block_threshold', -1.0)}, "
+        f"uav_fire_penalty={scenario_kwargs.get('r_uav_fire_footprint', 0.0)}, "
+        f"uav_fire_penalty_threshold={scenario_kwargs.get('uav_fire_penalty_threshold', 0.6)}"
     )
     print(f"steps: {args.steps}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")

@@ -168,6 +168,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         )
     if getattr(args, "uav_fire_block_threshold", None) is not None:
         scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
+    if getattr(args, "uav_fire_footprint_penalty", None) is not None:
+        scenario_kwargs["r_uav_fire_footprint"] = float(args.uav_fire_footprint_penalty)
+    if getattr(args, "uav_fire_penalty_threshold", None) is not None:
+        scenario_kwargs["uav_fire_penalty_threshold"] = float(args.uav_fire_penalty_threshold)
     if getattr(args, "drone_flight_levels_m", None):
         levels = tuple(
             float(value)
@@ -273,6 +277,7 @@ def run_rollout(
     new_coverage_cells_values: list[float] = []
     raw_new_coverage_cells_values: list[float] = []
     outside_footprint_values: list[float] = []
+    fire_footprint_values: list[float] = []
     overlap_values: list[float] = []
     expected_overlap_values: list[float] = []
     excess_overlap_values: list[float] = []
@@ -377,6 +382,7 @@ def run_rollout(
     penalty_uav_overlap_values: list[float] = []
     penalty_uav_inter_overlap_values: list[float] = []
     penalty_uav_outside_footprint_values: list[float] = []
+    penalty_uav_fire_footprint_values: list[float] = []
     reward_uav_coverage_threshold_values: list[float] = []
     reward_uav_scout_values: list[float] = []
     reward_team_values: list[float] = []
@@ -595,6 +601,11 @@ def run_rollout(
         outside_footprint_fraction = _metric_array(
             scenario,
             "metric_uav_outside_footprint_fraction_by_drone",
+            scenario.n_drones,
+        )
+        fire_footprint_fraction = _metric_array(
+            scenario,
+            "metric_uav_fire_footprint_fraction_by_drone",
             scenario.n_drones,
         )
         overlap_fraction = _metric_array(
@@ -939,6 +950,7 @@ def run_rollout(
                     expected_overlap=expected_overlap,
                     inter_uav_overlap=inter_uav_overlap,
                     outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                    fire_footprint=float(fire_footprint_fraction[drone_idx]),
                     coverage_opportunity_fraction=opportunity_fraction,
                     coverage_opportunity_available_fraction=opportunity_available_fraction,
                     confidence_reward=confidence_reward,
@@ -962,6 +974,7 @@ def run_rollout(
                 excess_overlap_values.append(excess_overlap)
                 inter_uav_overlap_values.append(inter_uav_overlap)
                 outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
+                fire_footprint_values.append(float(fire_footprint_fraction[drone_idx]))
                 boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
                 footprint_radius_m_values.append(footprint_radius)
                 reward_uav_coverage_values.append(reward_terms["coverage"])
@@ -982,6 +995,7 @@ def run_rollout(
                 penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
                 penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
                 penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+                penalty_uav_fire_footprint_values.append(reward_terms["fire_footprint_penalty"])
                 reward_uav_coverage_threshold_values.append(reward_terms["coverage_threshold"])
                 reward_uav_scout_values.append(reward_terms["scout"])
                 reward_team_values.append(reward_terms["team"])
@@ -1261,9 +1275,10 @@ def run_rollout(
                 frontier_ratio=frontier_ratio,
                 overlap=overlap,
                 expected_overlap=expected_overlap,
-                inter_uav_overlap=inter_uav_overlap,
-                outside_footprint=float(outside_footprint_fraction[drone_idx]),
-                coverage_opportunity_fraction=opportunity_fraction,
+                    inter_uav_overlap=inter_uav_overlap,
+                    outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                    fire_footprint=float(fire_footprint_fraction[drone_idx]),
+                    coverage_opportunity_fraction=opportunity_fraction,
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
                 confidence_reward=confidence_reward,
                 team_confidence_reward=team_confidence_reward,
@@ -1292,6 +1307,8 @@ def run_rollout(
             excess_overlap_values.append(excess_overlap)
             inter_uav_overlap_values.append(inter_uav_overlap)
             any_history_revisit_values.append(any_history_revisit)
+            outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
+            fire_footprint_values.append(float(fire_footprint_fraction[drone_idx]))
             own_history_revisit_values.append(own_history_revisit)
             teammate_history_revisit_values.append(teammate_history_revisit)
             own_only_revisit_values.append(own_only_revisit)
@@ -1410,6 +1427,7 @@ def run_rollout(
             penalty_uav_overlap_values.append(reward_terms["overlap_penalty"])
             penalty_uav_inter_overlap_values.append(reward_terms["inter_uav_overlap_penalty"])
             penalty_uav_outside_footprint_values.append(reward_terms["outside_footprint_penalty"])
+            penalty_uav_fire_footprint_values.append(reward_terms["fire_footprint_penalty"])
             reward_uav_coverage_threshold_values.append(reward_terms["coverage_threshold"])
             reward_uav_scout_values.append(reward_terms["scout"])
             reward_team_values.append(reward_terms["team"])
@@ -1436,6 +1454,7 @@ def run_rollout(
             drone_stats["new_coverage_cells"].append(new_cells)
             drone_stats["raw_new_coverage_cells"].append(raw_new_cells)
             drone_stats["outside_footprint"].append(float(outside_footprint_fraction[drone_idx]))
+            drone_stats["fire_footprint"].append(float(fire_footprint_fraction[drone_idx]))
             drone_stats["overlap"].append(overlap)
             drone_stats["expected_overlap"].append(expected_overlap)
             drone_stats["excess_overlap"].append(excess_overlap)
@@ -1661,12 +1680,14 @@ def run_rollout(
                     "overlap_penalty": reward_terms["overlap_penalty"],
                     "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
                     "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                    "fire_footprint_penalty": reward_terms["fire_footprint_penalty"],
                     "coverage_threshold_reward": reward_terms["coverage_threshold"],
                     "scout_reward": reward_terms["scout"],
                     "team_reward": reward_terms["team"],
                     "all_survivors_reward": reward_terms["all_survivors_found"],
                     "aux_reward": reward_terms["aux"],
                     "overlap": overlap,
+                    "fire_footprint": float(fire_footprint_fraction[drone_idx]),
                     "excess_overlap": excess_overlap,
                     "any_history_revisit": any_history_revisit,
                     "own_history_revisit": own_history_revisit,
@@ -1925,6 +1946,12 @@ def run_rollout(
             float(np.mean([value >= 0.10 for value in outside_footprint_values]))
             if outside_footprint_values else 0.0
         ),
+        "avg_fire_footprint_fraction": _finite_mean(fire_footprint_values),
+        "max_fire_footprint_fraction": max(fire_footprint_values) if fire_footprint_values else 0.0,
+        "fire_footprint_step_frac_10": (
+            float(np.mean([value >= 0.10 for value in fire_footprint_values]))
+            if fire_footprint_values else 0.0
+        ),
         "avg_overlap_fraction": _finite_mean(overlap_values),
         "avg_expected_overlap_fraction": _finite_mean(expected_overlap_values),
         "avg_excess_overlap_fraction": _finite_mean(excess_overlap_values),
@@ -2077,6 +2104,7 @@ def run_rollout(
         "avg_penalty_uav_overlap": _finite_mean(penalty_uav_overlap_values),
         "avg_penalty_uav_inter_overlap": _finite_mean(penalty_uav_inter_overlap_values),
         "avg_penalty_uav_outside_footprint": _finite_mean(penalty_uav_outside_footprint_values),
+        "avg_penalty_uav_fire_footprint": _finite_mean(penalty_uav_fire_footprint_values),
         "avg_reward_uav_coverage_threshold": _finite_mean(reward_uav_coverage_threshold_values),
         "avg_reward_uav_scout": _finite_mean(reward_uav_scout_values),
         "avg_reward_team": _finite_mean(reward_team_values),
@@ -3498,6 +3526,7 @@ def _uav_reward_terms(
     expected_overlap: float,
     inter_uav_overlap: float,
     outside_footprint: float,
+    fire_footprint: float,
     coverage_opportunity_fraction: float,
     coverage_opportunity_available_fraction: float,
     confidence_reward: float,
@@ -3581,6 +3610,13 @@ def _uav_reward_terms(
         max(outside_footprint, 0.0),
         1.0,
     )
+    fire_scale = float(getattr(scenario, "r_uav_fire_footprint", 0.0))
+    fire_threshold = float(getattr(scenario, "uav_fire_penalty_threshold", 0.6))
+    fire_penalty = (
+        -fire_scale * min(max(fire_footprint, 0.0), 1.0)
+        if fire_scale > 0.0 and fire_threshold >= 0.0
+        else 0.0
+    )
 
     aux = (
         coverage
@@ -3597,6 +3633,7 @@ def _uav_reward_terms(
         + overlap_penalty
         + inter_penalty
         + outside_penalty
+        + fire_penalty
     )
     abs_denom = (
         abs(coverage)
@@ -3613,6 +3650,7 @@ def _uav_reward_terms(
         + abs(overlap_penalty)
         + abs(inter_penalty)
         + abs(outside_penalty)
+        + abs(fire_penalty)
         + abs(scout_reward)
     )
     return {
@@ -3630,6 +3668,7 @@ def _uav_reward_terms(
         "overlap_penalty": float(overlap_penalty),
         "inter_uav_overlap_penalty": float(inter_penalty),
         "outside_footprint_penalty": float(outside_penalty),
+        "fire_footprint_penalty": float(fire_penalty),
         "scout": float(scout_reward),
         "aux": float(aux),
         "frontier_abs_share": float(abs(frontier) / abs_denom) if abs_denom > 1e-12 else 0.0,
@@ -4016,6 +4055,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
         "new_coverage_cells": [],
         "raw_new_coverage_cells": [],
         "outside_footprint": [],
+        "fire_footprint": [],
         "overlap": [],
         "expected_overlap": [],
         "excess_overlap": [],
@@ -4113,6 +4153,7 @@ def _new_drone_stats(drone_idx: int) -> dict[str, Any]:
             "overlap_penalty": [],
             "inter_uav_overlap_penalty": [],
             "outside_footprint_penalty": [],
+            "fire_footprint_penalty": [],
             "coverage_threshold": [],
             "scout": [],
             "team": [],
@@ -4243,6 +4284,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
     action_frontier_intent = stats["action_frontier_intent"]
     action_frontier_gap = stats["action_frontier_movement_gap"]
     outside = stats["outside_footprint"]
+    fire_footprint = stats["fire_footprint"]
     edge_mask = [bool(value) for value in stats["is_edge_step"]]
     high_frontier = int(stats["frontier_high_progress_steps"])
     action_frontier_aligned = int(stats["action_frontier_aligned_steps"])
@@ -4282,6 +4324,8 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         ),
         "avg_outside_footprint_fraction": _finite_mean(outside),
         "max_outside_footprint_fraction": max(outside) if outside else 0.0,
+        "avg_fire_footprint_fraction": _finite_mean(fire_footprint),
+        "max_fire_footprint_fraction": max(fire_footprint) if fire_footprint else 0.0,
         "avg_overlap_fraction": _finite_mean(stats["overlap"]),
         "avg_expected_overlap_fraction": _finite_mean(stats["expected_overlap"]),
         "avg_excess_overlap_fraction": _finite_mean(excess),
@@ -4406,6 +4450,7 @@ def _finalize_drone_stats(stats: dict[str, Any], scenario: WildfireSearchScenari
         "avg_penalty_uav_overlap": _finite_mean(reward_terms["overlap_penalty"]),
         "avg_penalty_uav_inter_overlap": _finite_mean(reward_terms["inter_uav_overlap_penalty"]),
         "avg_penalty_uav_outside_footprint": _finite_mean(reward_terms["outside_footprint_penalty"]),
+        "avg_penalty_uav_fire_footprint": _finite_mean(reward_terms["fire_footprint_penalty"]),
         "avg_reward_uav_coverage_threshold": _finite_mean(reward_terms["coverage_threshold"]),
         "avg_reward_uav_scout": _finite_mean(reward_terms["scout"]),
         "avg_reward_team": _finite_mean(reward_terms["team"]),
@@ -5073,6 +5118,12 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_outside_footprint_step_frac_10": _finite_mean([
             row["outside_footprint_step_frac_10"] for row in rows
         ]),
+        "mean_fire_footprint_fraction": _finite_mean([
+            row["avg_fire_footprint_fraction"] for row in rows
+        ]),
+        "mean_fire_footprint_step_frac_10": _finite_mean([
+            row["fire_footprint_step_frac_10"] for row in rows
+        ]),
         "mean_overlap_fraction": _finite_mean([row["avg_overlap_fraction"] for row in rows]),
         "mean_expected_overlap_fraction": _finite_mean([
             row["avg_expected_overlap_fraction"] for row in rows
@@ -5428,6 +5479,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_penalty_uav_outside_footprint": _finite_mean([
             row["avg_penalty_uav_outside_footprint"] for row in rows
         ]),
+        "mean_penalty_uav_fire_footprint": _finite_mean([
+            row["avg_penalty_uav_fire_footprint"] for row in rows
+        ]),
         "mean_reward_uav_coverage_threshold": _finite_mean([
             row["avg_reward_uav_coverage_threshold"] for row in rows
         ]),
@@ -5727,6 +5781,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "new_coverage_step_frac",
         "raw_new_coverage_step_frac",
         "avg_outside_footprint_fraction",
+        "avg_fire_footprint_fraction",
         "avg_overlap_fraction",
         "avg_expected_overlap_fraction",
         "avg_excess_overlap_fraction",
@@ -5834,6 +5889,7 @@ def _summarize_per_drone(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "avg_penalty_uav_overlap",
         "avg_penalty_uav_inter_overlap",
         "avg_penalty_uav_outside_footprint",
+        "avg_penalty_uav_fire_footprint",
         "avg_reward_uav_coverage_threshold",
         "avg_reward_uav_scout",
         "avg_reward_team",
@@ -6468,6 +6524,7 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
         ("overlap pen", "overlap_penalty", "#d44a3a", True),
         ("inter pen", "inter_uav_overlap_penalty", "#e07b39", True),
         ("outside pen", "outside_footprint_penalty", "#20242c", True),
+        ("fire pen", "fire_footprint_penalty", "#dc2626", True),
     ]
     max_value = 0.0
     for label, key, color, is_penalty in series:
@@ -7325,6 +7382,7 @@ def write_distribution_plots(
         ("Conf Frontier Advantage", "avg_confidence_frontier_capture_advantage", (-1.0, 1.0)),
         ("Conf LG Frontier Advantage", "avg_confidence_lg_frontier_capture_advantage", (-1.0, 1.0)),
         ("Outside Footprint", "avg_outside_footprint_fraction", (0.0, 1.0)),
+        ("Fire Footprint", "avg_fire_footprint_fraction", (0.0, 1.0)),
         ("Overlap", "avg_overlap_fraction", (0.0, 1.0)),
         ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
         ("Edge Step Fraction", "edge_step_frac", (0.0, 1.0)),
@@ -7543,6 +7601,12 @@ def main() -> None:
     parser.add_argument("--uav-fire-block-threshold", type=float, default=None,
                         help="If set, mark UAV local blocked-observation cells as blocked when "
                              "fire intensity >= this threshold. Omitted preserves checkpoint/default.")
+    parser.add_argument("--uav-fire-footprint-penalty", type=float, default=None,
+                        help="Override per-UAV active-fire footprint penalty scale. "
+                             "Omitted preserves checkpoint/default.")
+    parser.add_argument("--uav-fire-penalty-threshold", type=float, default=None,
+                        help="Override active-fire threshold for --uav-fire-footprint-penalty. "
+                             "Use a negative value to disable.")
     parser.add_argument("--drone-flight-levels-m", default=None,
                         help="Comma-separated UAV flight altitudes in meters, e.g. 30,50,75.")
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -7616,6 +7680,10 @@ def main() -> None:
         parser.error("--local-map-patch-size must be a positive odd integer")
     if args.uav_fire_block_threshold is not None and args.uav_fire_block_threshold > 1.0:
         parser.error("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
+    if args.uav_fire_footprint_penalty is not None and args.uav_fire_footprint_penalty < 0.0:
+        parser.error("--uav-fire-footprint-penalty must be nonnegative")
+    if args.uav_fire_penalty_threshold is not None and args.uav_fire_penalty_threshold > 1.0:
+        parser.error("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
     if (
         args.comms_dropout is not None
         and (
@@ -7685,6 +7753,8 @@ def main() -> None:
     )
     print(f"drone_perception_mode: {scenario_kwargs.get('drone_perception_mode', 'rgb')}")
     print(f"uav_fire_block_threshold: {scenario_kwargs.get('uav_fire_block_threshold', -1.0)}")
+    print(f"uav_fire_footprint_penalty: {scenario_kwargs.get('r_uav_fire_footprint', 0.0)}")
+    print(f"uav_fire_penalty_threshold: {scenario_kwargs.get('uav_fire_penalty_threshold', 0.6)}")
     print(
         "uav overlap penalty: "
         f"normalization={scenario_kwargs.get('uav_overlap_penalty_normalization', 'raw')}"
@@ -8047,6 +8117,8 @@ def main() -> None:
         "footprint/revisit means: "
         f"outside={summary['mean_outside_footprint_fraction']:.3f} "
         f"outside10={summary['mean_outside_footprint_step_frac_10']:.3f} "
+        f"fire_foot={summary['mean_fire_footprint_fraction']:.3f} "
+        f"fire10={summary['mean_fire_footprint_step_frac_10']:.3f} "
         f"overlap={summary['mean_overlap_fraction']:.3f} "
         f"expected_overlap={summary['mean_expected_overlap_fraction']:.3f} "
         f"excess_overlap={summary['mean_excess_overlap_fraction']:.3f} "
@@ -8089,6 +8161,7 @@ def main() -> None:
         f"overlap_pen={summary['mean_penalty_uav_overlap']:.4f} "
         f"inter_pen={summary['mean_penalty_uav_inter_overlap']:.4f} "
         f"outside_pen={summary['mean_penalty_uav_outside_footprint']:.4f} "
+        f"fire_pen={summary['mean_penalty_uav_fire_footprint']:.4f} "
         f"scout={summary['mean_reward_uav_scout']:.4f} "
         f"team={summary['mean_reward_team']:.4f} "
         f"all_found={summary['mean_reward_all_survivors_found']:.4f} "

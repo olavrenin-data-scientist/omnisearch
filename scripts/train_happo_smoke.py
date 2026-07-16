@@ -317,6 +317,8 @@ def build_args(
     uav_inter_uav_overlap_penalty: float = 0.0,
     uav_inter_uav_overlap_allowed: float = 0.20,
     uav_outside_footprint_penalty: float | None = None,
+    uav_fire_footprint_penalty: float = 0.0,
+    uav_fire_penalty_threshold: float = 0.6,
     uav_boundary_soft_margin_m: float = 25.0,
     uav_start_min_separation_m: float | None = None,
     uav_start_edge_margin_m: float | None = None,
@@ -834,6 +836,12 @@ def build_args(
     uav_outside_footprint_penalty = float(uav_outside_footprint_penalty)
     if uav_outside_footprint_penalty < 0.0:
         raise ValueError("uav_outside_footprint_penalty must be nonnegative")
+    uav_fire_footprint_penalty = float(uav_fire_footprint_penalty)
+    if uav_fire_footprint_penalty < 0.0:
+        raise ValueError("uav_fire_footprint_penalty must be nonnegative")
+    uav_fire_penalty_threshold = float(uav_fire_penalty_threshold)
+    if uav_fire_penalty_threshold > 1.0:
+        raise ValueError("uav_fire_penalty_threshold must be <= 1; use a negative value to disable")
     uav_boundary_soft_margin_m = max(float(uav_boundary_soft_margin_m), 1e-6)
     if uav_start_min_separation_m is not None:
         uav_start_min_separation_m = max(float(uav_start_min_separation_m), 0.0)
@@ -986,6 +994,8 @@ def build_args(
         "drone_min_footprint_m": drone_min_footprint_m,
         "drone_perception_mode": str(drone_perception_mode).replace("+", "_").replace("-", "_"),
         "uav_fire_block_threshold": -1.0 if uav_fire_block_threshold is None else float(uav_fire_block_threshold),
+        "r_uav_fire_footprint": uav_fire_footprint_penalty,
+        "uav_fire_penalty_threshold": uav_fire_penalty_threshold,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
         "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
@@ -1379,6 +1389,8 @@ def build_args(
             "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
             "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
+            "r_uav_fire_footprint": uav_fire_footprint_penalty,
+            "uav_fire_penalty_threshold": uav_fire_penalty_threshold,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
         if joint_schema_uav_diagnostic:
@@ -1459,6 +1471,8 @@ def build_args(
             "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
             "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
+            "r_uav_fire_footprint": uav_fire_footprint_penalty,
+            "uav_fire_penalty_threshold": uav_fire_penalty_threshold,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
     if joint_schema_ugv_diagnostic:
@@ -2108,6 +2122,12 @@ def main():
                    help="Maximum per-UAV per-step penalty when the camera footprint is fully outside the map. "
                         "Penalty scales linearly with the estimated outside-footprint fraction. "
                         "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-fire-footprint-penalty", type=float, default=0.0,
+                   help="Maximum per-UAV per-step penalty when the camera footprint is fully over "
+                        "active fire. Default 0 disables this optional fire-avoidance penalty.")
+    p.add_argument("--uav-fire-penalty-threshold", type=float, default=0.6,
+                   help="Fire intensity threshold used by --uav-fire-footprint-penalty. "
+                        "Use a negative value to disable the penalty even if the scale is nonzero.")
     p.add_argument("--uav-boundary-soft-margin-m", type=float, default=25.0,
                    help="Physical margin from map edge used for UAV boundary risk diagnostics.")
     p.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -2445,6 +2465,10 @@ def main():
         and args.uav_outside_footprint_penalty < 0.0
     ):
         p.error("--uav-outside-footprint-penalty must be nonnegative")
+    if args.uav_fire_footprint_penalty < 0.0:
+        p.error("--uav-fire-footprint-penalty must be nonnegative")
+    if args.uav_fire_penalty_threshold > 1.0:
+        p.error("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
     if args.uav_boundary_soft_margin_m <= 0.0:
         p.error("--uav-boundary-soft-margin-m must be positive")
     if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
@@ -2996,6 +3020,8 @@ def main():
     print(f" uav_inter_uav_overlap_penalty: {args.uav_inter_uav_overlap_penalty}")
     print(f" uav_inter_uav_overlap_allowed: {args.uav_inter_uav_overlap_allowed}")
     print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
+    print(f" uav_fire_footprint_penalty: {args.uav_fire_footprint_penalty}")
+    print(f" uav_fire_penalty_threshold: {args.uav_fire_penalty_threshold}")
     print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
     print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
     print(f" uav_start_edge_margin_m: {args.uav_start_edge_margin_m}")
@@ -3140,6 +3166,8 @@ def main():
         uav_inter_uav_overlap_penalty = args.uav_inter_uav_overlap_penalty,
         uav_inter_uav_overlap_allowed = args.uav_inter_uav_overlap_allowed,
         uav_outside_footprint_penalty = args.uav_outside_footprint_penalty,
+        uav_fire_footprint_penalty = args.uav_fire_footprint_penalty,
+        uav_fire_penalty_threshold = args.uav_fire_penalty_threshold,
         uav_boundary_soft_margin_m = args.uav_boundary_soft_margin_m,
         uav_start_min_separation_m = args.uav_start_min_separation_m,
         uav_start_edge_margin_m = args.uav_start_edge_margin_m,

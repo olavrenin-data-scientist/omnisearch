@@ -896,6 +896,10 @@ class WildfireSearchScenario(BaseScenario):
             0.999,
         )
         self.r_uav_outside_footprint = max(float(kwargs.pop("r_uav_outside_footprint", 0.0)), 0.0)
+        self.r_uav_fire_footprint = max(float(kwargs.pop("r_uav_fire_footprint", 0.0)), 0.0)
+        self.uav_fire_penalty_threshold = float(kwargs.pop("uav_fire_penalty_threshold", 0.6))
+        if self.uav_fire_penalty_threshold > 1.0:
+            raise ValueError("uav_fire_penalty_threshold must be <= 1; use a negative value to disable")
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
         # Per-step penalty for each survivor that is scouted but not yet
         # confirmed. This makes standing still cost something while survivors
@@ -1662,6 +1666,9 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_outside_footprint = torch.zeros(batch_dim, device=device)
         self.metric_uav_outside_footprint_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_outside_footprint_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_reward_uav_fire_footprint = torch.zeros(batch_dim, device=device)
+        self.metric_uav_fire_footprint_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_fire_footprint_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_boundary_soft_risk = torch.zeros(batch_dim, device=device)
         self.metric_uav_boundary_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_boundary_distance_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
@@ -1890,6 +1897,9 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_uav_outside_footprint,
             self.metric_uav_outside_footprint_fraction,
             self.metric_uav_outside_footprint_fraction_by_drone,
+            self.metric_reward_uav_fire_footprint,
+            self.metric_uav_fire_footprint_fraction,
+            self.metric_uav_fire_footprint_fraction_by_drone,
             self.metric_uav_boundary_soft_risk,
             self.metric_uav_boundary_distance_m,
             self.metric_uav_boundary_distance_m_by_drone,
@@ -5295,6 +5305,7 @@ class WildfireSearchScenario(BaseScenario):
             coverage_new,
             uav_overlap_fraction,
             uav_outside_footprint_fraction,
+            uav_fire_footprint_fraction,
             uav_inter_uav_overlap_fraction,
             uav_coverage_opportunity_fraction,
             uav_coverage_opportunity_cells,
@@ -5441,6 +5452,9 @@ class WildfireSearchScenario(BaseScenario):
         uav_outside_footprint_penalty = self._uav_outside_footprint_penalty(
             uav_outside_footprint_fraction,
         )
+        uav_fire_footprint_penalty = self._uav_fire_footprint_penalty(
+            uav_fire_footprint_fraction,
+        )
         boundary_soft_risk, boundary_distance_m = self._uav_boundary_risk_metrics(drone_pos)
 
         self.metric_new_scouts = (newly_scouted & active_survivors).float().sum(dim=1)
@@ -5529,6 +5543,13 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_outside_footprint_fraction_by_drone = uav_outside_footprint_fraction
         self.metric_uav_outside_footprint_fraction = (
             uav_outside_footprint_fraction.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_reward_uav_fire_footprint = uav_fire_footprint_penalty.sum(dim=1)
+        self.metric_uav_fire_footprint_fraction_by_drone = uav_fire_footprint_fraction
+        self.metric_uav_fire_footprint_fraction = (
+            uav_fire_footprint_fraction.mean(dim=1)
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=device)
         )
@@ -5710,6 +5731,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + uav_overlap_penalty[:, i]
                 r = r + uav_inter_uav_overlap_penalty[:, i]
                 r = r + uav_outside_footprint_penalty[:, i]
+                r = r + uav_fire_footprint_penalty[:, i]
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
@@ -8127,7 +8149,7 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos: Tensor,
         *,
         known_coverage: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Per-drone fraction of the map newly covered by camera footprints.
 
         All drone claims are calculated before updating ``coverage_grid``.
@@ -8138,6 +8160,7 @@ class WildfireSearchScenario(BaseScenario):
         new_per_drone = torch.zeros(B, self.n_drones, device=drone_pos.device)
         overlap_fraction = torch.zeros_like(new_per_drone)
         outside_footprint_fraction = torch.zeros_like(new_per_drone)
+        fire_footprint_fraction = torch.zeros_like(new_per_drone)
         inter_uav_overlap_fraction = torch.zeros_like(new_per_drone)
         opportunity_fraction = torch.zeros_like(new_per_drone)
         opportunity_cells = torch.zeros_like(new_per_drone)
@@ -8147,6 +8170,7 @@ class WildfireSearchScenario(BaseScenario):
                 new_per_drone,
                 overlap_fraction,
                 outside_footprint_fraction,
+                fire_footprint_fraction,
                 inter_uav_overlap_fraction,
                 opportunity_fraction,
                 opportunity_cells,
@@ -8174,11 +8198,13 @@ class WildfireSearchScenario(BaseScenario):
             and self.r_uav_overlap <= 0.0
             and self.r_uav_inter_uav_overlap <= 0.0
             and self.r_uav_outside_footprint <= 0.0
+            and self.r_uav_fire_footprint <= 0.0
         ):
             return (
                 new_per_drone,
                 overlap_fraction,
                 outside_footprint_fraction,
+                fire_footprint_fraction,
                 inter_uav_overlap_fraction,
                 opportunity_fraction,
                 opportunity_cells,
@@ -8214,6 +8240,22 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp(min=0.0, max=1.0)
         already_covered = claims & known_coverage
         overlap_fraction = already_covered.float().sum(dim=(-1, -2)) / footprint_cells.float()
+        if self.r_uav_fire_footprint > 0.0 and self.uav_fire_penalty_threshold >= 0.0:
+            fire_grid_size = int(self.fire_grid.shape[-1])
+            fire_x = (
+                (xs + self.x_semidim) / (2.0 * self.x_semidim) * fire_grid_size
+            ).clamp(0, fire_grid_size - 1).long()
+            fire_y = (
+                (ys + self.y_semidim) / (2.0 * self.y_semidim) * fire_grid_size
+            ).clamp(0, fire_grid_size - 1).long()
+            fire_active = (
+                self.fire_grid[:, fire_y.view(G, 1), fire_x.view(1, G)]
+                >= float(self.uav_fire_penalty_threshold)
+            )
+            fire_footprint_fraction = (
+                (claims & fire_active.unsqueeze(1)).float().sum(dim=(-1, -2))
+                / footprint_cells.float()
+            ).clamp(0.0, 1.0)
         team_claims = claims.any(dim=1)
         newly_known_by_drone = claims & ~known_coverage
         claim_count = claims.sum(dim=1).clamp_min(1)
@@ -8270,6 +8312,7 @@ class WildfireSearchScenario(BaseScenario):
             new_credit_cells / float(G * G),
             overlap_fraction,
             outside_footprint_fraction,
+            fire_footprint_fraction,
             inter_uav_overlap_fraction,
             opportunity_fraction,
             opportunity_cells,
@@ -9182,6 +9225,14 @@ class WildfireSearchScenario(BaseScenario):
         if self.r_uav_outside_footprint <= 0.0:
             return torch.zeros_like(outside_fraction)
         return -self.r_uav_outside_footprint * outside_fraction.clamp(min=0.0, max=1.0)
+
+    def _uav_fire_footprint_penalty(self, fire_fraction: Tensor) -> Tensor:
+        """Penalize camera footprint area over active fire cells."""
+        if self.n_drones == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=fire_fraction.device)
+        if self.r_uav_fire_footprint <= 0.0 or self.uav_fire_penalty_threshold < 0.0:
+            return torch.zeros_like(fire_fraction)
+        return -self.r_uav_fire_footprint * fire_fraction.clamp(min=0.0, max=1.0)
 
     def _uav_boundary_risk_metrics(self, drone_pos: Tensor) -> tuple[Tensor, Tensor]:
         """Diagnostic UAV distance-to-boundary risk before the hard world clamp is hit."""
@@ -12406,6 +12457,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,
             "reward/uav_outside_footprint": self.metric_reward_uav_outside_footprint,
+            "reward/uav_fire_footprint": self.metric_reward_uav_fire_footprint,
             "reward/ugv_progress": self.metric_reward_ugv_progress,
             "reward/ugv_approach": self.metric_reward_ugv_approach,
             "reward/ugv_movement_alignment": self.metric_reward_ugv_movement_alignment,
@@ -12424,6 +12476,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_proposed_path_blocked": self.step_ugv_proposed_path_blocked.float().sum(dim=1),
             "diagnostic/uav_overlap_fraction": self.metric_uav_overlap_fraction,
             "diagnostic/uav_inter_uav_overlap_fraction": self.metric_uav_inter_uav_overlap_fraction,
+            "diagnostic/uav_fire_footprint_fraction": self.metric_uav_fire_footprint_fraction,
             "diagnostic/uav_frontier_alignment": self.metric_uav_frontier_alignment,
             "diagnostic/uav_frontier_progress_fraction": self.metric_uav_frontier_progress_fraction,
             "diagnostic/uav_frontier_uncovered_ratio": self.metric_uav_frontier_uncovered_ratio,

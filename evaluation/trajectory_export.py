@@ -321,6 +321,8 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "drone_perception_mode": str(getattr(scenario, "drone_perception_mode", "rgb")),
         "drone_perception_sensor_stack": list(getattr(scenario, "drone_perception_sensor_stack", ("rgb",))),
         "uav_fire_block_threshold": round(float(getattr(scenario, "uav_fire_block_threshold", -1.0)), 4),
+        "uav_fire_footprint_penalty": round(float(getattr(scenario, "r_uav_fire_footprint", 0.0)), 6),
+        "uav_fire_penalty_threshold": round(float(getattr(scenario, "uav_fire_penalty_threshold", 0.6)), 4),
         "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range_by_env[env_index]), 6),
         "drone_detection_quality": [
             round(float(v), 4) for v in scenario.drone_detection_quality.cpu().tolist()

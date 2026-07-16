@@ -221,6 +221,18 @@ def main():
              "is at or above this threshold. Omitted preserves the checkpoint/default.",
     )
     p.add_argument(
+        "--uav-fire-footprint-penalty",
+        type=float,
+        default=None,
+        help="Override per-UAV active-fire footprint penalty scale.",
+    )
+    p.add_argument(
+        "--uav-fire-penalty-threshold",
+        type=float,
+        default=None,
+        help="Override active-fire threshold for --uav-fire-footprint-penalty.",
+    )
+    p.add_argument(
         "--ground-confirmation-range-m",
         type=float,
         default=None,
@@ -435,6 +447,14 @@ def main():
         if args.uav_fire_block_threshold > 1.0:
             raise ValueError("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
         scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
+    if args.uav_fire_footprint_penalty is not None:
+        if args.uav_fire_footprint_penalty < 0.0:
+            raise ValueError("--uav-fire-footprint-penalty must be nonnegative")
+        scenario_kwargs["r_uav_fire_footprint"] = float(args.uav_fire_footprint_penalty)
+    if args.uav_fire_penalty_threshold is not None:
+        if args.uav_fire_penalty_threshold > 1.0:
+            raise ValueError("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
+        scenario_kwargs["uav_fire_penalty_threshold"] = float(args.uav_fire_penalty_threshold)
     if args.ground_u_multiplier is not None:
         scenario_kwargs["ground_u_multiplier"] = args.ground_u_multiplier
 
