@@ -223,6 +223,8 @@ def build_args(
     drone_min_footprint_m: float = 0.0,
     ground_confirm_min_m: float = 0.0,
     fire_grid_size: int = 128,
+    fire_spread_prob: float = 0.035,
+    fire_spread_reference_cell_size_m: float = 31.25,
     reward_search: bool = False,
     reward_confirm: bool = False,
     recurrent: bool = False,
@@ -968,6 +970,8 @@ def build_args(
         "comms_dropout_min_steps": comms_dropout_min_steps,
         "comms_dropout_max_steps": comms_dropout_max_steps,
         "fire_grid_size": fire_grid_size,
+        "fire_spread_prob": fire_spread_prob,
+        "fire_spread_reference_cell_size_m": fire_spread_reference_cell_size_m,
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
         "ugv_planner_detour_obs": bool(ugv_planner_detour_obs),
@@ -1702,6 +1706,18 @@ def main():
                    dest="ground_min_confirm_radius_m",
                    type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument(
+        "--fire-spread-prob",
+        type=float,
+        default=0.035,
+        help="Base ignition probability per fire update before fuel/moisture/wind/slope scaling.",
+    )
+    p.add_argument(
+        "--fire-spread-reference-cell-size-m",
+        type=float,
+        default=31.25,
+        help="Reference physical cell size used to keep fire spread speed grid/terrain-size invariant.",
+    )
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
@@ -2649,6 +2665,10 @@ def main():
         p.error("--active-decoys-max must be <= --n-decoys")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
+    if args.fire_spread_prob < 0.0 or args.fire_spread_prob > 1.0:
+        p.error("--fire-spread-prob must be in [0, 1]")
+    if args.fire_spread_reference_cell_size_m <= 0.0:
+        p.error("--fire-spread-reference-cell-size-m must be positive")
     if sum(
         (
             bool(args.ugv_known_survivor_diagnostic),
@@ -3121,6 +3141,8 @@ def main():
     print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
     print(f" uav_fire_footprint_penalty: {args.uav_fire_footprint_penalty}")
     print(f" uav_fire_penalty_threshold: {args.uav_fire_penalty_threshold}")
+    print(f" fire_spread_prob: {args.fire_spread_prob}")
+    print(f" fire_spread_reference_cell_size_m: {args.fire_spread_reference_cell_size_m}")
     print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
     print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
     print(f" uav_start_edge_margin_m: {args.uav_start_edge_margin_m}")
@@ -3156,6 +3178,8 @@ def main():
         drone_min_footprint_m = args.drone_min_footprint_radius_m,
         ground_confirm_min_m = args.ground_min_confirm_radius_m,
         fire_grid_size = args.fire_grid_size,
+        fire_spread_prob = args.fire_spread_prob,
+        fire_spread_reference_cell_size_m = args.fire_spread_reference_cell_size_m,
         local_map_patch_size = args.local_map_patch_size,
         reward_search = args.reward_search,
         reward_confirm = args.reward_confirm,

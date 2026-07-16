@@ -292,9 +292,12 @@ class WildfireSearchScenario(BaseScenario):
         self.disable_fire = bool(kwargs.pop("disable_fire", False))
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 128)
         self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
-        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.065)
+        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.035)
         self.fire_spread_variability = kwargs.pop("fire_spread_variability", 0.55)
         self.fire_spotting_prob = kwargs.pop("fire_spotting_prob", 0.00008)
+        self.fire_spread_reference_cell_size_m = max(
+            float(kwargs.pop("fire_spread_reference_cell_size_m", 31.25)), 1e-6
+        )
         self.fire_wind_spread_weight = max(float(kwargs.pop("fire_wind_spread_weight", 1.25)), 0.0)
         self.fire_slope_spread_weight = max(float(kwargs.pop("fire_slope_spread_weight", 1.65)), 0.0)
         self.fire_moisture_damping = max(float(kwargs.pop("fire_moisture_damping", 1.15)), 0.0)
@@ -3314,6 +3317,27 @@ class WildfireSearchScenario(BaseScenario):
     def _grid_scale(self) -> float:
         return self.fire_grid_size / max(float(self.terrain_reference_grid_size), 1.0)
 
+    def _fire_spread_scale(self) -> Tensor:
+        """Resolution scale for spread based on physical cell size, not grid count."""
+        fallback = float(self._grid_scale())
+        if not hasattr(self, "terrain_sim_units_per_meter"):
+            return torch.full(
+                (self.world.batch_dim, 1, 1),
+                fallback,
+                dtype=torch.float,
+                device=self.fire_grid.device,
+            )
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(
+            device=self.fire_grid.device,
+            dtype=torch.float,
+        )
+        valid = sim_units_per_meter > 0.0
+        cell_size_sim = (2.0 * float(self.x_semidim)) / max(float(self.fire_grid_size), 1.0)
+        cell_size_m = cell_size_sim / sim_units_per_meter.clamp_min(1e-9)
+        scale = self.fire_spread_reference_cell_size_m / cell_size_m.clamp_min(1e-9)
+        fallback_tensor = torch.full_like(scale, fallback)
+        return torch.where(valid, scale, fallback_tensor).view(-1, 1, 1)
+
     def _scaled_area_cell_count(self, cells_at_reference: float, min_cells: int = 1) -> int:
         return max(int(round(float(cells_at_reference) * self._grid_scale() ** 2)), min_cells)
 
@@ -3901,11 +3925,12 @@ class WildfireSearchScenario(BaseScenario):
                 device=self.fire_grid.device,
             ) * self.fire_spread_variability
         ).clamp(0.35, 2.25)
+        spread_scale = self._fire_spread_scale()
         rate = (
             exposure
             * fuel
             * moisture_factor
-            * self._grid_scale()
+            * spread_scale
             * random_rate
         )
         p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** rate.clamp_min(0.0)
@@ -3913,7 +3938,7 @@ class WildfireSearchScenario(BaseScenario):
         smoke_spotting = self.smoke_grid > 0.08
         p_spot = (
             self.fire_spotting_prob
-            * self._grid_scale()
+            * spread_scale
             * random_rate
             * fuel.clamp(0.0, 1.0)
             * moisture_factor
