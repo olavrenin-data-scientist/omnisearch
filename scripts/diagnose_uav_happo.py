@@ -51,6 +51,8 @@ CONFIDENCE_REVISIT_WASTEFUL_OPPORTUNITY_THRESHOLD = 0.15
 CONFIDENCE_REVISIT_MIN_GAIN = 1e-9
 DEFAULT_DIAGNOSTIC_CONFIDENCE_FRONTIER_RADIUS_M = 60.0
 DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD = 1e-6
+FIRE_DIAGNOSTIC_FOOTPRINT_THRESHOLD = 0.01
+FIRE_DIAGNOSTIC_MATERIAL_FOOTPRINT_THRESHOLD = 0.10
 
 
 def _checkpoint_path(path: str | None) -> Path:
@@ -376,6 +378,15 @@ def run_rollout(
     confidence_gain_by_drone_values: list[float] = []
     confidence_weighted_gain_values: list[float] = []
     confidence_weighted_gain_by_drone_values: list[float] = []
+    fire_confidence_gain_values: list[float] = []
+    nonfire_confidence_gain_values: list[float] = []
+    fire_confidence_weighted_gain_values: list[float] = []
+    nonfire_confidence_weighted_gain_values: list[float] = []
+    fire_confidence_reward_values: list[float] = []
+    nonfire_confidence_reward_values: list[float] = []
+    fire_confidence_positive_values: list[float] = []
+    fire_step_values: list[float] = []
+    fire_repeat_step_values: list[float] = []
     confidence_opportunity_fraction_values: list[float] = []
     confidence_opportunity_best_gain_values: list[float] = []
     confidence_low_fraction_values: list[float] = []
@@ -436,6 +447,42 @@ def run_rollout(
     fast_drone_action_norms: list[list[float]] = [
         [] for _ in range(int(scenario.n_drones))
     ]
+    fire_streak_lengths = np.zeros(int(scenario.n_drones), dtype=int)
+    max_fire_streak_by_drone = np.zeros(int(scenario.n_drones), dtype=int)
+
+    def _record_fire_confidence_diagnostic(
+        drone_idx: int,
+        *,
+        fire_fraction: float,
+        confidence_gain: float,
+        confidence_weighted_gain: float,
+        confidence_reward: float,
+    ) -> tuple[float, float]:
+        fire_step = bool(fire_fraction >= FIRE_DIAGNOSTIC_FOOTPRINT_THRESHOLD)
+        repeat_step = bool(fire_step and fire_streak_lengths[drone_idx] > 0)
+        if fire_step:
+            fire_streak_lengths[drone_idx] += 1
+            max_fire_streak_by_drone[drone_idx] = max(
+                int(max_fire_streak_by_drone[drone_idx]),
+                int(fire_streak_lengths[drone_idx]),
+            )
+        else:
+            fire_streak_lengths[drone_idx] = 0
+
+        fire_step_values.append(float(fire_step))
+        fire_repeat_step_values.append(float(repeat_step))
+        if fire_step:
+            fire_confidence_gain_values.append(float(confidence_gain))
+            fire_confidence_weighted_gain_values.append(float(confidence_weighted_gain))
+            fire_confidence_reward_values.append(float(confidence_reward))
+            fire_confidence_positive_values.append(
+                float(math.isfinite(confidence_weighted_gain) and confidence_weighted_gain > CONFIDENCE_REVISIT_MIN_GAIN)
+            )
+        else:
+            nonfire_confidence_gain_values.append(float(confidence_gain))
+            nonfire_confidence_weighted_gain_values.append(float(confidence_weighted_gain))
+            nonfire_confidence_reward_values.append(float(confidence_reward))
+        return float(fire_step), float(repeat_step)
     low_action_high_motion = 0
     high_action_low_motion = 0
     moving_no_new_coverage = 0
@@ -956,9 +1003,11 @@ def run_rollout(
                 )
                 confidence_move_reward = float(confidence_move_reward_by_drone[drone_idx])
                 confidence_overlap_penalty = float(confidence_overlap_penalty_by_drone[drone_idx])
+                confidence_gain_drone = float(confidence_gain_by_drone[drone_idx])
                 confidence_weighted_gain_drone = float(confidence_weighted_gain_by_drone[drone_idx])
                 confidence_overlap_fraction = float(confidence_overlap_fraction_by_drone[drone_idx])
                 confidence_overlap_regret = float(confidence_overlap_regret_by_drone[drone_idx])
+                fire_fraction = float(fire_footprint_fraction[drone_idx])
                 cleanup_target_progress_reward = float(
                     cleanup_target_progress_reward_by_drone[drone_idx]
                 )
@@ -978,7 +1027,7 @@ def run_rollout(
                     expected_overlap=expected_overlap,
                     inter_uav_overlap=inter_uav_overlap,
                     outside_footprint=float(outside_footprint_fraction[drone_idx]),
-                    fire_footprint=float(fire_footprint_fraction[drone_idx]),
+                    fire_footprint=fire_fraction,
                     coverage_opportunity_fraction=opportunity_fraction,
                     coverage_opportunity_available_fraction=opportunity_available_fraction,
                     confidence_reward=confidence_reward,
@@ -996,13 +1045,20 @@ def run_rollout(
                 reward_terms["team"] = team_reward
                 reward_terms["all_survivors_found"] = all_survivors_found_reward
                 reward_terms["coverage_threshold"] = coverage_threshold_reward
+                fire_step, fire_repeat_step = _record_fire_confidence_diagnostic(
+                    drone_idx,
+                    fire_fraction=fire_fraction,
+                    confidence_gain=confidence_gain_drone,
+                    confidence_weighted_gain=confidence_weighted_gain_drone,
+                    confidence_reward=reward_terms["confidence"],
+                )
 
                 overlap_values.append(overlap)
                 expected_overlap_values.append(expected_overlap)
                 excess_overlap_values.append(excess_overlap)
                 inter_uav_overlap_values.append(inter_uav_overlap)
                 outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
-                fire_footprint_values.append(float(fire_footprint_fraction[drone_idx]))
+                fire_footprint_values.append(fire_fraction)
                 boundary_distance_m_values.append(float(boundary_distance_m[drone_idx]))
                 footprint_radius_m_values.append(footprint_radius)
                 reward_uav_coverage_values.append(reward_terms["coverage"])
@@ -1075,6 +1131,23 @@ def run_rollout(
                         "action_displacement_alignment": action_displacement_alignment,
                         "overlap": overlap,
                         "excess_overlap": excess_overlap,
+                        "fire_footprint": fire_fraction,
+                        "fire_step": fire_step,
+                        "fire_repeat_step": fire_repeat_step,
+                        "fire_confidence_weighted_gain": (
+                            confidence_weighted_gain_drone if fire_step >= 0.5 else 0.0
+                        ),
+                        "nonfire_confidence_weighted_gain": (
+                            confidence_weighted_gain_drone if fire_step < 0.5 else 0.0
+                        ),
+                        "fire_confidence_reward": (
+                            reward_terms["confidence"] if fire_step >= 0.5 else 0.0
+                        ),
+                        "fire_confidence_positive": float(
+                            fire_step >= 0.5
+                            and math.isfinite(confidence_weighted_gain_drone)
+                            and confidence_weighted_gain_drone > CONFIDENCE_REVISIT_MIN_GAIN
+                        ),
                         "edge_step": float(is_edge_step),
                         "moving_no_new_coverage": float(displacement_m > 1.0 and new_cells < 1.0),
                         "moving_no_confidence_gain": float(moving_no_confidence_gain_step),
@@ -1096,6 +1169,7 @@ def run_rollout(
                         "overlap_penalty": reward_terms["overlap_penalty"],
                         "inter_uav_overlap_penalty": reward_terms["inter_uav_overlap_penalty"],
                         "outside_footprint_penalty": reward_terms["outside_footprint_penalty"],
+                        "fire_footprint_penalty": reward_terms["fire_footprint_penalty"],
                         "coverage_threshold_reward": reward_terms["coverage_threshold"],
                         "scout_reward": reward_terms["scout"],
                         "team_reward": reward_terms["team"],
@@ -1292,6 +1366,7 @@ def run_rollout(
                 if math.isfinite(action_frontier_alignment) and math.isfinite(frontier_align)
                 else math.nan
             )
+            fire_fraction = float(fire_footprint_fraction[drone_idx])
             scout_reward = float(np.count_nonzero(scout_credit[drone_idx])) * float(
                 getattr(scenario, "r_drone_scout", 0.0)
             )
@@ -1303,10 +1378,10 @@ def run_rollout(
                 frontier_ratio=frontier_ratio,
                 overlap=overlap,
                 expected_overlap=expected_overlap,
-                    inter_uav_overlap=inter_uav_overlap,
-                    outside_footprint=float(outside_footprint_fraction[drone_idx]),
-                    fire_footprint=float(fire_footprint_fraction[drone_idx]),
-                    coverage_opportunity_fraction=opportunity_fraction,
+                inter_uav_overlap=inter_uav_overlap,
+                outside_footprint=float(outside_footprint_fraction[drone_idx]),
+                fire_footprint=fire_fraction,
+                coverage_opportunity_fraction=opportunity_fraction,
                 coverage_opportunity_available_fraction=opportunity_available_fraction,
                 confidence_reward=confidence_reward,
                 team_confidence_reward=team_confidence_reward,
@@ -1321,6 +1396,13 @@ def run_rollout(
             reward_terms["team"] = team_reward
             reward_terms["all_survivors_found"] = all_survivors_found_reward
             reward_terms["coverage_threshold"] = coverage_threshold_reward
+            fire_step, fire_repeat_step = _record_fire_confidence_diagnostic(
+                drone_idx,
+                fire_fraction=fire_fraction,
+                confidence_gain=confidence_gain_drone,
+                confidence_weighted_gain=confidence_weighted_gain_drone,
+                confidence_reward=reward_terms["confidence"],
+            )
             distances_to_edges = _distances_to_edges_m(
                 np.asarray([post_pos], dtype=float),
                 scenario,
@@ -1336,7 +1418,7 @@ def run_rollout(
             inter_uav_overlap_values.append(inter_uav_overlap)
             any_history_revisit_values.append(any_history_revisit)
             outside_footprint_values.append(float(outside_footprint_fraction[drone_idx]))
-            fire_footprint_values.append(float(fire_footprint_fraction[drone_idx]))
+            fire_footprint_values.append(fire_fraction)
             own_history_revisit_values.append(own_history_revisit)
             teammate_history_revisit_values.append(teammate_history_revisit)
             own_only_revisit_values.append(own_only_revisit)
@@ -1715,7 +1797,23 @@ def run_rollout(
                     "all_survivors_reward": reward_terms["all_survivors_found"],
                     "aux_reward": reward_terms["aux"],
                     "overlap": overlap,
-                    "fire_footprint": float(fire_footprint_fraction[drone_idx]),
+                    "fire_footprint": fire_fraction,
+                    "fire_step": fire_step,
+                    "fire_repeat_step": fire_repeat_step,
+                    "fire_confidence_weighted_gain": (
+                        confidence_weighted_gain_drone if fire_step >= 0.5 else 0.0
+                    ),
+                    "nonfire_confidence_weighted_gain": (
+                        confidence_weighted_gain_drone if fire_step < 0.5 else 0.0
+                    ),
+                    "fire_confidence_reward": (
+                        reward_terms["confidence"] if fire_step >= 0.5 else 0.0
+                    ),
+                    "fire_confidence_positive": float(
+                        fire_step >= 0.5
+                        and math.isfinite(confidence_weighted_gain_drone)
+                        and confidence_weighted_gain_drone > CONFIDENCE_REVISIT_MIN_GAIN
+                    ),
                     "excess_overlap": excess_overlap,
                     "any_history_revisit": any_history_revisit,
                     "own_history_revisit": own_history_revisit,
@@ -1910,6 +2008,13 @@ def run_rollout(
     else:
         survivor_exposures = []
     survivor_exposure_summary = _survivor_exposure_summary(survivor_exposures)
+    fire_weighted_gain_sum = float(
+        sum(max(float(value), 0.0) for value in fire_confidence_weighted_gain_values if math.isfinite(float(value)))
+    )
+    nonfire_weighted_gain_sum = float(
+        sum(max(float(value), 0.0) for value in nonfire_confidence_weighted_gain_values if math.isfinite(float(value)))
+    )
+    total_weighted_gain_sum = fire_weighted_gain_sum + nonfire_weighted_gain_sum
     row = {
         "seed": int(seed),
         "max_steps": int(scenario_kwargs["max_steps"]),
@@ -1977,8 +2082,32 @@ def run_rollout(
         "avg_fire_footprint_fraction": _finite_mean(fire_footprint_values),
         "max_fire_footprint_fraction": max(fire_footprint_values) if fire_footprint_values else 0.0,
         "fire_footprint_step_frac_10": (
-            float(np.mean([value >= 0.10 for value in fire_footprint_values]))
+            float(np.mean([value >= FIRE_DIAGNOSTIC_MATERIAL_FOOTPRINT_THRESHOLD for value in fire_footprint_values]))
             if fire_footprint_values else 0.0
+        ),
+        "fire_footprint_step_frac_01": _finite_mean(fire_step_values),
+        "fire_repeat_step_frac": _finite_mean(fire_repeat_step_values),
+        "fire_confidence_positive_frac": _finite_mean(fire_confidence_positive_values),
+        "fire_confidence_gain_share": (
+            fire_weighted_gain_sum / total_weighted_gain_sum
+            if total_weighted_gain_sum > 1e-12
+            else 0.0
+        ),
+        "avg_confidence_gain_on_fire": _finite_mean(fire_confidence_gain_values),
+        "avg_confidence_gain_off_fire": _finite_mean(nonfire_confidence_gain_values),
+        "avg_confidence_weighted_gain_on_fire": _finite_mean(fire_confidence_weighted_gain_values),
+        "avg_confidence_weighted_gain_off_fire": _finite_mean(nonfire_confidence_weighted_gain_values),
+        "avg_reward_uav_confidence_on_fire": _finite_mean(fire_confidence_reward_values),
+        "avg_reward_uav_confidence_off_fire": _finite_mean(nonfire_confidence_reward_values),
+        "max_fire_streak_steps": (
+            int(max_fire_streak_by_drone.max())
+            if max_fire_streak_by_drone.size
+            else 0
+        ),
+        "mean_max_fire_streak_steps_by_drone": (
+            float(max_fire_streak_by_drone.mean())
+            if max_fire_streak_by_drone.size
+            else 0.0
         ),
         "avg_overlap_fraction": _finite_mean(overlap_values),
         "avg_expected_overlap_fraction": _finite_mean(expected_overlap_values),
@@ -5152,6 +5281,42 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_fire_footprint_step_frac_10": _finite_mean([
             row["fire_footprint_step_frac_10"] for row in rows
         ]),
+        "mean_fire_footprint_step_frac_01": _finite_mean([
+            row.get("fire_footprint_step_frac_01", math.nan) for row in rows
+        ]),
+        "mean_fire_repeat_step_frac": _finite_mean([
+            row.get("fire_repeat_step_frac", math.nan) for row in rows
+        ]),
+        "mean_fire_confidence_positive_frac": _finite_mean([
+            row.get("fire_confidence_positive_frac", math.nan) for row in rows
+        ]),
+        "mean_fire_confidence_gain_share": _finite_mean([
+            row.get("fire_confidence_gain_share", math.nan) for row in rows
+        ]),
+        "mean_confidence_gain_on_fire": _finite_mean([
+            row.get("avg_confidence_gain_on_fire", math.nan) for row in rows
+        ]),
+        "mean_confidence_gain_off_fire": _finite_mean([
+            row.get("avg_confidence_gain_off_fire", math.nan) for row in rows
+        ]),
+        "mean_confidence_weighted_gain_on_fire": _finite_mean([
+            row.get("avg_confidence_weighted_gain_on_fire", math.nan) for row in rows
+        ]),
+        "mean_confidence_weighted_gain_off_fire": _finite_mean([
+            row.get("avg_confidence_weighted_gain_off_fire", math.nan) for row in rows
+        ]),
+        "mean_reward_uav_confidence_on_fire": _finite_mean([
+            row.get("avg_reward_uav_confidence_on_fire", math.nan) for row in rows
+        ]),
+        "mean_reward_uav_confidence_off_fire": _finite_mean([
+            row.get("avg_reward_uav_confidence_off_fire", math.nan) for row in rows
+        ]),
+        "mean_max_fire_streak_steps": _finite_mean([
+            row.get("max_fire_streak_steps", math.nan) for row in rows
+        ]),
+        "mean_max_fire_streak_steps_by_drone": _finite_mean([
+            row.get("mean_max_fire_streak_steps_by_drone", math.nan) for row in rows
+        ]),
         "mean_overlap_fraction": _finite_mean([row["avg_overlap_fraction"] for row in rows]),
         "mean_expected_overlap_fraction": _finite_mean([
             row["avg_expected_overlap_fraction"] for row in rows
@@ -5998,6 +6163,11 @@ def _distribution_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
         "new_cells": "avg_new_coverage_cells",
         "raw_new_cells": "avg_raw_new_coverage_cells",
         "outside": "avg_outside_footprint_fraction",
+        "fire": "avg_fire_footprint_fraction",
+        "fire01": "fire_footprint_step_frac_01",
+        "fire10": "fire_footprint_step_frac_10",
+        "fire_repeat": "fire_repeat_step_frac",
+        "fire_gain_share": "fire_confidence_gain_share",
         "overlap": "avg_overlap_fraction",
         "expected_overlap": "avg_expected_overlap_fraction",
         "excess_overlap": "avg_excess_overlap_fraction",
@@ -6496,6 +6666,7 @@ def _plot_time_bins_search_efficiency(ax: Any, summary: dict[str, Any]) -> None:
         ("overlap", "overlap", "#36a269"),
         ("excess", "excess_overlap", "#d44a3a"),
         ("edge", "edge_step", "#20242c"),
+        ("fire", "fire_step", "#dc2626"),
         ("moving no new", "moving_no_new_coverage", "#8a5cf6"),
         ("move no conf", "moving_no_confidence_gain", "#a855f7"),
         ("conf sat", "confidence_overlap_fraction", "#be185d"),
@@ -6583,6 +6754,75 @@ def _plot_time_bins_reward_scale(ax: Any, summary: dict[str, Any]) -> None:
     ax.set_title("Time-Bin Reward Scale (mean abs)", fontsize=10)
     ax.grid(alpha=0.25)
     ax.legend(fontsize=7, frameon=False, ncol=2)
+
+
+def _plot_time_bins_fire_diagnostics(ax: Any, summary: dict[str, Any]) -> None:
+    time_bins = summary.get("time_bins", [])
+    if not time_bins:
+        ax.text(0.5, 0.5, "no time bins", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Time-Bin Fire/Confidence", fontsize=10)
+        return
+    centers = [
+        0.5 * (float(row.get("start_fraction", 0.0)) + float(row.get("end_fraction", 0.0)))
+        for row in time_bins
+    ]
+    frac_series = [
+        ("fire footprint", "fire_footprint", "#ef4444"),
+        ("fire step", "fire_step", "#dc2626"),
+        ("repeat fire", "fire_repeat_step", "#991b1b"),
+        ("positive fire gain", "fire_confidence_positive", "#f97316"),
+    ]
+    frac_lines = []
+    for label, key, color in frac_series:
+        values = [float(row.get(key, math.nan)) for row in time_bins]
+        frac_lines.extend(
+            ax.plot(
+                centers,
+                values,
+                marker="o",
+                linewidth=1.25,
+                label=label,
+                color=color,
+            )
+        )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("episode fraction")
+    ax.set_ylabel("fraction")
+    ax.grid(alpha=0.25)
+
+    ax_gain = ax.twinx()
+    gain_series = [
+        ("gain on fire", "fire_confidence_weighted_gain", "#0f766e", "-"),
+        ("gain off fire", "nonfire_confidence_weighted_gain", "#14b8a6", "-"),
+        ("conf rew on fire", "fire_confidence_reward", "#2563eb", "--"),
+        ("fire pen", "fire_footprint_penalty", "#20242c", "--"),
+    ]
+    gain_lines = []
+    max_gain = 0.0
+    for label, key, color, linestyle in gain_series:
+        values = [abs(float(row.get(key, math.nan))) for row in time_bins]
+        finite = [value for value in values if math.isfinite(value)]
+        if finite:
+            max_gain = max(max_gain, max(finite))
+        gain_lines.extend(
+            ax_gain.plot(
+                centers,
+                values,
+                marker="s",
+                linewidth=1.1,
+                linestyle=linestyle,
+                label=label,
+                color=color,
+                alpha=0.9,
+            )
+        )
+    if max_gain > 0.0:
+        ax_gain.set_ylim(0.0, max_gain * 1.15)
+    ax_gain.set_ylabel("abs gain/reward")
+    lines = frac_lines + gain_lines
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=7, frameon=False)
+    ax.set_title("Time-Bin Fire/Confidence", fontsize=10)
 
 
 def _plot_time_bins_coverage_opportunity(ax: Any, summary: dict[str, Any]) -> None:
@@ -7344,8 +7584,9 @@ def _write_fast_distribution_plots(
     _plot_time_bins_scouts(axes_flat[custom_start + 3], summary)
     _plot_time_bins_search_efficiency(axes_flat[custom_start + 4], summary)
     _plot_time_bins_reward_scale(axes_flat[custom_start + 5], summary)
+    _plot_time_bins_fire_diagnostics(axes_flat[custom_start + 6], summary)
 
-    for ax in axes_flat[custom_start + 6:]:
+    for ax in axes_flat[custom_start + 7:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -7411,6 +7652,10 @@ def write_distribution_plots(
         ("Conf LG Frontier Advantage", "avg_confidence_lg_frontier_capture_advantage", (-1.0, 1.0)),
         ("Outside Footprint", "avg_outside_footprint_fraction", (0.0, 1.0)),
         ("Fire Footprint", "avg_fire_footprint_fraction", (0.0, 1.0)),
+        ("Fire Step >=1%", "fire_footprint_step_frac_01", (0.0, 1.0)),
+        ("Fire Gain Share", "fire_confidence_gain_share", (0.0, 1.0)),
+        ("Fire Repeat Step", "fire_repeat_step_frac", (0.0, 1.0)),
+        ("Max Fire Streak", "max_fire_streak_steps", None),
         ("Overlap", "avg_overlap_fraction", (0.0, 1.0)),
         ("Excess Overlap", "avg_excess_overlap_fraction", (0.0, 1.0)),
         ("Edge Step Fraction", "edge_step_frac", (0.0, 1.0)),
@@ -7442,7 +7687,7 @@ def write_distribution_plots(
         ("Frontier/New Corr", "frontier_progress_new_cells_corr", (-1.0, 1.0)),
     ]
 
-    custom_panel_count = 24
+    custom_panel_count = 25
     ncols = 3
     nrows = math.ceil((len(panels) + custom_panel_count) / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3.0 * nrows), constrained_layout=True)
@@ -7570,8 +7815,9 @@ def write_distribution_plots(
     _plot_time_bins_confidence(axes_flat[custom_start + 21], summary)
     _plot_time_bins_frontier_usefulness(axes_flat[custom_start + 22], summary)
     _plot_time_bins_cleanup_targets(axes_flat[custom_start + 23], summary)
+    _plot_time_bins_fire_diagnostics(axes_flat[custom_start + 24], summary)
 
-    for ax in axes_flat[custom_start + 24:]:
+    for ax in axes_flat[custom_start + 25:]:
         ax.axis("off")
 
     fig.suptitle(
@@ -8004,6 +8250,21 @@ def main() -> None:
             f"team={summary['mean_reward_team']:.4f}"
         )
         print(
+            "fire diagnostic means: "
+            f"fire01={summary['mean_fire_footprint_step_frac_01']:.3f} "
+            f"fire10={summary['mean_fire_footprint_step_frac_10']:.3f} "
+            f"repeat={summary['mean_fire_repeat_step_frac']:.3f} "
+            f"positive_gain={summary['mean_fire_confidence_positive_frac']:.3f} "
+            f"gain_share={summary['mean_fire_confidence_gain_share']:.3f} "
+            f"gain_on/off="
+            f"{summary['mean_confidence_weighted_gain_on_fire']:.6f}/"
+            f"{summary['mean_confidence_weighted_gain_off_fire']:.6f} "
+            f"conf_rew_on/off="
+            f"{summary['mean_reward_uav_confidence_on_fire']:.4f}/"
+            f"{summary['mean_reward_uav_confidence_off_fire']:.4f} "
+            f"max_streak={summary['mean_max_fire_streak_steps']:.1f}"
+        )
+        print(
             "failure labels: "
             + ", ".join(f"{label}={count}" for label, count in label_counts.items())
         )
@@ -8233,6 +8494,21 @@ def main() -> None:
         f"all_found={summary['mean_reward_all_survivors_found']:.4f} "
         f"aux_net={summary['mean_reward_uav_aux']:.4f} "
         f"frontier_abs_share={summary['mean_frontier_abs_reward_share']:.3f}"
+    )
+    print(
+        "fire diagnostic means: "
+        f"fire01={summary['mean_fire_footprint_step_frac_01']:.3f} "
+        f"fire10={summary['mean_fire_footprint_step_frac_10']:.3f} "
+        f"repeat={summary['mean_fire_repeat_step_frac']:.3f} "
+        f"positive_gain={summary['mean_fire_confidence_positive_frac']:.3f} "
+        f"gain_share={summary['mean_fire_confidence_gain_share']:.3f} "
+        f"gain_on/off="
+        f"{summary['mean_confidence_weighted_gain_on_fire']:.6f}/"
+        f"{summary['mean_confidence_weighted_gain_off_fire']:.6f} "
+        f"conf_rew_on/off="
+        f"{summary['mean_reward_uav_confidence_on_fire']:.4f}/"
+        f"{summary['mean_reward_uav_confidence_off_fire']:.4f} "
+        f"max_streak={summary['mean_max_fire_streak_steps']:.1f}"
     )
     print(
         "frontier diagnostic means: "
