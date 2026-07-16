@@ -166,6 +166,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["drone_perception_mode"] = (
             str(args.drone_perception_mode).replace("+", "_").replace("-", "_")
         )
+    if getattr(args, "uav_fire_block_threshold", None) is not None:
+        scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
     if getattr(args, "drone_flight_levels_m", None):
         levels = tuple(
             float(value)
@@ -7538,6 +7540,9 @@ def main() -> None:
                         choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                         default=None,
                         help="Override abstract UAV perception mode. rgb_thermal changes only smoke quality.")
+    parser.add_argument("--uav-fire-block-threshold", type=float, default=None,
+                        help="If set, mark UAV local blocked-observation cells as blocked when "
+                             "fire intensity >= this threshold. Omitted preserves checkpoint/default.")
     parser.add_argument("--drone-flight-levels-m", default=None,
                         help="Comma-separated UAV flight altitudes in meters, e.g. 30,50,75.")
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -7609,6 +7614,8 @@ def main() -> None:
         parser.error("--active-decoys-max must be >= --active-decoys-min")
     if args.local_map_patch_size is not None and (args.local_map_patch_size < 1 or args.local_map_patch_size % 2 != 1):
         parser.error("--local-map-patch-size must be a positive odd integer")
+    if args.uav_fire_block_threshold is not None and args.uav_fire_block_threshold > 1.0:
+        parser.error("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
     if (
         args.comms_dropout is not None
         and (
@@ -7677,6 +7684,7 @@ def main() -> None:
         f"..{scenario_kwargs.get('comms_dropout_max_steps', 15)}"
     )
     print(f"drone_perception_mode: {scenario_kwargs.get('drone_perception_mode', 'rgb')}")
+    print(f"uav_fire_block_threshold: {scenario_kwargs.get('uav_fire_block_threshold', -1.0)}")
     print(
         "uav overlap penalty: "
         f"normalization={scenario_kwargs.get('uav_overlap_penalty_normalization', 'raw')}"

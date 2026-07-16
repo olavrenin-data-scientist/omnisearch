@@ -214,6 +214,13 @@ def main():
         help="Abstract UAV perception mode for manual exports. rgb_thermal changes only smoke quality.",
     )
     p.add_argument(
+        "--uav-fire-block-threshold",
+        type=float,
+        default=None,
+        help="If set, mark UAV local blocked-observation cells as blocked when fire intensity "
+             "is at or above this threshold. Omitted preserves the checkpoint/default.",
+    )
+    p.add_argument(
         "--ground-confirmation-range-m",
         type=float,
         default=None,
@@ -424,6 +431,10 @@ def main():
         scenario_kwargs["drone_perception_mode"] = (
             args.drone_perception_mode.replace("+", "_").replace("-", "_")
         )
+    if args.uav_fire_block_threshold is not None:
+        if args.uav_fire_block_threshold > 1.0:
+            raise ValueError("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
+        scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
     if args.ground_u_multiplier is not None:
         scenario_kwargs["ground_u_multiplier"] = args.ground_u_multiplier
 

@@ -221,6 +221,7 @@ def build_args(
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
     drone_perception_mode: str | None = None,
+    uav_fire_block_threshold: float | None = None,
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int | None = None,
     confirm_requires_los: bool = False,
@@ -592,6 +593,8 @@ def build_args(
         raise ValueError("ugv_sticky_min_age_steps must be nonnegative")
     if not 0.0 <= float(ugv_planner_fire_block_threshold) <= 1.0:
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
+    if uav_fire_block_threshold is not None and float(uav_fire_block_threshold) > 1.0:
+        raise ValueError("uav_fire_block_threshold must be <= 1; use a negative value to disable")
     if uav_search_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -982,6 +985,7 @@ def build_args(
         "decoy_reveal_end_step": survivor_reveal_end_step,
         "drone_min_footprint_m": drone_min_footprint_m,
         "drone_perception_mode": str(drone_perception_mode).replace("+", "_").replace("-", "_"),
+        "uav_fire_block_threshold": -1.0 if uav_fire_block_threshold is None else float(uav_fire_block_threshold),
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
         "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
@@ -1815,6 +1819,9 @@ def main():
                    help="Abstract UAV perception sensor stack. rgb_thermal keeps RGB altitude/range/"
                         "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6. "
                         "Joint UAV diagnostics default to rgb_thermal; other modes default to rgb.")
+    p.add_argument("--uav-fire-block-threshold", type=float, default=None,
+                   help="If set, UAV local blocked-observation cells include active fire cells with "
+                        "fire intensity >= this threshold. Use e.g. 0.6. Omitted/negative disables it.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
     p.add_argument("--coverage-obs-grid", type=int, default=None,
@@ -2489,6 +2496,8 @@ def main():
         p.error("--ugv-planner-fire-replan-interval-steps must be positive")
     if not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0:
         p.error("--ugv-planner-fire-block-threshold must be in [0, 1]")
+    if args.uav_fire_block_threshold is not None and args.uav_fire_block_threshold > 1.0:
+        p.error("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
     for flag_name in (
         "ugv_planner_fire_cost",
         "ugv_planner_smoke_cost",
@@ -2970,6 +2979,7 @@ def main():
     print(f" uav_confidence_overlap_mode: {args.uav_confidence_overlap_mode}")
     print(f" uav_confidence_overlap_allowed_regret: {args.uav_confidence_overlap_allowed_regret}")
     print(f" drone_perception_mode: {args.drone_perception_mode}")
+    print(f" uav_fire_block_threshold: {args.uav_fire_block_threshold}")
     print(
         " drone_flight_levels_m: "
         f"{list(drone_flight_levels_m) if drone_flight_levels_m is not None else 'default'}"
@@ -3032,6 +3042,7 @@ def main():
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
         drone_perception_mode = args.drone_perception_mode,
+        uav_fire_block_threshold = args.uav_fire_block_threshold,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
         confirm_requires_los = args.confirm_requires_los,

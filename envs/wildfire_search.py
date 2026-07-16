@@ -423,6 +423,9 @@ class WildfireSearchScenario(BaseScenario):
         )
         if not 0.0 <= self.ugv_planner_fire_block_threshold <= 1.0:
             raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
+        self.uav_fire_block_threshold = float(kwargs.pop("uav_fire_block_threshold", -1.0))
+        if self.uav_fire_block_threshold > 1.0:
+            raise ValueError("uav_fire_block_threshold must be <= 1; use a negative value to disable")
         self.ugv_planner_smoke_cost = max(float(kwargs.pop("ugv_planner_smoke_cost", 5.0)), 0.0)
         self.ugv_planner_smolder_cost = max(float(kwargs.pop("ugv_planner_smolder_cost", 3.0)), 0.0)
         self.ugv_planner_fire_buffer_m = max(float(kwargs.pop("ugv_planner_fire_buffer_m", 10.0)), 0.0)
@@ -10070,6 +10073,13 @@ class WildfireSearchScenario(BaseScenario):
         if agent.is_drone:
             normalized_costs = torch.zeros(pos.shape[0], patch_cells, device=pos.device, dtype=pos.dtype)
             blocked = self._local_outside_map_patch(pos, self.local_map_patch_size)
+            if self.uav_fire_block_threshold >= 0.0:
+                fire_patch = self._local_grid_patch(self.fire_grid, pos, self.local_map_patch_size)
+                fire_blocked = (fire_patch >= float(self.uav_fire_block_threshold)).to(
+                    device=pos.device,
+                    dtype=pos.dtype,
+                )
+                blocked = torch.maximum(blocked, fire_blocked)
         else:
             costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
             blocked = (~self._local_grid_patch(self.traversable_grid, pos, self.local_map_patch_size)).float()

@@ -164,6 +164,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["drone_perception_mode"] = (
             str(args.drone_perception_mode).replace("+", "_").replace("-", "_")
         )
+    if getattr(args, "uav_fire_block_threshold", None) is not None:
+        scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
     if args.enable_fire:
         scenario_kwargs["disable_fire"] = False
     elif args.disable_fire:
@@ -958,6 +960,9 @@ def main() -> None:
                         choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                         default=None,
                         help="Override abstract UAV perception mode. rgb_thermal changes only smoke quality.")
+    parser.add_argument("--uav-fire-block-threshold", type=float, default=None,
+                        help="If set, mark UAV local blocked-observation cells as blocked when "
+                             "fire intensity >= this threshold. Omitted preserves checkpoint/default.")
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
     parser.add_argument("--uav-decision-grid", type=int, default=None,
@@ -1013,6 +1018,8 @@ def main() -> None:
         parser.error("--active-survivors-max must be >= --active-survivors-min")
     if args.n_decoys is not None and args.n_decoys < 0:
         parser.error("--n-decoys must be nonnegative")
+    if args.uav_fire_block_threshold is not None and args.uav_fire_block_threshold > 1.0:
+        parser.error("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
     if args.active_decoys_min is not None and args.active_decoys_min < 0:
         parser.error("--active-decoys-min must be nonnegative")
     if args.active_decoys_max is not None and args.active_decoys_max < 0:
@@ -1060,7 +1067,8 @@ def main() -> None:
         f"..{scenario_kwargs.get('active_decoys_max', scenario_kwargs.get('n_decoys', 0))}), "
         f"planner={scenario_kwargs.get('ugv_planner_hint')}, "
         f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}, "
-        f"drone_perception={scenario_kwargs.get('drone_perception_mode', 'rgb')}"
+        f"drone_perception={scenario_kwargs.get('drone_perception_mode', 'rgb')}, "
+        f"uav_fire_block_threshold={scenario_kwargs.get('uav_fire_block_threshold', -1.0)}"
     )
     print(f"steps: {args.steps}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
