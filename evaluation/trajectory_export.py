@@ -650,6 +650,7 @@ def export_trajectory(
             "smoke_emission": round(float(sc.smoke_emission), 4),
             "smoke_decay": round(float(sc.smoke_decay), 4),
             "smoke_diffusion": round(float(sc.smoke_diffusion), 4),
+            "smoke_advection_strength": round(float(sc.smoke_advection_strength), 4),
             "smolder_smoke_emission": round(float(sc.smolder_smoke_emission), 4),
             "smolder_decay": round(float(sc.smolder_decay), 4),
             "smolder_start_fraction": round(float(sc.smolder_start_fraction), 4),

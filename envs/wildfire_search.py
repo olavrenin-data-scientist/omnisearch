@@ -339,6 +339,10 @@ class WildfireSearchScenario(BaseScenario):
         self.smoke_emission = max(float(kwargs.pop("smoke_emission", 0.18)), 0.0)
         self.smoke_decay = min(max(float(kwargs.pop("smoke_decay", 0.985)), 0.0), 1.0)
         self.smoke_diffusion = min(max(float(kwargs.pop("smoke_diffusion", 0.16)), 0.0), 1.0)
+        self.smoke_advection_strength = min(
+            max(float(kwargs.pop("smoke_advection_strength", 0.30)), 0.0),
+            0.95,
+        )
         self.smolder_smoke_emission = max(float(kwargs.pop("smolder_smoke_emission", 0.04)), 0.0)
         self.smolder_decay = min(max(float(kwargs.pop("smolder_decay", 0.995)), 0.0), 1.0)
         self.smolder_start_fraction = min(max(float(kwargs.pop("smolder_start_fraction", 0.65)), 0.0), 1.0)
@@ -4031,9 +4035,14 @@ class WildfireSearchScenario(BaseScenario):
         neighbor_mean = self._neighbor_sum(smoke) / 4.0
         smoke = smoke + self.smoke_diffusion * (neighbor_mean - smoke)
 
+        # Simplified 2-D smoke transport: fire emissions are treated as a
+        # decaying, diffusing, wind-advected tracer. This mirrors the structure
+        # of operational/atmospheric smoke transport models such as NOAA ARL
+        # HYSPLIT smoke calculations and WRF-SFIRE-Chem (Kochanski et al., 2013),
+        # while remaining a local visibility-hazard proxy for VMAS training.
         shifted = self._wind_advected_grid(smoke)
         if shifted is not None:
-            smoke = smoke + self.wind_strength * (shifted - smoke)
+            smoke = smoke + self.smoke_advection_strength * (shifted - smoke)
 
         self.smoke_grid = smoke.clamp(0.0, 1.0)
         self._refresh_dynamic_drone_clearance_layers()
@@ -4056,7 +4065,7 @@ class WildfireSearchScenario(BaseScenario):
 
     def _wind_advected_grid(self, grid: Tensor) -> Tensor | None:
         wind_x, wind_y = self._normalized_wind()
-        if self.wind_strength <= 0 or (wind_x == 0.0 and wind_y == 0.0):
+        if self.smoke_advection_strength <= 0 or (wind_x == 0.0 and wind_y == 0.0):
             return None
         abs_x, abs_y = abs(wind_x), abs(wind_y)
         total = abs_x + abs_y

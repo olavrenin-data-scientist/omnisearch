@@ -112,6 +112,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "smoke_emission":    0.18,
     "smoke_decay":       0.985,
     "smoke_diffusion":   0.16,
+    "smoke_advection_strength": 0.30,
     "smolder_smoke_emission": 0.04,
     "smolder_decay":     0.995,
     "smolder_start_fraction": 0.65,

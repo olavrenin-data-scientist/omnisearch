@@ -225,6 +225,7 @@ def build_args(
     fire_grid_size: int = 128,
     fire_spread_prob: float = 0.035,
     fire_spread_reference_cell_size_m: float = 31.25,
+    smoke_advection_strength: float = 0.30,
     reward_search: bool = False,
     reward_confirm: bool = False,
     recurrent: bool = False,
@@ -972,6 +973,7 @@ def build_args(
         "fire_grid_size": fire_grid_size,
         "fire_spread_prob": fire_spread_prob,
         "fire_spread_reference_cell_size_m": fire_spread_reference_cell_size_m,
+        "smoke_advection_strength": smoke_advection_strength,
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
         "ugv_planner_detour_obs": bool(ugv_planner_detour_obs),
@@ -1717,6 +1719,12 @@ def main():
         type=float,
         default=31.25,
         help="Reference physical cell size used to keep fire spread speed grid/terrain-size invariant.",
+    )
+    p.add_argument(
+        "--smoke-advection-strength",
+        type=float,
+        default=0.30,
+        help="Wind-driven smoke transport blend per env step, separate from fire-spread wind strength.",
     )
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
@@ -2669,6 +2677,8 @@ def main():
         p.error("--fire-spread-prob must be in [0, 1]")
     if args.fire_spread_reference_cell_size_m <= 0.0:
         p.error("--fire-spread-reference-cell-size-m must be positive")
+    if args.smoke_advection_strength < 0.0 or args.smoke_advection_strength > 0.95:
+        p.error("--smoke-advection-strength must be in [0, 0.95]")
     if sum(
         (
             bool(args.ugv_known_survivor_diagnostic),
@@ -3143,6 +3153,7 @@ def main():
     print(f" uav_fire_penalty_threshold: {args.uav_fire_penalty_threshold}")
     print(f" fire_spread_prob: {args.fire_spread_prob}")
     print(f" fire_spread_reference_cell_size_m: {args.fire_spread_reference_cell_size_m}")
+    print(f" smoke_advection_strength: {args.smoke_advection_strength}")
     print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
     print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
     print(f" uav_start_edge_margin_m: {args.uav_start_edge_margin_m}")
@@ -3180,6 +3191,7 @@ def main():
         fire_grid_size = args.fire_grid_size,
         fire_spread_prob = args.fire_spread_prob,
         fire_spread_reference_cell_size_m = args.fire_spread_reference_cell_size_m,
+        smoke_advection_strength = args.smoke_advection_strength,
         local_map_patch_size = args.local_map_patch_size,
         reward_search = args.reward_search,
         reward_confirm = args.reward_confirm,
