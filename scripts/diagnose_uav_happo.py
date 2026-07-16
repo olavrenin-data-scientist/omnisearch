@@ -103,7 +103,11 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
 
     scenario_kwargs.update({
         "max_steps": args.steps,
-        "n_ground": 0,
+        "n_ground": int(
+            args.n_ugvs
+            if getattr(args, "n_ugvs", None) is not None
+            else scenario_kwargs.get("n_ground", 0)
+        ),
         "n_survivors": int(
             args.n_survivors
             if getattr(args, "n_survivors", None) is not None
@@ -7592,7 +7596,7 @@ def main() -> None:
     parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
                         help="Override UAV count for legacy checkpoints. Default preserves the checkpoint manifest.")
     parser.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=None,
-                        help="Override UGV schema count for joint-schema UAV diagnostics.")
+                        help="Override physical UGV count for joint checkpoints and UGV schema count for joint-schema UAV diagnostics.")
     parser.add_argument("--n-survivors", type=int, default=None,
                         help="Override survivor count. Default preserves the checkpoint manifest or uses 5.")
     parser.add_argument("--active-survivors-min", type=int, default=None,
@@ -7688,8 +7692,8 @@ def main() -> None:
         parser.error("--steps must be positive")
     if args.n_drones is not None and args.n_drones < 1:
         parser.error("--n-drones must be positive")
-    if args.n_ugvs is not None and args.n_ugvs < 1:
-        parser.error("--n-ugvs must be positive")
+    if args.n_ugvs is not None and args.n_ugvs < 0:
+        parser.error("--n-ugvs must be nonnegative")
     if args.n_survivors is not None and args.n_survivors < 1:
         parser.error("--n-survivors must be positive")
     if args.active_survivors_min is not None and args.active_survivors_min < 0:
@@ -7839,7 +7843,7 @@ def main() -> None:
         parser.error(
             f"checkpoint contains {len(policy.actors)} actors, but diagnostics scenario "
             f"contains {expected_agents} agents; use the checkpoint manifest settings or "
-            "a matching --n-drones override for legacy checkpoints"
+            "matching --n-drones/--n-ugvs overrides for legacy checkpoints"
         )
     rows = [
         run_rollout(
