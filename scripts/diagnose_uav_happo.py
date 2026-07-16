@@ -172,6 +172,30 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         scenario_kwargs["r_uav_fire_footprint"] = float(args.uav_fire_footprint_penalty)
     if getattr(args, "uav_fire_penalty_threshold", None) is not None:
         scenario_kwargs["uav_fire_penalty_threshold"] = float(args.uav_fire_penalty_threshold)
+    if getattr(args, "no_variable_drone_clearance", False):
+        for key in (
+            "drone_safety_clearance_by_land_cover_m",
+            "drone_safety_clearance_by_object_m",
+            "drone_fire_safety_clearance_m",
+            "drone_smoke_safety_clearance_m",
+            "drone_smoke_clearance_threshold",
+        ):
+            scenario_kwargs.pop(key, None)
+    else:
+        if getattr(args, "drone_safety_clearance_by_land_cover_m", None) is not None:
+            scenario_kwargs["drone_safety_clearance_by_land_cover_m"] = tuple(
+                float(v) for v in args.drone_safety_clearance_by_land_cover_m
+            )
+        if getattr(args, "drone_safety_clearance_by_object_m", None) is not None:
+            scenario_kwargs["drone_safety_clearance_by_object_m"] = tuple(
+                float(v) for v in args.drone_safety_clearance_by_object_m
+            )
+        if getattr(args, "drone_fire_safety_clearance_m", None) is not None:
+            scenario_kwargs["drone_fire_safety_clearance_m"] = float(args.drone_fire_safety_clearance_m)
+        if getattr(args, "drone_smoke_safety_clearance_m", None) is not None:
+            scenario_kwargs["drone_smoke_safety_clearance_m"] = float(args.drone_smoke_safety_clearance_m)
+        if getattr(args, "drone_smoke_clearance_threshold", None) is not None:
+            scenario_kwargs["drone_smoke_clearance_threshold"] = float(args.drone_smoke_clearance_threshold)
     if getattr(args, "drone_flight_levels_m", None):
         levels = tuple(
             float(value)
@@ -7607,6 +7631,20 @@ def main() -> None:
     parser.add_argument("--uav-fire-penalty-threshold", type=float, default=None,
                         help="Override active-fire threshold for --uav-fire-footprint-penalty. "
                              "Use a negative value to disable.")
+    parser.add_argument("--drone-safety-clearance-by-land-cover-m", type=float, nargs="+", default=None,
+                        help="Override variable UAV safety margins by land cover: "
+                             "road open brush forest rock [water]. Omitted preserves checkpoint/default.")
+    parser.add_argument("--drone-safety-clearance-by-object-m", type=float, nargs=3, default=None,
+                        metavar=("NONE", "TREE", "HOUSE"),
+                        help="Override variable UAV safety margins by object: none tree house.")
+    parser.add_argument("--drone-fire-safety-clearance-m", type=float, default=None,
+                        help="Override UAV active-fire safety margin in meters.")
+    parser.add_argument("--drone-smoke-safety-clearance-m", type=float, default=None,
+                        help="Override UAV smoke-plume safety margin in meters.")
+    parser.add_argument("--drone-smoke-clearance-threshold", type=float, default=None,
+                        help="Override smoke-grid threshold for applying UAV smoke clearance.")
+    parser.add_argument("--no-variable-drone-clearance", action="store_true",
+                        help="Disable variable UAV clearance overrides and use scalar checkpoint/default clearance.")
     parser.add_argument("--drone-flight-levels-m", default=None,
                         help="Comma-separated UAV flight altitudes in meters, e.g. 30,50,75.")
     parser.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -7684,6 +7722,30 @@ def main() -> None:
         parser.error("--uav-fire-footprint-penalty must be nonnegative")
     if args.uav_fire_penalty_threshold is not None and args.uav_fire_penalty_threshold > 1.0:
         parser.error("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
+    if (
+        args.drone_safety_clearance_by_land_cover_m is not None
+        and len(args.drone_safety_clearance_by_land_cover_m) not in {5, 6}
+    ):
+        parser.error("--drone-safety-clearance-by-land-cover-m must contain 5 or 6 values")
+    if (
+        args.drone_safety_clearance_by_land_cover_m is not None
+        and any(v < 0.0 for v in args.drone_safety_clearance_by_land_cover_m)
+    ):
+        parser.error("--drone-safety-clearance-by-land-cover-m values must be nonnegative")
+    if (
+        args.drone_safety_clearance_by_object_m is not None
+        and any(v < 0.0 for v in args.drone_safety_clearance_by_object_m)
+    ):
+        parser.error("--drone-safety-clearance-by-object-m values must be nonnegative")
+    if args.drone_fire_safety_clearance_m is not None and args.drone_fire_safety_clearance_m < 0.0:
+        parser.error("--drone-fire-safety-clearance-m must be nonnegative")
+    if args.drone_smoke_safety_clearance_m is not None and args.drone_smoke_safety_clearance_m < 0.0:
+        parser.error("--drone-smoke-safety-clearance-m must be nonnegative")
+    if (
+        args.drone_smoke_clearance_threshold is not None
+        and not (0.0 <= args.drone_smoke_clearance_threshold <= 1.0)
+    ):
+        parser.error("--drone-smoke-clearance-threshold must be in [0, 1]")
     if (
         args.comms_dropout is not None
         and (

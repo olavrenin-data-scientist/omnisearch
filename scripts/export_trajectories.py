@@ -27,8 +27,13 @@ import vmas
 
 from envs.wildfire_defaults import (
     DRONE_CAMERA_FOV_DEG,
+    DRONE_FIRE_SAFETY_CLEARANCE_M,
     DRONE_FLIGHT_LEVELS_M,
     DRONE_SAFETY_CLEARANCE_M,
+    DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M,
+    DRONE_SAFETY_CLEARANCE_BY_OBJECT_M,
+    DRONE_SMOKE_CLEARANCE_THRESHOLD,
+    DRONE_SMOKE_SAFETY_CLEARANCE_M,
     DRONE_SPEED_MPS,
     DRONE_U_MULTIPLIER,
     GROUND_ACCEL_MPS2,
@@ -258,6 +263,44 @@ def main():
         help="Minimum aerial clearance above terrain obstacles in meters.",
     )
     p.add_argument(
+        "--drone-safety-clearance-by-land-cover-m",
+        type=float,
+        nargs="+",
+        default=list(DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M),
+        help="Variable UAV safety margin by land cover in meters: road open brush forest rock [water].",
+    )
+    p.add_argument(
+        "--drone-safety-clearance-by-object-m",
+        type=float,
+        nargs=3,
+        default=list(DRONE_SAFETY_CLEARANCE_BY_OBJECT_M),
+        metavar=("NONE", "TREE", "HOUSE"),
+        help="Variable UAV safety margin by object in meters.",
+    )
+    p.add_argument(
+        "--drone-fire-safety-clearance-m",
+        type=float,
+        default=DRONE_FIRE_SAFETY_CLEARANCE_M,
+        help="Minimum UAV safety margin in active-fire cells, in meters.",
+    )
+    p.add_argument(
+        "--drone-smoke-safety-clearance-m",
+        type=float,
+        default=DRONE_SMOKE_SAFETY_CLEARANCE_M,
+        help="Minimum UAV safety margin in smoke-plume cells, in meters.",
+    )
+    p.add_argument(
+        "--drone-smoke-clearance-threshold",
+        type=float,
+        default=DRONE_SMOKE_CLEARANCE_THRESHOLD,
+        help="Smoke-grid threshold for applying smoke safety clearance.",
+    )
+    p.add_argument(
+        "--no-variable-drone-clearance",
+        action="store_true",
+        help="Disable variable UAV clearance margins and use only drone_safety_clearance_m.",
+    )
+    p.add_argument(
         "--sim-step-seconds",
         type=float,
         default=SIM_STEP_SECONDS,
@@ -416,6 +459,13 @@ def main():
     print(f" Terrain:       {args.terrain_source}")
     print("-" * 60)
 
+    variable_clearance_keys = (
+        "drone_safety_clearance_by_land_cover_m",
+        "drone_safety_clearance_by_object_m",
+        "drone_fire_safety_clearance_m",
+        "drone_smoke_safety_clearance_m",
+        "drone_smoke_clearance_threshold",
+    )
     scenario_kwargs = {
         "max_steps":        args.steps,
         "x_semidim":        args.x_semidim,
@@ -439,6 +489,27 @@ def main():
         "ground_speed_mps": args.ground_speed_mps,
         "ground_accel_mps2": args.ground_accel_mps2,
     }
+    if args.no_variable_drone_clearance:
+        for key in variable_clearance_keys:
+            scenario_kwargs.pop(key, None)
+    else:
+        if len(args.drone_safety_clearance_by_land_cover_m) not in {5, 6}:
+            raise ValueError("--drone-safety-clearance-by-land-cover-m must contain 5 or 6 values")
+        if any(v < 0.0 for v in args.drone_safety_clearance_by_land_cover_m):
+            raise ValueError("--drone-safety-clearance-by-land-cover-m values must be nonnegative")
+        if any(v < 0.0 for v in args.drone_safety_clearance_by_object_m):
+            raise ValueError("--drone-safety-clearance-by-object-m values must be nonnegative")
+        if args.drone_fire_safety_clearance_m < 0.0 or args.drone_smoke_safety_clearance_m < 0.0:
+            raise ValueError("drone fire/smoke safety clearances must be nonnegative")
+        if not (0.0 <= args.drone_smoke_clearance_threshold <= 1.0):
+            raise ValueError("--drone-smoke-clearance-threshold must be in [0, 1]")
+        scenario_kwargs.update({
+            "drone_safety_clearance_by_land_cover_m": tuple(args.drone_safety_clearance_by_land_cover_m),
+            "drone_safety_clearance_by_object_m": tuple(args.drone_safety_clearance_by_object_m),
+            "drone_fire_safety_clearance_m": float(args.drone_fire_safety_clearance_m),
+            "drone_smoke_safety_clearance_m": float(args.drone_smoke_safety_clearance_m),
+            "drone_smoke_clearance_threshold": float(args.drone_smoke_clearance_threshold),
+        })
     if args.drone_perception_mode is not None:
         scenario_kwargs["drone_perception_mode"] = (
             args.drone_perception_mode.replace("+", "_").replace("-", "_")
@@ -493,6 +564,9 @@ def main():
             print(" HAPPO env:     legacy checkpoint (no saved training config)")
     except (ImportError, FileNotFoundError):
         training_manifest = None
+    if args.no_variable_drone_clearance:
+        for key in variable_clearance_keys:
+            scenario_kwargs.pop(key, None)
 
     if args.ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = max(args.ground_confirmation_range_m, 0.0)

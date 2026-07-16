@@ -46,6 +46,13 @@ from agents.harl_terrain_cnn import (
     TERRAIN_CNN_OBS_OFFSET,
     wildfire_single_observation_dim,
 )
+from envs.wildfire_defaults import (
+    DRONE_FIRE_SAFETY_CLEARANCE_M,
+    DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M,
+    DRONE_SAFETY_CLEARANCE_BY_OBJECT_M,
+    DRONE_SMOKE_CLEARANCE_THRESHOLD,
+    DRONE_SMOKE_SAFETY_CLEARANCE_M,
+)
 
 DEFAULT_UGV_APPROACH_REWARD = 0.05
 DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
@@ -81,6 +88,11 @@ DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
 DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M = (30.0, 50.0, 75.0)
 DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE = "rgb_thermal"
+DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_LAND_COVER_M = DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M
+DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_OBJECT_M = DRONE_SAFETY_CLEARANCE_BY_OBJECT_M
+DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M = DRONE_FIRE_SAFETY_CLEARANCE_M
+DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M = DRONE_SMOKE_SAFETY_CLEARANCE_M
+DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD = DRONE_SMOKE_CLEARANCE_THRESHOLD
 DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
 DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M = 30.0
 DEFAULT_UGV_DIAG_LR = 2.5e-4
@@ -221,6 +233,11 @@ def build_args(
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
     drone_perception_mode: str | None = None,
+    drone_safety_clearance_by_land_cover_m: tuple[float, ...] | None = DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_LAND_COVER_M,
+    drone_safety_clearance_by_object_m: tuple[float, ...] | None = DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_OBJECT_M,
+    drone_fire_safety_clearance_m: float = DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M,
+    drone_smoke_safety_clearance_m: float = DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M,
+    drone_smoke_clearance_threshold: float = DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD,
     uav_fire_block_threshold: float | None = None,
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int | None = None,
@@ -1036,6 +1053,24 @@ def build_args(
         scenario_kwargs["drone_camera_fov_deg"] = float(drone_camera_fov_deg)
     if drone_flight_levels_m is not None:
         scenario_kwargs["drone_flight_levels_m"] = tuple(float(v) for v in drone_flight_levels_m)
+    has_physical_drones_for_clearance = (
+        joint_drone_count > 0
+        and not ugv_known_survivor_diagnostic
+        and not joint_schema_ugv_diagnostic
+    )
+    if has_physical_drones_for_clearance and drone_safety_clearance_by_land_cover_m is not None:
+        scenario_kwargs["drone_safety_clearance_by_land_cover_m"] = tuple(
+            float(v) for v in drone_safety_clearance_by_land_cover_m
+        )
+    if has_physical_drones_for_clearance and drone_safety_clearance_by_object_m is not None:
+        scenario_kwargs["drone_safety_clearance_by_object_m"] = tuple(
+            float(v) for v in drone_safety_clearance_by_object_m
+        )
+    if has_physical_drones_for_clearance and drone_fire_safety_clearance_m > 0.0:
+        scenario_kwargs["drone_fire_safety_clearance_m"] = float(drone_fire_safety_clearance_m)
+    if has_physical_drones_for_clearance and drone_smoke_safety_clearance_m > 0.0:
+        scenario_kwargs["drone_smoke_safety_clearance_m"] = float(drone_smoke_safety_clearance_m)
+        scenario_kwargs["drone_smoke_clearance_threshold"] = float(drone_smoke_clearance_threshold)
     if ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = float(ground_confirmation_range_m)
     coverage_obs_grid = 0 if coverage_obs_grid is None else int(coverage_obs_grid)
@@ -1827,6 +1862,25 @@ def main():
     p.add_argument("--drone-flight-levels-m", default=None,
                    help="Comma-separated flight altitudes in meters (>=2 values), e.g. '50,80,100'. "
                         "Higher altitude => larger scout footprint.")
+    p.add_argument("--drone-safety-clearance-by-land-cover-m", type=float, nargs="+",
+                   default=list(DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_LAND_COVER_M),
+                   help="Variable UAV safety margin by land cover in meters: "
+                        "road open brush forest rock [water]. Default: 10 10 10 20 10 10.")
+    p.add_argument("--drone-safety-clearance-by-object-m", type=float, nargs=3,
+                   default=list(DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_OBJECT_M),
+                   metavar=("NONE", "TREE", "HOUSE"),
+                   help="Variable UAV safety margin by object in meters. Default: 0 20 15.")
+    p.add_argument("--drone-fire-safety-clearance-m", type=float,
+                   default=DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M,
+                   help="Minimum UAV safety margin in active-fire cells, in meters. Default: 25.")
+    p.add_argument("--drone-smoke-safety-clearance-m", type=float,
+                   default=DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M,
+                   help="Minimum UAV safety margin in smoke-plume cells, in meters. Default: 25.")
+    p.add_argument("--drone-smoke-clearance-threshold", type=float,
+                   default=DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD,
+                   help="Smoke-grid threshold for applying smoke safety clearance. Default: 0.20.")
+    p.add_argument("--no-variable-drone-clearance", action="store_true",
+                   help="Disable variable UAV clearance margins and use only drone_safety_clearance_m.")
     p.add_argument("--drone-perception-mode",
                    choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                    default=None,
@@ -2631,6 +2685,18 @@ def main():
         )
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
+    if len(args.drone_safety_clearance_by_land_cover_m) not in {5, 6}:
+        p.error("--drone-safety-clearance-by-land-cover-m must contain 5 or 6 values")
+    if any(v < 0.0 for v in args.drone_safety_clearance_by_land_cover_m):
+        p.error("--drone-safety-clearance-by-land-cover-m values must be nonnegative")
+    if any(v < 0.0 for v in args.drone_safety_clearance_by_object_m):
+        p.error("--drone-safety-clearance-by-object-m values must be nonnegative")
+    if args.drone_fire_safety_clearance_m < 0.0:
+        p.error("--drone-fire-safety-clearance-m must be nonnegative")
+    if args.drone_smoke_safety_clearance_m < 0.0:
+        p.error("--drone-smoke-safety-clearance-m must be nonnegative")
+    if not (0.0 <= args.drone_smoke_clearance_threshold <= 1.0):
+        p.error("--drone-smoke-clearance-threshold must be in [0, 1]")
 
     drone_flight_levels_m = None
     if args.drone_flight_levels_m:
@@ -2646,6 +2712,22 @@ def main():
             if uav_joint_search_diagnostic
             else "rgb"
         )
+    drone_safety_clearance_by_land_cover_m = (
+        None
+        if args.no_variable_drone_clearance
+        else tuple(float(v) for v in args.drone_safety_clearance_by_land_cover_m)
+    )
+    drone_safety_clearance_by_object_m = (
+        None
+        if args.no_variable_drone_clearance
+        else tuple(float(v) for v in args.drone_safety_clearance_by_object_m)
+    )
+    drone_fire_safety_clearance_m = (
+        0.0 if args.no_variable_drone_clearance else float(args.drone_fire_safety_clearance_m)
+    )
+    drone_smoke_safety_clearance_m = (
+        0.0 if args.no_variable_drone_clearance else float(args.drone_smoke_safety_clearance_m)
+    )
 
     uav_search_diagnostic = (
         args.uav_survivor_diagnostic
@@ -3008,6 +3090,23 @@ def main():
         " drone_flight_levels_m: "
         f"{list(drone_flight_levels_m) if drone_flight_levels_m is not None else 'default'}"
     )
+    print(
+        " drone_variable_clearance: "
+        f"{'off' if args.no_variable_drone_clearance else 'on'}"
+    )
+    print(
+        " drone_clearance_land_m: "
+        f"{list(drone_safety_clearance_by_land_cover_m) if drone_safety_clearance_by_land_cover_m else 'scalar'}"
+    )
+    print(
+        " drone_clearance_object_m: "
+        f"{list(drone_safety_clearance_by_object_m) if drone_safety_clearance_by_object_m else 'scalar'}"
+    )
+    print(
+        " drone_clearance_fire_smoke_m: "
+        f"{drone_fire_safety_clearance_m}/{drone_smoke_safety_clearance_m} "
+        f"threshold={args.drone_smoke_clearance_threshold}"
+    )
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
@@ -3068,6 +3167,11 @@ def main():
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
         drone_perception_mode = args.drone_perception_mode,
+        drone_safety_clearance_by_land_cover_m = drone_safety_clearance_by_land_cover_m,
+        drone_safety_clearance_by_object_m = drone_safety_clearance_by_object_m,
+        drone_fire_safety_clearance_m = drone_fire_safety_clearance_m,
+        drone_smoke_safety_clearance_m = drone_smoke_safety_clearance_m,
+        drone_smoke_clearance_threshold = args.drone_smoke_clearance_threshold,
         uav_fire_block_threshold = args.uav_fire_block_threshold,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,

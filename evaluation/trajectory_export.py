@@ -292,6 +292,22 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "drone_altitude_release_margin": round(float(scenario.drone_altitude_release_margin), 4),
         "drone_safety_clearance": round(float(scenario.drone_safety_clearance_by_env[env_index]), 6),
         "drone_safety_clearance_m": round(float(scenario.drone_safety_clearance_m), 4),
+        "drone_variable_clearance_enabled": bool(getattr(scenario, "drone_variable_clearance_enabled", False)),
+        "drone_safety_clearance_by_land_cover_m": list(
+            getattr(scenario, "drone_safety_clearance_by_land_cover_m", None) or []
+        ),
+        "drone_safety_clearance_by_object_m": list(
+            getattr(scenario, "drone_safety_clearance_by_object_m", None) or []
+        ),
+        "drone_fire_safety_clearance_m": round(
+            float(getattr(scenario, "drone_fire_safety_clearance_m", 0.0)), 4
+        ),
+        "drone_smoke_safety_clearance_m": round(
+            float(getattr(scenario, "drone_smoke_safety_clearance_m", 0.0)), 4
+        ),
+        "drone_smoke_clearance_threshold": round(
+            float(getattr(scenario, "drone_smoke_clearance_threshold", 0.0)), 4
+        ),
         "sim_units_per_meter": round(float(scenario.terrain_sim_units_per_meter[env_index]), 8),
         "sim_step_seconds": round(float(getattr(scenario, "sim_step_seconds", 1.0)), 4),
         "drone_speed_mps": round(float(getattr(scenario, "drone_speed_mps", 0.0)), 4),

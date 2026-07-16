@@ -794,7 +794,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
         positions = torch.zeros(1, 2, 2)
 
-        credit, overlap, outside, inter_uav, *_ = scenario._coverage_reward(positions)
+        credit, overlap, outside, _fire, inter_uav, *_ = scenario._coverage_reward(positions)
 
         self.assertAlmostEqual(float(credit[0, 0]), float(credit[0, 1]), places=7)
         self.assertEqual(float(overlap.sum()), 0.0)
@@ -812,8 +812,12 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.drone_altitude = torch.tensor([[0.10]])
         positions = torch.zeros(1, 1, 2)
 
-        first_credit, first_overlap, first_outside, first_inter_uav, *_ = scenario._coverage_reward(positions)
-        revisit_credit, revisit_overlap, revisit_outside, revisit_inter_uav, *_ = scenario._coverage_reward(positions)
+        first_credit, first_overlap, first_outside, _first_fire, first_inter_uav, *_ = (
+            scenario._coverage_reward(positions)
+        )
+        revisit_credit, revisit_overlap, revisit_outside, _revisit_fire, revisit_inter_uav, *_ = (
+            scenario._coverage_reward(positions)
+        )
 
         self.assertGreater(float(first_credit.sum()), 0.0)
         self.assertEqual(float(first_overlap.sum()), 0.0)
@@ -900,7 +904,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
         scenario.uav_inter_uav_overlap_allowed = 0.20
         scenario.drone_altitude = torch.tensor([[0.10, 0.10]])
 
-        _, _, _, inter_uav, *_ = scenario._coverage_reward(torch.zeros(1, 2, 2))
+        _, _, _, _fire, inter_uav, *_ = scenario._coverage_reward(torch.zeros(1, 2, 2))
         penalty = scenario._uav_inter_uav_overlap_penalty(inter_uav)
 
         self.assertEqual(float(inter_uav[0, 0]), 1.0)
@@ -2027,6 +2031,7 @@ class PhysicalUnitConversionTests(unittest.TestCase):
 
         (
             credit,
+            _,
             _,
             _,
             _,
