@@ -120,9 +120,8 @@ DEFAULT_JOINT_DIAG_SURVIVORS = 5
 DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD = 1.0
 DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD = 4.0
 DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD = 10.0
-DEFAULT_JOINT_DIAG_PENDING_PENALTY = -0.02
-DEFAULT_JOINT_DIAG_ROUTE_PROGRESS_SHORTFALL_PENALTY = 0.10
-DEFAULT_JOINT_DIAG_UGV_TARGET_ASSIGNMENT_MODE = "route_cost_sticky"
+DEFAULT_JOINT_DIAG_PENDING_PENALTY = -0.005
+DEFAULT_JOINT_DIAG_UGV_TARGET_ASSIGNMENT_MODE = "greedy_sticky"
 DEFAULT_UAV_FRONTIER_MODE = "sector_topk"
 DEFAULT_UAV_DIAG_FRONTIER_MODE = "local_global"
 DEFAULT_UAV_DIAG_FRONTIER_SOURCE = "confidence"
@@ -362,7 +361,6 @@ def build_args(
     ugv_stall_displacement_threshold_m: float = 0.05,
     ugv_route_progress_floor_penalty: float = 0.0,
     ugv_route_progress_floor_m: float = 0.0,
-    ugv_route_progress_shortfall_penalty: float | None = None,
     local_map_patch_size: int = 3,
     slope_speed_weight: float | None = None,
     land_cover_speeds: tuple[float, ...] | None = None,
@@ -568,37 +566,17 @@ def build_args(
             else "nearest"
         )
     ugv_target_assignment_mode = str(ugv_target_assignment_mode).replace("-", "_").lower()
-    valid_assignment_modes = {
-        "nearest",
-        "greedy",
-        "greedy_sticky",
-        "route_cost_greedy",
-        "route_cost_sticky",
-        "route_cost_global",
-    }
-    if ugv_target_assignment_mode not in valid_assignment_modes:
-        raise ValueError(
-            "ugv_target_assignment_mode must be one of: nearest, greedy, "
-            "greedy_sticky, route_cost_greedy, route_cost_sticky, route_cost_global"
-        )
+    if ugv_target_assignment_mode not in {"nearest", "greedy", "greedy_sticky"}:
+        raise ValueError("ugv_target_assignment_mode must be one of: nearest, greedy, greedy_sticky")
     if ugv_assigned_target_obs_only is None:
-        ugv_assigned_target_obs_only = False
-    ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
-    if ugv_route_progress_shortfall_penalty is None:
-        ugv_route_progress_shortfall_penalty = (
-            DEFAULT_JOINT_DIAG_ROUTE_PROGRESS_SHORTFALL_PENALTY
-            if joint_survivor_diagnostic or joint_schema_ugv_diagnostic
-            else 0.0
-        )
-    if float(ugv_route_progress_shortfall_penalty) < 0.0:
-        raise ValueError("ugv_route_progress_shortfall_penalty must be nonnegative")
-    ugv_route_progress_shortfall_penalty = float(ugv_route_progress_shortfall_penalty)
-    if survivor_assignment_obs is None:
-        survivor_assignment_obs = bool(
+        ugv_assigned_target_obs_only = bool(
             joint_survivor_diagnostic
             or joint_schema_uav_diagnostic
             or joint_schema_ugv_diagnostic
         )
+    ugv_assigned_target_obs_only = bool(ugv_assigned_target_obs_only)
+    if survivor_assignment_obs is None:
+        survivor_assignment_obs = False
     survivor_assignment_obs = bool(survivor_assignment_obs)
     survivor_reveal_schedule = str(survivor_reveal_schedule).replace("-", "_").lower()
     if survivor_reveal_schedule not in {"stratified_uniform"}:
@@ -1045,7 +1023,6 @@ def build_args(
         "ugv_stall_displacement_threshold_m": ugv_stall_displacement_threshold_m,
         "r_ugv_route_progress_floor_penalty": ugv_route_progress_floor_penalty,
         "ugv_route_progress_floor_m": ugv_route_progress_floor_m,
-        "r_ugv_route_progress_shortfall_penalty": ugv_route_progress_shortfall_penalty,
         "r_fire_penalty": -0.20,
         "r_ground_travel_cost": -0.01,
         "r_drone_climb_cost": -0.005,
@@ -1447,11 +1424,10 @@ def build_args(
         })
         if joint_schema_uav_diagnostic:
             scenario_kwargs.update({
-                "obs_schema_n_drones": joint_drone_count,
-                "obs_schema_n_ground": joint_ugv_count,
-                "obs_schema_n_survivors": survivor_count,
-                "ugv_assigned_target_obs_only": False,
-                "survivor_assignment_obs": True,
+                "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
+                "obs_schema_n_ground": 2,
+                "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
+                "ugv_assigned_target_obs_only": True,
             })
     if joint_survivor_diagnostic:
         joint_diagnostic_ugvs = max(int(joint_diagnostic_ugvs), 1)
@@ -1468,10 +1444,9 @@ def build_args(
             "known_survivors_at_reset": _known_survivors_default(False),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
-            "comms_dropout": comms_dropout,
-            "ugv_target_assignment_mode": ugv_target_assignment_mode,
+            "comms_dropout": 0.0,
+            "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
-            "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
             "r_team_scout": (
                 DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD
@@ -1530,12 +1505,12 @@ def build_args(
     if joint_schema_ugv_diagnostic:
         scenario_kwargs.update({
             "n_drones": 0,
-            "n_ground": joint_ugv_count,
-            "n_survivors": survivor_count,
+            "n_ground": 2,
+            "n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
             "n_decoys": decoy_count,
-            "obs_schema_n_drones": joint_drone_count,
-            "obs_schema_n_ground": joint_ugv_count,
-            "obs_schema_n_survivors": survivor_count,
+            "obs_schema_n_drones": DEFAULT_JOINT_DIAG_DRONES,
+            "obs_schema_n_ground": 2,
+            "obs_schema_n_survivors": DEFAULT_JOINT_DIAG_SURVIVORS,
             "known_survivors_at_reset": _known_survivors_default(False),
             "delayed_survivor_knowledge": _delayed_survivor_default(True),
             "delayed_decoy_knowledge": decoy_count > 0,
@@ -1549,11 +1524,10 @@ def build_args(
             "decoy_reveal_end_step": int(survivor_reveal_end_step),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
-            "comms_dropout": comms_dropout,
-            "ugv_target_assignment_mode": ugv_target_assignment_mode,
+            "comms_dropout": 0.0,
+            "ugv_target_assignment_mode": "greedy_sticky",
             "ugv_zero_uav_search_observations": True,
             "ugv_assigned_target_obs_only": ugv_assigned_target_obs_only,
-            "survivor_assignment_obs": True,
             "r_found_survivor": DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
             "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
             "r_all_survivors_found": 0.0,
@@ -1846,12 +1820,6 @@ def main():
                        "greedy",
                        "greedy_sticky",
                        "greedy-sticky",
-                       "route_cost_greedy",
-                       "route-cost-greedy",
-                       "route_cost_sticky",
-                       "route-cost-sticky",
-                       "route_cost_global",
-                       "route-cost-global",
                    ),
                    default=None,
                    help="How UGV planner targets are selected from known, unconfirmed survivors. "
@@ -2264,10 +2232,6 @@ def main():
     p.add_argument("--ugv-route-progress-floor-m", type=float, default=0.0,
                    help="Minimum expected planner-route progress per step before "
                         "--ugv-route-progress-floor-penalty starts.")
-    p.add_argument("--ugv-route-progress-shortfall-penalty", type=float, default=None,
-                   help="Penalty coefficient per meter that planner-route progress falls short of "
-                        "remaining_route_distance / remaining_episode_steps. Omit to use the "
-                        "diagnostic mode default; pass 0 to disable.")
     p.add_argument("--slope-speed-weight", type=float, default=None,
                    help="Override slope penalty in UGV speed multiplier. "
                         "Default scenario value is 0.5; larger values make slopes slower.")
@@ -2644,11 +2608,6 @@ def main():
         p.error("--ugv-route-progress-floor-penalty must be nonnegative")
     if args.ugv_route_progress_floor_m < 0.0:
         p.error("--ugv-route-progress-floor-m must be nonnegative")
-    if (
-        args.ugv_route_progress_shortfall_penalty is not None
-        and args.ugv_route_progress_shortfall_penalty < 0.0
-    ):
-        p.error("--ugv-route-progress-shortfall-penalty must be nonnegative")
     if args.survivor_reveal_initial_count < 0:
         p.error("--survivor-reveal-initial-count must be nonnegative")
     if args.survivor_reveal_start_step < 0 or args.survivor_reveal_end_step < 0:
@@ -2718,20 +2677,14 @@ def main():
         args.ugv_target_assignment_mode = DEFAULT_JOINT_DIAG_UGV_TARGET_ASSIGNMENT_MODE
     if args.ugv_target_assignment_mode is None:
         args.ugv_target_assignment_mode = "nearest"
-    if args.ugv_route_progress_shortfall_penalty is None:
-        args.ugv_route_progress_shortfall_penalty = (
-            DEFAULT_JOINT_DIAG_ROUTE_PROGRESS_SHORTFALL_PENALTY
-            if args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
-            else 0.0
-        )
     if args.ugv_assigned_target_obs_only is None:
-        args.ugv_assigned_target_obs_only = False
-    if args.survivor_assignment_obs is None:
-        args.survivor_assignment_obs = bool(
+        args.ugv_assigned_target_obs_only = bool(
             args.joint_survivor_diagnostic
             or args.joint_schema_uav_diagnostic
             or args.joint_schema_ugv_diagnostic
         )
+    if args.survivor_assignment_obs is None:
+        args.survivor_assignment_obs = False
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
     if len(args.drone_safety_clearance_by_land_cover_m) not in {5, 6}:
@@ -3114,7 +3067,6 @@ def main():
     print(f" ugv_pending_penalty: {args.ugv_pending_penalty}")
     print(f" ugv_route_progress_floor_penalty: {args.ugv_route_progress_floor_penalty}")
     print(f" ugv_route_progress_floor_m: {args.ugv_route_progress_floor_m}")
-    print(f" ugv_route_progress_shortfall_penalty: {args.ugv_route_progress_shortfall_penalty}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
     print(f" team_scout_reward: {args.team_scout_reward}")
@@ -3352,7 +3304,6 @@ def main():
         ugv_stall_displacement_threshold_m = args.ugv_stall_displacement_threshold_m,
         ugv_route_progress_floor_penalty = args.ugv_route_progress_floor_penalty,
         ugv_route_progress_floor_m = args.ugv_route_progress_floor_m,
-        ugv_route_progress_shortfall_penalty = args.ugv_route_progress_shortfall_penalty,
         slope_speed_weight = args.slope_speed_weight,
         land_cover_speeds = tuple(args.land_cover_speeds) if args.land_cover_speeds is not None else None,
         action_transform = args.action_transform,
