@@ -292,7 +292,8 @@ def build_args(
     n_decoys: int | None = None,
     active_decoys_min: int | None = None,
     active_decoys_max: int | None = None,
-    delayed_survivor_knowledge: bool = False,
+    known_survivors_at_reset: bool | None = None,
+    delayed_survivor_knowledge: bool | None = None,
     survivor_reveal_schedule: str = "stratified_uniform",
     survivor_reveal_initial_count: int = 1,
     survivor_reveal_start_step: int = 10,
@@ -607,6 +608,10 @@ def build_args(
         raise ValueError("survivor reveal steps must be nonnegative")
     if int(survivor_reveal_end_step) < int(survivor_reveal_start_step):
         raise ValueError("survivor_reveal_end_step must be >= survivor_reveal_start_step")
+    def _known_survivors_default(default: bool) -> bool:
+        return bool(default if known_survivors_at_reset is None else known_survivors_at_reset)
+    def _delayed_survivor_default(default: bool) -> bool:
+        return bool(default if delayed_survivor_knowledge is None else delayed_survivor_knowledge)
     if float(ugv_sticky_switch_margin_m) < 0.0:
         raise ValueError("ugv_sticky_switch_margin_m must be nonnegative")
     if float(ugv_sticky_switch_ratio) < 0.0:
@@ -1004,7 +1009,8 @@ def build_args(
         "ugv_sticky_switch_margin_m": ugv_sticky_switch_margin_m,
         "ugv_sticky_switch_ratio": ugv_sticky_switch_ratio,
         "ugv_sticky_min_age_steps": ugv_sticky_min_age_steps,
-        "delayed_survivor_knowledge": bool(delayed_survivor_knowledge),
+        "known_survivors_at_reset": _known_survivors_default(False),
+        "delayed_survivor_knowledge": _delayed_survivor_default(False),
         "survivor_reveal_schedule": survivor_reveal_schedule,
         "survivor_reveal_initial_count": survivor_reveal_initial_count,
         "survivor_reveal_start_step": survivor_reveal_start_step,
@@ -1332,7 +1338,7 @@ def build_args(
             "n_survivors": ugv_known_survivor_count,
             "active_survivors_min": ugv_active_min,
             "active_survivors_max": ugv_active_max,
-            "known_survivors_at_reset": True,
+            "known_survivors_at_reset": _known_survivors_default(True),
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
             "r_found_survivor": 10.0,
@@ -1373,7 +1379,7 @@ def build_args(
             "n_drones": uav_diagnostic_drones,
             "n_ground": 0,
             "n_survivors": survivor_count,
-            "known_survivors_at_reset": False,
+            "known_survivors_at_reset": _known_survivors_default(False),
             "drone_can_confirm": True,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
@@ -1454,7 +1460,7 @@ def build_args(
             "n_drones": joint_drone_count,
             "n_ground": joint_diagnostic_ugvs,
             "n_survivors": survivor_count,
-            "known_survivors_at_reset": False,
+            "known_survivors_at_reset": _known_survivors_default(False),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
@@ -1525,8 +1531,8 @@ def build_args(
             "obs_schema_n_drones": joint_drone_count,
             "obs_schema_n_ground": joint_ugv_count,
             "obs_schema_n_survivors": survivor_count,
-            "known_survivors_at_reset": False,
-            "delayed_survivor_knowledge": True,
+            "known_survivors_at_reset": _known_survivors_default(False),
+            "delayed_survivor_knowledge": _delayed_survivor_default(True),
             "delayed_decoy_knowledge": decoy_count > 0,
             "survivor_reveal_schedule": survivor_reveal_schedule,
             "survivor_reveal_initial_count": int(survivor_reveal_initial_count),
@@ -2064,8 +2070,12 @@ def main():
     p.add_argument("--active-decoys-max", type=int, default=None,
                    help="Maximum active decoy slots sampled per env reset. "
                         "Example: --n-decoys 4 --active-decoys-min 0 --active-decoys-max 4.")
-    p.add_argument("--delayed-survivor-knowledge", action="store_true",
-                   help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
+    p.add_argument("--known-survivors-at-reset", action=argparse.BooleanOptionalAction, default=None,
+                   help="Initialize survivors as known to UGVs at reset. "
+                        "Use --no-known-survivors-at-reset to force unknown survivors.")
+    p.add_argument("--delayed-survivor-knowledge", action=argparse.BooleanOptionalAction, default=None,
+                   help="Reveal survivors over time as oracle scout events for curriculum scenarios. "
+                        "Use --no-delayed-survivor-knowledge to disable preset delayed reveals.")
     p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
                    default="stratified_uniform",
                    help="Sampling scheme for delayed survivor knowledge reveal times.")
@@ -3051,7 +3061,8 @@ def main():
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(
         " survivor_reveal: "
-        f"delayed={args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic} "
+        f"known_at_reset={args.known_survivors_at_reset if args.known_survivors_at_reset is not None else 'preset'} "
+        f"delayed={args.delayed_survivor_knowledge if args.delayed_survivor_knowledge is not None else 'preset'} "
         f"schedule={args.survivor_reveal_schedule} "
         f"initial={args.survivor_reveal_initial_count} "
         f"range={args.survivor_reveal_start_step}-{args.survivor_reveal_end_step}"
@@ -3259,9 +3270,8 @@ def main():
         n_decoys = args.n_decoys,
         active_decoys_min = args.active_decoys_min,
         active_decoys_max = args.active_decoys_max,
-        delayed_survivor_knowledge = bool(
-            args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
-        ),
+        known_survivors_at_reset = args.known_survivors_at_reset,
+        delayed_survivor_knowledge = args.delayed_survivor_knowledge,
         survivor_reveal_schedule = args.survivor_reveal_schedule,
         survivor_reveal_initial_count = args.survivor_reveal_initial_count,
         survivor_reveal_start_step = args.survivor_reveal_start_step,

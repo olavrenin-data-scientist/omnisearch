@@ -981,6 +981,29 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1302)
 
+    def test_joint_schema_ugv_diagnostic_respects_reveal_cli_overrides(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_reveal_override",
+            joint_schema_ugv_diagnostic=True,
+            known_survivors_at_reset=True,
+            delayed_survivor_knowledge=False,
+            survivor_reveal_initial_count=0,
+            survivor_reveal_start_step=20,
+            survivor_reveal_end_step=40,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertTrue(scenario["known_survivors_at_reset"])
+        self.assertFalse(scenario["delayed_survivor_knowledge"])
+        self.assertEqual(scenario["survivor_reveal_initial_count"], 0)
+        self.assertEqual(scenario["survivor_reveal_start_step"], 20)
+        self.assertEqual(scenario["survivor_reveal_end_step"], 40)
+
     def test_joint_schema_ugv_diagnostic_preserves_assignment_override(self):
         _, _algo_args, env_args = build_args(
             num_env_steps=100,
