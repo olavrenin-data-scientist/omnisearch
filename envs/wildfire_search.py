@@ -4660,10 +4660,6 @@ class WildfireSearchScenario(BaseScenario):
 
         current_step = self.step_count.to(device=device)
         for env_index in range(batch_dim):
-            if int(self.ugv_assignment_cache_step[env_index].item()) == int(current_step[env_index].item()):
-                assigned[env_index] = self.ugv_assignment_cache_idx[env_index]
-                continue
-
             previous = self.ugv_sticky_target_idx[env_index].clone()
             reserved_current: set[int] = set()
             for ground_index in range(self.n_ground):

@@ -218,6 +218,54 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario = env.scenario
 
         self.assertEqual(scenario.r_found_survivor, 10.0)
+
+    def test_sticky_assignment_recomputes_when_targets_appear_same_step(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            ugv_planner_hint="global_astar",
+            ugv_target_assignment_mode="route_cost_sticky",
+        )
+        scenario = env.scenario
+        device = scenario.world.agents[0].state.pos.device
+        dtype = scenario.world.agents[0].state.pos.dtype
+
+        scenario.traversable_grid.fill_(True)
+        scenario.mobility_cost_grid.fill_(1.0)
+        scenario._invalidate_ugv_planner_route_cache(terrain_changed=True)
+        ground_slice = slice(scenario.n_drones, scenario.n_agents)
+        ground_positions = [(20, 64), (36, 64)]
+        for ground_index, cell in enumerate(ground_positions):
+            scenario.world.agents[ground_slice.start + ground_index].state.pos[:] = (
+                scenario._grid_cell_center_to_world(cell, device=device, dtype=dtype).view(1, 2)
+            )
+        scenario._survivors[0].state.pos[:] = scenario._grid_cell_center_to_world(
+            (80, 64),
+            device=device,
+            dtype=dtype,
+        ).view(1, 2)
+
+        target_pos, targetable, _ = scenario._ugv_ground_target_candidates()
+        ground_pos = torch.stack([a.state.pos for a in scenario.world.agents[ground_slice]], dim=1)
+        poisoned_idx, _ = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            target_pos,
+            targetable,
+        )
+        self.assertTrue(torch.all(poisoned_idx < 0))
+
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, ground_slice, 0] = True
+        target_pos, targetable, _ = scenario._ugv_ground_target_candidates()
+        assigned_idx, _ = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            target_pos,
+            targetable,
+        )
+
+        self.assertTrue(torch.all(assigned_idx >= 0))
+        self.assertTrue(torch.all(assigned_idx == 0))
         self.assertEqual(scenario.r_all_survivors_found, 0.0)
         self.assertEqual(scenario.r_drone_scout, 2.0)
         self.assertEqual(scenario.r_ground_confirm, 4.0)
