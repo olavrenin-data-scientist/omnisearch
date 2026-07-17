@@ -49,6 +49,11 @@ def _build_wildfire_logger_class():
             super().__init__(*a, **kw)
             self.last_aver_episode_rewards: Optional[float] = None
             self.last_average_step_rewards: Optional[float] = None
+            self.train_episode_rewards_by_agent = None
+            self.done_episode_rewards_by_agent = None
+            self.done_episode_rewards_by_class = None
+            self._reward_agent_labels: list[str] = []
+            self._reward_class_members: dict[str, list[int]] = {}
 
         def get_task_name(self):
             return "wildfire_search"
@@ -56,18 +61,100 @@ def _build_wildfire_logger_class():
         def init(self, episodes):
             super().init(episodes)
             init_env_metric_storage(self)
+            n_threads = int(self.algo_args["train"]["n_rollout_threads"])
+            self.train_episode_rewards_by_agent = np.zeros(
+                (n_threads, int(self.num_agents)),
+                dtype=np.float64,
+            )
+            scenario_kwargs = self.env_args.get("scenario_kwargs", {})
+            n_drones = int(scenario_kwargs.get("n_drones", 0))
+            n_ground = int(scenario_kwargs.get("n_ground", 0))
+            self._reward_agent_labels = []
+            self._reward_class_members = {}
+            for agent_id in range(int(self.num_agents)):
+                if agent_id < n_drones:
+                    class_name = "uav"
+                elif agent_id < n_drones + n_ground:
+                    class_name = "ugv"
+                else:
+                    class_name = "agent"
+                self._reward_agent_labels.append(f"agent{agent_id}_{class_name}")
+                self._reward_class_members.setdefault(class_name, []).append(agent_id)
+            self.done_episode_rewards_by_agent = {
+                label: [] for label in self._reward_agent_labels
+            }
+            self.done_episode_rewards_by_class = {
+                class_name: [] for class_name in self._reward_class_members
+            }
 
         def per_step(self, data):
+            self._accumulate_agent_class_rewards(data)
             accumulate_env_metrics(self, data[4], data[3])
             super().per_step(data)
+
+        def _accumulate_agent_class_rewards(self, data):
+            if self.train_episode_rewards_by_agent is None:
+                return
+            rewards = np.asarray(data[2], dtype=np.float64)
+            dones = np.asarray(data[3])
+            if rewards.ndim == 3 and rewards.shape[-1] == 1:
+                rewards = rewards[..., 0]
+            if rewards.ndim != 2:
+                return
+            n_agents = min(rewards.shape[1], self.train_episode_rewards_by_agent.shape[1])
+            self.train_episode_rewards_by_agent[:, :n_agents] += rewards[:, :n_agents]
+            dones_env = np.all(dones, axis=1)
+            done_indices = np.where(dones_env)[0]
+            for env_index in done_indices:
+                episode_rewards = self.train_episode_rewards_by_agent[env_index].copy()
+                for agent_id, label in enumerate(self._reward_agent_labels):
+                    self.done_episode_rewards_by_agent[label].append(float(episode_rewards[agent_id]))
+                for class_name, members in self._reward_class_members.items():
+                    if members:
+                        class_reward = float(np.mean(episode_rewards[members]))
+                        self.done_episode_rewards_by_class[class_name].append(class_reward)
+                self.train_episode_rewards_by_agent[env_index] = 0.0
 
         def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
             # Snapshot before super() clears done_episodes_rewards
             if len(self.done_episodes_rewards) > 0:
                 self.last_aver_episode_rewards = float(np.mean(self.done_episodes_rewards))
             super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
+            self._log_done_agent_class_rewards()
             log_done_env_metrics(self)
             self.last_average_step_rewards = float(critic_train_info["average_step_rewards"])
+
+        def _log_done_agent_class_rewards(self):
+            if not self.done_episode_rewards_by_agent or not self.done_episode_rewards_by_class:
+                return
+            class_infos = {
+                class_name: float(np.mean(values))
+                for class_name, values in self.done_episode_rewards_by_class.items()
+                if len(values) > 0
+            }
+            if class_infos:
+                self.writter.add_scalars(
+                    "train_episode_rewards_by_class",
+                    class_infos,
+                    self.total_num_steps,
+                )
+            agent_infos = {
+                label: float(np.mean(values))
+                for label, values in self.done_episode_rewards_by_agent.items()
+                if len(values) > 0
+            }
+            if agent_infos:
+                self.writter.add_scalars(
+                    "train_episode_rewards_by_agent",
+                    agent_infos,
+                    self.total_num_steps,
+                )
+            self.done_episode_rewards_by_class = {
+                class_name: [] for class_name in self._reward_class_members
+            }
+            self.done_episode_rewards_by_agent = {
+                label: [] for label in self._reward_agent_labels
+            }
 
     return WildfireLogger
 
