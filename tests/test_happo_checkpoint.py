@@ -240,6 +240,33 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(algo_args["train"]["warmstart_uav_model_dir"], "/tmp/uav/models")
         self.assertEqual(algo_args["train"]["warmstart_ugv_model_dir"], "/tmp/ugv/models")
 
+    def test_build_args_exposes_warmstart_actor_freeze_episodes(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="class_warmstart_freeze",
+            joint_survivor_diagnostic=True,
+            share_param_by_agent_class=True,
+            warmstart_actor_freeze_episodes=25,
+        )
+
+        self.assertEqual(algo_args["train"]["warmstart_actor_freeze_episodes"], 25)
+
+    def test_build_args_rejects_negative_warmstart_actor_freeze_episodes(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="class_warmstart_freeze_negative",
+                warmstart_actor_freeze_episodes=-1,
+            )
+
     def test_build_args_rejects_class_warmstart_without_class_sharing(self):
         with self.assertRaises(ValueError):
             build_args(

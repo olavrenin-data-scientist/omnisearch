@@ -233,6 +233,7 @@ def build_args(
     model_dir: str | None = None,
     warmstart_uav_model_dir: str | None = None,
     warmstart_ugv_model_dir: str | None = None,
+    warmstart_actor_freeze_episodes: int = 0,
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
     drone_perception_mode: str | None = None,
@@ -731,6 +732,9 @@ def build_args(
         raise ValueError("model_dir cannot be combined with class warm-start model dirs")
     if (warmstart_uav_model_dir or warmstart_ugv_model_dir) and not bool(share_param_by_agent_class):
         raise ValueError("class warm-start model dirs require share_param_by_agent_class=True")
+    warmstart_actor_freeze_episodes = int(warmstart_actor_freeze_episodes)
+    if warmstart_actor_freeze_episodes < 0:
+        raise ValueError("warmstart_actor_freeze_episodes must be nonnegative")
     uav_confidence_reward = float(uav_confidence_reward)
     if uav_confidence_reward < 0.0:
         raise ValueError("uav_confidence_reward must be nonnegative")
@@ -897,6 +901,7 @@ def build_args(
             "model_dir":              model_dir,
             "warmstart_uav_model_dir": warmstart_uav_model_dir,
             "warmstart_ugv_model_dir": warmstart_ugv_model_dir,
+            "warmstart_actor_freeze_episodes": warmstart_actor_freeze_episodes,
         },
         "eval": {
             "use_eval":               False,
@@ -1874,6 +1879,10 @@ def main():
                    help="Warm-start the class-shared UAV actor from actor_agent0.pt in this models/ directory.")
     p.add_argument("--warmstart-ugv-model-dir", default=None,
                    help="Warm-start the class-shared UGV actor from actor_agent0.pt in this models/ directory.")
+    p.add_argument("--warmstart-actor-freeze-episodes", type=int, default=0,
+                   help="Skip actor updates for the first N training episodes while still training the critic. "
+                        "Useful after class warm-starts when the critic is fresh and early PPO updates "
+                        "would otherwise damage a good imported policy. Default: 0.")
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
@@ -2979,6 +2988,8 @@ def main():
         p.error("--episode-length must be positive")
     if args.hidden_sizes is not None and any(size <= 0 for size in args.hidden_sizes):
         p.error("--hidden-sizes values must be positive")
+    if args.warmstart_actor_freeze_episodes < 0:
+        p.error("--warmstart-actor-freeze-episodes must be nonnegative")
 
     if args.preset == "tuned":
         # Keep explicit user values, but upgrade defaults to convergence-oriented
@@ -3171,6 +3182,7 @@ def main():
     print(f" action_transform: {args.action_transform}")
     print(f" warmstart_uav_model_dir: {args.warmstart_uav_model_dir}")
     print(f" warmstart_ugv_model_dir: {args.warmstart_ugv_model_dir}")
+    print(f" warmstart_actor_freeze_episodes: {args.warmstart_actor_freeze_episodes}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
 
@@ -3211,6 +3223,7 @@ def main():
         model_dir = args.model_dir,
         warmstart_uav_model_dir = args.warmstart_uav_model_dir,
         warmstart_ugv_model_dir = args.warmstart_ugv_model_dir,
+        warmstart_actor_freeze_episodes = args.warmstart_actor_freeze_episodes,
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
         drone_perception_mode = args.drone_perception_mode,

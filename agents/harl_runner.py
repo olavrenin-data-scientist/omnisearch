@@ -640,6 +640,40 @@ def _build_diagnostic_happo_runner_class():
             out["policy_group/is_ugv"] = 1.0 if group_name == "ugv" else 0.0
             return out
 
+        def _warmstart_actor_freeze_episodes(self) -> int:
+            return max(
+                int(self.algo_args.get("train", {}).get("warmstart_actor_freeze_episodes", 0)),
+                0,
+            )
+
+        def _warmstart_actor_freeze_active(self) -> bool:
+            episode = int(getattr(self, "_current_episode", 0))
+            freeze_episodes = self._warmstart_actor_freeze_episodes()
+            return freeze_episodes > 0 and 1 <= episode <= freeze_episodes
+
+        def _skipped_actor_train_info(
+            self,
+            group_index: int,
+            representative: int,
+            group_size: int,
+        ) -> dict:
+            info = {
+                "policy_loss": 0.0,
+                "dist_entropy": 0.0,
+                "actor_grad_norm": 0.0,
+                "ratio": 1.0,
+                "actor_update_skipped": 1.0,
+                "warmstart_actor_freeze_active": 1.0,
+                "warmstart_actor_freeze_episode": float(getattr(self, "_current_episode", 0)),
+                "warmstart_actor_freeze_episodes": float(self._warmstart_actor_freeze_episodes()),
+            }
+            return self._annotate_policy_group_info(
+                info,
+                group_index,
+                representative,
+                group_size,
+            )
+
         def run(self):
             """Run the training pipeline with class-shared actors decayed once."""
             if self.algo_args["render"]["use_render"] is True:
@@ -657,9 +691,12 @@ def _build_diagnostic_happo_runner_class():
             self.logger.init(episodes)
 
             for episode in range(1, episodes + 1):
+                self._current_episode = episode
+                actor_freeze_active = self._warmstart_actor_freeze_active()
                 if self.algo_args["train"]["use_linear_lr_decay"]:
-                    for agent_id in self._unique_actor_agent_ids():
-                        self.actor[agent_id].lr_decay(episode, episodes)
+                    if not actor_freeze_active:
+                        for agent_id in self._unique_actor_agent_ids():
+                            self.actor[agent_id].lr_decay(episode, episodes)
                     self.critic.lr_decay(episode, episodes)
 
                 self.logger.episode_init(episode)
@@ -791,6 +828,7 @@ def _build_diagnostic_happo_runner_class():
             else:
                 group_order = list(torch.randperm(len(update_groups)).numpy())
 
+            actor_freeze_active = self._warmstart_actor_freeze_active()
             scenario_kwargs = self.env_args.get("scenario_kwargs", {})
             n_survivors = int(scenario_kwargs.get("n_survivors", 0))
             n_decoys = int(scenario_kwargs.get("n_decoys", 0))
@@ -807,6 +845,16 @@ def _build_diagnostic_happo_runner_class():
             for group_index in group_order:
                 members = list(update_groups[group_index])
                 representative = members[0]
+                if actor_freeze_active:
+                    annotated_info = self._skipped_actor_train_info(
+                        group_index,
+                        representative,
+                        len(members),
+                    )
+                    for agent_id in members:
+                        actor_train_infos[agent_id] = dict(annotated_info)
+                    continue
+
                 old_actions_logprob_by_agent = {
                     agent_id: self._evaluate_agent_actions(agent_id)
                     for agent_id in members
