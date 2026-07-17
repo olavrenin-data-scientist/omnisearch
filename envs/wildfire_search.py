@@ -2341,17 +2341,7 @@ class WildfireSearchScenario(BaseScenario):
             self._generate_terrain(b)
             self._sample_active_survivors(b)
             self._sample_active_decoys(b)
-            ScenarioUtils.spawn_entities_randomly(
-                entities=self._active_survivor_entities(b) + self._active_decoy_entities(b) + self.world.agents,
-                world=self.world,
-                env_index=b,
-                min_dist_between_entities=(
-                    2 * self.agent_radius
-                    + float(self.spawn_padding_by_env[b].item())
-                ),
-                x_bounds=(-self.x_semidim, self.x_semidim),
-                y_bounds=(-self.y_semidim, self.y_semidim),
-            )
+            self._place_land_entities_uniformly_on_valid_cells(b)
             self._place_drones_jointly_uniform_interior(b)
             self._place_diagnostic_survivors_near_reference_agents(b)
             self._move_inactive_survivors_outside_map(b)
@@ -2978,9 +2968,8 @@ class WildfireSearchScenario(BaseScenario):
         )
 
     def _generate_terrain(self, env_index: int) -> None:
-        """Load real terrain and place land entities on feasible cells."""
+        """Load real terrain and refresh terrain-derived mobility layers."""
         self._load_real_terrain(env_index)
-        self._place_land_entities_uniformly_on_valid_cells(env_index)
         self._refresh_mobility_layers(env_index)
 
     def _load_real_terrain(self, env_index: int) -> None:

@@ -219,6 +219,41 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertEqual(scenario.r_found_survivor, 10.0)
 
+    def test_ugv_spawns_are_traversable_under_runtime_lookup(self):
+        env = vmas.make_env(
+            scenario=WildfireSearchScenario(),
+            num_envs=1,
+            device="cpu",
+            continuous_actions=True,
+            seed=1022,
+            n_drones=3,
+            n_ground=2,
+            n_survivors=5,
+            disable_fire=True,
+            fire_grid_size=128,
+            max_steps=10,
+            terrain_source="real",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        env.reset()
+        scenario = env.scenario
+        ground_pos = torch.stack(
+            [agent.state.pos for agent in scenario.world.agents[scenario.n_drones:]],
+            dim=1,
+        )
+
+        traversable = scenario._grid_values_at_positions(
+            scenario.traversable_grid.float(),
+            ground_pos,
+        )
+        speed = scenario._grid_values_at_positions(
+            scenario.speed_multiplier_grid,
+            ground_pos,
+        )
+
+        self.assertTrue(bool((traversable > 0.5).all().item()))
+        self.assertTrue(bool((speed > 0.0).all().item()))
+
     def test_sticky_assignment_recomputes_when_targets_appear_same_step(self):
         env = self._diagnostic_env(
             n_ground=2,
