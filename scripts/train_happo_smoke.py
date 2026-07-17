@@ -302,6 +302,8 @@ def build_args(
     survivor_assignment_obs: bool | None = None,
     ugv_diagnostic_target_distance_min_m: float | None = None,
     ugv_diagnostic_target_distance_max_m: float | None = None,
+    found_survivor_reward: float | None = None,
+    ground_confirm_reward: float | None = None,
     uav_no_global_coverage_obs: bool = False,
     uav_coverage_only: bool = False,
     uav_found_survivor_reward: float | None = None,
@@ -1604,6 +1606,10 @@ def build_args(
         algo_args["algo"]["share_param_group_names"] = share_param_group_names
     if ugv_ground_shaping_reward is not None:
         scenario_kwargs["r_ground_shaping"] = float(ugv_ground_shaping_reward)
+    if found_survivor_reward is not None:
+        scenario_kwargs["r_found_survivor"] = float(found_survivor_reward)
+    if ground_confirm_reward is not None:
+        scenario_kwargs["r_ground_confirm"] = float(ground_confirm_reward)
     if ugv_pending_penalty is not None:
         scenario_kwargs["r_pending_penalty"] = float(ugv_pending_penalty)
     obs_dim_n_agents = int(scenario_kwargs.get("obs_schema_n_drones", scenario_kwargs["n_drones"])) + int(
@@ -2104,8 +2110,13 @@ def main():
                         "leave only coverage rewards and coverage-quality penalties.")
     p.add_argument("--uav-no-global-coverage-obs", action="store_true",
                    help="In UAV diagnostic mode, keep local coverage observation but disable the default global coverage map.")
+    p.add_argument("--found-survivor-reward", type=float, default=None,
+                   help="Override r_found_survivor, the team reward paid when a survivor is confirmed/found.")
+    p.add_argument("--ground-confirm-reward", type=float, default=None,
+                   help="Override r_ground_confirm, the individual UGV reward for confirming a survivor.")
     p.add_argument("--uav-found-survivor-reward", type=float, default=None,
-                   help="Override r_found_survivor in UAV diagnostic mode.")
+                   help="Legacy alias for overriding r_found_survivor in UAV diagnostic mode. "
+                        "Prefer --found-survivor-reward for joint or UGV diagnostics.")
     p.add_argument("--uav-all-survivors-reward", type=float, default=None,
                    help="One-time team reward when the final survivor is found in UAV diagnostic mode. "
                         "Omit for 0; pass a positive value to add an explicit mission-completion bonus.")
@@ -2466,6 +2477,12 @@ def main():
         p.error("--ugv-pending-penalty must be zero or negative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
         p.error("--uav-coverage-reward must be nonnegative")
+    if args.found_survivor_reward is not None and args.found_survivor_reward < 0.0:
+        p.error("--found-survivor-reward must be nonnegative")
+    if args.ground_confirm_reward is not None and args.ground_confirm_reward < 0.0:
+        p.error("--ground-confirm-reward must be nonnegative")
+    if args.found_survivor_reward is not None and args.uav_found_survivor_reward is not None:
+        p.error("Use either --found-survivor-reward or --uav-found-survivor-reward, not both")
     if args.uav_found_survivor_reward is not None and args.uav_found_survivor_reward < 0.0:
         p.error("--uav-found-survivor-reward must be nonnegative")
     if args.uav_all_survivors_reward is not None and args.uav_all_survivors_reward < 0.0:
@@ -3117,6 +3134,8 @@ def main():
     print(f" ugv_route_progress_shortfall_penalty: {args.ugv_route_progress_shortfall_penalty}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
+    print(f" found_survivor_reward: {args.found_survivor_reward}")
+    print(f" ground_confirm_reward: {args.ground_confirm_reward}")
     print(f" team_scout_reward: {args.team_scout_reward}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_coverage_normalization: {args.uav_coverage_normalization}")
@@ -3292,6 +3311,8 @@ def main():
         survivor_assignment_obs = args.survivor_assignment_obs,
         ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
         ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
+        found_survivor_reward = args.found_survivor_reward,
+        ground_confirm_reward = args.ground_confirm_reward,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
         uav_coverage_only = args.uav_coverage_only,
         uav_found_survivor_reward = args.uav_found_survivor_reward,
