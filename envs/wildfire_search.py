@@ -4907,10 +4907,15 @@ class WildfireSearchScenario(BaseScenario):
             & ~self.scouted_survivors
             & ~self.found_survivors
         )
+        # A UAV scout and a UGV confirmation can happen during the same simulator
+        # step. Use the post-scout state here so a UGV already inside the
+        # confirmation radius is not left in a one-step limbo where the target is
+        # assigned/reward-gated as scouted but cannot yet be confirmed.
+        scouted_for_ground_confirmation = self.scouted_survivors | newly_scouted
         eligible_ground_confirmations = (
             within_confirm[:, self.n_drones:, :]
             & active_survivors.unsqueeze(1)
-            & self.scouted_survivors.unsqueeze(1)
+            & scouted_for_ground_confirmation.unsqueeze(1)
         )
         if self.confirm_requires_los:
             # Confirmation also requires an unobstructed terrain sight line, not

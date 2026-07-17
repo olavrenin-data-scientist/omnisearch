@@ -58,6 +58,31 @@ class SurvivorCommunicationTests(unittest.TestCase):
             **params,
         )
 
+    def test_ugv_confirms_survivor_scouted_in_same_step(self):
+        env = self._env(n_survivors=1, disable_fire=True)
+        scenario = env.scenario
+
+        survivor_pos = scenario._survivors[0].state.pos.clone()
+        scenario.world.agents[0].state.pos[:] = survivor_pos
+        scenario.world.agents[1].state.pos[:] = survivor_pos
+        scenario._pre_step_ground_pos = scenario.world.agents[1].state.pos.unsqueeze(1).clone()
+        scenario.scouted_survivors.zero_()
+        scenario.found_survivors.zero_()
+
+        def forced_drone_detection(drone_dists, drone_pos, surv_pos):
+            return torch.ones(
+                drone_dists.shape,
+                dtype=torch.bool,
+                device=drone_dists.device,
+            )
+
+        scenario._drone_survivor_detections = forced_drone_detection
+        scenario._compute_step_rewards()
+
+        self.assertTrue(bool(scenario.scouted_survivors[0, 0].item()))
+        self.assertTrue(bool(scenario.found_survivors[0, 0].item()))
+        self.assertTrue(bool(scenario.step_ground_confirmations[0, 0, 0].item()))
+
     def _reference_local_astar_route(self, scenario, env_index, pos, target_pos):
         patch_size = scenario.ugv_planner_patch_size
         radius = patch_size // 2
