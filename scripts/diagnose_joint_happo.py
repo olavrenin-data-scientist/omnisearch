@@ -933,6 +933,23 @@ def _format_value(value: float, digits: int = 3) -> str:
     return f"{value:.{digits}f}" if math.isfinite(value) else "nan"
 
 
+def _format_duration(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not math.isfinite(seconds) or seconds < 0.0:
+        return "unknown"
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    total_seconds = int(round(seconds))
+    minutes, sec = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {sec:02d}s"
+
+
 def _print_mean_std(label: str, mean: float, std: float, *, digits: int = 3) -> None:
     print(f"{label:<34} mean={_format_value(mean, digits)} std={_format_value(std, digits)}")
 
@@ -1406,12 +1423,32 @@ def main() -> None:
     )
     print(f"steps: {args.steps}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
+    total_rollout_steps = int(args.steps) * len(args.seeds)
+    print(
+        f"planned rollout: {len(args.seeds)} seeds x {args.steps} steps = "
+        f"{total_rollout_steps} env steps; ETA after first seed"
+    )
     print("-" * 88)
 
-    rows = [
-        run_rollout(policy, scenario_kwargs, seed, time_bins=args.time_bins)
-        for seed in args.seeds
-    ]
+    rows = []
+    rollout_started_at = time.perf_counter()
+    for seed_index, seed in enumerate(args.seeds, start=1):
+        seed_started_at = time.perf_counter()
+        rows.append(run_rollout(policy, scenario_kwargs, seed, time_bins=args.time_bins))
+        elapsed_rollout_s = time.perf_counter() - rollout_started_at
+        seed_elapsed_s = time.perf_counter() - seed_started_at
+        completed_steps = int(args.steps) * seed_index
+        rollout_steps_per_second = completed_steps / max(elapsed_rollout_s, 1e-9)
+        remaining_steps = max(total_rollout_steps - completed_steps, 0)
+        eta_s = remaining_steps / rollout_steps_per_second if rollout_steps_per_second > 0.0 else float("nan")
+        print(
+            f"progress: {seed_index}/{len(args.seeds)} seeds "
+            f"({completed_steps}/{total_rollout_steps} env steps), "
+            f"{rollout_steps_per_second:.1f} env steps/s, "
+            f"last seed {_format_duration(seed_elapsed_s)}, "
+            f"ETA {_format_duration(eta_s)}",
+            flush=True,
+        )
     summary = summarize(rows, bins=args.time_bins)
     if args.diagnostic_level == "fast":
         _print_fast_summary(summary)
