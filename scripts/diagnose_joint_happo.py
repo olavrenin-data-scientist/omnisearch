@@ -968,9 +968,9 @@ def _print_threshold_times(title: str, entries: dict[str, dict[str, float]]) -> 
         )
 
 
-def _print_fast_summary(summary: dict[str, Any]) -> None:
+def _print_core_joint_metrics(summary: dict[str, Any]) -> None:
     episodes = int(summary.get("episodes", 0.0))
-    print("FAST JOINT METRICS")
+    print("CORE JOINT METRICS")
     print("-" * 88)
     print(
         "success".ljust(34)
@@ -988,15 +988,20 @@ def _print_fast_summary(summary: dict[str, Any]) -> None:
         summary.get("std_confirm_recall", float("nan")),
     )
     _print_mean_std(
-        "final coverage",
-        summary.get("mean_final_coverage_fraction", float("nan")),
-        summary.get("std_final_coverage_fraction", float("nan")),
-    )
-    _print_mean_std(
         "final confidence",
         summary.get("mean_final_confidence", float("nan")),
         summary.get("std_final_confidence", float("nan")),
     )
+    _print_mean_std(
+        "final coverage",
+        summary.get("mean_final_coverage_fraction", float("nan")),
+        summary.get("std_final_coverage_fraction", float("nan")),
+    )
+
+
+def _print_fast_summary(summary: dict[str, Any]) -> None:
+    print("FAST JOINT DETAILS")
+    print("-" * 88)
     _print_mean_std(
         "UAV path length (m)",
         summary.get("mean_uav_path_length_m", float("nan")),
@@ -1440,9 +1445,7 @@ def main() -> None:
             print(f"ETA {_format_duration(eta_s)}", flush=True)
         print(f"progress: {seed_index}/{len(args.seeds)} seeds", flush=True)
     summary = summarize(rows, bins=args.time_bins)
-    if args.diagnostic_level == "fast":
-        _print_fast_summary(summary)
-    else:
+    if args.diagnostic_level != "fast":
         for row in rows:
             print(
                 f"seed {row['seed']:>4}: "
@@ -1488,6 +1491,9 @@ def main() -> None:
         print("fast diagnostic level skips plot generation; ignoring --plots-output")
     elif args.plots_output:
         _plot(rows, summary, Path(args.plots_output))
+    _print_core_joint_metrics(summary)
+    if args.diagnostic_level == "fast":
+        _print_fast_summary(summary)
     elapsed_s = time.perf_counter() - started_at
     print(f"Diagnostics complete in {elapsed_s:.1f}s")
 
