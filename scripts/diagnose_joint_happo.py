@@ -64,6 +64,8 @@ UGV_REWARD_COMPONENTS = (
     ("ugv_travel", "cost/ugv_travel"),
 )
 
+RECALL_TIME_THRESHOLDS = (0.50, 0.80, 0.90, 1.00)
+
 
 def _checkpoint_path(path: str | None) -> Path:
     return Path(path) if path else find_latest_happo_checkpoint(ROOT / "results" / "harl_runs")
@@ -253,6 +255,63 @@ def _mean(values: list[float]) -> float:
     return float(np.mean(finite)) if finite else float("nan")
 
 
+def _std(values: list[float]) -> float:
+    finite = [float(v) for v in values if math.isfinite(float(v))]
+    return float(np.std(finite)) if finite else float("nan")
+
+
+def _mean_std(values: list[float]) -> dict[str, float]:
+    finite = [float(v) for v in values if math.isfinite(float(v))]
+    return {
+        "mean": float(np.mean(finite)) if finite else float("nan"),
+        "std": float(np.std(finite)) if finite else float("nan"),
+        "count": float(len(finite)),
+    }
+
+
+def _recall_threshold_time_stats(
+    rows: list[dict[str, Any]],
+    *,
+    key: str,
+    threshold: float,
+) -> dict[str, float]:
+    times_s: list[float] = []
+    for row in rows:
+        survivors = int(row.get("survivors", 0))
+        if survivors <= 0:
+            times_s.append(0.0)
+            continue
+        required = max(1, int(math.ceil(float(threshold) * survivors - 1e-9)))
+        event_steps = sorted(
+            float(step)
+            for step in row.get(key, [])
+            if step is not None and math.isfinite(float(step))
+        )
+        if len(event_steps) < required:
+            continue
+        step_seconds = max(float(row.get("step_seconds", 1.0)), 1e-9)
+        times_s.append(event_steps[required - 1] * step_seconds)
+    total = max(len(rows), 1)
+    return {
+        "threshold": float(threshold),
+        "reached_count": float(len(times_s)),
+        "reached_fraction": float(len(times_s) / total),
+        "mean_s": _mean(times_s),
+        "std_s": _std(times_s),
+    }
+
+
+def _threshold_time_summary(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, float]]:
+    return {
+        f"recall_{int(round(threshold * 100)):03d}": _recall_threshold_time_stats(
+            rows,
+            key=key,
+            threshold=threshold,
+        )
+        for threshold in RECALL_TIME_THRESHOLDS
+    }
+
+
 def _positions_m(
     agents: list[Any],
     *,
@@ -418,6 +477,9 @@ def run_rollout(
     uav_excess_overlap_values: list[float] = []
     uav_edge_values: list[float] = []
     uav_moving_no_new_values: list[float] = []
+    uav_fire_footprint_values: list[float] = []
+    ugv_fire_exposure_values: list[float] = []
+    hazard_exposure_values: list[float] = []
 
     prev_pos = _positions(scenario).clone()
     for step in range(max_steps):
@@ -447,6 +509,15 @@ def run_rollout(
         switches = _to_float(info.get("diagnostic/ugv_assignment_switches"))
         duplicate_assignment.append(duplicate)
         assignment_switches.append(switches)
+        uav_fire_footprint = _to_float(info.get("diagnostic/uav_fire_footprint_fraction"))
+        ugv_fire_exposure = _to_float(info.get("cost/ugv_fire_exposure"))
+        ugv_fire_fraction = ugv_fire_exposure / max(n_ground, 1)
+        hazard_exposure = (
+            (uav_fire_footprint * n_drones) + ugv_fire_exposure
+        ) / max(n_drones + n_ground, 1)
+        uav_fire_footprint_values.append(uav_fire_footprint)
+        ugv_fire_exposure_values.append(ugv_fire_fraction)
+        hazard_exposure_values.append(hazard_exposure)
 
         bin_row = time_series[_bin_index(step, max_steps, len(time_series))]
         bin_row["count"] += 1.0
@@ -636,6 +707,7 @@ def run_rollout(
         "first_scout_steps": first_scout_steps,
         "first_confirm_steps": first_confirm_steps,
         "episode_steps": max_steps,
+        "step_seconds": step_seconds,
         "scout_to_confirm_latencies_steps": latencies,
         "scout_to_confirm_latency_count": int(len(latencies)),
         "avg_scout_to_confirm_latency_steps": _mean(latencies),
@@ -655,6 +727,15 @@ def run_rollout(
             if n_ground > 0 else 0.0
         ),
         "ugv_speed_mps": ugv_speed_mps,
+        "ugv_travel_cost_per_step": _mean(ugv_reward_terms["ugv_travel"]),
+        "ugv_travel_cost_per_ground_step": (
+            _mean([value / max(n_ground, 1) for value in ugv_reward_terms["ugv_travel"]])
+            if n_ground > 0 else 0.0
+        ),
+        "ugv_travel_cost_total": float(np.sum(ugv_reward_terms["ugv_travel"])),
+        "uav_fire_footprint_fraction": _mean(uav_fire_footprint_values),
+        "ugv_fire_exposure_fraction": _mean(ugv_fire_exposure_values),
+        "hazard_exposure": _mean(hazard_exposure_values),
         "ugv_final_pending_distance_m": (
             float(np.mean(final_pending_distances_m)) if final_pending_distances_m else 0.0
         ),
@@ -713,19 +794,66 @@ def _mean_path_by_agent(rows: list[dict[str, Any]], key: str) -> list[float]:
 
 
 def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
+    success_count = int(sum(bool(row["full_confirm_success"]) for row in rows))
+    latency_values_s: list[float] = []
+    for row in rows:
+        step_seconds = max(float(row.get("step_seconds", 1.0)), 1e-9)
+        latency_values_s.extend(
+            float(value) * step_seconds
+            for value in row.get("scout_to_confirm_latencies_steps", [])
+            if math.isfinite(float(value))
+        )
+    ugv_travel_cost_per_ground_step = [
+        row.get("ugv_travel_cost_per_ground_step", row.get("ugv_travel_cost_per_step", float("nan")))
+        for row in rows
+    ]
+    hazard_exposure = [row.get("hazard_exposure", float("nan")) for row in rows]
     return {
         "episodes": float(len(rows)),
         "mean_scout_recall": _mean([row["scout_recall"] for row in rows]),
+        "std_scout_recall": _std([row["scout_recall"] for row in rows]),
         "mean_confirm_recall": _mean([row["confirm_recall"] for row in rows]),
+        "std_confirm_recall": _std([row["confirm_recall"] for row in rows]),
+        "full_confirm_success_count": float(success_count),
         "full_confirm_success_rate": _mean([float(row["full_confirm_success"]) for row in rows]),
+        "full_confirm_success_percent": (
+            100.0 * success_count / max(len(rows), 1)
+        ),
         "mean_final_coverage_fraction": _mean([row["final_coverage_fraction"] for row in rows]),
+        "std_final_coverage_fraction": _std([row["final_coverage_fraction"] for row in rows]),
         "mean_final_confidence": _mean([row["final_confidence_mean"] for row in rows]),
+        "std_final_confidence": _std([row["final_confidence_mean"] for row in rows]),
         "mean_uav_path_length_m": _mean([row["uav_path_length_m"] for row in rows]),
+        "std_uav_path_length_m": _std([row["uav_path_length_m"] for row in rows]),
         "mean_uav_movement_m_per_drone_step": _mean([
             row["uav_movement_m_per_drone_step"] for row in rows
         ]),
         "mean_ugv_path_length_m": _mean([row["ugv_path_length_m"] for row in rows]),
+        "std_ugv_path_length_m": _std([row["ugv_path_length_m"] for row in rows]),
         "mean_ugv_speed_mps": _mean([row["ugv_speed_mps"] for row in rows]),
+        "std_ugv_speed_mps": _std([row["ugv_speed_mps"] for row in rows]),
+        "mean_ugv_travel_cost_per_ground_step": _mean(ugv_travel_cost_per_ground_step),
+        "std_ugv_travel_cost_per_ground_step": _std(ugv_travel_cost_per_ground_step),
+        "mean_ugv_travel_cost_total": _mean([
+            row.get("ugv_travel_cost_total", float("nan")) for row in rows
+        ]),
+        "std_ugv_travel_cost_total": _std([
+            row.get("ugv_travel_cost_total", float("nan")) for row in rows
+        ]),
+        "mean_uav_fire_footprint_fraction": _mean([
+            row.get("uav_fire_footprint_fraction", float("nan")) for row in rows
+        ]),
+        "std_uav_fire_footprint_fraction": _std([
+            row.get("uav_fire_footprint_fraction", float("nan")) for row in rows
+        ]),
+        "mean_ugv_fire_exposure_fraction": _mean([
+            row.get("ugv_fire_exposure_fraction", float("nan")) for row in rows
+        ]),
+        "std_ugv_fire_exposure_fraction": _std([
+            row.get("ugv_fire_exposure_fraction", float("nan")) for row in rows
+        ]),
+        "mean_hazard_exposure": _mean(hazard_exposure),
+        "std_hazard_exposure": _std(hazard_exposure),
         "mean_ugv_final_pending_distance_m": _mean([
             row["ugv_final_pending_distance_m"] for row in rows
         ]),
@@ -742,12 +870,16 @@ def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
         "mean_scout_to_confirm_latency_count": _mean([
             float(row["scout_to_confirm_latency_count"]) for row in rows
         ]),
+        "total_scout_to_confirm_latency_count": float(
+            sum(int(row["scout_to_confirm_latency_count"]) for row in rows)
+        ),
         "mean_scout_to_confirm_latency_steps": _mean([
             row["avg_scout_to_confirm_latency_steps"] for row in rows
         ]),
         "mean_scout_to_confirm_latency_s": _mean([
             row["avg_scout_to_confirm_latency_s"] for row in rows
         ]),
+        "std_scout_to_confirm_latency_s": _std(latency_values_s),
         "mean_pending_target_time_fraction": _mean([
             row["pending_target_time_fraction"] for row in rows
         ]),
@@ -777,7 +909,107 @@ def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
             key="first_confirm_steps",
             bins=bins,
         ),
+        "time_to_scout_s": _threshold_time_summary(rows, "first_scout_steps"),
+        "time_to_confirm_s": _threshold_time_summary(rows, "first_confirm_steps"),
+        "fast_metrics": {
+            "scout_recall": _mean_std([row["scout_recall"] for row in rows]),
+            "confirm_recall": _mean_std([row["confirm_recall"] for row in rows]),
+            "coverage": _mean_std([row["final_coverage_fraction"] for row in rows]),
+            "confidence": _mean_std([row["final_confidence_mean"] for row in rows]),
+            "uav_path_length_m": _mean_std([row["uav_path_length_m"] for row in rows]),
+            "ugv_travel_cost_per_ground_step": _mean_std(ugv_travel_cost_per_ground_step),
+            "hazard_exposure": _mean_std(hazard_exposure),
+            "scout_to_confirm_latency_s": _mean_std(latency_values_s),
+        },
     }
+
+
+def _format_value(value: float, digits: int = 3) -> str:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "nan"
+    return f"{value:.{digits}f}" if math.isfinite(value) else "nan"
+
+
+def _print_mean_std(label: str, mean: float, std: float, *, digits: int = 3) -> None:
+    print(f"{label:<34} mean={_format_value(mean, digits)} std={_format_value(std, digits)}")
+
+
+def _print_threshold_times(title: str, entries: dict[str, dict[str, float]]) -> None:
+    print(title)
+    for key in ("recall_050", "recall_080", "recall_090", "recall_100"):
+        row = entries.get(key, {})
+        threshold = 100.0 * float(row.get("threshold", 0.0))
+        print(
+            f"  >= {threshold:>5.1f}% recall: "
+            f"reached={_format_value(row.get('reached_fraction', float('nan')), 3)} "
+            f"({int(row.get('reached_count', 0.0))} episodes), "
+            f"time={_format_value(row.get('mean_s', float('nan')), 1)}s "
+            f"+/- {_format_value(row.get('std_s', float('nan')), 1)}s"
+        )
+
+
+def _print_fast_summary(summary: dict[str, Any]) -> None:
+    episodes = int(summary.get("episodes", 0.0))
+    print("FAST JOINT METRICS")
+    print("-" * 88)
+    print(
+        "success".ljust(34)
+        + f"{int(summary.get('full_confirm_success_count', 0.0))}/{episodes} "
+        + f"({_format_value(summary.get('full_confirm_success_percent', float('nan')), 1)}%)"
+    )
+    _print_mean_std(
+        "scout recall",
+        summary.get("mean_scout_recall", float("nan")),
+        summary.get("std_scout_recall", float("nan")),
+    )
+    _print_mean_std(
+        "confirm recall",
+        summary.get("mean_confirm_recall", float("nan")),
+        summary.get("std_confirm_recall", float("nan")),
+    )
+    _print_mean_std(
+        "final coverage",
+        summary.get("mean_final_coverage_fraction", float("nan")),
+        summary.get("std_final_coverage_fraction", float("nan")),
+    )
+    _print_mean_std(
+        "final confidence",
+        summary.get("mean_final_confidence", float("nan")),
+        summary.get("std_final_confidence", float("nan")),
+    )
+    _print_mean_std(
+        "UAV path length (m)",
+        summary.get("mean_uav_path_length_m", float("nan")),
+        summary.get("std_uav_path_length_m", float("nan")),
+        digits=1,
+    )
+    _print_mean_std(
+        "UGV travel cost / UGV-step",
+        summary.get("mean_ugv_travel_cost_per_ground_step", float("nan")),
+        summary.get("std_ugv_travel_cost_per_ground_step", float("nan")),
+        digits=4,
+    )
+    _print_mean_std(
+        "hazard exposure",
+        summary.get("mean_hazard_exposure", float("nan")),
+        summary.get("std_hazard_exposure", float("nan")),
+    )
+    _print_mean_std(
+        "scout-to-confirm latency (s)",
+        summary.get("mean_scout_to_confirm_latency_s", float("nan")),
+        summary.get("std_scout_to_confirm_latency_s", float("nan")),
+        digits=1,
+    )
+    print(
+        "scout-to-confirm latency count".ljust(34)
+        + f"{int(summary.get('total_scout_to_confirm_latency_count', 0.0))} events "
+        + f"(mean {summary.get('mean_scout_to_confirm_latency_count', float('nan')):.2f}/episode)"
+    )
+    print("-" * 88)
+    _print_threshold_times("time to scout", summary.get("time_to_scout_s", {}))
+    _print_threshold_times("time to confirmation", summary.get("time_to_confirm_s", {}))
 
 
 def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> None:
@@ -1046,6 +1278,12 @@ def main() -> None:
     )
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--time-bins", type=int, default=5)
+    parser.add_argument(
+        "--diagnostic-level",
+        choices=("full", "fast"),
+        default="full",
+        help="fast prints compact metrics and skips plots; full keeps the detailed plot output.",
+    )
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--plots-output", default=None)
     args = parser.parse_args()
@@ -1173,35 +1411,38 @@ def main() -> None:
         for seed in args.seeds
     ]
     summary = summarize(rows, bins=args.time_bins)
-    for row in rows:
+    if args.diagnostic_level == "fast":
+        _print_fast_summary(summary)
+    else:
+        for row in rows:
+            print(
+                f"seed {row['seed']:>4}: "
+                f"scout={row['scouted']}/{row['survivors']} "
+                f"confirm={row['confirmed']}/{row['survivors']} "
+                f"success={int(row['full_confirm_success'])} "
+                f"cov={row['final_coverage_fraction']:.3f} "
+                f"conf={row['final_confidence_mean']:.3f} "
+                f"lat={row['avg_scout_to_confirm_latency_steps']:.1f} "
+                f"uav_move={row['uav_movement_m_per_drone_step']:.2f}m/step "
+                f"uav_path={row['uav_path_length_m']:.1f}m "
+                f"ugv_path={row['ugv_path_length_m']:.1f}m "
+                f"ugv_speed={row['ugv_speed_mps']:.2f}m/s "
+                f"ugv_final={row['ugv_final_pending_distance_m']:.1f}m "
+                f"pending={row['pending_target_time_fraction']:.2f}"
+            )
+        print("-" * 88)
         print(
-            f"seed {row['seed']:>4}: "
-            f"scout={row['scouted']}/{row['survivors']} "
-            f"confirm={row['confirmed']}/{row['survivors']} "
-            f"success={int(row['full_confirm_success'])} "
-            f"cov={row['final_coverage_fraction']:.3f} "
-            f"conf={row['final_confidence_mean']:.3f} "
-            f"lat={row['avg_scout_to_confirm_latency_steps']:.1f} "
-            f"uav_move={row['uav_movement_m_per_drone_step']:.2f}m/step "
-            f"uav_path={row['uav_path_length_m']:.1f}m "
-            f"ugv_path={row['ugv_path_length_m']:.1f}m "
-            f"ugv_speed={row['ugv_speed_mps']:.2f}m/s "
-            f"ugv_final={row['ugv_final_pending_distance_m']:.1f}m "
-            f"pending={row['pending_target_time_fraction']:.2f}"
+            "means: "
+            f"scout_recall={summary['mean_scout_recall']:.3f} "
+            f"confirm_recall={summary['mean_confirm_recall']:.3f} "
+            f"success={summary['full_confirm_success_rate']:.3f} "
+            f"coverage={summary['mean_final_coverage_fraction']:.3f} "
+            f"confidence={summary['mean_final_confidence']:.3f} "
+            f"uav_move={summary['mean_uav_movement_m_per_drone_step']:.2f}m/step "
+            f"ugv_speed={summary['mean_ugv_speed_mps']:.2f}m/s "
+            f"ugv_final={summary['mean_ugv_final_pending_distance_m']:.1f}m "
+            f"latency={summary['mean_scout_to_confirm_latency_steps']:.1f} steps"
         )
-    print("-" * 88)
-    print(
-        "means: "
-        f"scout_recall={summary['mean_scout_recall']:.3f} "
-        f"confirm_recall={summary['mean_confirm_recall']:.3f} "
-        f"success={summary['full_confirm_success_rate']:.3f} "
-        f"coverage={summary['mean_final_coverage_fraction']:.3f} "
-        f"confidence={summary['mean_final_confidence']:.3f} "
-        f"uav_move={summary['mean_uav_movement_m_per_drone_step']:.2f}m/step "
-        f"ugv_speed={summary['mean_ugv_speed_mps']:.2f}m/s "
-        f"ugv_final={summary['mean_ugv_final_pending_distance_m']:.1f}m "
-        f"latency={summary['mean_scout_to_confirm_latency_steps']:.1f} steps"
-    )
 
     payload = {
         "checkpoint": str(checkpoint_dir),
@@ -1214,7 +1455,9 @@ def main() -> None:
         output = Path(args.json_output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    if args.plots_output:
+    if args.plots_output and args.diagnostic_level == "fast":
+        print("fast diagnostic level skips plot generation; ignoring --plots-output")
+    elif args.plots_output:
         _plot(rows, summary, Path(args.plots_output))
 
 

@@ -6,6 +6,7 @@ from scripts.diagnose_joint_happo import (
     _event_time_bins,
     _label_counts,
     _mean_path_by_agent,
+    _recall_threshold_time_stats,
 )
 
 
@@ -51,3 +52,25 @@ def test_mean_path_by_agent_handles_variable_agent_counts() -> None:
     ]
 
     assert _mean_path_by_agent(rows, "paths") == pytest.approx([20.0, 20.0])
+
+
+def test_recall_threshold_time_stats_reports_seconds_and_reached_fraction() -> None:
+    rows = [
+        {
+            "survivors": 5,
+            "step_seconds": 2.0,
+            "first_confirm_steps": [5, 10, 15, 20, None],
+        },
+        {
+            "survivors": 5,
+            "step_seconds": 2.0,
+            "first_confirm_steps": [3, 4, None, None, None],
+        },
+    ]
+
+    stats = _recall_threshold_time_stats(rows, key="first_confirm_steps", threshold=0.80)
+
+    assert stats["reached_count"] == pytest.approx(1.0)
+    assert stats["reached_fraction"] == pytest.approx(0.5)
+    assert stats["mean_s"] == pytest.approx(40.0)
+    assert stats["std_s"] == pytest.approx(0.0)
