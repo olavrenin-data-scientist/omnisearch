@@ -20,7 +20,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.happo_checkpoint import load_training_manifest
-from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+from agents.happo_policy import (
+    HappoPolicy,
+    actor_file_indices_for_scenario,
+    find_latest_happo_checkpoint,
+)
 from envs.wildfire_search import WildfireSearchScenario
 
 TIME_BIN_COUNT = 5
@@ -67,11 +71,40 @@ def _active_survivor_mask_for_env(scenario: WildfireSearchScenario, env_index: i
     return active[env_index].detach().cpu().numpy().astype(bool)
 
 
+def _schema_count(
+    scenario_kwargs: dict[str, Any],
+    schema_key: str,
+    physical_key: str,
+    fallback: int,
+) -> int:
+    return max(int(scenario_kwargs.get(schema_key, scenario_kwargs.get(physical_key, fallback))), 0)
+
+
 def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_training_manifest(checkpoint_dir)
     scenario_kwargs: dict[str, Any] = {}
     if manifest is not None:
         scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
+    has_manifest = manifest is not None
+    checkpoint_n_drones = max(int(scenario_kwargs.get("n_drones", 1 if not has_manifest else 0)), 0)
+    checkpoint_schema_n_drones = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_drones",
+        "n_drones",
+        checkpoint_n_drones if checkpoint_n_drones > 0 else 1,
+    )
+    checkpoint_schema_n_ground = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_ground",
+        "n_ground",
+        0,
+    )
+    checkpoint_schema_n_survivors = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_survivors",
+        "n_survivors",
+        5,
+    )
 
     for key in (
         "known_survivor_spawn_distance_m",
@@ -83,15 +116,16 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
 
     scenario_kwargs.update({
         "max_steps": args.steps,
-        "n_ground": int(
-            args.n_ugvs
-            if getattr(args, "n_ugvs", None) is not None
-            else scenario_kwargs.get("n_ground", 0)
+        "n_drones": int(
+            args.n_drones
+            if getattr(args, "n_drones", None) is not None
+            else checkpoint_n_drones
         ),
+        "n_ground": int(0 if getattr(args, "n_ugvs", None) is None else args.n_ugvs),
         "n_survivors": int(
             args.n_survivors
             if getattr(args, "n_survivors", None) is not None
-            else scenario_kwargs.get("n_survivors", 5)
+            else scenario_kwargs.get("n_survivors", checkpoint_schema_n_survivors)
         ),
         "known_survivors_at_reset": False,
         "drone_can_confirm": True,
@@ -103,6 +137,21 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "uav_confidence_diagnostics": True,
         "uav_cleanup_target_diagnostics": False,
     })
+    scenario_kwargs["obs_schema_n_drones"] = int(
+        args.n_drones
+        if getattr(args, "n_drones", None) is not None
+        else checkpoint_schema_n_drones
+    )
+    scenario_kwargs["obs_schema_n_ground"] = int(
+        args.n_ugvs
+        if getattr(args, "n_ugvs", None) is not None
+        else checkpoint_schema_n_ground
+    )
+    scenario_kwargs["obs_schema_n_survivors"] = int(
+        args.n_survivors
+        if getattr(args, "n_survivors", None) is not None
+        else checkpoint_schema_n_survivors
+    )
     scenario_kwargs.setdefault("disable_fire", True)
     fire_override = getattr(args, "enable_fire", None)
     if fire_override is not None:
@@ -112,34 +161,12 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     joint_observation_schema = bool(
         getattr(args, "joint_schema_uav_diagnostic", False)
         or getattr(args, "joint_observation_schema", False)
+        or int(scenario_kwargs.get("obs_schema_n_ground", 0)) > 0
     )
-    if args.n_drones is not None:
-        scenario_kwargs["n_drones"] = int(args.n_drones)
-    elif joint_observation_schema:
-        scenario_kwargs.setdefault("n_drones", 3)
-    else:
-        scenario_kwargs.setdefault("n_drones", 1)
     if joint_observation_schema:
-        scenario_kwargs.update({
-            "obs_schema_n_drones": int(
-                args.n_drones
-                if getattr(args, "n_drones", None) is not None
-                else scenario_kwargs.get("obs_schema_n_drones", 3)
-            ),
-            "obs_schema_n_ground": int(
-                args.n_ugvs
-                if getattr(args, "n_ugvs", None) is not None
-                else scenario_kwargs.get("obs_schema_n_ground", 2)
-            ),
-            "obs_schema_n_survivors": int(
-                args.n_survivors
-                if getattr(args, "n_survivors", None) is not None
-                else scenario_kwargs.get("obs_schema_n_survivors", scenario_kwargs.get("n_survivors", 5))
-            ),
-            "ugv_planner_hint": "global_astar",
-            "ugv_assigned_target_obs_only": False,
-            "survivor_assignment_obs": True,
-        })
+        scenario_kwargs.setdefault("ugv_planner_hint", "global_astar")
+        scenario_kwargs.setdefault("ugv_assigned_target_obs_only", False)
+        scenario_kwargs.setdefault("survivor_assignment_obs", True)
 
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
@@ -2761,7 +2788,12 @@ def main() -> None:
         f"..{scenario_kwargs.get('active_decoys_max', scenario_kwargs.get('n_decoys', 0))}), "
         f"dt={scenario_kwargs.get('sim_step_seconds', 'scenario-default')}s"
     )
-    if args.joint_schema_uav_diagnostic or args.joint_observation_schema:
+    if (
+        args.joint_schema_uav_diagnostic
+        or args.joint_observation_schema
+        or int(scenario_kwargs.get("obs_schema_n_drones", 0)) != int(scenario_kwargs.get("n_drones", 0))
+        or int(scenario_kwargs.get("obs_schema_n_ground", 0)) != int(scenario_kwargs.get("n_ground", 0))
+    ):
         print(
             "joint_observation_schema: "
             f"obs_schema=({scenario_kwargs.get('obs_schema_n_drones')}, "
@@ -2796,7 +2828,18 @@ def main() -> None:
     )
     print("-" * 88)
 
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=not args.stochastic)
+    if int(scenario_kwargs.get("n_drones", 0)) < 1:
+        parser.error("diagnose_uav_happo.py needs at least one physical UAV actor in the checkpoint")
+    try:
+        actor_file_indices = actor_file_indices_for_scenario(checkpoint_dir, scenario_kwargs)
+    except ValueError as exc:
+        parser.error(str(exc))
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=not args.stochastic,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
     expected_agents = int(scenario_kwargs["n_drones"]) + int(scenario_kwargs["n_ground"])
     if len(policy.actors) != expected_agents:
         parser.error(

@@ -20,7 +20,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.happo_checkpoint import load_training_manifest
-from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+from agents.happo_policy import (
+    HappoPolicy,
+    actor_file_indices_for_scenario,
+    find_latest_happo_checkpoint,
+)
 from envs.wildfire_search import WildfireSearchScenario
 from scripts.train_happo_smoke import build_args
 
@@ -135,19 +139,21 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     scenario_kwargs.setdefault("n_drones", 3)
     scenario_kwargs.setdefault("n_ground", int(args.joint_diagnostic_ugvs))
     scenario_kwargs.setdefault("n_survivors", 5)
+    scenario_kwargs.setdefault("obs_schema_n_drones", scenario_kwargs.get("n_drones", 3))
+    scenario_kwargs.setdefault("obs_schema_n_ground", scenario_kwargs.get("n_ground", int(args.joint_diagnostic_ugvs)))
+    scenario_kwargs.setdefault("obs_schema_n_survivors", scenario_kwargs.get("n_survivors", 5))
     if args.n_drones is not None:
         if args.joint_schema_ugv_diagnostic:
             scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
         else:
             scenario_kwargs["n_drones"] = int(args.n_drones)
+            scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
     if args.n_ugvs is not None:
         scenario_kwargs["n_ground"] = int(args.n_ugvs)
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
+        scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
     if args.n_survivors is not None:
         scenario_kwargs["n_survivors"] = int(args.n_survivors)
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
+        scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
     if getattr(args, "n_decoys", None) is not None:
         scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
     scenario_kwargs.setdefault("known_survivors_at_reset", False)
@@ -1123,7 +1129,16 @@ def main() -> None:
 
     checkpoint_dir = _checkpoint_path(args.checkpoint_dir)
     scenario_kwargs = _scenario_kwargs(checkpoint_dir, args)
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=not args.stochastic)
+    try:
+        actor_file_indices = actor_file_indices_for_scenario(checkpoint_dir, scenario_kwargs)
+    except ValueError as exc:
+        parser.error(str(exc))
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=not args.stochastic,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
     expected_agents = int(scenario_kwargs.get("n_drones", 0)) + int(scenario_kwargs.get("n_ground", 0))
     if len(policy.actors) != expected_agents:
         parser.error(

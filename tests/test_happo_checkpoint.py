@@ -10,7 +10,11 @@ from agents.happo_checkpoint import (
     merge_training_scenario,
     save_training_manifest,
 )
-from agents.happo_policy import _action_transform_from_manifest, _scenario_kwargs_from_manifest
+from agents.happo_policy import (
+    _action_transform_from_manifest,
+    _scenario_kwargs_from_manifest,
+    actor_file_indices_for_scenario,
+)
 from scripts.diagnose_uav_happo import (
     _scenario_kwargs as diagnose_uav_scenario_kwargs,
     _summarize_per_drone,
@@ -1345,6 +1349,39 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["max_steps"], 123)
 
+    def test_uav_diagnostics_keeps_checkpoint_joint_schema_without_physical_ugvs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 4,
+                        "n_ground": 3,
+                        "n_survivors": 6,
+                        "obs_schema_n_drones": 4,
+                        "obs_schema_n_ground": 3,
+                        "obs_schema_n_survivors": 6,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(steps=300)
+
+            scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            actor_indices = actor_file_indices_for_scenario(models_dir, scenario)
+
+        self.assertEqual(scenario["n_drones"], 4)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["obs_schema_n_drones"], 4)
+        self.assertEqual(scenario["obs_schema_n_ground"], 3)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 6)
+        self.assertEqual(actor_indices, [0, 1, 2, 3])
+
     def test_uav_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
@@ -1530,7 +1567,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertTrue(no_fire_scenario["disable_fire"])
         self.assertFalse(fire_scenario["disable_fire"])
 
-    def test_ugv_known_diagnostics_reset_stale_variable_survivor_range(self):
+    def test_ugv_known_diagnostics_preserve_checkpoint_survivor_slots(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
             models_dir = run_dir / "models"
@@ -1559,9 +1596,46 @@ class HappoCheckpointTests(unittest.TestCase):
 
             scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
 
-        self.assertEqual(scenario["n_survivors"], 1)
-        self.assertEqual(scenario["active_survivors_min"], 1)
-        self.assertEqual(scenario["active_survivors_max"], 1)
+        self.assertEqual(scenario["n_survivors"], 8)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 8)
+        self.assertEqual(scenario["active_survivors_min"], 3)
+        self.assertEqual(scenario["active_survivors_max"], 8)
+
+    def test_ugv_diagnostics_keep_checkpoint_joint_schema_without_physical_uavs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 4,
+                        "n_ground": 3,
+                        "n_survivors": 6,
+                        "obs_schema_n_drones": 4,
+                        "obs_schema_n_ground": 3,
+                        "obs_schema_n_survivors": 6,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=300,
+                joint_schema_ugv_diagnostic=False,
+            )
+
+            scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+            actor_indices = actor_file_indices_for_scenario(models_dir, scenario)
+
+        self.assertEqual(scenario["n_drones"], 0)
+        self.assertEqual(scenario["n_ground"], 3)
+        self.assertEqual(scenario["obs_schema_n_drones"], 4)
+        self.assertEqual(scenario["obs_schema_n_ground"], 3)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 6)
+        self.assertEqual(actor_indices, [4, 5, 6])
 
     def test_ugv_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
         with tempfile.TemporaryDirectory() as tmp:

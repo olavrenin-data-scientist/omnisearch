@@ -24,7 +24,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.happo_checkpoint import load_training_manifest
-from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+from agents.happo_policy import (
+    HappoPolicy,
+    actor_file_indices_for_scenario,
+    find_latest_happo_checkpoint,
+)
 from envs.wildfire_search import WildfireSearchScenario
 from scripts.train_happo_smoke import build_args
 
@@ -81,6 +85,10 @@ def _active_success_for_env(scenario: WildfireSearchScenario, env_index: int = 0
     return bool(np.logical_or(found, ~active).all())
 
 
+def _schema_count(scenario_kwargs: dict, schema_key: str, physical_key: str, fallback: int) -> int:
+    return max(int(scenario_kwargs.get(schema_key, scenario_kwargs.get(physical_key, fallback))), 0)
+
+
 def _joint_schema_ugv_defaults() -> dict:
     _, _algo_args, env_args = build_args(
         num_env_steps=100,
@@ -99,11 +107,31 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
     scenario_kwargs = {}
     if manifest is not None:
         scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
+    has_manifest = manifest is not None
 
     if args.joint_schema_ugv_diagnostic:
         defaults = _joint_schema_ugv_defaults()
         defaults.update(scenario_kwargs)
         scenario_kwargs = defaults
+    checkpoint_n_ground = max(int(scenario_kwargs.get("n_ground", 1 if not has_manifest else 0)), 0)
+    checkpoint_schema_n_drones = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_drones",
+        "n_drones",
+        0,
+    )
+    checkpoint_schema_n_ground = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_ground",
+        "n_ground",
+        checkpoint_n_ground if checkpoint_n_ground > 0 else 1,
+    )
+    checkpoint_schema_n_survivors = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_survivors",
+        "n_survivors",
+        1,
+    )
 
     distance_kwargs = {}
     if (
@@ -144,41 +172,51 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
 
     scenario_kwargs["max_steps"] = args.steps
     scenario_kwargs["comms_dropout"] = 0.0
+    scenario_kwargs["n_drones"] = 0
+    scenario_kwargs["n_ground"] = int(
+        args.n_ugvs
+        if args.n_ugvs is not None
+        else checkpoint_n_ground
+    )
+    scenario_kwargs["n_survivors"] = int(
+        args.n_survivors
+        if args.n_survivors is not None
+        else scenario_kwargs.get("n_survivors", checkpoint_schema_n_survivors)
+    )
+    scenario_kwargs["obs_schema_n_drones"] = int(
+        args.n_drones
+        if args.n_drones is not None
+        else checkpoint_schema_n_drones
+    )
+    scenario_kwargs["obs_schema_n_ground"] = int(
+        args.n_ugvs
+        if args.n_ugvs is not None
+        else checkpoint_schema_n_ground
+    )
+    scenario_kwargs["obs_schema_n_survivors"] = int(
+        args.n_survivors
+        if args.n_survivors is not None
+        else checkpoint_schema_n_survivors
+    )
     if args.joint_schema_ugv_diagnostic:
-        scenario_kwargs.setdefault("n_drones", 0)
-        scenario_kwargs.setdefault("n_ground", 2)
-        scenario_kwargs.setdefault("n_survivors", 5)
-        scenario_kwargs.setdefault("obs_schema_n_drones", 3)
-        scenario_kwargs.setdefault("obs_schema_n_ground", 2)
-        scenario_kwargs.setdefault("obs_schema_n_survivors", 5)
         scenario_kwargs.setdefault("known_survivors_at_reset", False)
         scenario_kwargs.setdefault("delayed_survivor_knowledge", True)
         scenario_kwargs.setdefault("ugv_target_assignment_mode", "route_cost_sticky")
         scenario_kwargs.setdefault("ugv_zero_uav_search_observations", True)
     else:
-        scenario_kwargs.update({
-            "n_drones": 0,
-            "n_ground": 1,
-            "n_survivors": 1,
-            "known_survivors_at_reset": True,
-        })
+        scenario_kwargs.setdefault("known_survivors_at_reset", True)
         scenario_kwargs.setdefault("disable_fire", True)
     fire_override = getattr(args, "enable_fire", None)
     if fire_override is not None:
         scenario_kwargs["disable_fire"] = not bool(fire_override)
     if args.n_drones is not None:
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
-        else:
-            scenario_kwargs["n_drones"] = int(args.n_drones)
+        scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
     if args.n_ugvs is not None:
         scenario_kwargs["n_ground"] = int(args.n_ugvs)
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
+        scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
     if args.n_survivors is not None:
         scenario_kwargs["n_survivors"] = int(args.n_survivors)
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
+        scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
     if args.n_decoys is not None:
         scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
         if args.joint_schema_ugv_diagnostic and int(args.n_decoys) > 0:
@@ -1840,8 +1878,14 @@ def run_rollout(
     scenario_kwargs: dict,
     seed: int,
     deterministic: bool,
+    actor_file_indices: list[int] | None = None,
 ) -> dict:
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=deterministic,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
@@ -2138,9 +2182,15 @@ def run_failure_trace(
     scenario_kwargs: dict,
     seed: int,
     deterministic: bool,
+    actor_file_indices: list[int] | None = None,
 ) -> dict:
     """Run one rollout and keep per-step diagnostics for debugging failures."""
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=deterministic,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
@@ -2335,8 +2385,17 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
     return out
 
 
-def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tuple[str, np.ndarray, float | None]]:
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=True)
+def run_direction_probe(
+    checkpoint_dir: Path,
+    scenario_kwargs: dict,
+    actor_file_indices: list[int] | None = None,
+) -> list[tuple[str, np.ndarray, float | None]]:
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=True,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
@@ -2376,10 +2435,16 @@ def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tup
 def run_angle_bucket_probe(
     checkpoint_dir: Path,
     scenario_kwargs: dict,
+    actor_file_indices: list[int] | None = None,
     radius_m: float = 80.0,
     n_angles: int = 16,
 ) -> list[dict]:
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=True)
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=True,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
@@ -2826,9 +2891,19 @@ def main() -> None:
         and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"
     ):
         parser.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
+    if int(scenario_kwargs.get("n_ground", 0)) < 1:
+        parser.error("diagnose_ugv_happo.py needs at least one physical UGV actor in the checkpoint")
+    try:
+        actor_file_indices = actor_file_indices_for_scenario(checkpoint_dir, scenario_kwargs)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"checkpoint: {checkpoint_dir}")
     print(f"steps: {args.steps}")
-    if args.joint_schema_ugv_diagnostic:
+    if (
+        args.joint_schema_ugv_diagnostic
+        or int(scenario_kwargs.get("obs_schema_n_drones", 0)) != int(scenario_kwargs.get("n_drones", 0))
+        or int(scenario_kwargs.get("obs_schema_n_ground", 0)) != int(scenario_kwargs.get("n_ground", 0))
+    ):
         print(
             "joint_schema_ugv_diagnostic: "
             f"{scenario_kwargs.get('n_drones', 0)} UAVs, "
@@ -2867,6 +2942,7 @@ def main() -> None:
             scenario_kwargs,
             seed,
             deterministic=not args.stochastic,
+            actor_file_indices=actor_file_indices,
         )
         for seed in args.seeds
     ]
@@ -2941,7 +3017,11 @@ def main() -> None:
         print(f"command {name:>9}: displacement={mean_m:.3f}m +/- {std_m:.3f}m")
 
     print("-" * 72)
-    for name, action, alignment in run_direction_probe(checkpoint_dir, scenario_kwargs):
+    for name, action, alignment in run_direction_probe(
+        checkpoint_dir,
+        scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    ):
         align_text = "none" if alignment is None else f"{alignment: .3f}"
         print(f"probe {name:>9}: action=[{action[0]: .3f}, {action[1]: .3f}] align={align_text}")
 
@@ -2950,6 +3030,7 @@ def main() -> None:
     for row in run_angle_bucket_probe(
         checkpoint_dir,
         scenario_kwargs,
+        actor_file_indices=actor_file_indices,
         radius_m=80.0,
     ):
         action = row["action"]
@@ -2969,7 +3050,13 @@ def main() -> None:
 
     if args.trace_failures or args.trace_all:
         trace_rows = [
-            run_failure_trace(checkpoint_dir, scenario_kwargs, seed, deterministic=not args.stochastic)
+            run_failure_trace(
+                checkpoint_dir,
+                scenario_kwargs,
+                seed,
+                deterministic=not args.stochastic,
+                actor_file_indices=actor_file_indices,
+            )
             for seed in args.seeds
         ]
         for result in trace_rows:

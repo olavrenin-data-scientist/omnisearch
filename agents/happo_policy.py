@@ -46,6 +46,46 @@ def _scenario_kwargs_from_manifest(manifest: Optional[dict]) -> dict:
     return scenario_kwargs
 
 
+def actor_file_indices_for_scenario(
+    checkpoint_dir: str | Path,
+    scenario_kwargs: Optional[dict],
+) -> list[int] | None:
+    """Map diagnostic agents to actor files from the checkpoint manifest.
+
+    Class-specific diagnostics may omit physical agents from the other class
+    while preserving their observation-schema slots. A joint checkpoint stores
+    actor files as UAVs first, then UGVs, so a UGV-only diagnostic for a
+    3-UAV/2-UGV checkpoint must load actor_agent3.pt and actor_agent4.pt.
+    Legacy checkpoints without a manifest keep the historical 0..N-1 loading.
+    """
+    manifest = load_training_manifest(checkpoint_dir)
+    checkpoint_scenario = _scenario_kwargs_from_manifest(manifest)
+    if not checkpoint_scenario:
+        return None
+
+    checkpoint_n_drones = max(int(checkpoint_scenario.get("n_drones", 0)), 0)
+    checkpoint_n_ground = max(int(checkpoint_scenario.get("n_ground", 0)), 0)
+    scenario_kwargs = scenario_kwargs or {}
+    n_drones = max(int(scenario_kwargs.get("n_drones", checkpoint_n_drones)), 0)
+    n_ground = max(int(scenario_kwargs.get("n_ground", checkpoint_n_ground)), 0)
+
+    if n_drones > checkpoint_n_drones:
+        raise ValueError(
+            f"diagnostic asks for {n_drones} UAV actors, but checkpoint has "
+            f"{checkpoint_n_drones}"
+        )
+    if n_ground > checkpoint_n_ground:
+        raise ValueError(
+            f"diagnostic asks for {n_ground} UGV actors, but checkpoint has "
+            f"{checkpoint_n_ground}"
+        )
+
+    return [
+        *range(n_drones),
+        *range(checkpoint_n_drones, checkpoint_n_drones + n_ground),
+    ]
+
+
 def _action_transform_from_manifest(manifest: Optional[dict]) -> str:
     if not manifest:
         return "clip"
@@ -133,6 +173,7 @@ class HappoPolicy:
         deterministic: bool = True,
         scenario_kwargs: Optional[dict] = None,
         action_transform: str = "clip",
+        actor_file_indices: Optional[Sequence[int]] = None,
     ):
         from agents.harl_terrain_cnn import install_harl_terrain_cnn_patch
 
@@ -148,12 +189,25 @@ class HappoPolicy:
         actor_args = _actor_args(algo_args)
         self.agent_names, obs_spaces, action_spaces = _build_policy_spaces(scenario_kwargs)
 
-        # Build one HAPPO actor per agent, restore the state dict.
+        if actor_file_indices is None:
+            actor_file_indices = list(range(len(obs_spaces)))
+        else:
+            actor_file_indices = [int(index) for index in actor_file_indices]
+            if len(actor_file_indices) != len(obs_spaces):
+                raise ValueError(
+                    "actor_file_indices length must match the number of agents "
+                    f"({len(actor_file_indices)} != {len(obs_spaces)})"
+                )
+        self.actor_file_indices = list(actor_file_indices)
+
+        # Build one HAPPO actor per active diagnostic agent, restore the requested
+        # actor file. This lets class-specific diagnostics omit physical off-class
+        # agents while still loading their checkpoint-compatible observation schema.
         self.actors = []
-        for i, (obs_s, act_s) in enumerate(zip(obs_spaces, action_spaces)):
+        for actor_file_index, obs_s, act_s in zip(actor_file_indices, obs_spaces, action_spaces):
             actor = HAPPO(actor_args, obs_s, act_s, self._device)
             state = torch.load(
-                self.checkpoint_dir / f"actor_agent{i}.pt",
+                self.checkpoint_dir / f"actor_agent{actor_file_index}.pt",
                 map_location=self._device,
                 weights_only=True,
             )
@@ -174,17 +228,24 @@ class HappoPolicy:
         algo_args: Optional[dict] = None,
         deterministic: bool = True,
         scenario_kwargs: Optional[dict] = None,
+        actor_file_indices: Optional[Sequence[int]] = None,
     ) -> "HappoPolicy":
         manifest = load_training_manifest(checkpoint_dir)
-        scenario_kwargs = _scenario_kwargs_from_manifest(manifest)
+        manifest_scenario_kwargs = _scenario_kwargs_from_manifest(manifest)
+        policy_scenario_kwargs = (
+            copy.deepcopy(scenario_kwargs)
+            if scenario_kwargs is not None
+            else manifest_scenario_kwargs
+        )
         action_transform = _action_transform_from_manifest(manifest)
         algo_args = _algo_args_from_manifest_or_legacy(checkpoint_dir, manifest, algo_args)
         return cls(
             checkpoint_dir,
             algo_args,
             deterministic,
-            scenario_kwargs=scenario_kwargs,
+            scenario_kwargs=policy_scenario_kwargs,
             action_transform=action_transform,
+            actor_file_indices=actor_file_indices,
         )
 
     # ------------------------------------------------------------------
