@@ -195,10 +195,9 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
             scenario_kwargs["drone_smoke_safety_clearance_m"] = float(args.drone_smoke_safety_clearance_m)
         if getattr(args, "drone_smoke_clearance_threshold", None) is not None:
             scenario_kwargs["drone_smoke_clearance_threshold"] = float(args.drone_smoke_clearance_threshold)
-    if args.enable_fire:
-        scenario_kwargs["disable_fire"] = False
-    elif args.disable_fire:
-        scenario_kwargs["disable_fire"] = True
+    fire_override = getattr(args, "enable_fire", None)
+    if fire_override is not None:
+        scenario_kwargs["disable_fire"] = not bool(fire_override)
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
     for attr in (
@@ -1010,8 +1009,11 @@ def main() -> None:
                         help="Override smoke-grid threshold for applying UAV smoke clearance.")
     parser.add_argument("--no-variable-drone-clearance", action="store_true",
                         help="Disable variable UAV clearance and use scalar checkpoint/default clearance.")
-    parser.add_argument("--enable-fire", action="store_true")
-    parser.add_argument("--disable-fire", action="store_true")
+    parser.add_argument("--enable-fire", dest="enable_fire", action="store_true",
+                        help="Override checkpoint/default settings and enable fire/smoke dynamics.")
+    parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
+                        help="Override checkpoint/default settings and disable fire/smoke dynamics.")
+    parser.set_defaults(enable_fire=None)
     parser.add_argument("--uav-decision-grid", type=int, default=None,
                         help="Override UAV internal decision-map grid size. Default preserves checkpoint settings.")
     parser.add_argument("--uav-confidence-reward-grid", type=int, default=None,

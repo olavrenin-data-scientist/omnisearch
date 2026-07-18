@@ -95,7 +95,6 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         ),
         "known_survivors_at_reset": False,
         "drone_can_confirm": True,
-        "disable_fire": not bool(getattr(args, "enable_fire", False)),
         "comms_dropout": float(
             0.0
             if getattr(args, "comms_dropout", None) is None
@@ -104,6 +103,10 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         "uav_confidence_diagnostics": True,
         "uav_cleanup_target_diagnostics": False,
     })
+    scenario_kwargs.setdefault("disable_fire", True)
+    fire_override = getattr(args, "enable_fire", None)
+    if fire_override is not None:
+        scenario_kwargs["disable_fire"] = not bool(fire_override)
     if getattr(args, "comms_dropout_mode", None) is not None:
         scenario_kwargs["comms_dropout_mode"] = str(args.comms_dropout_mode).replace("-", "_")
     joint_observation_schema = bool(
@@ -2580,10 +2583,10 @@ def main() -> None:
                         help="Maximum active decoys sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--enable-fire", dest="enable_fire", action="store_true",
-                        help="Enable fire/smoke dynamics during UAV diagnostics. Defaults to disabled.")
+                        help="Override checkpoint/default settings and enable fire/smoke dynamics.")
     parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
-                        help="Disable fire/smoke dynamics during UAV diagnostics.")
-    parser.set_defaults(enable_fire=False)
+                        help="Override checkpoint/default settings and disable fire/smoke dynamics.")
+    parser.set_defaults(enable_fire=None)
     parser.add_argument("--comms-dropout", type=float, default=None,
                         help="Communication dropout probability during evaluation. "
                              "Omitted or 0 preserves the full-communication diagnostic default.")

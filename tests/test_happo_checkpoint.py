@@ -1345,7 +1345,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["max_steps"], 123)
 
-    def test_uav_diagnostics_can_enable_fire(self):
+    def test_uav_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
             models_dir = run_dir / "models"
@@ -1364,15 +1364,18 @@ class HappoCheckpointTests(unittest.TestCase):
                 terrain_cache_path=None,
                 local_map_patch_size=None,
                 drone_min_footprint_radius_m=None,
-                enable_fire=False,
+                enable_fire=None,
             )
 
             default_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
             args.enable_fire = True
             fire_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            args.enable_fire = False
+            no_fire_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
 
-        self.assertTrue(default_scenario["disable_fire"])
+        self.assertFalse(default_scenario["disable_fire"])
         self.assertFalse(fire_scenario["disable_fire"])
+        self.assertTrue(no_fire_scenario["disable_fire"])
 
     def test_uav_diagnostics_can_override_communication_dropout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1438,7 +1441,7 @@ class HappoCheckpointTests(unittest.TestCase):
                 steps=123,
                 n_survivors=5,
                 n_decoys=1,
-                enable_fire=False,
+                enable_fire=None,
                 terrain_cache_path=None,
                 local_map_patch_size=None,
                 drone_min_footprint_radius_m=None,
@@ -1481,8 +1484,7 @@ class HappoCheckpointTests(unittest.TestCase):
                 joint_survivor_diagnostic=False,
                 joint_schema_ugv_diagnostic=False,
                 joint_diagnostic_ugvs=2,
-                enable_fire=False,
-                disable_fire=False,
+                enable_fire=None,
                 terrain_cache_path=None,
                 ugv_target_assignment_mode=None,
             )
@@ -1495,6 +1497,38 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_decoys"], 4)
         self.assertEqual(scenario["active_decoys_min"], 0)
         self.assertEqual(scenario["active_decoys_max"], 2)
+
+    def test_joint_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={"scenario_kwargs": {"disable_fire": False}},
+            )
+            args = MissingNoneNamespace(
+                steps=300,
+                joint_survivor_diagnostic=False,
+                joint_schema_ugv_diagnostic=False,
+                joint_diagnostic_ugvs=2,
+                enable_fire=None,
+                terrain_cache_path=None,
+                ugv_target_assignment_mode=None,
+            )
+
+            default_scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+            args.enable_fire = False
+            no_fire_scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+            args.enable_fire = True
+            fire_scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+
+        self.assertFalse(default_scenario["disable_fire"])
+        self.assertTrue(no_fire_scenario["disable_fire"])
+        self.assertFalse(fire_scenario["disable_fire"])
 
     def test_ugv_known_diagnostics_reset_stale_variable_survivor_range(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1519,7 +1553,7 @@ class HappoCheckpointTests(unittest.TestCase):
             args = MissingNoneNamespace(
                 steps=150,
                 joint_schema_ugv_diagnostic=False,
-                enable_fire=False,
+                enable_fire=None,
                 terrain_cache_path=None,
             )
 
@@ -1528,6 +1562,35 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["active_survivors_min"], 1)
         self.assertEqual(scenario["active_survivors_max"], 1)
+
+    def test_ugv_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={"scenario_kwargs": {"disable_fire": False}},
+            )
+            args = MissingNoneNamespace(
+                steps=150,
+                joint_schema_ugv_diagnostic=False,
+                enable_fire=None,
+                terrain_cache_path=None,
+            )
+
+            default_scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+            args.enable_fire = False
+            no_fire_scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+            args.enable_fire = True
+            fire_scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+
+        self.assertFalse(default_scenario["disable_fire"])
+        self.assertTrue(no_fire_scenario["disable_fire"])
+        self.assertFalse(fire_scenario["disable_fire"])
 
     def test_uav_diagnostics_summarizes_per_drone_metrics(self):
         rows = [

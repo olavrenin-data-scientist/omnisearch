@@ -155,16 +155,17 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         scenario_kwargs.setdefault("delayed_survivor_knowledge", True)
         scenario_kwargs.setdefault("ugv_target_assignment_mode", "route_cost_sticky")
         scenario_kwargs.setdefault("ugv_zero_uav_search_observations", True)
-        if args.enable_fire:
-            scenario_kwargs["disable_fire"] = False
     else:
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1,
             "n_survivors": 1,
             "known_survivors_at_reset": True,
-            "disable_fire": not bool(args.enable_fire),
         })
+        scenario_kwargs.setdefault("disable_fire", True)
+    fire_override = getattr(args, "enable_fire", None)
+    if fire_override is not None:
+        scenario_kwargs["disable_fire"] = not bool(fire_override)
     if args.n_drones is not None:
         if args.joint_schema_ugv_diagnostic:
             scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
@@ -2680,8 +2681,11 @@ def main() -> None:
                         help="Override fire buffer planner cost.")
     parser.add_argument("--ugv-planner-land-cover-costs", type=float, nargs="+", default=None,
                         help="Override planner-only land-cover costs for road/open/brush/forest/rock[/water].")
-    parser.add_argument("--enable-fire", action="store_true",
-                        help="Allow fire to run in the UGV diagnostic scenario.")
+    parser.add_argument("--enable-fire", dest="enable_fire", action="store_true",
+                        help="Override checkpoint/default settings and enable fire/smoke dynamics.")
+    parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
+                        help="Override checkpoint/default settings and disable fire/smoke dynamics.")
+    parser.set_defaults(enable_fire=None)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--trace-failures", action="store_true",
                         help="Print per-step diagnostics for seeds that fail to confirm.")
