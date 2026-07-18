@@ -207,6 +207,16 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     fire_override = getattr(args, "enable_fire", None)
     if fire_override is not None:
         scenario_kwargs["disable_fire"] = not bool(fire_override)
+    if getattr(args, "comms_dropout", None) is not None:
+        scenario_kwargs["comms_dropout"] = float(args.comms_dropout)
+    if getattr(args, "comms_dropout_mode", None) is not None:
+        scenario_kwargs["comms_dropout_mode"] = str(args.comms_dropout_mode).replace("-", "_")
+    if getattr(args, "comms_map_mode", None) is not None:
+        scenario_kwargs["comms_map_mode"] = str(args.comms_map_mode).replace("-", "_")
+    if getattr(args, "comms_dropout_min_steps", None) is not None:
+        scenario_kwargs["comms_dropout_min_steps"] = int(args.comms_dropout_min_steps)
+    if getattr(args, "comms_dropout_max_steps", None) is not None:
+        scenario_kwargs["comms_dropout_max_steps"] = int(args.comms_dropout_max_steps)
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
     for attr in (
@@ -1276,6 +1286,16 @@ def main() -> None:
     parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
                         help="Override checkpoint/default settings and disable fire/smoke dynamics.")
     parser.set_defaults(enable_fire=None)
+    parser.add_argument("--comms-dropout", type=float, default=None,
+                        help="Override checkpoint communication dropout probability in [0, 1].")
+    parser.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default=None,
+                        help="Override checkpoint communication dropout mode.")
+    parser.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default=None,
+                        help="Override checkpoint communication map sharing mode.")
+    parser.add_argument("--comms-dropout-min-steps", type=int, default=None,
+                        help="Override minimum outage duration for bursty communication dropout.")
+    parser.add_argument("--comms-dropout-max-steps", type=int, default=None,
+                        help="Override maximum outage duration for bursty communication dropout.")
     parser.add_argument("--uav-decision-grid", type=int, default=None,
                         help="Override UAV internal decision-map grid size. Default preserves checkpoint settings.")
     parser.add_argument("--uav-confidence-reward-grid", type=int, default=None,
@@ -1341,6 +1361,24 @@ def main() -> None:
         parser.error("--uav-fire-footprint-penalty must be nonnegative")
     if args.uav_fire_penalty_threshold is not None and args.uav_fire_penalty_threshold > 1.0:
         parser.error("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
+    if (
+        args.comms_dropout is not None
+        and (
+            not math.isfinite(args.comms_dropout)
+            or not 0.0 <= args.comms_dropout <= 1.0
+        )
+    ):
+        parser.error("--comms-dropout must be finite and between 0 and 1")
+    if args.comms_dropout_min_steps is not None and args.comms_dropout_min_steps < 1:
+        parser.error("--comms-dropout-min-steps must be >= 1")
+    if args.comms_dropout_max_steps is not None and args.comms_dropout_max_steps < 1:
+        parser.error("--comms-dropout-max-steps must be >= 1")
+    if (
+        args.comms_dropout_min_steps is not None
+        and args.comms_dropout_max_steps is not None
+        and args.comms_dropout_max_steps < args.comms_dropout_min_steps
+    ):
+        parser.error("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
     if (
         args.drone_safety_clearance_by_land_cover_m is not None
         and len(args.drone_safety_clearance_by_land_cover_m) not in {5, 6}
@@ -1425,6 +1463,14 @@ def main() -> None:
         f"uav_fire_block_threshold={scenario_kwargs.get('uav_fire_block_threshold', -1.0)}, "
         f"uav_fire_penalty={scenario_kwargs.get('r_uav_fire_footprint', 0.0)}, "
         f"uav_fire_penalty_threshold={scenario_kwargs.get('uav_fire_penalty_threshold', 0.6)}"
+    )
+    print(
+        "communications: "
+        f"dropout={scenario_kwargs.get('comms_dropout', 0.0)} "
+        f"mode={scenario_kwargs.get('comms_dropout_mode', 'iid')} "
+        f"maps={scenario_kwargs.get('comms_map_mode', 'global')} "
+        f"burst_steps={scenario_kwargs.get('comms_dropout_min_steps', 5)}"
+        f"..{scenario_kwargs.get('comms_dropout_max_steps', 15)}"
     )
     print(f"steps: {args.steps}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
