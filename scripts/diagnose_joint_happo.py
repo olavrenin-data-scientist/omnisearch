@@ -8,6 +8,7 @@ import copy
 import json
 import math
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1196,6 +1197,7 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> 
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint-dir", "--checkpoint", dest="checkpoint_dir", default=None)
     parser.add_argument("--joint-survivor-diagnostic", action="store_true",
@@ -1459,6 +1461,8 @@ def main() -> None:
         print("fast diagnostic level skips plot generation; ignoring --plots-output")
     elif args.plots_output:
         _plot(rows, summary, Path(args.plots_output))
+    elapsed_s = time.perf_counter() - started_at
+    print(f"Diagnostics complete in {elapsed_s:.1f}s")
 
 
 if __name__ == "__main__":
