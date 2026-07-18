@@ -85,6 +85,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
 
         self._pending_actions: Optional[np.ndarray] = None
         self._step_counts = np.zeros(self._num_envs, dtype=np.int64)
+        self._policy_class_obs_masks: dict[str, np.ndarray] = {}
 
     # ------------------------------------------------------------------
     # Internals
@@ -101,6 +102,7 @@ class BatchedVMASVecEnv(ShareVecEnv):
         self._env.reset()
         self.agents:   list[str] = [a.name for a in self._env.agents]
         self.n_agents: int       = len(self.agents)
+        self._policy_class_obs_masks = {}
 
     def _stack_per_agent(self, tensor_list) -> np.ndarray:
         """Stack list of (N, ...) per-agent tensors into (N, A, ...) ndarray."""
@@ -119,6 +121,46 @@ class BatchedVMASVecEnv(ShareVecEnv):
         flat = obs.reshape(N, A * D)
         # Repeat across the agent axis so every actor sees the same shared state.
         return np.broadcast_to(flat[:, None, :], (N, A, A * D)).copy()
+
+    def _observation_mask_for_policy_class(self, policy_class: str, obs_dim: int) -> np.ndarray:
+        policy_class = str(policy_class).replace("-", "_").lower()
+        cached = self._policy_class_obs_masks.get(policy_class)
+        if cached is not None:
+            return cached
+        if not hasattr(self._env.scenario, "observation_mask_for_policy_class"):
+            mask = np.ones(obs_dim, dtype=np.float32)
+        else:
+            mask = np.asarray(
+                self._env.scenario.observation_mask_for_policy_class(policy_class),
+                dtype=np.float32,
+            )
+        if mask.shape != (obs_dim,):
+            raise ValueError(
+                f"{policy_class} observation mask shape {mask.shape} does not match "
+                f"agent observation width {obs_dim}"
+            )
+        self._policy_class_obs_masks[policy_class] = mask
+        return mask
+
+    def share_obs_for_policy_class(
+        self,
+        obs: np.ndarray,
+        policy_class: str,
+        member_ids: list[int] | tuple[int, ...] | np.ndarray,
+    ) -> np.ndarray:
+        """Build class-masked centralized observations with each member first."""
+        N, A, D = obs.shape
+        member_ids = [int(agent_id) for agent_id in member_ids]
+        mask = self._observation_mask_for_policy_class(policy_class, D)
+        masked_obs = obs * mask.reshape(1, 1, D)
+        out = np.zeros((N, len(member_ids), A * D), dtype=np.float32)
+        all_ids = list(range(A))
+        for slot, agent_id in enumerate(member_ids):
+            if agent_id < 0 or agent_id >= A:
+                raise IndexError(f"agent id {agent_id} outside centralized obs with {A} agents")
+            order = [agent_id] + [other_id for other_id in all_ids if other_id != agent_id]
+            out[:, slot] = masked_obs[:, order, :].reshape(N, A * D)
+        return out
 
     # ------------------------------------------------------------------
     # ShareVecEnv interface

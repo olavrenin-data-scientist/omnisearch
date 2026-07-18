@@ -209,6 +209,50 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertTrue(algo_args["algo"]["share_param"])
         self.assertFalse(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertFalse(algo_args["algo"]["split_critic_by_agent_class"])
+
+    def test_joint_survivor_defaults_to_class_shared_split_critics(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint-split",
+            joint_survivor_diagnostic=True,
+        )
+
+        self.assertFalse(algo_args["algo"]["share_param"])
+        self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertTrue(algo_args["algo"]["split_critic_by_agent_class"])
+        self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
+
+    def test_non_joint_class_shared_runs_do_not_default_to_split_critics(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="ugv-no-split",
+            joint_schema_ugv_diagnostic=True,
+        )
+
+        self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertFalse(algo_args["algo"]["split_critic_by_agent_class"])
+
+    def test_split_critics_require_class_shared_policy(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="bad-split",
+                share_param_by_agent_class=False,
+                split_critic_by_agent_class=True,
+            )
 
     def test_build_args_rejects_global_and_class_parameter_sharing_together(self):
         with self.assertRaises(ValueError):

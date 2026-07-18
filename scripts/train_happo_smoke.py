@@ -215,10 +215,13 @@ def build_args(
     comms_dropout_max_steps: int = 15,
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
+    uav_critic_lr: float | None = None,
+    ugv_critic_lr: float | None = None,
     clip_param: float = 0.2,
     linear_lr_decay: bool | None = None,
     share_param: bool | None = None,
     share_param_by_agent_class: bool | None = None,
+    split_critic_by_agent_class: bool | None = None,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
     drone_min_footprint_m: float = 0.0,
@@ -727,10 +730,16 @@ def build_args(
             (joint_survivor_diagnostic or joint_schema_ugv_diagnostic)
             and not bool(share_param)
         )
+    if split_critic_by_agent_class is None:
+        split_critic_by_agent_class = bool(
+            joint_survivor_diagnostic and share_param_by_agent_class
+        )
     if share_param is None:
         share_param = False
     if bool(share_param) and bool(share_param_by_agent_class):
         raise ValueError("share_param and share_param_by_agent_class are mutually exclusive")
+    if bool(split_critic_by_agent_class) and not bool(share_param_by_agent_class):
+        raise ValueError("split_critic_by_agent_class requires share_param_by_agent_class=True")
     if model_dir and (warmstart_uav_model_dir or warmstart_ugv_model_dir):
         raise ValueError("model_dir cannot be combined with class warm-start model dirs")
     if (warmstart_uav_model_dir or warmstart_ugv_model_dir) and not bool(share_param_by_agent_class):
@@ -927,6 +936,8 @@ def build_args(
             "data_chunk_length":          10,
             "lr":                         lr,
             "critic_lr":                  critic_lr,
+            "uav_critic_lr":              critic_lr if uav_critic_lr is None else float(uav_critic_lr),
+            "ugv_critic_lr":              critic_lr if ugv_critic_lr is None else float(ugv_critic_lr),
             "opti_eps":                   1e-5,
             "weight_decay":               0,
             "std_x_coef":                 1,
@@ -959,6 +970,7 @@ def build_args(
             "action_aggregation":      "prod",
             "share_param":             bool(share_param),
             "share_param_by_agent_class": bool(share_param_by_agent_class),
+            "split_critic_by_agent_class": bool(split_critic_by_agent_class),
             "share_param_groups":      [],
             "share_param_group_names": [],
             "fixed_order":             False,
@@ -1678,6 +1690,10 @@ def main():
                    help="Actor learning rate.")
     p.add_argument("--critic-lr", type=float, default=5e-4,
                    help="Critic learning rate.")
+    p.add_argument("--uav-critic-lr", type=float, default=None,
+                   help="UAV split-critic learning rate. Defaults to --critic-lr.")
+    p.add_argument("--ugv-critic-lr", type=float, default=None,
+                   help="UGV split-critic learning rate. Defaults to --critic-lr.")
     p.add_argument("--clip-param", type=float, default=0.2,
                    help="PPO/HAPPO clipping epsilon. Default 0.2 clips policy ratios to about [0.8, 1.2].")
     p.set_defaults(linear_lr_decay=None)
@@ -1696,6 +1712,11 @@ def main():
                    help="Share actor parameters within each agent class, e.g. one UAV policy and one UGV policy.")
     p.add_argument("--no-share-param-by-agent-class", dest="share_param_by_agent_class", action="store_false",
                    help="Disable class-wise actor parameter sharing, overriding joint diagnostic defaults.")
+    p.set_defaults(split_critic_by_agent_class=None)
+    p.add_argument("--split-critic-by-agent-class", dest="split_critic_by_agent_class", action="store_true",
+                   help="Use separate centralized critics for UAV and UGV policy classes.")
+    p.add_argument("--no-split-critic-by-agent-class", dest="split_critic_by_agent_class", action="store_false",
+                   help="Disable class-wise split critics, overriding joint diagnostic defaults.")
     p.add_argument("--terrain-cnn-encoder", action="store_true",
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
@@ -2400,6 +2421,10 @@ def main():
         p.error("--lr must be positive")
     if args.critic_lr <= 0.0:
         p.error("--critic-lr must be positive")
+    if args.uav_critic_lr is not None and args.uav_critic_lr <= 0.0:
+        p.error("--uav-critic-lr must be positive")
+    if args.ugv_critic_lr is not None and args.ugv_critic_lr <= 0.0:
+        p.error("--ugv-critic-lr must be positive")
     if args.clip_param <= 0.0:
         p.error("--clip-param must be positive")
     if args.terrain_cnn_embed_dim <= 0:
@@ -2926,10 +2951,16 @@ def main():
             (args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic)
             and not bool(args.share_param)
         )
+    if args.split_critic_by_agent_class is None:
+        args.split_critic_by_agent_class = bool(
+            args.joint_survivor_diagnostic and args.share_param_by_agent_class
+        )
     if args.share_param is None:
         args.share_param = False
     if bool(args.share_param) and bool(args.share_param_by_agent_class):
         p.error("--share-param and --share-param-by-agent-class are mutually exclusive")
+    if bool(args.split_critic_by_agent_class) and not bool(args.share_param_by_agent_class):
+        p.error("--split-critic-by-agent-class requires --share-param-by-agent-class")
     class_warmstart_dirs = [
         value for value in (args.warmstart_uav_model_dir, args.warmstart_ugv_model_dir)
         if value
@@ -3040,10 +3071,13 @@ def main():
     print(f" entropy_coef:   {args.entropy_coef}")
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
+    print(f" uav_critic_lr:  {args.uav_critic_lr if args.uav_critic_lr is not None else args.critic_lr}")
+    print(f" ugv_critic_lr:  {args.ugv_critic_lr if args.ugv_critic_lr is not None else args.critic_lr}")
     print(f" clip_param:     {args.clip_param}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
     print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
+    print(f" split_critic_by_agent_class: {args.split_critic_by_agent_class}")
     print(f" hidden_sizes:   {args.hidden_sizes or list(DEFAULT_HAPPO_HIDDEN_SIZES)}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
@@ -3228,10 +3262,13 @@ def main():
         entropy_coef   = args.entropy_coef,
         lr             = args.lr,
         critic_lr      = args.critic_lr,
+        uav_critic_lr  = args.uav_critic_lr,
+        ugv_critic_lr  = args.ugv_critic_lr,
         clip_param     = args.clip_param,
         linear_lr_decay = args.linear_lr_decay,
         share_param    = args.share_param,
         share_param_by_agent_class = args.share_param_by_agent_class,
+        split_critic_by_agent_class = args.split_critic_by_agent_class,
         exp_name       = args.exp_name,
         n_rollout_threads = args.n_rollout_threads,
         terrain_cache_path = args.terrain_cache_path,

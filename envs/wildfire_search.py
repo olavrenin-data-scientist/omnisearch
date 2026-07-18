@@ -27,6 +27,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from agents.harl_terrain_cnn import wildfire_observation_slices
 from vmas.simulator.core import Agent, Landmark, Sphere, World
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
@@ -9540,6 +9541,46 @@ class WildfireSearchScenario(BaseScenario):
         if self.uav_astar_route_obs:
             parts.append(self._uav_astar_route_observation(agent))
         return torch.cat(parts, dim=-1)
+
+    def observation_mask_for_policy_class(self, policy_class: str) -> np.ndarray:
+        """Return a flat per-agent observation mask for class-specific critics."""
+        policy_class = str(policy_class).replace("-", "_").lower()
+        if policy_class not in {"uav", "ugv"}:
+            raise ValueError(f"unsupported policy class for observation mask: {policy_class!r}")
+        slices = wildfire_observation_slices(
+            local_map_patch_size=self.local_map_patch_size,
+            n_agents=self.obs_schema_n_agents,
+            n_survivors=self.obs_schema_n_survivors,
+            n_decoys=self.n_decoys,
+            ugv_planner_hint=self.ugv_planner_hint,
+            ugv_planner_detour_obs=self.ugv_planner_detour_obs,
+            coverage_obs_grid=self.coverage_obs_grid,
+            local_coverage_obs_grid=self.local_coverage_obs_grid,
+            uav_confidence_obs_grid=self.uav_confidence_obs_grid,
+            local_confidence_obs_grid=self.local_confidence_obs_grid,
+            uav_frontier_obs=self.uav_frontier_obs,
+            uav_frontier_mode=self.uav_frontier_mode,
+            uav_frontier_top_k=self.uav_frontier_top_k,
+            uav_cleanup_target_obs=self.uav_cleanup_target_obs,
+            uav_astar_route_obs=self.uav_astar_route_obs,
+            survivor_assignment_obs=self.survivor_assignment_obs,
+        )
+        obs_dim = max((sl.stop for sl in slices.values()), default=0)
+        mask = np.ones(obs_dim, dtype=np.float32)
+        if policy_class == "uav":
+            mask[slices["ugv_planner_hint"]] = 0.0
+        else:
+            for name in (
+                "coverage",
+                "local_coverage",
+                "uav_confidence",
+                "local_confidence",
+                "uav_frontier",
+                "uav_cleanup_target",
+                "uav_astar_route",
+            ):
+                mask[slices[name]] = 0.0
+        return mask
 
     def _coverage_observation(self, agent: Agent | None = None) -> Tensor:
         """Team-coverage situational awareness: a downsampled absolute map of
