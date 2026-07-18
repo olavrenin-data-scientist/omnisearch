@@ -215,6 +215,7 @@ def build_args(
     comms_dropout_max_steps: int = 15,
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
+    clip_param: float = 0.2,
     linear_lr_decay: bool | None = None,
     share_param: bool | None = None,
     share_param_by_agent_class: bool | None = None,
@@ -942,7 +943,7 @@ def build_args(
             "ppo_epoch":               2,
             "critic_epoch":            2,
             "use_clipped_value_loss":  True,
-            "clip_param":              0.2,
+            "clip_param":              float(clip_param),
             "actor_num_mini_batch":    1,
             "critic_num_mini_batch":   1,
             "entropy_coef":            entropy_coef,
@@ -1677,6 +1678,8 @@ def main():
                    help="Actor learning rate.")
     p.add_argument("--critic-lr", type=float, default=5e-4,
                    help="Critic learning rate.")
+    p.add_argument("--clip-param", type=float, default=0.2,
+                   help="PPO/HAPPO clipping epsilon. Default 0.2 clips policy ratios to about [0.8, 1.2].")
     p.set_defaults(linear_lr_decay=None)
     p.add_argument("--linear-lr-decay", dest="linear_lr_decay", action="store_true",
                    help="Linearly decay actor/critic learning rates over training.")
@@ -2397,6 +2400,8 @@ def main():
         p.error("--lr must be positive")
     if args.critic_lr <= 0.0:
         p.error("--critic-lr must be positive")
+    if args.clip_param <= 0.0:
+        p.error("--clip-param must be positive")
     if args.terrain_cnn_embed_dim <= 0:
         p.error("--terrain-cnn-embed-dim must be positive")
     if args.joint_diagnostic_ugvs < 1:
@@ -3035,6 +3040,7 @@ def main():
     print(f" entropy_coef:   {args.entropy_coef}")
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
+    print(f" clip_param:     {args.clip_param}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
     print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
@@ -3222,6 +3228,7 @@ def main():
         entropy_coef   = args.entropy_coef,
         lr             = args.lr,
         critic_lr      = args.critic_lr,
+        clip_param     = args.clip_param,
         linear_lr_decay = args.linear_lr_decay,
         share_param    = args.share_param,
         share_param_by_agent_class = args.share_param_by_agent_class,
