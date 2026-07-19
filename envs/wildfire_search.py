@@ -10892,14 +10892,14 @@ class WildfireSearchScenario(BaseScenario):
             )
 
         current_target = int(target_idx)
+        replanned_after_fire = bool(
+            self.ugv_global_route_fire_replan_pending[env_index, ground_index].item()
+        )
         needs_plan = (
             int(self.ugv_global_route_target_idx[env_index, ground_index].item()) != current_target
             or not self.ugv_global_route_paths[env_index][ground_index]
         )
         if needs_plan:
-            replanned_after_fire = bool(
-                self.ugv_global_route_fire_replan_pending[env_index, ground_index].item()
-            )
             self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = False
             self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
             plan = self._global_astar_plan_uncached_for_env(
@@ -10917,17 +10917,13 @@ class WildfireSearchScenario(BaseScenario):
                     self._ugv_fire_blocked_no_path_active(env_index)
                 )
                 return None
-            self.ugv_global_route_target_idx[env_index, ground_index] = current_target
-            self.ugv_global_route_paths[env_index][ground_index] = list(plan["path"])
-            gx, gy = plan["goal"]
-            self.ugv_global_route_goal_cell[env_index, ground_index, 0] = int(gx)
-            self.ugv_global_route_goal_cell[env_index, ground_index, 1] = int(gy)
-            self.ugv_global_route_path_index[env_index, ground_index] = 0
-            self.ugv_global_route_last_replan_step[env_index, ground_index] = int(
-                self.step_count[env_index].item()
+            self._set_ugv_global_route_plan_for_env(
+                env_index,
+                ground_index,
+                current_target,
+                plan,
+                replanned_after_fire=replanned_after_fire,
             )
-            self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
-            self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = replanned_after_fire
 
         path = self.ugv_global_route_paths[env_index][ground_index]
         if len(path) < 2:
@@ -10946,6 +10942,50 @@ class WildfireSearchScenario(BaseScenario):
 
         start = self._single_position_to_grid_cell(pos)
         planner_traversable, _planner_cost = self._ugv_planner_layer_tensors_for_env(env_index)
+        if self._global_cached_route_is_stale_for_current_position(
+            env_index,
+            pos,
+            path,
+            nearest_idx,
+            waypoint,
+            planner_traversable,
+        ):
+            plan = self._global_astar_plan_uncached_for_env(
+                env_index,
+                pos,
+                target_pos,
+                update_state=False,
+            )
+            if plan is None:
+                self._clear_ugv_global_route(env_index, ground_index)
+                self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = (
+                    replanned_after_fire
+                )
+                self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = (
+                    self._ugv_fire_blocked_no_path_active(env_index)
+                )
+                return None
+            self._set_ugv_global_route_plan_for_env(
+                env_index,
+                ground_index,
+                current_target,
+                plan,
+                replanned_after_fire=replanned_after_fire,
+            )
+            path = self.ugv_global_route_paths[env_index][ground_index]
+            goal = path[-1]
+            waypoint, nearest_idx, waypoint_idx = self._global_route_waypoint_for_env(
+                env_index,
+                pos,
+                path,
+                start_idx=0,
+            )
+            if update_index:
+                self.ugv_global_route_path_index[env_index, ground_index] = int(nearest_idx)
+                self.ugv_global_route_waypoint_cell[env_index, ground_index, 0] = int(waypoint[0])
+                self.ugv_global_route_waypoint_cell[env_index, ground_index, 1] = int(waypoint[1])
+            start = self._single_position_to_grid_cell(pos)
+            planner_traversable, _planner_cost = self._ugv_planner_layer_tensors_for_env(env_index)
         direct_blocked = not self._grid_segment_is_traversable(planner_traversable, start, goal)
         detour_needed = self._local_astar_detour_needed(
             env_index,
@@ -10967,6 +11007,76 @@ class WildfireSearchScenario(BaseScenario):
             "detour_needed": bool(detour_needed),
             "planner_mode": "global_astar",
         }
+
+    def _set_ugv_global_route_plan_for_env(
+        self,
+        env_index: int,
+        ground_index: int,
+        target_idx: int,
+        plan: dict,
+        *,
+        replanned_after_fire: bool,
+    ) -> None:
+        self.ugv_global_route_target_idx[env_index, ground_index] = int(target_idx)
+        self.ugv_global_route_paths[env_index][ground_index] = list(plan["path"])
+        gx, gy = plan["goal"]
+        self.ugv_global_route_goal_cell[env_index, ground_index, 0] = int(gx)
+        self.ugv_global_route_goal_cell[env_index, ground_index, 1] = int(gy)
+        self.ugv_global_route_path_index[env_index, ground_index] = 0
+        self.ugv_global_route_last_replan_step[env_index, ground_index] = int(
+            self.step_count[env_index].item()
+        )
+        self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
+        self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = (
+            bool(replanned_after_fire)
+        )
+        self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
+
+    def _global_cached_route_is_stale_for_current_position(
+        self,
+        env_index: int,
+        pos: Tensor,
+        path: list[tuple[int, int]],
+        nearest_idx: int,
+        waypoint: tuple[int, int],
+        planner_traversable: Tensor,
+    ) -> bool:
+        """Return True when the cached global path no longer locally fits the UGV.
+
+        Global A* paths are cached for speed. If the learned policy drifts away
+        from that path, blindly following the old waypoint can point through a
+        blocked local pocket. Replan only when the current cell is too far from
+        the cached route or cannot reach the selected waypoint by the same
+        line-of-sight traversability rule used for waypoint lookahead.
+        """
+        if not path:
+            return True
+        G = int(self.fire_grid_size)
+        current = self._single_position_to_grid_cell(pos)
+        cx, cy = current
+        if not (0 <= cx < G and 0 <= cy < G):
+            return True
+        if not bool(planner_traversable[cy, cx].item()):
+            return True
+        if not self._grid_segment_is_traversable(planner_traversable, current, waypoint):
+            return True
+
+        nearest_idx = max(0, min(int(nearest_idx), len(path) - 1))
+        nearest_pos = self._grid_cell_center_to_world(
+            path[nearest_idx],
+            device=pos.device,
+            dtype=pos.dtype,
+        )
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        off_route_m = float(torch.linalg.norm(nearest_pos - pos).detach().cpu().item()) / max(scale, 1e-9)
+        cell_w_m = (2.0 * float(self.x_semidim) / float(G)) / max(scale, 1e-9)
+        cell_h_m = (2.0 * float(self.y_semidim) / float(G)) / max(scale, 1e-9)
+        cell_diag_m = math.hypot(cell_w_m, cell_h_m)
+        max_off_route_m = max(
+            2.0 * cell_diag_m,
+            min(0.5 * float(self.ugv_global_planner_lookahead_m), 20.0),
+        )
+        return off_route_m > max_off_route_m
 
     def _global_astar_plan_uncached_for_env(
         self,

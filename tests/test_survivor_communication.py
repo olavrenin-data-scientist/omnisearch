@@ -1967,6 +1967,85 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertNotIn((68, 64), plan["path"])
         self.assertNotEqual(plan["waypoint"][1], 64)
 
+    def test_global_astar_replans_when_ugv_drifts_off_cached_route(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+
+        first = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(first["path"][0], (64, 64))
+
+        ground.state.pos[:] = scenario._grid_cell_center_to_world(
+            (64, 78),
+            device=ground.state.pos.device,
+            dtype=ground.state.pos.dtype,
+        ).view(1, 2)
+        second = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+
+        self.assertIsNotNone(second)
+        self.assertEqual(second["path"][0], (64, 78))
+        self.assertEqual(scenario.ugv_global_route_paths[0][0][0], (64, 78))
+
+    def test_global_astar_replans_when_cached_waypoint_becomes_blocked(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+
+        first = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+        self.assertIsNotNone(first)
+        self.assertIn((65, 64), first["path"])
+
+        scenario.traversable_grid[0, 64, 65] = False
+        scenario._invalidate_ugv_planner_layer_cache(0)
+        second = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+
+        self.assertIsNotNone(second)
+        self.assertNotIn((65, 64), second["path"])
+        self.assertNotIn((65, 64), scenario.ugv_global_route_paths[0][0])
+
     def test_global_astar_terrain_heuristic_preserves_route_cost(self):
         env = self._diagnostic_env(
             ugv_planner_hint="global_astar",
@@ -3275,7 +3354,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scale = float(scenario.terrain_sim_units_per_meter[0])
 
         scenario.r_ugv_route_progress_shortfall_penalty = 0.02
-        scenario.step_count[0] = 90
+        scenario.step_count[0] = 99
         scenario.scouted_survivors[0, 0] = True
         scenario.known_survivors_by_agent[0, 0, 0] = True
         survivor.state.pos[:] = torch.tensor([[80.0 * scale, 0.0]])
@@ -3285,13 +3364,14 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(scenario.metric_reward_ugv_route_progress_shortfall_penalty[0]), 0.0)
 
         scenario._pre_step_ground_pos[:, 0, :] = torch.tensor([[0.0, 0.0]])
-        ground.state.pos[:] = torch.tensor([[0.5 * scale, 0.0]])
-        scenario.step_ugv_actual_displacement_m[0, 0] = 0.5
+        ground.state.pos[:] = torch.tensor([[0.05 * scale, 0.0]])
+        scenario.step_ugv_actual_displacement_m[0, 0] = 0.05
         scenario._compute_step_rewards()
 
         required = float(scenario.metric_ugv_route_progress_required_m[0])
+        progress = float(scenario.metric_ugv_global_route_progress_m[0])
         shortfall = float(scenario.metric_ugv_route_progress_shortfall_m[0])
-        self.assertGreater(required, 0.5)
+        self.assertGreater(required, progress)
         self.assertGreater(shortfall, 0.0)
         self.assertAlmostEqual(
             float(scenario.metric_reward_ugv_route_progress_shortfall_penalty[0]),
