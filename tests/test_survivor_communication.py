@@ -1061,14 +1061,16 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "greedy_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
+            "route_sequence_sticky",
         ]
+        route_modes = {"route_cost_greedy", "route_cost_sticky", "route_sequence_sticky"}
         for mode in modes:
             with self.subTest(mode=mode):
                 env = self._diagnostic_env(
                     n_ground=3,
                     n_survivors=1,
                     ugv_target_assignment_mode=mode,
-                    ugv_planner_hint="global_astar" if mode.startswith("route_cost") else "none",
+                    ugv_planner_hint="global_astar" if mode in route_modes else "none",
                 )
                 scenario = env.scenario
                 scenario.ugv_sticky_target_idx.fill_(-1)
@@ -1078,11 +1080,14 @@ class SurvivorCommunicationTests(unittest.TestCase):
                 survivor_pos = torch.tensor([[[0.30, 0.0]]])
                 targetable = torch.ones(1, 3, 1, dtype=torch.bool)
 
-                if mode.startswith("route_cost"):
+                if mode in route_modes:
                     def route_costs(_ground_pos, _survivor_pos, _targetable):
                         return torch.tensor([[[30.0], [5.0], [50.0]]])
 
                     scenario._ugv_route_assignment_costs_m = route_costs
+                    scenario._ugv_target_pair_route_costs_m = (
+                        lambda _survivor_pos, _targetable: torch.full((1, 1, 1), float("inf"))
+                    )
 
                 target_idx, target_dist = scenario._ugv_assigned_target_indices(
                     ground_pos,
@@ -1498,6 +1503,74 @@ class SurvivorCommunicationTests(unittest.TestCase):
         )
 
         self.assertEqual(target_idx.tolist(), [[1]])
+
+    def test_route_sequence_sticky_can_reorder_current_and_new_target(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_sequence_sticky",
+            ugv_planner_hint="global_astar",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=20.0,
+            ugv_sticky_switch_ratio=0.8,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[1.0, 0.0], [0.2, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+        scenario._ugv_route_assignment_costs_m = (
+            lambda _ground_pos, _survivor_pos, _targetable: torch.tensor([[[20.0, 10.0]]])
+        )
+        scenario._ugv_target_pair_route_costs_m = (
+            lambda _survivor_pos, _targetable: torch.tensor([[[float("inf"), 100.0], [10.0, float("inf")]]])
+        )
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[1]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[0]])
+
+    def test_route_sequence_sticky_keeps_current_for_marginal_reorder_gain(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_sequence_sticky",
+            ugv_planner_hint="global_astar",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=20.0,
+            ugv_sticky_switch_ratio=0.8,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[0.2, 0.0], [0.3, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+        scenario._ugv_route_assignment_costs_m = (
+            lambda _ground_pos, _survivor_pos, _targetable: torch.tensor([[[20.0, 15.0]]])
+        )
+        scenario._ugv_target_pair_route_costs_m = (
+            lambda _survivor_pos, _targetable: torch.tensor([[[float("inf"), 10.0], [10.0, float("inf")]]])
+        )
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[1]])
 
     def test_known_survivors_at_reset_initializes_ground_mission_memory(self):
         env = self._diagnostic_env()

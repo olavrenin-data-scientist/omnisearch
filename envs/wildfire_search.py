@@ -753,12 +753,14 @@ class WildfireSearchScenario(BaseScenario):
             "greedy_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
+            "route_sequence_sticky",
             "route_cost_global",
         }
         if self.ugv_target_assignment_mode not in valid_assignment_modes:
             raise ValueError(
                 "ugv_target_assignment_mode must be one of: nearest, greedy, "
-                "greedy_sticky, route_cost_greedy, route_cost_sticky, route_cost_global"
+                "greedy_sticky, route_cost_greedy, route_cost_sticky, "
+                "route_sequence_sticky, route_cost_global"
             )
         self.ugv_sticky_switch_margin_m = max(
             float(kwargs.pop("ugv_sticky_switch_margin_m", 20.0)),
@@ -1525,6 +1527,9 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_sticky_target_age = torch.zeros(
             batch_dim, self.n_ground, dtype=torch.long, device=device,
         )
+        self.ugv_sequence_next_target_idx = torch.full(
+            (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
+        )
         self.ugv_assignment_cache_step = torch.full(
             (batch_dim,), -1, dtype=torch.long, device=device,
         )
@@ -2277,6 +2282,7 @@ class WildfireSearchScenario(BaseScenario):
             self.prev_ground_target_idx.fill_(-1)
             self.ugv_sticky_target_idx.fill_(-1)
             self.ugv_sticky_target_age.zero_()
+            self.ugv_sequence_next_target_idx.fill_(-1)
             self._invalidate_ugv_assignment_cache()
             self._invalidate_ugv_route_assignment_cost_grid_cache()
             self.ground_approach_milestones_reached.zero_()
@@ -2327,6 +2333,7 @@ class WildfireSearchScenario(BaseScenario):
             self.prev_ground_target_idx[env_index] = -1
             self.ugv_sticky_target_idx[env_index] = -1
             self.ugv_sticky_target_age[env_index] = 0
+            self.ugv_sequence_next_target_idx[env_index] = -1
             self._invalidate_ugv_assignment_cache(env_index)
             self._invalidate_ugv_route_assignment_cost_grid_cache(env_index)
             self.ground_approach_milestones_reached[env_index] = False
@@ -4423,7 +4430,12 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_target_assignment_mode == "nearest" or (
             self.n_ground <= 1
             and self.ugv_target_assignment_mode
-            not in {"route_cost_greedy", "route_cost_sticky", "route_cost_global"}
+            not in {
+                "route_cost_greedy",
+                "route_cost_sticky",
+                "route_sequence_sticky",
+                "route_cost_global",
+            }
         ):
             assigned_dist, assigned_idx = masked.min(dim=2)
             assigned_idx = torch.where(
@@ -4471,6 +4483,30 @@ class WildfireSearchScenario(BaseScenario):
                 targetable,
             )
             assigned_idx = self._ugv_route_cost_sticky_target_indices(route_costs_m, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "route_sequence_sticky":
+            route_costs_m = self._ugv_route_assignment_costs_m(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            target_pair_costs_m = self._ugv_target_pair_route_costs_m(
+                survivor_pos,
+                targetable,
+            )
+            assigned_idx = self._ugv_route_sequence_sticky_target_indices(
+                route_costs_m,
+                target_pair_costs_m,
+                targetable,
+            )
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(
@@ -4558,6 +4594,183 @@ class WildfireSearchScenario(BaseScenario):
             targetable,
             margin_by_env=margin_by_env,
         )
+
+    def _ugv_route_sequence_sticky_target_indices(
+        self,
+        route_costs_m: Tensor,
+        target_pair_costs_m: Tensor,
+        targetable: Tensor,
+    ) -> Tensor:
+        """Assign active UGV targets from short route sequences.
+
+        Candidate routes have length one or two. Only the first target becomes
+        the active planner target; the optional second target is reserved
+        internally so another UGV does not chase it first.
+        """
+        batch_dim = route_costs_m.shape[0]
+        device = route_costs_m.device
+        assigned = torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device)
+        next_assigned = torch.full_like(assigned, -1)
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
+            self.ugv_sequence_next_target_idx = next_assigned
+            return assigned
+
+        current_step = self.step_count.to(device=device)
+        margin = float(self.ugv_sticky_switch_margin_m)
+        ratio = float(self.ugv_sticky_switch_ratio)
+        min_age = int(self.ugv_sticky_min_age_steps)
+
+        for env_index in range(batch_dim):
+            previous_first = self.ugv_sticky_target_idx[env_index].clone()
+            previous_next = self.ugv_sequence_next_target_idx[env_index].clone()
+            candidates: list[tuple[float, float, int, int, int, int]] = []
+            reserved_target_owner: dict[int, int] = {}
+            for owner_index in range(self.n_ground):
+                for owned_target in (
+                    int(previous_first[owner_index].item()),
+                    int(previous_next[owner_index].item()),
+                ):
+                    if (
+                        owned_target >= 0
+                        and owned_target not in reserved_target_owner
+                        and bool(targetable[env_index, owner_index, owned_target].item())
+                        and bool(torch.isfinite(route_costs_m[env_index, owner_index, owned_target]).item())
+                    ):
+                        reserved_target_owner[owned_target] = owner_index
+
+            for ground_index in range(self.n_ground):
+                scoreable = (
+                    targetable[env_index, ground_index]
+                    & torch.isfinite(route_costs_m[env_index, ground_index])
+                )
+                valid_targets = [
+                    int(target.item())
+                    for target in torch.nonzero(scoreable, as_tuple=False).flatten()
+                    if reserved_target_owner.get(int(target.item()), ground_index) == ground_index
+                ]
+                if not valid_targets:
+                    continue
+
+                current = int(previous_first[ground_index].item())
+                current_valid = (
+                    current >= 0
+                    and bool(scoreable[current].item())
+                )
+                if not current_valid:
+                    queued = int(previous_next[ground_index].item())
+                    if queued >= 0 and bool(scoreable[queued].item()):
+                        current = queued
+                        current_valid = True
+
+                age = int(self.ugv_sticky_target_age[env_index, ground_index].item())
+                for first in valid_targets:
+                    first_cost = float(route_costs_m[env_index, ground_index, first].item())
+                    if not math.isfinite(first_cost):
+                        continue
+                    self._ugv_add_route_sequence_candidate(
+                        candidates,
+                        env_index,
+                        ground_index,
+                        first,
+                        -1,
+                        first_cost,
+                        1,
+                        current,
+                        current_valid,
+                        age,
+                        min_age,
+                        margin,
+                        ratio,
+                        route_costs_m,
+                        target_pair_costs_m,
+                    )
+                    for second in valid_targets:
+                        if second == first:
+                            continue
+                        pair_cost = float(target_pair_costs_m[env_index, first, second].item())
+                        if not math.isfinite(pair_cost):
+                            continue
+                        self._ugv_add_route_sequence_candidate(
+                            candidates,
+                            env_index,
+                            ground_index,
+                            first,
+                            second,
+                            first_cost + pair_cost,
+                            2,
+                            current,
+                            current_valid,
+                            age,
+                            min_age,
+                            margin,
+                            ratio,
+                            route_costs_m,
+                            target_pair_costs_m,
+                        )
+
+            candidates.sort()
+            used_targets: set[int] = set()
+            used_ground: set[int] = set()
+            for _priority, cost, neg_count, ground_index, first, second in candidates:
+                if ground_index in used_ground:
+                    continue
+                targets = [first] if second < 0 else [first, second]
+                if any(target in used_targets for target in targets):
+                    continue
+                assigned[env_index, ground_index] = first
+                if second >= 0:
+                    next_assigned[env_index, ground_index] = second
+                used_ground.add(ground_index)
+                used_targets.update(targets)
+
+            switched = (previous_first >= 0) & (assigned[env_index] >= 0) & (previous_first != assigned[env_index])
+            self.metric_ugv_assignment_switches[env_index] += switched.float().sum()
+            same = assigned[env_index] == previous_first
+            self.ugv_sticky_target_age[env_index] = torch.where(
+                (assigned[env_index] >= 0) & same,
+                self.ugv_sticky_target_age[env_index] + 1,
+                torch.zeros_like(self.ugv_sticky_target_age[env_index]),
+            )
+            self.ugv_sticky_target_idx[env_index] = assigned[env_index]
+            self.ugv_assignment_cache_idx[env_index] = assigned[env_index]
+            self.ugv_assignment_cache_step[env_index] = current_step[env_index]
+
+        self.ugv_sequence_next_target_idx = next_assigned
+        return assigned
+
+    def _ugv_add_route_sequence_candidate(
+        self,
+        candidates: list[tuple[float, float, int, int, int, int]],
+        env_index: int,
+        ground_index: int,
+        first: int,
+        second: int,
+        cost: float,
+        count: int,
+        current: int,
+        current_valid: bool,
+        age: int,
+        min_age: int,
+        margin: float,
+        ratio: float,
+        route_costs_m: Tensor,
+        target_pair_costs_m: Tensor,
+    ) -> None:
+        if not math.isfinite(cost) or count <= 0:
+            return
+        if current_valid and first != current:
+            if age < min_age:
+                return
+            keep_cost = float(route_costs_m[env_index, ground_index, current].item())
+            if second == current:
+                keep_pair = float(target_pair_costs_m[env_index, current, first].item())
+                if math.isfinite(keep_pair):
+                    keep_cost = keep_cost + keep_pair
+            if not math.isfinite(keep_cost) or cost + margin >= keep_cost * ratio:
+                return
+        priority = cost / float(count)
+        candidates.append((priority, cost, -count, ground_index, first, second))
 
     def _ugv_global_score_assignment_indices(self, scores: Tensor, targetable: Tensor) -> Tensor:
         """Exact min-cost one-to-one UGV-target assignment for each environment.
@@ -4756,19 +4969,29 @@ class WildfireSearchScenario(BaseScenario):
             "greedy_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
+            "route_sequence_sticky",
         }:
             return local_pending_targets
         if local_pending_targets.numel() == 0 or local_pending_targets.shape[2] == 0:
             return local_pending_targets
 
-        assignment_mask = torch.zeros_like(local_pending_targets, dtype=torch.bool)
-        assignment_mask.scatter_(
+        active_assignment_mask = torch.zeros_like(local_pending_targets, dtype=torch.bool)
+        active_assignment_mask.scatter_(
             dim=2,
             index=assigned_idx.clamp(min=0).unsqueeze(-1),
             src=valid_target.unsqueeze(-1),
         )
-        assigned_any = assignment_mask.any(dim=1, keepdim=True)
-        assigned_to_me = local_pending_targets & assignment_mask
+        owned_mask = active_assignment_mask.clone()
+        if self.ugv_target_assignment_mode == "route_sequence_sticky":
+            next_idx = self.ugv_sequence_next_target_idx.to(device=local_pending_targets.device)
+            next_valid = next_idx >= 0
+            owned_mask.scatter_(
+                dim=2,
+                index=next_idx.clamp(min=0).unsqueeze(-1),
+                src=next_valid.unsqueeze(-1),
+            )
+        assigned_any = owned_mask.any(dim=1, keepdim=True)
+        assigned_to_me = local_pending_targets & active_assignment_mask
         unassigned_pending = local_pending_targets & ~assigned_any
         return torch.where(
             valid_target.unsqueeze(-1),
@@ -4841,6 +5064,75 @@ class WildfireSearchScenario(BaseScenario):
                     route_cost = float(cost_to_go[sy, sx])
                     if math.isfinite(route_cost):
                         costs_m[env_index, ground_index, target_index] = route_cost * cell_m
+        return costs_m
+
+    def _ugv_target_pair_route_costs_m(
+        self,
+        target_pos: Tensor,
+        targetable: Tensor,
+    ) -> Tensor:
+        """Route cost from one pending target to another for sequence scoring."""
+        batch_dim, n_targets, _ = target_pos.shape
+        device = target_pos.device
+        costs_m = torch.full(
+            (batch_dim, n_targets, n_targets),
+            float("inf"),
+            device=device,
+            dtype=target_pos.dtype,
+        )
+        if n_targets == 0:
+            return costs_m
+
+        target_needed = targetable.any(dim=1) if targetable.ndim == 3 else torch.zeros(
+            batch_dim,
+            n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        if not bool(target_needed.any().item()):
+            return costs_m
+
+        G = int(self.fire_grid_size)
+        cell_w_sim = 2.0 * float(self.x_semidim) / float(G)
+        cell_h_sim = 2.0 * float(self.y_semidim) / float(G)
+        bounds = (0, G - 1, 0, G - 1)
+        for env_index in range(batch_dim):
+            scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+            cell_m = max(cell_w_sim, cell_h_sim) / max(scale, 1e-9)
+            traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+            traversable_tensor = self.traversable_grid[env_index]
+            for to_target in range(n_targets):
+                if not bool(target_needed[env_index, to_target].item()):
+                    continue
+                cost_to_go = self._ugv_route_assignment_cost_grid_for_survivor(
+                    env_index,
+                    to_target,
+                    target_pos[env_index, to_target],
+                    traversable,
+                    movement_cost,
+                    traversable_tensor,
+                    bounds,
+                )
+                if cost_to_go is None:
+                    continue
+                for from_target in range(n_targets):
+                    if from_target == to_target or not bool(target_needed[env_index, from_target].item()):
+                        continue
+                    sx, sy = self._single_position_to_grid_cell(target_pos[env_index, from_target])
+                    if not (0 <= sx < G and 0 <= sy < G and bool(traversable[sy, sx])):
+                        nearest_start = self._nearest_traversable_cell_in_bounds(
+                            env_index,
+                            sx,
+                            sy,
+                            bounds,
+                            traversable=traversable_tensor,
+                        )
+                        if nearest_start is None:
+                            continue
+                        sx, sy = nearest_start
+                    route_cost = float(cost_to_go[sy, sx])
+                    if math.isfinite(route_cost):
+                        costs_m[env_index, from_target, to_target] = route_cost * cell_m
         return costs_m
 
     def _ugv_route_assignment_cost_grid_for_survivor(
