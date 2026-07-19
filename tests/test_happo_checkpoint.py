@@ -51,7 +51,10 @@ class HappoCheckpointTests(unittest.TestCase):
             )
 
             self.assertEqual(path, run_dir / MANIFEST_FILENAME)
-            self.assertEqual(load_training_manifest(models_dir)["env_args"], env_args)
+            manifest = load_training_manifest(models_dir)
+            self.assertEqual(manifest["env_args"], env_args)
+            self.assertIn("git", manifest)
+            self.assertIsInstance(manifest["git"], dict)
 
     def test_missing_manifest_is_supported_for_legacy_checkpoints(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ def save_training_manifest(
     path = run_dir / MANIFEST_FILENAME
     payload = {
         "version": MANIFEST_VERSION,
+        "git": _git_metadata(),
         "harl_args": harl_args,
         "algo_args": algo_args,
         "env_args": env_args,
@@ -85,3 +87,34 @@ def _runner_run_dir(runner) -> Path:
         return run_dir
 
     raise RuntimeError("Could not locate the HARL run directory for checkpoint metadata")
+
+
+def _git_metadata() -> dict[str, Any]:
+    """Return best-effort Git provenance for the training manifest."""
+    repo_dir = Path(__file__).resolve().parents[1]
+
+    def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    try:
+        commit = run_git("rev-parse", "HEAD").stdout.strip()
+        short_commit = run_git("rev-parse", "--short", "HEAD").stdout.strip()
+        branch = run_git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        status = run_git("status", "--short", "--untracked-files=no")
+    except (OSError, subprocess.CalledProcessError):
+        return {"available": False}
+
+    status_lines = [line for line in status.stdout.splitlines() if line.strip()]
+    return {
+        "available": True,
+        "commit": commit,
+        "short_commit": short_commit,
+        "branch": branch,
+        "dirty": bool(status_lines),
+        "status_short": status_lines,
+    }
