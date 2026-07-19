@@ -890,7 +890,7 @@ def main():
             # eval env. Policy construction creates a temporary VMAS env to
             # infer spaces; doing that after reset shifts torch RNG and changes
             # probabilistic survivor detections for the same seed.
-            happo_policy = HappoPolicy.from_checkpoint(ckpt)
+            happo_policy = HappoPolicy.from_checkpoint(ckpt, scenario_kwargs=scenario_kwargs)
             def make_happo(env, _policy=happo_policy):
                 _policy.reset()
                 return _policy
