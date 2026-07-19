@@ -4524,18 +4524,15 @@ class WildfireSearchScenario(BaseScenario):
                     for target in valid_targets
                     if int(target.item()) not in used
                 ]
-                candidate_targets = (
-                    torch.tensor(unused_targets, dtype=torch.long, device=device)
-                    if unused_targets
-                    else valid_targets
-                )
+                if not unused_targets:
+                    continue
+                candidate_targets = torch.tensor(unused_targets, dtype=torch.long, device=device)
                 candidate_distances = distances[env_index, ground_index, candidate_targets]
                 selected_offset = int(torch.argmin(candidate_distances).item())
                 selected = int(candidate_targets[selected_offset].item())
                 assigned_idx[env_index, ground_index] = selected
                 assigned_dist[env_index, ground_index] = distances[env_index, ground_index, selected]
-                if unused_targets:
-                    used.add(selected)
+                used.add(selected)
         return assigned_idx, assigned_dist
 
     def _ugv_sticky_target_indices(self, distances: Tensor, targetable: Tensor) -> Tensor:
@@ -4664,8 +4661,15 @@ class WildfireSearchScenario(BaseScenario):
 
             used: set[int] = set()
             deferred: list[int] = []
+            masked_scores = torch.where(
+                targetable[env_index] & torch.isfinite(scores[env_index]),
+                scores[env_index],
+                torch.full_like(scores[env_index], float("inf")),
+            )
+            ground_order = torch.argsort(masked_scores.min(dim=1).values)
 
-            for ground_index in range(self.n_ground):
+            for ground_index_tensor in ground_order:
+                ground_index = int(ground_index_tensor.item())
                 current = int(previous[ground_index].item())
                 current_valid = (
                     current >= 0
@@ -4683,11 +4687,10 @@ class WildfireSearchScenario(BaseScenario):
                     if int(target.item()) not in used
                     and (int(target.item()) == current or int(target.item()) not in reserved_current)
                 ]
-                candidate_targets = (
-                    torch.tensor(unused_targets, dtype=torch.long, device=device)
-                    if unused_targets
-                    else valid_targets
-                )
+                if not unused_targets:
+                    deferred.append(ground_index)
+                    continue
+                candidate_targets = torch.tensor(unused_targets, dtype=torch.long, device=device)
                 candidate_scores = scores[env_index, ground_index, candidate_targets]
                 candidate = int(candidate_targets[int(torch.argmin(candidate_scores).item())].item())
                 switch = not current_valid
@@ -4716,16 +4719,13 @@ class WildfireSearchScenario(BaseScenario):
                     for target in valid_targets
                     if int(target.item()) not in used
                 ]
-                candidate_targets = (
-                    torch.tensor(unused_targets, dtype=torch.long, device=device)
-                    if unused_targets
-                    else valid_targets
-                )
+                if not unused_targets:
+                    continue
+                candidate_targets = torch.tensor(unused_targets, dtype=torch.long, device=device)
                 candidate_scores = scores[env_index, ground_index, candidate_targets]
                 selected = int(candidate_targets[int(torch.argmin(candidate_scores).item())].item())
                 assigned[env_index, ground_index] = selected
-                if unused_targets:
-                    used.add(selected)
+                used.add(selected)
 
             switched = (previous >= 0) & (assigned[env_index] >= 0) & (previous != assigned[env_index])
             self.metric_ugv_assignment_switches[env_index] += switched.float().sum()
@@ -4739,6 +4739,42 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_assignment_cache_idx[env_index] = assigned[env_index]
             self.ugv_assignment_cache_step[env_index] = current_step[env_index]
         return assigned
+
+    def _ugv_assignment_aware_pending_targets(
+        self,
+        local_pending_targets: Tensor,
+        assigned_idx: Tensor,
+        valid_target: Tensor,
+    ) -> Tensor:
+        """Filter UGV pending pressure to match unique assignment semantics.
+
+        Assigned UGVs are pressured only for their own target. Unassigned UGVs
+        are pressured only when they know a pending target that no UGV owns.
+        """
+        if self.ugv_target_assignment_mode not in {
+            "greedy",
+            "greedy_sticky",
+            "route_cost_greedy",
+            "route_cost_sticky",
+        }:
+            return local_pending_targets
+        if local_pending_targets.numel() == 0 or local_pending_targets.shape[2] == 0:
+            return local_pending_targets
+
+        assignment_mask = torch.zeros_like(local_pending_targets, dtype=torch.bool)
+        assignment_mask.scatter_(
+            dim=2,
+            index=assigned_idx.clamp(min=0).unsqueeze(-1),
+            src=valid_target.unsqueeze(-1),
+        )
+        assigned_any = assignment_mask.any(dim=1, keepdim=True)
+        assigned_to_me = local_pending_targets & assignment_mask
+        unassigned_pending = local_pending_targets & ~assigned_any
+        return torch.where(
+            valid_target.unsqueeze(-1),
+            assigned_to_me,
+            unassigned_pending,
+        )
 
     def _ugv_route_assignment_costs_m(
         self,
@@ -5363,10 +5399,9 @@ class WildfireSearchScenario(BaseScenario):
             + float(self.r_time_penalty)
         )
 
-        # Per-step pressure from each UGV's local mission memory. A disconnected
-        # UGV is only penalized for candidates it currently knows and has not
-        # locally marked as resolved; reconnection updates that local memory via
-        # the survivor-message synchronization path.
+        # Per-step pressure from each UGV's local mission memory. In unique
+        # greedy assignment modes, standby UGVs are not penalized for targets
+        # already assigned to someone else.
         if self.n_ground > 0:
             ground_slice = slice(self.n_drones, self.n_agents)
             local_pending_survivors = (
@@ -5386,6 +5421,11 @@ class WildfireSearchScenario(BaseScenario):
                 )
             else:
                 local_pending_targets = local_pending_survivors
+            local_pending_targets = self._ugv_assignment_aware_pending_targets(
+                local_pending_targets,
+                curr_ground_target_idx,
+                valid_ground_target,
+            )
             n_pending_by_ground = local_pending_targets.float().sum(dim=2)
         else:
             n_pending_by_ground = torch.zeros(

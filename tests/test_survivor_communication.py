@@ -324,8 +324,13 @@ class SurvivorCommunicationTests(unittest.TestCase):
             targetable,
         )
 
-        self.assertTrue(torch.all(assigned_idx >= 0))
-        self.assertTrue(torch.all(assigned_idx == 0))
+        self.assertEqual(int((assigned_idx == 0).sum().item()), 1)
+        self.assertEqual(int((assigned_idx < 0).sum().item()), 1)
+        unassigned_ground = int(torch.nonzero(assigned_idx[0] < 0, as_tuple=False)[0].item())
+        hint = scenario._ugv_planner_hint_observations(
+            scenario.world.agents[ground_slice.start + unassigned_ground],
+        )
+        torch.testing.assert_close(hint, torch.zeros_like(hint))
         self.assertEqual(scenario.r_all_survivors_found, 0.0)
         self.assertEqual(scenario.r_drone_scout, 2.0)
         self.assertEqual(scenario.r_ground_confirm, 4.0)
@@ -988,6 +993,44 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(ugv1.scenario_reward, torch.tensor([0.0]))
         torch.testing.assert_close(scenario.metric_reward_pending_penalty, torch.tensor([-0.5]))
 
+    def test_unassigned_ugv_has_no_pending_penalty_when_target_is_owned(self):
+        env = self._diagnostic_env(
+            n_drones=0,
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            ugv_target_assignment_mode="greedy_sticky",
+            ugv_planner_hint="none",
+            r_found_survivor=0.0,
+            r_ground_confirm=0.0,
+            r_ground_shaping=0.0,
+            r_ground_approach=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_ugv_planner_progress=0.0,
+            r_pending_penalty=-0.5,
+            r_fire_penalty=0.0,
+            r_ground_travel_cost=0.0,
+            r_time_penalty=0.0,
+            r_coverage=0.0,
+        )
+        env.reset()
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.8, 0.0]])
+        scenario._survivors[0].state.pos[:] = torch.tensor([[0.1, 0.0]])
+        scenario.detection_range_by_env.zero_()
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[:, :, 0] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario._invalidate_ugv_assignment_cache()
+
+        scenario._compute_step_rewards()
+
+        torch.testing.assert_close(ugv0.scenario_reward, torch.tensor([-0.5]))
+        torch.testing.assert_close(ugv1.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(scenario.metric_reward_pending_penalty, torch.tensor([-0.5]))
+
     def test_greedy_ugv_assignment_prefers_distinct_known_targets(self):
         env = self._diagnostic_env(
             n_ground=2,
@@ -1011,6 +1054,50 @@ class SurvivorCommunicationTests(unittest.TestCase):
             target_idx >= 0,
         )
         torch.testing.assert_close(duplicate_fraction, torch.tensor([0.0]))
+
+    def test_unique_greedy_assignment_modes_leave_extra_ugvs_unassigned(self):
+        modes = [
+            "greedy",
+            "greedy_sticky",
+            "route_cost_greedy",
+            "route_cost_sticky",
+        ]
+        for mode in modes:
+            with self.subTest(mode=mode):
+                env = self._diagnostic_env(
+                    n_ground=3,
+                    n_survivors=1,
+                    ugv_target_assignment_mode=mode,
+                    ugv_planner_hint="global_astar" if mode.startswith("route_cost") else "none",
+                )
+                scenario = env.scenario
+                scenario.ugv_sticky_target_idx.fill_(-1)
+                scenario.ugv_sticky_target_age.zero_()
+                scenario._invalidate_ugv_assignment_cache()
+                ground_pos = torch.tensor([[[0.00, 0.0], [0.25, 0.0], [0.80, 0.0]]])
+                survivor_pos = torch.tensor([[[0.30, 0.0]]])
+                targetable = torch.ones(1, 3, 1, dtype=torch.bool)
+
+                if mode.startswith("route_cost"):
+                    def route_costs(_ground_pos, _survivor_pos, _targetable):
+                        return torch.tensor([[[30.0], [5.0], [50.0]]])
+
+                    scenario._ugv_route_assignment_costs_m = route_costs
+
+                target_idx, target_dist = scenario._ugv_assigned_target_indices(
+                    ground_pos,
+                    survivor_pos,
+                    targetable,
+                )
+
+                self.assertEqual(int((target_idx == 0).sum().item()), 1)
+                self.assertEqual(int((target_idx < 0).sum().item()), 2)
+                assigned_ground = int(torch.nonzero(target_idx[0] == 0, as_tuple=False)[0].item())
+                self.assertEqual(assigned_ground, 1)
+                self.assertTrue(torch.isfinite(target_dist[0, assigned_ground]))
+                for ground_index in range(3):
+                    if ground_index != assigned_ground:
+                        self.assertTrue(torch.isinf(target_dist[0, ground_index]))
 
     def test_nearest_ugv_assignment_preserves_shared_target_behavior(self):
         env = self._diagnostic_env(
