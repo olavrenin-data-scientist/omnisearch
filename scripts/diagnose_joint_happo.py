@@ -170,6 +170,8 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
+    if getattr(args, "fire_grid_size", None) is not None:
+        scenario_kwargs["fire_grid_size"] = int(args.fire_grid_size)
     if getattr(args, "drone_perception_mode", None) is not None:
         scenario_kwargs["drone_perception_mode"] = (
             str(args.drone_perception_mode).replace("+", "_").replace("-", "_")
@@ -1256,6 +1258,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1020)))
     parser.add_argument("--terrain-cache-path", default=None)
+    parser.add_argument("--fire-grid-size", type=int, default=None,
+                        help="Override checkpoint/default fire, coverage, and confidence grid size.")
     parser.add_argument("--drone-perception-mode",
                         choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
                         default=None,
@@ -1417,6 +1421,8 @@ def main() -> None:
         parser.error("--joint-survivor-diagnostic and --joint-schema-ugv-diagnostic are mutually exclusive")
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         parser.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
+    if args.fire_grid_size is not None and args.fire_grid_size < 2:
+        parser.error("--fire-grid-size must be at least 2")
     for arg_name in (
         "uav_decision_grid",
         "uav_confidence_reward_grid",
