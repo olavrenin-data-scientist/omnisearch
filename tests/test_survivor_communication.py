@@ -1059,6 +1059,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         modes = [
             "greedy",
             "greedy_sticky",
+            "greedy_sequence_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
             "route_sequence_sticky",
@@ -1537,6 +1538,60 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertEqual(target_idx.tolist(), [[1]])
         self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[0]])
+
+    def test_greedy_sequence_sticky_can_reorder_current_and_new_target(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="greedy_sequence_sticky",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=0.0,
+            ugv_sticky_switch_ratio=1.0,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[12.0, 0.0], [10.0, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[1]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[0]])
+
+    def test_greedy_sequence_sticky_keeps_current_and_queues_next_target(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="greedy_sequence_sticky",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=0.0,
+            ugv_sticky_switch_ratio=1.0,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[10.0, 0.0], [15.0, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[1]])
 
     def test_route_sequence_sticky_keeps_current_for_marginal_reorder_gain(self):
         env = self._diagnostic_env(

@@ -1050,6 +1050,21 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_target_assignment_mode"], "route_sequence_sticky")
 
+    def test_joint_survivor_diagnostic_accepts_greedy_sequence_sticky_assignment(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_diag_greedy_sequence",
+            joint_survivor_diagnostic=True,
+            ugv_target_assignment_mode="greedy-sequence-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sequence_sticky")
+
     def test_joint_schema_ugv_diagnostic_uses_delayed_joint_schema_defaults(self):
         _, algo_args, env_args = build_args(
             num_env_steps=100,
@@ -1166,6 +1181,21 @@ class HappoCheckpointTests(unittest.TestCase):
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_target_assignment_mode"], "route_sequence_sticky")
+
+    def test_joint_schema_ugv_diagnostic_accepts_greedy_sequence_sticky_assignment(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_greedy_sequence",
+            joint_schema_ugv_diagnostic=True,
+            ugv_target_assignment_mode="greedy-sequence-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sequence_sticky")
 
     def test_joint_schema_uav_diagnostic_uses_padded_joint_observation_defaults(self):
         _, algo_args, env_args = build_args(

@@ -751,6 +751,7 @@ class WildfireSearchScenario(BaseScenario):
             "nearest",
             "greedy",
             "greedy_sticky",
+            "greedy_sequence_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
             "route_sequence_sticky",
@@ -759,8 +760,8 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_target_assignment_mode not in valid_assignment_modes:
             raise ValueError(
                 "ugv_target_assignment_mode must be one of: nearest, greedy, "
-                "greedy_sticky, route_cost_greedy, route_cost_sticky, "
-                "route_sequence_sticky, route_cost_global"
+                "greedy_sticky, greedy_sequence_sticky, route_cost_greedy, "
+                "route_cost_sticky, route_sequence_sticky, route_cost_global"
             )
         self.ugv_sticky_switch_margin_m = max(
             float(kwargs.pop("ugv_sticky_switch_margin_m", 20.0)),
@@ -4433,6 +4434,7 @@ class WildfireSearchScenario(BaseScenario):
             not in {
                 "route_cost_greedy",
                 "route_cost_sticky",
+                "greedy_sequence_sticky",
                 "route_sequence_sticky",
                 "route_cost_global",
             }
@@ -4447,6 +4449,26 @@ class WildfireSearchScenario(BaseScenario):
 
         if self.ugv_target_assignment_mode == "greedy_sticky":
             assigned_idx = self._ugv_sticky_target_indices(distances, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "greedy_sequence_sticky":
+            distances_m = distances / self.terrain_sim_units_per_meter.to(device=device).view(-1, 1, 1).clamp_min(1e-9)
+            target_pair_distances_m = self._ugv_target_pair_euclidean_costs_m(
+                survivor_pos,
+                targetable,
+            )
+            assigned_idx = self._ugv_route_sequence_sticky_target_indices(
+                distances_m,
+                target_pair_distances_m,
+                targetable,
+            )
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(
@@ -4739,6 +4761,38 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_sequence_next_target_idx = next_assigned
         return assigned
 
+    def _ugv_target_pair_euclidean_costs_m(self, survivor_pos: Tensor, targetable: Tensor) -> Tensor:
+        """Euclidean survivor-to-survivor sequence costs in meters."""
+        batch_dim = survivor_pos.shape[0]
+        n_targets = survivor_pos.shape[1]
+        device = survivor_pos.device
+        if n_targets == 0:
+            return torch.empty((batch_dim, 0, 0), device=device, dtype=survivor_pos.dtype)
+        pair_dist_sim = torch.linalg.norm(
+            survivor_pos.unsqueeze(2) - survivor_pos.unsqueeze(1),
+            dim=-1,
+        )
+        pair_dist_m = pair_dist_sim / self.terrain_sim_units_per_meter.to(
+            device=device,
+            dtype=survivor_pos.dtype,
+        ).view(-1, 1, 1).clamp_min(1e-9)
+        if targetable.ndim == 3 and targetable.shape[1] > 0:
+            target_available = targetable.any(dim=1)
+            valid_pair = target_available.unsqueeze(2) & target_available.unsqueeze(1)
+        else:
+            valid_pair = torch.zeros(
+                (batch_dim, n_targets, n_targets),
+                dtype=torch.bool,
+                device=device,
+            )
+        eye = torch.eye(n_targets, dtype=torch.bool, device=device).unsqueeze(0)
+        valid_pair = valid_pair & ~eye
+        return torch.where(
+            valid_pair,
+            pair_dist_m,
+            torch.full_like(pair_dist_m, float("inf")),
+        )
+
     def _ugv_add_route_sequence_candidate(
         self,
         candidates: list[tuple[float, float, int, int, int, int]],
@@ -4967,6 +5021,7 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_target_assignment_mode not in {
             "greedy",
             "greedy_sticky",
+            "greedy_sequence_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
             "route_sequence_sticky",
@@ -4982,7 +5037,7 @@ class WildfireSearchScenario(BaseScenario):
             src=valid_target.unsqueeze(-1),
         )
         owned_mask = active_assignment_mask.clone()
-        if self.ugv_target_assignment_mode == "route_sequence_sticky":
+        if self.ugv_target_assignment_mode in {"greedy_sequence_sticky", "route_sequence_sticky"}:
             next_idx = self.ugv_sequence_next_target_idx.to(device=local_pending_targets.device)
             next_valid = next_idx >= 0
             owned_mask.scatter_(

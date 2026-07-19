@@ -578,6 +578,7 @@ def build_args(
         "nearest",
         "greedy",
         "greedy_sticky",
+        "greedy_sequence_sticky",
         "route_cost_greedy",
         "route_cost_sticky",
         "route_sequence_sticky",
@@ -586,8 +587,8 @@ def build_args(
     if ugv_target_assignment_mode not in valid_assignment_modes:
         raise ValueError(
             "ugv_target_assignment_mode must be one of: nearest, greedy, "
-            "greedy_sticky, route_cost_greedy, route_cost_sticky, "
-            "route_sequence_sticky, route_cost_global"
+            "greedy_sticky, greedy_sequence_sticky, route_cost_greedy, "
+            "route_cost_sticky, route_sequence_sticky, route_cost_global"
         )
     if ugv_assigned_target_obs_only is None:
         ugv_assigned_target_obs_only = False
@@ -1878,6 +1879,8 @@ def main():
                        "greedy",
                        "greedy_sticky",
                        "greedy-sticky",
+                       "greedy_sequence_sticky",
+                       "greedy-sequence-sticky",
                        "route_cost_greedy",
                        "route-cost-greedy",
                        "route_cost_sticky",

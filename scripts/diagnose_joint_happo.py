@@ -1315,6 +1315,8 @@ def main() -> None:
             "greedy",
             "greedy_sticky",
             "greedy-sticky",
+            "greedy_sequence_sticky",
+            "greedy-sequence-sticky",
             "route_cost_greedy",
             "route-cost-greedy",
             "route_cost_sticky",
