@@ -102,6 +102,30 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(merged["max_steps"], 1_000)
         self.assertEqual(merged["comms_dropout"], 0.8)
 
+    def test_training_scenario_preserves_checkpoint_controls_when_not_overridden(self):
+        manifest = {
+            "env_args": {
+                "scenario_kwargs": {
+                    "max_steps": 500,
+                    "comms_dropout": 0.1,
+                    "ugv_planner_hint": "global_astar",
+                },
+            },
+        }
+
+        merged = merge_training_scenario(
+            {
+                "max_steps": 100,
+                "comms_dropout": 0.0,
+                "ugv_planner_hint": "local_astar",
+            },
+            manifest,
+        )
+
+        self.assertEqual(merged["max_steps"], 500)
+        self.assertEqual(merged["comms_dropout"], 0.1)
+        self.assertEqual(merged["ugv_planner_hint"], "global_astar")
+
     def test_policy_loader_extracts_manifest_scenario_kwargs(self):
         manifest = {
             "env_args": {

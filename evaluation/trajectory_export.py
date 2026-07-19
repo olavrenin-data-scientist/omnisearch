@@ -618,6 +618,12 @@ def export_trajectory(
         "ground_confirmation_range_m": round(float(sc.ground_confirmation_range_m), 4),
         "ground_lidar_range": round(float(sc.ground_lidar_range), 8),
         "ground_lidar_range_m": round(float(sc.ground_lidar_range_m), 4),
+        "ugv_planner": {
+            "hint": str(getattr(sc, "ugv_planner_hint", "none")),
+            "dense_reward_mode": str(getattr(sc, "ugv_dense_reward_mode", "target")),
+            "target_assignment_mode": str(getattr(sc, "ugv_target_assignment_mode", "nearest")),
+            "global_lookahead_m": round(float(getattr(sc, "ugv_global_planner_lookahead_m", 20.0)), 4),
+        },
         "ugv_planner_fire": {
             "global_heuristic": str(getattr(sc, "ugv_global_planner_heuristic", "euclidean")),
             "mode": str(getattr(sc, "ugv_planner_fire_mode", "off")),

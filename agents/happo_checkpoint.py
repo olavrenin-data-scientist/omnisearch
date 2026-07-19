@@ -52,17 +52,20 @@ def merge_training_scenario(
     export_scenario: dict[str, Any],
     manifest: dict[str, Any],
     *,
-    max_steps: int,
-    comms_dropout: float,
+    max_steps: int | None = None,
+    comms_dropout: float | None = None,
 ) -> dict[str, Any]:
     """Restore training settings while preserving deliberate evaluation controls."""
     training_scenario = manifest.get("env_args", {}).get("scenario_kwargs", {})
-    return {
+    merged = {
         **export_scenario,
         **training_scenario,
-        "max_steps": max_steps,
-        "comms_dropout": comms_dropout,
     }
+    if max_steps is not None:
+        merged["max_steps"] = max_steps
+    if comms_dropout is not None:
+        merged["comms_dropout"] = comms_dropout
+    return merged
 
 
 def _runner_run_dir(runner) -> Path:

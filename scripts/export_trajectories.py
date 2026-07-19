@@ -71,6 +71,15 @@ def _resolve_happo_checkpoint(path: str | None) -> Path | None:
     return candidate.resolve()
 
 
+def _cli_option_present(*names: str) -> bool:
+    """Return whether any option name was explicitly supplied on the command line."""
+    prefixes = tuple(f"{name}=" for name in names)
+    for token in sys.argv[1:]:
+        if token in names or any(token.startswith(prefix) for prefix in prefixes):
+            return True
+    return False
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -114,8 +123,10 @@ def main():
                    help="Minimum outage duration for --comms-dropout-mode bursty.")
     p.add_argument("--comms-dropout-max-steps", type=int, default=15,
                    help="Maximum outage duration for --comms-dropout-mode bursty.")
-    p.add_argument("--enable-fire", action="store_true",
+    p.add_argument("--enable-fire", dest="enable_fire", action="store_true", default=None,
                    help="Enable fire in exported trajectories when the merged scenario disables it.")
+    p.add_argument("--disable-fire", dest="enable_fire", action="store_false",
+                   help="Disable fire in exported trajectories when the checkpoint enabled it.")
     p.add_argument("--joint-survivor-diagnostic", action="store_true",
                    help="Export the joint UAV+UGV diagnostic scenario when not relying on a checkpoint manifest.")
     p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
@@ -139,6 +150,36 @@ def main():
                    ),
                    default=None,
                    help="Override UGV assignment for known, unconfirmed survivor targets.")
+    p.add_argument("--ugv-planner-hint",
+                   choices=(
+                       "none",
+                       "local_astar",
+                       "local-astar",
+                       "local_escape_astar",
+                       "local-escape-astar",
+                       "global_astar",
+                       "global-astar",
+                   ),
+                   default=None,
+                   help="Override the checkpoint's UGV planner hint setting.")
+    p.add_argument("--ugv-dense-reward-mode",
+                   choices=(
+                       "target",
+                       "positive_target",
+                       "positive-target",
+                       "planner_blend",
+                       "planner-blend",
+                       "escape_blend",
+                       "escape-blend",
+                       "escape_route_switch",
+                       "escape-route-switch",
+                       "planner_follow",
+                       "planner-follow",
+                   ),
+                   default=None,
+                   help="Override UGV dense reward shaping mode for exported reward metrics.")
+    p.add_argument("--ugv-global-planner-lookahead-m", type=float, default=None,
+                   help="Override the checkpoint's global_astar waypoint lookahead in meters.")
     p.add_argument("--ugv-planner-fire-mode",
                    choices=("off", "cost", "block"),
                    default=None,
@@ -434,6 +475,12 @@ def main():
                         "default). Nonzero values simulate an oblique/side-angle view: "
                         "survivors render taller, matching --oblique-frac training data.")
     args = p.parse_args()
+    steps_cli = _cli_option_present("--steps")
+    comms_dropout_cli = _cli_option_present("--comms-dropout")
+    comms_dropout_mode_cli = _cli_option_present("--comms-dropout-mode")
+    comms_map_mode_cli = _cli_option_present("--comms-map-mode")
+    comms_dropout_min_cli = _cli_option_present("--comms-dropout-min-steps")
+    comms_dropout_max_cli = _cli_option_present("--comms-dropout-max-steps")
     if args.steps < 1:
         raise SystemExit("--steps must be at least 1")
     if args.grid_size < 8:
@@ -453,7 +500,7 @@ def main():
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
     print(f" Approach:      {args.approach}")
-    print(f" Steps:         {args.steps}")
+    print(f" Steps:         {args.steps}" + ("" if steps_cli else " (default; checkpoint may override)"))
     print(f" Grid:          {args.grid_size}x{args.grid_size}")
     print(f" Comms dropout: {args.comms_dropout}")
     print(f" Comms mode:    {args.comms_dropout_mode}")
@@ -537,6 +584,7 @@ def main():
     # apples-to-apples. Episode length and dropout stay evaluation controls.
     happo_checkpoint = None
     training_manifest = None
+    restored_happo_manifest = False
     try:
         from agents.happo_checkpoint import load_training_manifest, merge_training_scenario
         from agents.happo_policy import find_latest_happo_checkpoint
@@ -552,15 +600,18 @@ def main():
             scenario_kwargs = merge_training_scenario(
                 scenario_kwargs,
                 training_manifest,
-                max_steps=args.steps,
-                comms_dropout=args.comms_dropout,
+                max_steps=args.steps if steps_cli else None,
+                comms_dropout=args.comms_dropout if comms_dropout_cli else None,
             )
-            scenario_kwargs.update({
-                "comms_dropout_mode": args.comms_dropout_mode,
-                "comms_map_mode": args.comms_map_mode,
-                "comms_dropout_min_steps": args.comms_dropout_min_steps,
-                "comms_dropout_max_steps": args.comms_dropout_max_steps,
-            })
+            if comms_dropout_mode_cli:
+                scenario_kwargs["comms_dropout_mode"] = args.comms_dropout_mode
+            if comms_map_mode_cli:
+                scenario_kwargs["comms_map_mode"] = args.comms_map_mode
+            if comms_dropout_min_cli:
+                scenario_kwargs["comms_dropout_min_steps"] = args.comms_dropout_min_steps
+            if comms_dropout_max_cli:
+                scenario_kwargs["comms_dropout_max_steps"] = args.comms_dropout_max_steps
+            restored_happo_manifest = True
             print(f" HAPPO env:     restored from {happo_checkpoint.parent.name}")
         else:
             print(" HAPPO env:     legacy checkpoint (no saved training config)")
@@ -569,6 +620,51 @@ def main():
     if args.no_variable_drone_clearance:
         for key in variable_clearance_keys:
             scenario_kwargs.pop(key, None)
+
+    if _cli_option_present("--x-semidim"):
+        scenario_kwargs["x_semidim"] = args.x_semidim
+    if _cli_option_present("--y-semidim"):
+        scenario_kwargs["y_semidim"] = args.y_semidim
+    if _cli_option_present("--grid-size"):
+        scenario_kwargs["fire_grid_size"] = args.grid_size
+    if _cli_option_present("--terrain-source"):
+        scenario_kwargs["terrain_source"] = args.terrain_source
+    if _cli_option_present("--terrain-place"):
+        scenario_kwargs["terrain_place"] = args.terrain_place
+    if _cli_option_present("--terrain-cache-dir"):
+        scenario_kwargs["terrain_cache_dir"] = args.terrain_cache_dir
+    if _cli_option_present("--terrain-cache-path"):
+        scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
+    if _cli_option_present("--drone-flight-levels-m"):
+        scenario_kwargs["drone_flight_levels_m"] = tuple(args.drone_flight_levels_m)
+    if _cli_option_present("--drone-camera-fov-deg"):
+        scenario_kwargs["drone_camera_fov_deg"] = args.drone_camera_fov_deg
+    if _cli_option_present("--drone-safety-clearance-m"):
+        scenario_kwargs["drone_safety_clearance_m"] = args.drone_safety_clearance_m
+    if _cli_option_present("--drone-safety-clearance-by-land-cover-m"):
+        scenario_kwargs["drone_safety_clearance_by_land_cover_m"] = tuple(
+            args.drone_safety_clearance_by_land_cover_m
+        )
+    if _cli_option_present("--drone-safety-clearance-by-object-m"):
+        scenario_kwargs["drone_safety_clearance_by_object_m"] = tuple(
+            args.drone_safety_clearance_by_object_m
+        )
+    if _cli_option_present("--drone-fire-safety-clearance-m"):
+        scenario_kwargs["drone_fire_safety_clearance_m"] = float(args.drone_fire_safety_clearance_m)
+    if _cli_option_present("--drone-smoke-safety-clearance-m"):
+        scenario_kwargs["drone_smoke_safety_clearance_m"] = float(args.drone_smoke_safety_clearance_m)
+    if _cli_option_present("--drone-smoke-clearance-threshold"):
+        scenario_kwargs["drone_smoke_clearance_threshold"] = float(args.drone_smoke_clearance_threshold)
+    if _cli_option_present("--sim-step-seconds"):
+        scenario_kwargs["sim_step_seconds"] = args.sim_step_seconds
+    if _cli_option_present("--drone-speed-mps"):
+        scenario_kwargs["drone_speed_mps"] = args.drone_speed_mps
+    if _cli_option_present("--drone-u-multiplier"):
+        scenario_kwargs["drone_u_multiplier"] = args.drone_u_multiplier
+    if _cli_option_present("--ground-speed-mps"):
+        scenario_kwargs["ground_speed_mps"] = args.ground_speed_mps
+    if _cli_option_present("--ground-accel-mps2"):
+        scenario_kwargs["ground_accel_mps2"] = args.ground_accel_mps2
 
     if args.ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = max(args.ground_confirmation_range_m, 0.0)
@@ -582,7 +678,7 @@ def main():
         scenario_kwargs["ground_confirm_min_m"] = max(
             args.ground_min_confirm_radius_m, 0.0,
         )
-    if args.joint_survivor_diagnostic:
+    if args.joint_survivor_diagnostic and not restored_happo_manifest:
         scenario_kwargs.update({
             "n_drones": 3,
             "n_ground": max(int(args.joint_diagnostic_ugvs), 1),
@@ -602,7 +698,9 @@ def main():
             "ugv_global_planner_lookahead_m": 20.0,
             "disable_fire": True,
         })
-    if args.joint_schema_ugv_diagnostic:
+    elif args.joint_survivor_diagnostic:
+        print(" HAPPO env:     kept checkpoint scenario; --joint-survivor-diagnostic preset not applied")
+    if args.joint_schema_ugv_diagnostic and not restored_happo_manifest:
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 2,
@@ -640,10 +738,20 @@ def main():
             "uav_cleanup_target_obs": True,
             "disable_fire": True,
         })
-    if args.enable_fire:
-        scenario_kwargs["disable_fire"] = False
+    elif args.joint_schema_ugv_diagnostic:
+        print(" HAPPO env:     kept checkpoint scenario; --joint-schema-ugv-diagnostic preset not applied")
+    if args.enable_fire is not None:
+        scenario_kwargs["disable_fire"] = not bool(args.enable_fire)
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
+    if args.ugv_planner_hint is not None:
+        scenario_kwargs["ugv_planner_hint"] = args.ugv_planner_hint.replace("-", "_")
+    if args.ugv_dense_reward_mode is not None:
+        scenario_kwargs["ugv_dense_reward_mode"] = args.ugv_dense_reward_mode.replace("-", "_")
+    if args.ugv_global_planner_lookahead_m is not None:
+        if args.ugv_global_planner_lookahead_m <= 0.0:
+            raise SystemExit("--ugv-global-planner-lookahead-m must be positive")
+        scenario_kwargs["ugv_global_planner_lookahead_m"] = float(args.ugv_global_planner_lookahead_m)
     if args.ugv_planner_fire_mode is not None:
         scenario_kwargs["ugv_planner_fire_mode"] = args.ugv_planner_fire_mode.replace("-", "_")
     if args.ugv_planner_fire_replan_policy is not None:
@@ -689,6 +797,26 @@ def main():
         scenario_kwargs["ugv_planner_land_cover_costs"] = tuple(
             float(v) for v in args.ugv_planner_land_cover_costs
         )
+
+    planner_hint = str(scenario_kwargs.get("ugv_planner_hint", "none")).replace("-", "_")
+    dense_reward_mode = str(scenario_kwargs.get("ugv_dense_reward_mode", "target")).replace("-", "_")
+    scenario_kwargs["ugv_planner_hint"] = planner_hint
+    scenario_kwargs["ugv_dense_reward_mode"] = dense_reward_mode
+    if dense_reward_mode == "planner_blend" and planner_hint not in {"local_astar", "local_escape_astar"}:
+        raise SystemExit("--ugv-dense-reward-mode planner_blend requires a local UGV planner hint")
+    if dense_reward_mode == "escape_blend" and planner_hint != "local_escape_astar":
+        raise SystemExit("--ugv-dense-reward-mode escape_blend requires --ugv-planner-hint local_escape_astar")
+    if dense_reward_mode == "escape_route_switch" and planner_hint != "local_astar":
+        raise SystemExit("--ugv-dense-reward-mode escape_route_switch requires --ugv-planner-hint local_astar")
+    if dense_reward_mode == "planner_follow" and planner_hint != "global_astar":
+        raise SystemExit("--ugv-dense-reward-mode planner_follow requires --ugv-planner-hint global_astar")
+
+    export_steps = int(scenario_kwargs.get("max_steps", args.steps))
+    if export_steps < 1:
+        raise SystemExit("effective max_steps must be at least 1")
+    if export_steps != args.steps:
+        print(f" HAPPO env:     effective steps restored from checkpoint: {export_steps}")
+
     cv_options = None
     if args.enable_cv:
         if scenario_kwargs.get("terrain_cache_path") is None:
@@ -740,7 +868,7 @@ def main():
             strategy_name=name,
             make_policy=make_policy,
             output_path=out_dir / f"{name}.json",
-            n_steps=args.steps,
+            n_steps=export_steps,
             seed=args.seed,
             scenario_kwargs=scenario_kwargs,
             cv_options=run_cv_options,
@@ -776,7 +904,7 @@ def main():
                 strategy_name="happo_trained",
                 make_policy=make_happo,
                 output_path=out_dir / "happo_trained.json",
-                n_steps=args.steps,
+                n_steps=export_steps,
                 seed=args.seed,
                 scenario_kwargs=scenario_kwargs,
                 cv_options=run_cv_options,
