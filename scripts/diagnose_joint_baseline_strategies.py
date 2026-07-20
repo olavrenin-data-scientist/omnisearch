@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agents.baselines import BASELINES, get_baseline
+from agents.baselines import BASELINES, UGV_CONTROLLER_CHOICES, get_baseline
 from agents.happo_checkpoint import load_training_manifest
 from agents.happo_policy import (
     HappoPolicy,
@@ -158,7 +158,10 @@ def build_scenario_kwargs(
         if (
             args.ugv_target_assignment_mode is None
             and specs is not None
-            and any(spec.name == "matched_heuristic" for spec in specs)
+            and (
+                any(spec.name == "matched_heuristic" for spec in specs)
+                or args.baseline_ugv_controller.replace("-", "_") != "native"
+            )
         ):
             scenario_kwargs["ugv_target_assignment_mode"] = "greedy_sticky"
     n_ugvs = getattr(args, "n_ugvs", None)
@@ -220,11 +223,16 @@ def make_policy(
     env: Any,
     scenario_kwargs: dict[str, Any],
     *,
+    baseline_ugv_controller: str = "native",
     happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] | None = None,
     deterministic_happo: bool = True,
 ) -> Callable[[Any], list[torch.Tensor]]:
     if spec.name in BASELINES:
-        return get_baseline(spec.name, env)
+        return get_baseline(
+            spec.name,
+            env,
+            ugv_controller_mode=baseline_ugv_controller,
+        )
     if spec.name == "happo":
         if spec.checkpoint_dir is None:
             raise ValueError("HAPPO strategy requires a checkpoint directory")
@@ -462,6 +470,7 @@ def run_rollout(
     time_bins: int = 5,
     happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] | None = None,
     stochastic_happo: bool = False,
+    baseline_ugv_controller: str = "native",
 ) -> dict[str, Any]:
     env = vmas.make_env(
         scenario=WildfireSearchScenario(),
@@ -477,6 +486,7 @@ def run_rollout(
         spec,
         env,
         scenario_kwargs,
+        baseline_ugv_controller=baseline_ugv_controller,
         happo_cache=happo_cache,
         deterministic_happo=not stochastic_happo,
     )
@@ -744,6 +754,7 @@ def run_rollout(
         "strategy": spec.label,
         "strategy_name": spec.name,
         "checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir),
+        "baseline_ugv_controller": baseline_ugv_controller,
         "seed": int(seed),
         "max_steps": max_steps,
         "episode_steps": max_steps,
@@ -1253,11 +1264,12 @@ def _print_summary(summary: dict[str, Any]) -> None:
     )
 
 
-def _spec_metadata(spec: StrategySpec) -> dict[str, Any]:
+def _spec_metadata(spec: StrategySpec, *, baseline_ugv_controller: str = "native") -> dict[str, Any]:
     return {
         "label": spec.label,
         "name": spec.name,
         "checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir),
+        "baseline_ugv_controller": baseline_ugv_controller,
     }
 
 
@@ -1287,6 +1299,17 @@ def _parse_args() -> argparse.Namespace:
                         help="Override episode length. Default uses checkpoint max_steps when available, else 300.")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
     parser.add_argument("--time-bins", type=int, default=5)
+    parser.add_argument(
+        "--baseline-ugv-controller",
+        choices=UGV_CONTROLLER_CHOICES,
+        default="native",
+        help=(
+            "UGV controller for heuristic baselines. 'native' keeps each heuristic's "
+            "current UGV target memory/routing; 'matched_heuristic' keeps the "
+            "heuristic UAV actions but uses scenario assignment plus planner hints "
+            "like HAPPO."
+        ),
+    )
     parser.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS)
     parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
                         help="Override UAV count. Default uses checkpoint count when available, else joint default.")
@@ -1372,6 +1395,7 @@ def main() -> None:
 
     scenario_checkpoint = _scenario_checkpoint_from_specs(args, specs)
     scenario_kwargs = build_scenario_kwargs(args, scenario_checkpoint, specs=specs)
+    baseline_ugv_controller = args.baseline_ugv_controller.replace("-", "_")
     print(
         "scenario: "
         f"{scenario_kwargs['n_drones']} UAVs, "
@@ -1394,6 +1418,7 @@ def main() -> None:
         spec.label if spec.checkpoint_dir is None else f"{spec.label}:{spec.checkpoint_dir}"
         for spec in specs
     ))
+    print(f"baseline UGV controller: {baseline_ugv_controller}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
     print("-" * 104)
 
@@ -1408,6 +1433,7 @@ def main() -> None:
                 time_bins=args.time_bins,
                 happo_cache=happo_cache,
                 stochastic_happo=args.stochastic,
+                baseline_ugv_controller=baseline_ugv_controller,
             )
             rows.append(row)
             _print_row(row)
@@ -1417,8 +1443,11 @@ def main() -> None:
     payload = {
         "scenario_kwargs": scenario_kwargs,
         "metadata": {
-            "strategy": _spec_metadata(specs[0]),
-            "strategies": [_spec_metadata(spec) for spec in specs],
+            "strategy": _spec_metadata(specs[0], baseline_ugv_controller=baseline_ugv_controller),
+            "strategies": [
+                _spec_metadata(spec, baseline_ugv_controller=baseline_ugv_controller)
+                for spec in specs
+            ],
             "happo_deterministic": not args.stochastic,
             "steps": int(scenario_kwargs["max_steps"]),
             "scenario_source_checkpoint": None if scenario_checkpoint is None else str(scenario_checkpoint),

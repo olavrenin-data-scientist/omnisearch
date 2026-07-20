@@ -44,6 +44,17 @@ from envs.wildfire_search import LAND_ROCK, LAND_WATER, WildfireSearchScenario, 
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
 GROUND_ROUTE_MAX_LOOKAHEAD_CELLS = 10
+UGV_CONTROLLER_NATIVE = "native"
+UGV_CONTROLLER_MATCHED = "matched_heuristic"
+UGV_CONTROLLER_ALIASES = {
+    "native": UGV_CONTROLLER_NATIVE,
+    "baseline": UGV_CONTROLLER_NATIVE,
+    "matched": UGV_CONTROLLER_MATCHED,
+    "matched_astar": UGV_CONTROLLER_MATCHED,
+    "matched_heuristic": UGV_CONTROLLER_MATCHED,
+    "scenario": UGV_CONTROLLER_MATCHED,
+}
+UGV_CONTROLLER_CHOICES = tuple(sorted(UGV_CONTROLLER_ALIASES))
 GROUND_RECOVERY_ANGLES = (
     0.0,
     math.pi / 6,
@@ -1248,61 +1259,76 @@ class MatchedHeuristicPolicy:
         del env
         sc = self.scenario
         actions = self._lawnmower._drone_lawnmower_actions()
-        actions.extend(self._ground_actions())
+        actions.extend(_matched_ground_actions(sc))
         return actions
 
-    def _ground_actions(self) -> List[torch.Tensor]:
-        sc = self.scenario
-        B = sc.world.batch_dim
-        device = sc.fire_grid.device
-        if sc.n_ground <= 0:
-            return []
 
-        actions: List[torch.Tensor] = []
-        for ground_index in range(sc.n_ground):
-            agent = sc.world.agents[sc.n_drones + ground_index]
-            hint = sc._ugv_planner_hint_observations(agent)
-            if hint.shape[-1] >= 4:
-                unit = hint[:, :2]
-                distance_norm = hint[:, 2:3].clamp(0.0, 1.0)
-                valid = hint[:, 3:4] > 0.5
-                action_scale = (2.0 * distance_norm).clamp(0.0, 1.0)
-                action = torch.where(valid, unit * action_scale, torch.zeros(B, 2, device=device))
-            else:
-                action = self._direct_assigned_target_action(ground_index)
-            actions.append(action.clamp(-1.0, 1.0))
+class MatchedUGVControllerPolicy:
+    """Wrap any baseline UAV policy with scenario-matched UGV assignment/pathing."""
+
+    def __init__(self, base_policy, env):
+        self.base_policy = base_policy
+        self.scenario: WildfireSearchScenario = env.scenario
+
+    def __call__(self, env) -> List[torch.Tensor]:
+        sc = self.scenario
+        base_actions = list(self.base_policy(env))
+        actions = list(base_actions[:sc.n_drones])
+        actions.extend(_matched_ground_actions(sc))
         return actions
 
-    def _direct_assigned_target_action(self, ground_index: int) -> torch.Tensor:
-        """Fallback for scenarios without planner hints: move toward assigned target."""
-        sc = self.scenario
-        B = sc.world.batch_dim
-        device = sc.fire_grid.device
-        pos_all, targetable, _is_decoy = sc._ugv_ground_target_candidates()
-        if pos_all.shape[1] == 0:
-            return torch.zeros(B, 2, device=device)
 
-        ground_pos = torch.stack(
-            [a.state.pos for a in sc.world.agents[sc.n_drones:sc.n_agents]],
-            dim=1,
-        )
-        assigned_idx, _assigned_dist = sc._ugv_assigned_target_indices(
-            ground_pos,
-            pos_all,
-            targetable,
-        )
-        target_idx = assigned_idx[:, ground_index]
-        has_target = target_idx >= 0
-        safe_idx = target_idx.clamp(min=0)
-        target_pos = pos_all.gather(
-            1,
-            safe_idx.view(B, 1, 1).expand(B, 1, 2),
-        ).squeeze(1)
-        pos = sc.world.agents[sc.n_drones + ground_index].state.pos
-        delta = target_pos - pos
-        dist = delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        action = delta / dist
-        return torch.where(has_target.unsqueeze(-1), action, torch.zeros_like(action))
+def _matched_ground_actions(sc: WildfireSearchScenario) -> List[torch.Tensor]:
+    B = sc.world.batch_dim
+    device = sc.fire_grid.device
+    if sc.n_ground <= 0:
+        return []
+
+    actions: List[torch.Tensor] = []
+    for ground_index in range(sc.n_ground):
+        agent = sc.world.agents[sc.n_drones + ground_index]
+        hint = sc._ugv_planner_hint_observations(agent)
+        if hint.shape[-1] >= 4:
+            unit = hint[:, :2]
+            distance_norm = hint[:, 2:3].clamp(0.0, 1.0)
+            valid = hint[:, 3:4] > 0.5
+            action_scale = (2.0 * distance_norm).clamp(0.0, 1.0)
+            action = torch.where(valid, unit * action_scale, torch.zeros(B, 2, device=device))
+        else:
+            action = _direct_assigned_target_action(sc, ground_index)
+        actions.append(action.clamp(-1.0, 1.0))
+    return actions
+
+
+def _direct_assigned_target_action(sc: WildfireSearchScenario, ground_index: int) -> torch.Tensor:
+    """Fallback for scenarios without planner hints: move toward assigned target."""
+    B = sc.world.batch_dim
+    device = sc.fire_grid.device
+    pos_all, targetable, _is_decoy = sc._ugv_ground_target_candidates()
+    if pos_all.shape[1] == 0:
+        return torch.zeros(B, 2, device=device)
+
+    ground_pos = torch.stack(
+        [a.state.pos for a in sc.world.agents[sc.n_drones:sc.n_agents]],
+        dim=1,
+    )
+    assigned_idx, _assigned_dist = sc._ugv_assigned_target_indices(
+        ground_pos,
+        pos_all,
+        targetable,
+    )
+    target_idx = assigned_idx[:, ground_index]
+    has_target = target_idx >= 0
+    safe_idx = target_idx.clamp(min=0)
+    target_pos = pos_all.gather(
+        1,
+        safe_idx.view(B, 1, 1).expand(B, 1, 2),
+    ).squeeze(1)
+    pos = sc.world.agents[sc.n_drones + ground_index].state.pos
+    delta = target_pos - pos
+    dist = delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    action = delta / dist
+    return torch.where(has_target.unsqueeze(-1), action, torch.zeros_like(action))
 
 
 # ----------------------------------------------------------------------
@@ -1318,9 +1344,28 @@ BASELINES: dict[str, Callable] = {
 }
 
 
-def get_baseline(name: str, env) -> Callable:
+def _normalize_ugv_controller_mode(mode: str | None) -> str:
+    normalized = (mode or UGV_CONTROLLER_NATIVE).replace("-", "_")
+    if normalized not in UGV_CONTROLLER_ALIASES:
+        raise ValueError(
+            f"Unknown UGV controller mode {mode!r}. "
+            f"Available: {list(UGV_CONTROLLER_ALIASES)}"
+        )
+    return UGV_CONTROLLER_ALIASES[normalized]
+
+
+def get_baseline(
+    name: str,
+    env,
+    *,
+    ugv_controller_mode: str | None = UGV_CONTROLLER_NATIVE,
+) -> Callable:
     """Resolve a baseline by name, constructing it on the given env."""
     if name not in BASELINES:
         raise KeyError(f"Unknown baseline {name!r}. Available: {list(BASELINES)}")
     cls = BASELINES[name]
-    return cls(env)
+    policy = cls(env)
+    mode = _normalize_ugv_controller_mode(ugv_controller_mode)
+    if mode == UGV_CONTROLLER_NATIVE or name == "matched_heuristic":
+        return policy
+    return MatchedUGVControllerPolicy(policy, env)

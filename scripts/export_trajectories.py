@@ -41,7 +41,7 @@ from envs.wildfire_defaults import (
     SIM_STEP_SECONDS,
 )
 from envs.wildfire_search import WildfireSearchScenario
-from agents.baselines import BASELINES, RandomActionPolicy
+from agents.baselines import BASELINES, UGV_CONTROLLER_CHOICES, get_baseline
 from evaluation.trajectory_export import export_trajectory
 
 
@@ -133,6 +133,16 @@ def main():
                    help="Export the 2-UGV delayed-knowledge joint-schema curriculum scenario.")
     p.add_argument("--joint-diagnostic-ugvs", type=int, default=1,
                    help="Number of UGVs for --joint-survivor-diagnostic manual exports.")
+    p.add_argument(
+        "--baseline-ugv-controller",
+        choices=UGV_CONTROLLER_CHOICES,
+        default="native",
+        help=(
+            "UGV controller for heuristic baseline exports. 'native' keeps the "
+            "baseline's current UGV pathing; 'matched_heuristic' keeps the "
+            "baseline UAV actions but uses scenario assignment plus planner hints."
+        ),
+    )
     p.add_argument("--ugv-target-assignment-mode",
                    choices=(
                        "nearest",
@@ -507,6 +517,8 @@ def main():
     print(f" Comms dropout: {args.comms_dropout}")
     print(f" Comms mode:    {args.comms_dropout_mode}")
     print(f" Comms maps:    {args.comms_map_mode}")
+    baseline_ugv_controller = args.baseline_ugv_controller.replace("-", "_")
+    print(f" Baseline UGV:  {baseline_ugv_controller}")
     print(f" Terrain:       {args.terrain_source}")
     print("-" * 60)
 
@@ -743,7 +755,10 @@ def main():
     elif args.joint_schema_ugv_diagnostic:
         print(" HAPPO env:     kept checkpoint scenario; --joint-schema-ugv-diagnostic preset not applied")
     if (
-        args.approach == "matched_heuristic"
+        (
+            args.approach == "matched_heuristic"
+            or baseline_ugv_controller != "native"
+        )
         and not restored_happo_manifest
         and args.ugv_target_assignment_mode is None
     ):
@@ -863,9 +878,8 @@ def main():
         }
 
     for name in _selected_baselines(args.approach):
-        cls = BASELINES[name]
-        def make_policy(env, _cls=cls):
-            return _cls() if _cls is RandomActionPolicy else _cls(env)
+        def make_policy(env, _name=name, _mode=baseline_ugv_controller):
+            return get_baseline(_name, env, ugv_controller_mode=_mode)
         run_cv_options = None
         if cv_options is not None:
             run_cv_options = dict(cv_options)
