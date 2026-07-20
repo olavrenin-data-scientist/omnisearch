@@ -17,6 +17,7 @@ plan:
     LawnmowerPolicy       sweep a serpentine path  follow nearest scouted
     HighestConfidence     bias toward unscouted    go to most-recently scouted
     AntColony             avoid fresh pheromone    follow locally known survivors
+    MatchedHeuristic      lawnmower search        follow scenario assignment hint
 
 The "candidate" abstraction in the plan (uncertain detections with
 confidence scores) is currently a stretch — for the MVP we use
@@ -1228,6 +1229,83 @@ class AntColonyPolicy:
 
 
 # ----------------------------------------------------------------------
+# Matched-control baseline
+# ----------------------------------------------------------------------
+class MatchedHeuristicPolicy:
+    """Lawnmower UAVs plus UGVs that obey the scenario assignment/planner hint.
+
+    This is the fairer confirmation baseline: UGV target assignment is not
+    chosen by the heuristic policy. It uses the same environment-side
+    ``ugv_target_assignment_mode`` and the same planner-hint observation that
+    HAPPO receives, then applies a simple continuous waypoint controller.
+    """
+
+    def __init__(self, env):
+        self.scenario: WildfireSearchScenario = env.scenario
+        self._lawnmower = LawnmowerPolicy(env)
+
+    def __call__(self, env) -> List[torch.Tensor]:
+        del env
+        sc = self.scenario
+        actions = self._lawnmower._drone_lawnmower_actions()
+        actions.extend(self._ground_actions())
+        return actions
+
+    def _ground_actions(self) -> List[torch.Tensor]:
+        sc = self.scenario
+        B = sc.world.batch_dim
+        device = sc.fire_grid.device
+        if sc.n_ground <= 0:
+            return []
+
+        actions: List[torch.Tensor] = []
+        for ground_index in range(sc.n_ground):
+            agent = sc.world.agents[sc.n_drones + ground_index]
+            hint = sc._ugv_planner_hint_observations(agent)
+            if hint.shape[-1] >= 4:
+                unit = hint[:, :2]
+                distance_norm = hint[:, 2:3].clamp(0.0, 1.0)
+                valid = hint[:, 3:4] > 0.5
+                action_scale = (2.0 * distance_norm).clamp(0.0, 1.0)
+                action = torch.where(valid, unit * action_scale, torch.zeros(B, 2, device=device))
+            else:
+                action = self._direct_assigned_target_action(ground_index)
+            actions.append(action.clamp(-1.0, 1.0))
+        return actions
+
+    def _direct_assigned_target_action(self, ground_index: int) -> torch.Tensor:
+        """Fallback for scenarios without planner hints: move toward assigned target."""
+        sc = self.scenario
+        B = sc.world.batch_dim
+        device = sc.fire_grid.device
+        pos_all, targetable, _is_decoy = sc._ugv_ground_target_candidates()
+        if pos_all.shape[1] == 0:
+            return torch.zeros(B, 2, device=device)
+
+        ground_pos = torch.stack(
+            [a.state.pos for a in sc.world.agents[sc.n_drones:sc.n_agents]],
+            dim=1,
+        )
+        assigned_idx, _assigned_dist = sc._ugv_assigned_target_indices(
+            ground_pos,
+            pos_all,
+            targetable,
+        )
+        target_idx = assigned_idx[:, ground_index]
+        has_target = target_idx >= 0
+        safe_idx = target_idx.clamp(min=0)
+        target_pos = pos_all.gather(
+            1,
+            safe_idx.view(B, 1, 1).expand(B, 1, 2),
+        ).squeeze(1)
+        pos = sc.world.agents[sc.n_drones + ground_index].state.pos
+        delta = target_pos - pos
+        dist = delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        action = delta / dist
+        return torch.where(has_target.unsqueeze(-1), action, torch.zeros_like(action))
+
+
+# ----------------------------------------------------------------------
 # Registry — for use from scripts/notebooks
 # ----------------------------------------------------------------------
 BASELINES: dict[str, Callable] = {
@@ -1236,6 +1314,7 @@ BASELINES: dict[str, Callable] = {
     "lawnmower":           LawnmowerPolicy,
     "highest_confidence":  HighestConfidencePolicy,
     "ant_colony":          AntColonyPolicy,
+    "matched_heuristic":   MatchedHeuristicPolicy,
 }
 
 

@@ -742,6 +742,12 @@ def main():
         })
     elif args.joint_schema_ugv_diagnostic:
         print(" HAPPO env:     kept checkpoint scenario; --joint-schema-ugv-diagnostic preset not applied")
+    if (
+        args.approach == "matched_heuristic"
+        and not restored_happo_manifest
+        and args.ugv_target_assignment_mode is None
+    ):
+        scenario_kwargs["ugv_target_assignment_mode"] = "greedy_sticky"
     if args.enable_fire is not None:
         scenario_kwargs["disable_fire"] = not bool(args.enable_fire)
     if args.ugv_target_assignment_mode is not None:

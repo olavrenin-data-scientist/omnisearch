@@ -149,11 +149,18 @@ def _scenario_checkpoint_from_specs(
 def build_scenario_kwargs(
     args: argparse.Namespace,
     checkpoint_dir: Path | None = None,
+    specs: list[StrategySpec] | None = None,
 ) -> dict[str, Any]:
     scenario_kwargs = _scenario_kwargs_from_checkpoint(checkpoint_dir)
     loaded_from_checkpoint = bool(scenario_kwargs)
     if not loaded_from_checkpoint:
         scenario_kwargs = _joint_defaults(int(args.joint_diagnostic_ugvs))
+        if (
+            args.ugv_target_assignment_mode is None
+            and specs is not None
+            and any(spec.name == "matched_heuristic" for spec in specs)
+        ):
+            scenario_kwargs["ugv_target_assignment_mode"] = "greedy_sticky"
     n_ugvs = getattr(args, "n_ugvs", None)
     default_steps = int(scenario_kwargs.get("max_steps", 300)) if loaded_from_checkpoint else 300
     scenario_kwargs["max_steps"] = int(
@@ -1330,7 +1337,7 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
 
     scenario_checkpoint = _scenario_checkpoint_from_specs(args, specs)
-    scenario_kwargs = build_scenario_kwargs(args, scenario_checkpoint)
+    scenario_kwargs = build_scenario_kwargs(args, scenario_checkpoint, specs=specs)
     print(
         "scenario: "
         f"{scenario_kwargs['n_drones']} UAVs, "
