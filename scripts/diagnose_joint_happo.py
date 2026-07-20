@@ -9,6 +9,7 @@ import json
 import math
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -1084,7 +1085,7 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> 
     import matplotlib.pyplot as plt
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(5, 4, figsize=(18, 22), constrained_layout=True)
+    fig, axes = plt.subplots(6, 4, figsize=(18, 26), constrained_layout=True)
     axes = axes.ravel()
 
     def hist(ax, title: str, values: list[float], xlabel: str, xlim: tuple[float, float] | None = None):
@@ -1121,6 +1122,34 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> 
             ax.text(0.5, 0.5, "no labels", ha="center", va="center", transform=ax.transAxes)
         ax.set_title(title, fontsize=10)
         ax.grid(axis="x", alpha=0.25)
+
+    def survivor_count_hist(ax) -> None:
+        values = [
+            int(row.get("active_survivors", row.get("survivors", 0)))
+            for row in rows
+            if int(row.get("active_survivors", row.get("survivors", 0))) > 0
+        ]
+        if values:
+            counts = Counter(values)
+            xs = sorted(counts)
+            ys = [counts[x] for x in xs]
+            ax.bar(xs, ys, color="#4f7df3", alpha=0.78, width=0.75)
+            ax.set_xticks(xs)
+            mean = _mean(values)
+            median = float(np.nanmedian(values))
+            if math.isfinite(mean):
+                ax.axvline(mean, color="#ef4444", label=f"mean {mean:.2f}")
+            if math.isfinite(median):
+                ax.axvline(median, color="#111827", linestyle="--", label=f"med {median:.2f}")
+        else:
+            ax.text(0.5, 0.5, "no survivor counts", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Active Survivors", fontsize=10)
+        ax.set_xlabel("survivors / episode")
+        ax.set_ylabel("episodes")
+        ax.grid(axis="y", alpha=0.25)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles and labels:
+            ax.legend(fontsize=8)
 
     def heatmap(ax, title: str, key: str, cmap: str) -> None:
         points = [point for row in rows for point in row.get(key, []) if len(point) >= 2]
@@ -1250,6 +1279,9 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> 
     hist(axes[16], "UGV Speed", [row["ugv_speed_mps"] for row in rows], "m/s")
     heatmap(axes[18], "UGV Start Heatmap", "ugv_start_positions_m", "Greens")
     label_bars(axes[19], "UGV Failure Labels", summary.get("ugv_failure_label_counts", {}))
+    survivor_count_hist(axes[20])
+    for ax in axes[21:]:
+        ax.axis("off")
 
     fig.suptitle(
         "Joint UAV+UGV HAPPO Diagnostics "
