@@ -522,6 +522,11 @@ def run_rollout(
     ugv_fire_exposure_values: list[float] = []
     hazard_exposure_values: list[float] = []
     ugv_travel_cost_values: list[float] = []
+    scout_auc_sum = 0.0
+    confirm_auc_sum = 0.0
+    coverage_auc_sum = 0.0
+    confidence_auc_sum = 0.0
+    auc_steps = 0
     time_series = _new_time_bins(time_bins)
 
     prev_pos = _positions(scenario).clone()
@@ -539,6 +544,15 @@ def run_rollout(
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        if n_active_survivors > 0:
+            scout_auc_sum += float(np.logical_and(active_survivor_mask, scouted).sum() / n_active_survivors)
+            confirm_auc_sum += float(np.logical_and(active_survivor_mask, confirmed).sum() / n_active_survivors)
+        else:
+            scout_auc_sum += 1.0
+            confirm_auc_sum += 1.0
+        coverage_auc_sum += float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
+        confidence_auc_sum += float(scenario.uav_confidence_grid[0].float().mean().detach().cpu().item())
+        auc_steps += 1
         for survivor_idx in active_survivor_indices:
             if scouted[survivor_idx] and first_scout_steps[survivor_idx] is None:
                 first_scout_steps[survivor_idx] = step + 1
@@ -741,6 +755,10 @@ def run_rollout(
         "confirmed": int(confirm_count),
         "scout_recall": float(scout_count / max(n_active_survivors, 1)),
         "confirm_recall": float(confirm_count / max(n_active_survivors, 1)),
+        "scout_auc": float(scout_auc_sum / max(auc_steps, 1)),
+        "confirm_auc": float(confirm_auc_sum / max(auc_steps, 1)),
+        "coverage_auc": float(coverage_auc_sum / max(auc_steps, 1)),
+        "confidence_auc": float(confidence_auc_sum / max(auc_steps, 1)),
         "full_confirm_success": bool(confirm_count == n_active_survivors),
         "overall_success": bool(confirm_count == n_active_survivors),
         "first_scout_steps": first_scout_steps,
@@ -871,6 +889,14 @@ def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
         "std_scout_recall": _std([row["scout_recall"] for row in rows]),
         "mean_confirm_recall": _mean([row["confirm_recall"] for row in rows]),
         "std_confirm_recall": _std([row["confirm_recall"] for row in rows]),
+        "mean_scout_auc": _mean([row["scout_auc"] for row in rows]),
+        "std_scout_auc": _std([row["scout_auc"] for row in rows]),
+        "mean_confirm_auc": _mean([row["confirm_auc"] for row in rows]),
+        "std_confirm_auc": _std([row["confirm_auc"] for row in rows]),
+        "mean_coverage_auc": _mean([row["coverage_auc"] for row in rows]),
+        "std_coverage_auc": _std([row["coverage_auc"] for row in rows]),
+        "mean_confidence_auc": _mean([row["confidence_auc"] for row in rows]),
+        "std_confidence_auc": _std([row["confidence_auc"] for row in rows]),
         "full_confirm_success_count": float(success_count),
         "full_confirm_success_rate": _mean([float(row["full_confirm_success"]) for row in rows]),
         "full_confirm_success_percent": 100.0 * success_count / max(len(rows), 1),
@@ -983,6 +1009,10 @@ def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
         "fast_metrics": {
             "scout_recall": _mean_std([row["scout_recall"] for row in rows]),
             "confirm_recall": _mean_std([row["confirm_recall"] for row in rows]),
+            "scout_auc": _mean_std([row["scout_auc"] for row in rows]),
+            "confirm_auc": _mean_std([row["confirm_auc"] for row in rows]),
+            "coverage_auc": _mean_std([row["coverage_auc"] for row in rows]),
+            "confidence_auc": _mean_std([row["confidence_auc"] for row in rows]),
             "coverage": _mean_std([row["final_coverage_fraction"] for row in rows]),
             "confidence": _mean_std([row["final_confidence_mean"] for row in rows]),
             "uav_path_length_m": _mean_std([row["uav_path_length_m"] for row in rows]),
@@ -1210,6 +1240,10 @@ def _print_summary(summary: dict[str, Any]) -> None:
         f"episodes={int(summary['episodes'])} "
         f"scout={summary['mean_scout_recall']:.3f}+/-{summary['std_scout_recall']:.3f} "
         f"confirm={summary['mean_confirm_recall']:.3f}+/-{summary['std_confirm_recall']:.3f} "
+        f"scout_auc={summary['mean_scout_auc']:.3f} "
+        f"confirm_auc={summary['mean_confirm_auc']:.3f} "
+        f"coverage_auc={summary['mean_coverage_auc']:.3f} "
+        f"confidence_auc={summary['mean_confidence_auc']:.3f} "
         f"success={summary['full_confirm_success_rate']:.3f} "
         f"cov={summary['mean_final_coverage_fraction']:.3f}+/-{summary['std_final_coverage_fraction']:.3f} "
         f"conf={summary['mean_final_confidence']:.3f}+/-{summary['std_final_confidence']:.3f} "

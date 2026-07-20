@@ -1214,6 +1214,7 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         "success_rate": _finite_mean(row["full_success"] for row in rows),
         "mean_confirmed": _finite_mean(row["confirmed"] for row in rows),
         "mean_confirmation_recall": _finite_mean(row.get("confirmation_recall") for row in rows),
+        "mean_confirmation_auc": _finite_mean(row.get("confirmation_auc") for row in rows),
         "mean_initial_distance_m": _finite_mean(row["initial_distance_m"] for row in rows),
         "mean_final_distance_m": _finite_mean(row["final_distance_m"] for row in rows),
         "mean_min_distance_m": _finite_mean(row["min_distance_m"] for row in rows),
@@ -1928,6 +1929,10 @@ def run_rollout(
     max_steps = int(scenario_kwargs["max_steps"])
     time_series = _new_time_series()
     confirmation_step: int | None = None
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
+    confirm_auc_sum = 0.0
+    auc_steps = 0
 
     for step in range(max_steps):
         target_idx, survivor = _assigned_ground_target(scenario, ground_index)
@@ -2068,6 +2073,12 @@ def run_rollout(
                     speed_mps=speed_mps,
                 )
         min_distance = min(min_distance, dist_after_m)
+        found_for_auc = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        confirm_auc_sum += (
+            float(np.logical_and(found_for_auc, active_survivor_mask).sum() / n_active_survivors)
+            if n_active_survivors > 0 else 1.0
+        )
+        auc_steps += 1
         if _active_success_for_env(scenario):
             confirmation_step = step
             break
@@ -2091,6 +2102,9 @@ def run_rollout(
     n_active_survivors = int(active_survivor_mask.sum())
     found = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
     confirmed_count = float(np.logical_and(found, active_survivor_mask).sum())
+    if auc_steps < max_steps:
+        final_confirm_recall = confirmed_count / n_active_survivors if n_active_survivors else 1.0
+        confirm_auc_sum += float(final_confirm_recall) * (max_steps - auc_steps)
     full_success = _active_success_for_env(scenario)
     return {
         "seed": seed,
@@ -2099,6 +2113,7 @@ def run_rollout(
         "survivor_slots": survivor_slots,
         "confirmed": confirmed_count,
         "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "confirmation_auc": float(confirm_auc_sum / max(max_steps, 1)),
         "full_success": float(full_success),
         "diagnostic_ground_agent_index": int(ground_agent_idx),
         "diagnostic_ground_index": int(ground_index),
@@ -2211,7 +2226,12 @@ def run_failure_trace(
     trace = []
     initial_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
     min_distance = initial_distance
-    for step in range(scenario_kwargs["max_steps"]):
+    max_steps = int(scenario_kwargs["max_steps"])
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
+    confirm_auc_sum = 0.0
+    auc_steps = 0
+    for step in range(max_steps):
         _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
@@ -2322,6 +2342,12 @@ def run_failure_trace(
             **{f"after_{k}": v for k, v in cell_after.items()},
         })
 
+        found_for_auc = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        confirm_auc_sum += (
+            float(np.logical_and(found_for_auc, active_survivor_mask).sum() / n_active_survivors)
+            if n_active_survivors > 0 else 1.0
+        )
+        auc_steps += 1
         if _active_success_for_env(scenario):
             break
 
@@ -2331,6 +2357,9 @@ def run_failure_trace(
     n_active_survivors = int(active_survivor_mask.sum())
     found = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
     confirmed_count = float(np.logical_and(found, active_survivor_mask).sum())
+    if auc_steps < max_steps:
+        final_confirm_recall = confirmed_count / n_active_survivors if n_active_survivors else 1.0
+        confirm_auc_sum += float(final_confirm_recall) * (max_steps - auc_steps)
     full_success = _active_success_for_env(scenario)
     return {
         "seed": seed,
@@ -2339,6 +2368,7 @@ def run_failure_trace(
         "survivor_slots": survivor_slots,
         "confirmed": confirmed_count,
         "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "confirmation_auc": float(confirm_auc_sum / max(max_steps, 1)),
         "full_success": float(full_success),
         "initial_distance_m": initial_distance,
         "final_distance_m": _distance_m(scenario, ground.state.pos, survivor.state.pos),
@@ -2978,6 +3008,7 @@ def main() -> None:
         "means: "
         f"confirmed={summary['mean_confirmed']:.3f} "
         f"recall={summary['mean_confirmation_recall']:.3f} "
+        f"confirm_auc={summary['mean_confirmation_auc']:.3f} "
         f"success={summary['success_rate']:.3f} "
         f"final={summary['mean_final_distance_m']:.1f}m "
         f"min={summary['mean_min_distance_m']:.1f}m "

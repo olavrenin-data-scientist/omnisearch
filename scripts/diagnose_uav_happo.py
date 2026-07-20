@@ -326,6 +326,11 @@ def run_rollout(
     moving_no_confidence_gain = 0
     diagnostic_steps = 0
     time_bins = _new_time_bins(TIME_BIN_COUNT)
+    scout_auc_sum = 0.0
+    confirm_auc_sum = 0.0
+    coverage_auc_sum = 0.0
+    confidence_auc_sum = 0.0
+    auc_steps = 0
 
     def _record_fire_confidence_diagnostic(
         drone_idx: int,
@@ -518,6 +523,7 @@ def run_rollout(
             scenario,
             "metric_uav_step_detection_probability",
         )
+        coverage_fraction_now = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
         team_reward = _metric_scalar(scenario, "metric_reward_team")
         all_survivors_found_reward = _metric_scalar(scenario, "metric_reward_all_survivors_found")
         coverage_threshold_reward = _metric_scalar(scenario, "metric_reward_uav_coverage_threshold")
@@ -747,6 +753,15 @@ def run_rollout(
                 and first_confirm_steps[survivor_idx] is None
             ):
                 first_confirm_steps[survivor_idx] = step + 1
+        if n_active_survivors > 0:
+            scout_auc_sum += float(np.logical_and(active_survivor_mask, scouted).sum() / n_active_survivors)
+            confirm_auc_sum += float(np.logical_and(active_survivor_mask, confirmed).sum() / n_active_survivors)
+        else:
+            scout_auc_sum += 1.0
+            confirm_auc_sum += 1.0
+        coverage_auc_sum += coverage_fraction_now
+        confidence_auc_sum += confidence_mean
+        auc_steps += 1
         if (
             all(first_scout_steps[idx] is not None for idx in active_survivor_indices)
             and all(first_confirm_steps[idx] is not None for idx in active_survivor_indices)
@@ -772,6 +787,22 @@ def run_rollout(
         else (0 if n_active_survivors == 0 else None)
     )
     final_coverage_fraction = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
+    final_confidence_mean = float(scenario.uav_confidence_grid[0].float().mean().detach().cpu().item())
+    max_steps = int(scenario_kwargs["max_steps"])
+    if auc_steps < max_steps:
+        final_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
+        final_confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        if n_active_survivors > 0:
+            final_scout_recall = float(np.logical_and(active_survivor_mask, final_scouted).sum() / n_active_survivors)
+            final_confirm_recall = float(np.logical_and(active_survivor_mask, final_confirmed).sum() / n_active_survivors)
+        else:
+            final_scout_recall = 1.0
+            final_confirm_recall = 1.0
+        remaining_steps = max_steps - auc_steps
+        scout_auc_sum += final_scout_recall * remaining_steps
+        confirm_auc_sum += final_confirm_recall * remaining_steps
+        coverage_auc_sum += final_coverage_fraction * remaining_steps
+        confidence_auc_sum += final_confidence_mean * remaining_steps
     final_coverage_grid = scenario.coverage_grid[0].detach().cpu().numpy().astype(bool)
     path_metrics = _path_metrics(
         path_positions_sim,
@@ -810,8 +841,12 @@ def run_rollout(
         "confirmed": confirmed_count,
         "unconfirmed": unconfirmed_count,
         "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "scout_auc": float(scout_auc_sum / max(max_steps, 1)),
+        "confirmation_auc": float(confirm_auc_sum / max(max_steps, 1)),
+        "coverage_auc": float(coverage_auc_sum / max(max_steps, 1)),
+        "confidence_auc": float(confidence_auc_sum / max(max_steps, 1)),
         "final_coverage_fraction": final_coverage_fraction,
-        "final_confidence_mean": float(scenario.uav_confidence_grid[0].float().mean().detach().cpu().item()),
+        "final_confidence_mean": final_confidence_mean,
         "final_confidence_low_fraction": float((scenario.uav_confidence_grid[0] < 0.50).float().mean().detach().cpu().item()),
         "final_confidence_high_fraction": float((scenario.uav_confidence_grid[0] >= 0.80).float().mean().detach().cpu().item()),
         "final_survivor_confidence": final_survivor_confidence,
@@ -1794,6 +1829,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_confirmed": float(np.mean([row.get("confirmed", 0.0) for row in rows])) if rows else 0.0,
         "mean_unconfirmed": float(np.mean([row.get("unconfirmed", 0.0) for row in rows])) if rows else 0.0,
         "mean_confirmation_recall": float(np.mean([row.get("confirmation_recall", 0.0) for row in rows])) if rows else 0.0,
+        "mean_scout_auc": _finite_mean([row.get("scout_auc", math.nan) for row in rows]),
+        "mean_confirmation_auc": _finite_mean([row.get("confirmation_auc", math.nan) for row in rows]),
+        "mean_coverage_auc": _finite_mean([row.get("coverage_auc", math.nan) for row in rows]),
+        "mean_confidence_auc": _finite_mean([row.get("confidence_auc", math.nan) for row in rows]),
         "mean_final_coverage_fraction": _finite_mean([row["final_coverage_fraction"] for row in rows]),
         "mean_final_confidence_mean": _finite_mean([row["final_confidence_mean"] for row in rows]),
         "mean_final_confidence_low_fraction": _finite_mean([row["final_confidence_low_fraction"] for row in rows]),
@@ -2796,6 +2835,10 @@ def main() -> None:
         f"recall={summary['mean_recall']:.3f} "
         f"confirmed={summary['mean_confirmed']:.3f} "
         f"confirm_recall={summary['mean_confirmation_recall']:.3f} "
+        f"scout_auc={summary['mean_scout_auc']:.3f} "
+        f"confirm_auc={summary['mean_confirmation_auc']:.3f} "
+        f"coverage_auc={summary['mean_coverage_auc']:.3f} "
+        f"confidence_auc={summary['mean_confidence_auc']:.3f} "
         f"coverage={summary['mean_final_coverage_fraction']:.3f} "
         f"confidence={summary['mean_final_confidence_mean']:.3f} "
         f"success={summary['full_success_rate']:.3f} "

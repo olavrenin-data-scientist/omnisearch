@@ -34,6 +34,7 @@ from scripts.diagnose_uav_happo import (
     DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
     TIME_BIN_COUNT,
     _append_time_bin,
+    _active_survivor_mask_for_env,
     _coverage_shape_metrics,
     _distances_to_edges_m,
     _finalize_time_bins,
@@ -202,6 +203,8 @@ def run_rollout(
     meters_per_sim = 1.0 / max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-9)
 
     first_scout_steps: list[int | None] = [None] * n_survivors
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
     displacement_m_values: list[float] = []
     new_coverage_cells_values: list[float] = []
     confidence_mean_values: list[float] = []
@@ -230,6 +233,10 @@ def run_rollout(
     diagnostic_steps = 0
     time_bins = _new_time_bins(TIME_BIN_COUNT)
     per_drone_stats = [_new_drone_stats(drone_idx) for drone_idx in range(n_drones)]
+    scout_auc_sum = 0.0
+    coverage_auc_sum = 0.0
+    confidence_auc_sum = 0.0
+    auc_steps = 0
 
     for step in range(max_steps):
         prev_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool).copy()
@@ -412,6 +419,13 @@ def run_rollout(
             )
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
+        if n_active_survivors > 0:
+            scout_auc_sum += float(np.logical_and(active_survivor_mask, scouted).sum() / n_active_survivors)
+        else:
+            scout_auc_sum += 1.0
+        coverage_auc_sum += coverage_fraction_now
+        confidence_auc_sum += confidence_mean
+        auc_steps += 1
         for survivor_idx, is_scouted in enumerate(scouted):
             if is_scouted and first_scout_steps[survivor_idx] is None:
                 first_scout_steps[survivor_idx] = step + 1
@@ -424,6 +438,16 @@ def run_rollout(
     all_scouted_step = max(scout_steps) if scouted_count == n_survivors and scout_steps else None
     final_coverage_fraction = float(scenario.coverage_grid[0].float().mean().detach().cpu().item())
     final_confidence_mean = float(scenario.uav_confidence_grid[0].float().mean().detach().cpu().item())
+    if auc_steps < max_steps:
+        final_scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
+        final_recall_for_auc = (
+            float(np.logical_and(active_survivor_mask, final_scouted).sum() / n_active_survivors)
+            if n_active_survivors > 0 else 1.0
+        )
+        remaining_steps = max_steps - auc_steps
+        scout_auc_sum += final_recall_for_auc * remaining_steps
+        coverage_auc_sum += final_coverage_fraction * remaining_steps
+        confidence_auc_sum += final_confidence_mean * remaining_steps
     final_confidence_low_fraction = float(
         (scenario.uav_confidence_grid[0] < 0.50).float().mean().detach().cpu().item()
     )
@@ -463,6 +487,9 @@ def run_rollout(
         "scouted": scouted_count,
         "missed": missed_count,
         "recall": scouted_count / n_survivors if n_survivors else 0.0,
+        "scout_auc": float(scout_auc_sum / max(max_steps, 1)),
+        "coverage_auc": float(coverage_auc_sum / max(max_steps, 1)),
+        "confidence_auc": float(confidence_auc_sum / max(max_steps, 1)),
         "final_coverage_fraction": final_coverage_fraction,
         "final_confidence_mean": final_confidence_mean,
         "final_confidence_low_fraction": final_confidence_low_fraction,
@@ -697,6 +724,9 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_scouted": _finite_mean([float(row["scouted"]) for row in rows]),
         "mean_missed": _finite_mean([float(row["missed"]) for row in rows]),
         "mean_recall": _finite_mean([float(row["recall"]) for row in rows]),
+        "mean_scout_auc": _finite_mean([float(row["scout_auc"]) for row in rows]),
+        "mean_coverage_auc": _finite_mean([float(row["coverage_auc"]) for row in rows]),
+        "mean_confidence_auc": _finite_mean([float(row["confidence_auc"]) for row in rows]),
         "mean_final_coverage_fraction": _finite_mean([
             float(row["final_coverage_fraction"]) for row in rows
         ]),
@@ -1367,6 +1397,9 @@ def _print_summary(summary: dict[str, Any]) -> None:
             f"{strategy:>14s}: "
             f"episodes={int(item['episodes'])} "
             f"recall={item['mean_recall']:.3f} "
+            f"scout_auc={item['mean_scout_auc']:.3f} "
+            f"cov_auc={item['mean_coverage_auc']:.3f} "
+            f"conf_auc={item['mean_confidence_auc']:.3f} "
             f"coverage={item['mean_final_coverage_fraction']:.3f} "
             f"confidence={item['mean_final_confidence_mean']:.3f} "
             f"success={item['full_success_rate']:.3f} "

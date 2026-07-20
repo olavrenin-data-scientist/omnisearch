@@ -217,6 +217,14 @@ def _to_float(value: Any, default: float = 0.0) -> float:
     return out if math.isfinite(out) else default
 
 
+def _active_survivor_mask_for_env(scenario: WildfireSearchScenario, env_index: int = 0) -> np.ndarray:
+    slots = int(getattr(scenario, "n_survivors", 0))
+    active = getattr(scenario, "active_survivors", None)
+    if active is None:
+        return np.ones(slots, dtype=bool)
+    return active[env_index].detach().cpu().numpy().astype(bool)
+
+
 def _mean(values: list[float]) -> float:
     finite = [float(v) for v in values if math.isfinite(float(v))]
     return float(np.mean(finite)) if finite else float("nan")
@@ -297,6 +305,8 @@ def run_rollout(
     n_ground = int(scenario.n_ground)
     n_agents = int(scenario.n_agents)
     n_survivors = int(scenario.n_survivors)
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
     max_steps = int(scenario_kwargs["max_steps"])
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     scale = max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-12)
@@ -311,6 +321,8 @@ def run_rollout(
     pending_min_distances: list[float] = []
     duplicate_assignment: list[float] = []
     assignment_switches: list[float] = []
+    confirm_auc_sum = 0.0
+    auc_steps = 0
     time_series = _new_time_bins(time_bins)
 
     prev_pos = _positions(scenario).clone()
@@ -327,6 +339,11 @@ def run_rollout(
         prev_pos = pos
 
         confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        confirm_auc_sum += (
+            float(np.logical_and(confirmed, active_survivor_mask).sum() / n_active_survivors)
+            if n_active_survivors > 0 else 1.0
+        )
+        auc_steps += 1
         for survivor_idx, is_confirmed in enumerate(confirmed):
             if is_confirmed and first_confirm_steps[survivor_idx] is None:
                 first_confirm_steps[survivor_idx] = step + 1
@@ -351,7 +368,11 @@ def run_rollout(
         bin_row["duplicate_assignment"] += duplicate
         bin_row["assignment_switches"] += switches
 
-    confirmed_count = sum(step is not None for step in first_confirm_steps)
+    confirmed_count = sum(
+        step is not None
+        for survivor_idx, step in enumerate(first_confirm_steps)
+        if survivor_idx < len(active_survivor_mask) and active_survivor_mask[survivor_idx]
+    )
     reveal_to_confirm_latencies = [
         float(confirm_step - reveal_step)
         for reveal_step, confirm_step in zip(reveal_steps, first_confirm_steps)
@@ -382,11 +403,14 @@ def run_rollout(
         "checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir),
         "seed": int(seed),
         "max_steps": max_steps,
-        "survivors": n_survivors,
+        "survivors": n_active_survivors,
+        "active_survivors": n_active_survivors,
+        "survivor_slots": n_survivors,
         "survivor_reveal_steps": reveal_steps,
         "confirmed": int(confirmed_count),
-        "confirmation_recall": float(confirmed_count / max(n_survivors, 1)),
-        "full_confirm_success": bool(confirmed_count == n_survivors),
+        "confirmation_recall": float(confirmed_count / max(n_active_survivors, 1)),
+        "confirmation_auc": float(confirm_auc_sum / max(auc_steps, 1)),
+        "full_confirm_success": bool(confirmed_count == n_active_survivors),
         "first_confirm_steps": first_confirm_steps,
         "first_confirm_times_s": [
             None if value is None else float(value * step_seconds)
@@ -438,6 +462,7 @@ def _summarize_strategy(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "episodes": float(len(rows)),
         "mean_confirmation_recall": _mean([row["confirmation_recall"] for row in rows]),
+        "mean_confirmation_auc": _mean([row["confirmation_auc"] for row in rows]),
         "full_confirm_success_rate": _mean([float(row["full_confirm_success"]) for row in rows]),
         "mean_reveal_to_confirm_latency_steps": _mean([
             row["avg_reveal_to_confirm_latency_steps"] for row in rows
@@ -626,6 +651,7 @@ def _print_summary(summary: dict[str, Any]) -> None:
             f"{strategy:>18s}: "
             f"episodes={int(item['episodes'])} "
             f"confirm_recall={item['mean_confirmation_recall']:.3f} "
+            f"confirm_auc={item['mean_confirmation_auc']:.3f} "
             f"success={item['full_confirm_success_rate']:.3f} "
             f"lat={item['mean_reveal_to_confirm_latency_steps']:.1f} steps "
             f"path={item['mean_ugv_path_length_m']:.1f}m "
