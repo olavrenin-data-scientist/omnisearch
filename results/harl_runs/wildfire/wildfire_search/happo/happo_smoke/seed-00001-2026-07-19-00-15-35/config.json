@@ -280,7 +280,7 @@
     "main_args":	{
         "algo":	"happo",
         "env":	"wildfire",
-        "exp_name":	"uav4_ugv3_1sqkm_256_108_900_128_fire_nsurv_min10_max10_obs10",
+        "exp_name":	"joint_uav4_ugv3_1sqkm_256_2160k_900_128_fire_splitcritic",
         "load_config":	""
     }
 }
