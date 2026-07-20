@@ -26,7 +26,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.baselines import AntColonyPolicy, LawnmowerPolicy
-from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+from agents.happo_checkpoint import load_training_manifest
+from agents.happo_policy import (
+    HappoPolicy,
+    actor_file_indices_for_scenario,
+    find_latest_happo_checkpoint,
+)
 from envs.wildfire_search import WildfireSearchScenario
 from scripts.train_happo_smoke import (
     DEFAULT_JOINT_DIAG_DRONES,
@@ -115,20 +120,57 @@ def _joint_defaults(joint_diagnostic_ugvs: int) -> dict[str, Any]:
     return copy.deepcopy(env_args["scenario_kwargs"])
 
 
-def build_scenario_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    scenario_kwargs = _joint_defaults(int(args.joint_diagnostic_ugvs))
+def _scenario_kwargs_from_checkpoint(checkpoint_dir: Path | None) -> dict[str, Any]:
+    if checkpoint_dir is None:
+        return {}
+    manifest = load_training_manifest(checkpoint_dir)
+    if manifest is None:
+        return {}
+    scenario_kwargs = manifest.get("env_args", {}).get("scenario_kwargs", {})
+    if not isinstance(scenario_kwargs, dict):
+        return {}
+    return copy.deepcopy(scenario_kwargs)
+
+
+def _scenario_checkpoint_from_specs(
+    args: argparse.Namespace,
+    specs: list[StrategySpec],
+) -> Path | None:
+    if args.happo_checkpoint:
+        return _resolve_happo_checkpoint(args.happo_checkpoint)
+    for spec in specs:
+        if spec.checkpoint_dir is not None:
+            return spec.checkpoint_dir
+    return None
+
+
+def build_scenario_kwargs(
+    args: argparse.Namespace,
+    checkpoint_dir: Path | None = None,
+) -> dict[str, Any]:
+    scenario_kwargs = _scenario_kwargs_from_checkpoint(checkpoint_dir)
+    loaded_from_checkpoint = bool(scenario_kwargs)
+    if not loaded_from_checkpoint:
+        scenario_kwargs = _joint_defaults(int(args.joint_diagnostic_ugvs))
     n_ugvs = getattr(args, "n_ugvs", None)
-    scenario_kwargs.update({
-        "max_steps": int(args.steps),
-        "n_drones": int(getattr(args, "n_drones", DEFAULT_JOINT_DIAG_DRONES)),
-        "n_ground": int(n_ugvs if n_ugvs is not None else args.joint_diagnostic_ugvs),
-        "n_survivors": 5,
-        "known_survivors_at_reset": False,
-        "delayed_survivor_knowledge": False,
-        "drone_can_confirm": False,
-        "comms_dropout": 0.0,
-        "uav_confidence_diagnostics": True,
-    })
+    default_steps = int(scenario_kwargs.get("max_steps", 300)) if loaded_from_checkpoint else 300
+    scenario_kwargs["max_steps"] = int(
+        args.steps if args.steps is not None else default_steps
+    )
+    scenario_kwargs.setdefault("n_drones", DEFAULT_JOINT_DIAG_DRONES)
+    scenario_kwargs.setdefault("n_ground", int(args.joint_diagnostic_ugvs))
+    scenario_kwargs.setdefault("n_survivors", 5)
+    scenario_kwargs.setdefault("known_survivors_at_reset", False)
+    scenario_kwargs.setdefault("delayed_survivor_knowledge", False)
+    scenario_kwargs.setdefault("drone_can_confirm", False)
+    scenario_kwargs.setdefault("comms_dropout", 0.0)
+    scenario_kwargs["uav_confidence_diagnostics"] = True
+    if args.n_drones is not None:
+        scenario_kwargs["n_drones"] = int(args.n_drones)
+        scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
+    if n_ugvs is not None:
+        scenario_kwargs["n_ground"] = int(n_ugvs)
+        scenario_kwargs["obs_schema_n_ground"] = int(n_ugvs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = str(args.terrain_cache_path)
@@ -167,8 +209,9 @@ def build_scenario_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 def make_policy(
     spec: StrategySpec,
     env: Any,
+    scenario_kwargs: dict[str, Any],
     *,
-    happo_cache: dict[tuple[Path, bool], HappoPolicy] | None = None,
+    happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] | None = None,
     deterministic_happo: bool = True,
 ) -> Callable[[Any], list[torch.Tensor]]:
     if spec.name == "lawnmower_astar":
@@ -178,13 +221,25 @@ def make_policy(
     if spec.name == "happo":
         if spec.checkpoint_dir is None:
             raise ValueError("HAPPO strategy requires a checkpoint directory")
-        key = (spec.checkpoint_dir, deterministic_happo)
+        actor_file_indices = actor_file_indices_for_scenario(spec.checkpoint_dir, scenario_kwargs)
+        key = (
+            spec.checkpoint_dir,
+            deterministic_happo,
+            tuple(actor_file_indices or ()),
+        )
         if happo_cache is None:
-            return HappoPolicy.from_checkpoint(spec.checkpoint_dir, deterministic=deterministic_happo)
+            return HappoPolicy.from_checkpoint(
+                spec.checkpoint_dir,
+                deterministic=deterministic_happo,
+                scenario_kwargs=scenario_kwargs,
+                actor_file_indices=actor_file_indices,
+            )
         if key not in happo_cache:
             happo_cache[key] = HappoPolicy.from_checkpoint(
                 spec.checkpoint_dir,
                 deterministic=deterministic_happo,
+                scenario_kwargs=scenario_kwargs,
+                actor_file_indices=actor_file_indices,
             )
         policy = happo_cache[key]
         expected_agents = len(env.agents)
@@ -199,6 +254,17 @@ def make_policy(
 
 def _positions(scenario: WildfireSearchScenario) -> torch.Tensor:
     return torch.stack([agent.state.pos for agent in scenario.world.agents], dim=1)
+
+
+def _active_survivor_mask_for_env(
+    scenario: WildfireSearchScenario,
+    env_index: int = 0,
+) -> np.ndarray:
+    slots = int(getattr(scenario, "n_survivors", 0))
+    active = getattr(scenario, "active_survivors", None)
+    if active is None:
+        return np.ones(slots, dtype=bool)
+    return active[env_index].detach().cpu().numpy().astype(bool)
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -255,7 +321,7 @@ def run_rollout(
     seed: int,
     *,
     time_bins: int = 5,
-    happo_cache: dict[tuple[Path, bool], HappoPolicy] | None = None,
+    happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] | None = None,
     stochastic_happo: bool = False,
 ) -> dict[str, Any]:
     env = vmas.make_env(
@@ -271,6 +337,7 @@ def run_rollout(
     policy = make_policy(
         spec,
         env,
+        scenario_kwargs,
         happo_cache=happo_cache,
         deterministic_happo=not stochastic_happo,
     )
@@ -280,13 +347,16 @@ def run_rollout(
     n_drones = int(scenario.n_drones)
     n_ground = int(scenario.n_ground)
     n_agents = int(scenario.n_agents)
-    n_survivors = int(scenario.n_survivors)
+    survivor_slots = int(scenario.n_survivors)
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    active_survivor_indices = np.flatnonzero(active_survivor_mask)
+    n_active_survivors = int(active_survivor_mask.sum())
     max_steps = int(scenario_kwargs["max_steps"])
     step_seconds = max(float(getattr(scenario, "sim_step_seconds", 1.0)), 1e-9)
     scale = max(float(scenario.terrain_sim_units_per_meter[0].detach().cpu().item()), 1e-12)
 
-    first_scout_steps: list[int | None] = [None] * n_survivors
-    first_confirm_steps: list[int | None] = [None] * n_survivors
+    first_scout_steps: list[int | None] = [None] * survivor_slots
+    first_confirm_steps: list[int | None] = [None] * survivor_slots
     path_lengths_m = np.zeros(n_agents, dtype=float)
     pending_counts: list[float] = []
     duplicate_assignment: list[float] = []
@@ -308,14 +378,14 @@ def run_rollout(
 
         scouted = scenario.scouted_survivors[0].detach().cpu().numpy().astype(bool)
         confirmed = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
-        for survivor_idx in range(n_survivors):
+        for survivor_idx in active_survivor_indices:
             if scouted[survivor_idx] and first_scout_steps[survivor_idx] is None:
                 first_scout_steps[survivor_idx] = step + 1
             if confirmed[survivor_idx] and first_confirm_steps[survivor_idx] is None:
                 first_confirm_steps[survivor_idx] = step + 1
 
         info = scenario.info(env.agents[0])
-        pending = float(np.logical_and(scouted, ~confirmed).sum())
+        pending = float(np.logical_and(active_survivor_mask & scouted, ~confirmed).sum())
         pending_counts.append(pending)
         duplicate = _to_float(info.get("diagnostic/ugv_duplicate_assignment_fraction"))
         switches = _to_float(info.get("diagnostic/ugv_assignment_switches"))
@@ -336,8 +406,10 @@ def run_rollout(
         bucket["duplicate_assignment"] += duplicate
         bucket["assignment_switches"] += switches
 
-    scout_count = sum(step is not None for step in first_scout_steps)
-    confirm_count = sum(step is not None for step in first_confirm_steps)
+    active_scout_steps = [first_scout_steps[idx] for idx in active_survivor_indices]
+    active_confirm_steps = [first_confirm_steps[idx] for idx in active_survivor_indices]
+    scout_count = sum(step is not None for step in active_scout_steps)
+    confirm_count = sum(step is not None for step in active_confirm_steps)
     scout_to_confirm_latencies = [
         float(confirm_step - scout_step)
         for scout_step, confirm_step in zip(first_scout_steps, first_confirm_steps)
@@ -373,13 +445,15 @@ def run_rollout(
         "checkpoint_dir": None if spec.checkpoint_dir is None else str(spec.checkpoint_dir),
         "seed": int(seed),
         "max_steps": max_steps,
-        "survivors": n_survivors,
+        "survivors": n_active_survivors,
+        "active_survivors": n_active_survivors,
+        "survivor_slots": survivor_slots,
         "scouted": int(scout_count),
         "confirmed": int(confirm_count),
-        "scout_recall": float(scout_count / max(n_survivors, 1)),
-        "confirm_recall": float(confirm_count / max(n_survivors, 1)),
-        "full_confirm_success": bool(confirm_count == n_survivors),
-        "overall_success": bool(confirm_count == n_survivors),
+        "scout_recall": float(scout_count / max(n_active_survivors, 1)),
+        "confirm_recall": float(confirm_count / max(n_active_survivors, 1)),
+        "full_confirm_success": bool(confirm_count == n_active_survivors),
+        "overall_success": bool(confirm_count == n_active_survivors),
         "first_scout_steps": first_scout_steps,
         "first_confirm_steps": first_confirm_steps,
         "first_scout_times_s": [
@@ -674,14 +748,20 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--strategies", nargs="+", default=list(DEFAULT_STRATEGIES))
     parser.add_argument("--happo-checkpoint", default=None,
-                        help="Checkpoint models/ directory used by the 'happo' strategy token.")
+                        help=(
+                            "HAPPO models/ directory. If provided, its saved scenario settings "
+                            "are used for all strategies unless explicitly overridden by CLI flags; "
+                            "also used by the 'happo' strategy token."
+                        ))
     parser.add_argument("--stochastic", action="store_true",
                         help="Sample HAPPO actions instead of using deterministic actor means.")
-    parser.add_argument("--steps", type=int, default=300)
+    parser.add_argument("--steps", type=int, default=None,
+                        help="Override episode length. Default uses checkpoint max_steps when available, else 300.")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(1000, 1100)))
     parser.add_argument("--time-bins", type=int, default=5)
     parser.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS)
-    parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=DEFAULT_JOINT_DIAG_DRONES)
+    parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
+                        help="Override UAV count. Default uses checkpoint count when available, else joint default.")
     parser.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=None)
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
@@ -720,13 +800,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--plots-output", default=None)
     args = parser.parse_args()
 
-    if args.steps <= 0:
+    if args.steps is not None and args.steps <= 0:
         parser.error("--steps must be positive")
     if args.time_bins <= 0:
         parser.error("--time-bins must be positive")
     if args.joint_diagnostic_ugvs < 1:
         parser.error("--joint-diagnostic-ugvs must be positive")
-    if args.n_drones < 1:
+    if args.n_drones is not None and args.n_drones < 1:
         parser.error("--n-drones must be positive")
     if args.n_ugvs is not None and args.n_ugvs < 1:
         parser.error("--n-ugvs must be positive")
@@ -762,7 +842,8 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    scenario_kwargs = build_scenario_kwargs(args)
+    scenario_checkpoint = _scenario_checkpoint_from_specs(args, specs)
+    scenario_kwargs = build_scenario_kwargs(args, scenario_checkpoint)
     print(
         "scenario: "
         f"{scenario_kwargs['n_drones']} UAVs, "
@@ -771,6 +852,14 @@ def main() -> None:
         f"steps={scenario_kwargs['max_steps']}, "
         f"fire={'on' if not scenario_kwargs.get('disable_fire', True) else 'off'}, "
         f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}"
+    )
+    print(
+        "scenario source: "
+        + (
+            f"checkpoint {scenario_checkpoint}"
+            if scenario_checkpoint is not None
+            else "joint defaults / CLI"
+        )
     )
     print(f"terrain: {scenario_kwargs.get('terrain_cache_path')}")
     print("strategies: " + ", ".join(
@@ -781,7 +870,7 @@ def main() -> None:
     print("-" * 104)
 
     rows: list[dict[str, Any]] = []
-    happo_cache: dict[tuple[Path, bool], HappoPolicy] = {}
+    happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] = {}
     for spec in specs:
         for seed in args.seeds:
             row = run_rollout(
@@ -802,7 +891,8 @@ def main() -> None:
         "metadata": {
             "strategies": [_spec_metadata(spec) for spec in specs],
             "happo_deterministic": not args.stochastic,
-            "steps": int(args.steps),
+            "steps": int(scenario_kwargs["max_steps"]),
+            "scenario_source_checkpoint": None if scenario_checkpoint is None else str(scenario_checkpoint),
             "seeds": [int(seed) for seed in args.seeds],
             "scenario_kwargs": scenario_kwargs,
         },
