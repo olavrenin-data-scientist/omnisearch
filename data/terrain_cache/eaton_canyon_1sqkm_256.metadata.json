@@ -1,0 +1,125 @@
+{
+  "builder": "terrain.usgs_osm_builder.build_real_terrain_cache",
+  "cache_path": "/Users/aschuetz/Software/capstone/omnisearch/data/terrain_cache/8be18fde002b_256.npz",
+  "fuel": {
+    "derived_seed": 3311589366,
+    "landfire_layer_list": [],
+    "landfire_output_projection": null,
+    "landfire_resample_resolution_m": 31,
+    "source": "derived"
+  },
+  "generated_at": "2026-07-20T22:32:37.318432+00:00",
+  "inputs": {
+    "landfire": null,
+    "openstreetmap": {
+      "bbox": [
+        -118.10212417,
+        34.18409248,
+        -118.09127583,
+        34.19310752
+      ],
+      "building_feature_count": 0,
+      "client": "osmnx",
+      "client_version": "2.1.0",
+      "provider": "OpenStreetMap",
+      "road_feature_count": 12,
+      "tags": {
+        "buildings": {
+          "building": true
+        },
+        "roads": {
+          "highway": true
+        },
+        "water": {
+          "natural": [
+            "water",
+            "bay",
+            "strait",
+            "coastline"
+          ],
+          "water": true,
+          "waterway": [
+            "riverbank",
+            "dock"
+          ]
+        }
+      },
+      "timeout_s": 180,
+      "water_feature_count": 0
+    },
+    "usgs_3dep": {
+      "bbox": [
+        -118.10212417,
+        34.18409248,
+        -118.09127583,
+        34.19310752
+      ],
+      "bbox_crs": "EPSG:4326",
+      "cell_size_m": 4.757646355155271,
+      "endpoint": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage",
+      "grid_size": [
+        256,
+        256
+      ],
+      "image_crs": "EPSG:3857",
+      "interpolation": "RSP_BilinearInterpolation",
+      "meters_per_world_unit": 606.5999102822971,
+      "pixel_type": "F32",
+      "projected_bounds": [
+        -13147068.324208366,
+        4053548.015582411,
+        -13145860.692523615,
+        4054761.2154029757
+      ],
+      "projected_crs": "EPSG:3857",
+      "provider": "USGS 3DEP",
+      "sim_units_per_meter": 0.001648533049625121
+    }
+  },
+  "metadata_path": "/Users/aschuetz/Software/capstone/omnisearch/data/terrain_cache/8be18fde002b_256.metadata.json",
+  "outputs": {
+    "building_cell_count": 0,
+    "land_cover_counts": {
+      "0": 5611,
+      "1": 37063,
+      "2": 2661,
+      "3": 15244,
+      "4": 4957
+    },
+    "obstacle_type_counts": {
+      "0": 65536
+    },
+    "road_cell_count": 5611,
+    "water_cell_count": 0
+  },
+  "parameters": {
+    "bbox": [
+      -118.10212417,
+      34.18409248,
+      -118.09127583,
+      34.19310752
+    ],
+    "brush_height_m": 4.0,
+    "building_height_m": 7.0,
+    "building_height_sim": 0.011539731347375848,
+    "building_height_source": "meters",
+    "forest_height_m": 40.0,
+    "fuel_source": "derived",
+    "grid_size": 256,
+    "house_height_m": 10.0,
+    "place": "Eaton Canyon, California",
+    "requested_dem_resolution_m": 10,
+    "road_width_m": 8.0,
+    "source_cache_dir": "/Users/aschuetz/Software/capstone/omnisearch/data/source_cache",
+    "terrain_elevation_scale": 0.3
+  },
+  "schema_version": 3,
+  "source_description": "USGS 3DEP DEM 10m + OpenStreetMap roads/buildings/water; fuel_source=derived; place='Eaton Canyon, California'; bbox=(-118.102124, 34.184092, -118.091276, 34.193108)",
+  "source_note": null,
+  "units": {
+    "horizontal": "simulation world units, with x/y spanning roughly [-1, 1]",
+    "meters_per_world_unit": 606.5999102822971,
+    "sim_units_per_meter": 0.001648533049625121,
+    "vertical": "normalized simulation units"
+  }
+}
