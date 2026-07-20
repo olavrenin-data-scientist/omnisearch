@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agents.baselines import AntColonyPolicy, LawnmowerPolicy
+from agents.baselines import BASELINES, get_baseline
 from agents.happo_checkpoint import load_training_manifest
 from agents.happo_policy import (
     HappoPolicy,
@@ -40,13 +40,13 @@ from scripts.train_happo_smoke import (
 )
 
 
-AVAILABLE_STRATEGIES = ("lawnmower_astar", "ant_colony_astar")
-DEFAULT_STRATEGY = "lawnmower_astar"
+AVAILABLE_STRATEGIES = tuple(BASELINES.keys())
+DEFAULT_STRATEGY = "lawnmower"
 STRATEGY_ALIASES = {
-    "lawnmower": "lawnmower_astar",
-    "lawnmower_astar": "lawnmower_astar",
-    "ant_colony": "ant_colony_astar",
-    "ant_colony_astar": "ant_colony_astar",
+    **{name: name for name in AVAILABLE_STRATEGIES},
+    # Backward-compatible spellings from the old joint diagnostic name.
+    "lawnmower_astar": "lawnmower",
+    "ant_colony_astar": "ant_colony",
 }
 RECALL_TIME_THRESHOLDS = (0.50, 0.80, 0.90, 1.00)
 
@@ -216,10 +216,8 @@ def make_policy(
     happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] | None = None,
     deterministic_happo: bool = True,
 ) -> Callable[[Any], list[torch.Tensor]]:
-    if spec.name == "lawnmower_astar":
-        return LawnmowerPolicy(env)
-    if spec.name == "ant_colony_astar":
-        return AntColonyPolicy(env)
+    if spec.name in BASELINES:
+        return get_baseline(spec.name, env)
     if spec.name == "happo":
         if spec.checkpoint_dir is None:
             raise ValueError("HAPPO strategy requires a checkpoint directory")
@@ -1230,7 +1228,11 @@ def _parse_args() -> argparse.Namespace:
         dest="strategies",
         nargs="+",
         default=[DEFAULT_STRATEGY],
-        help="Run exactly one strategy: lawnmower_astar, ant_colony_astar, or happo.",
+        help=(
+            "Run exactly one strategy: "
+            + ", ".join(AVAILABLE_STRATEGIES)
+            + ", or happo."
+        ),
     )
     parser.add_argument("--happo-checkpoint", default=None,
                         help=(
