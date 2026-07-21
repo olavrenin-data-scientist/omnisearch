@@ -1131,10 +1131,30 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> 
         ]
         if values:
             counts = Counter(values)
+            success_counts = Counter(
+                int(row.get("active_survivors", row.get("survivors", 0)))
+                for row in rows
+                if int(row.get("active_survivors", row.get("survivors", 0))) > 0
+                and bool(row.get("full_confirm_success", row.get("overall_success", False)))
+            )
             xs = sorted(counts)
             ys = [counts[x] for x in xs]
-            ax.bar(xs, ys, color="#4f7df3", alpha=0.78, width=0.75)
+            success_ys = [success_counts.get(x, 0) for x in xs]
+            ax.bar(xs, ys, color="#4f7df3", alpha=0.72, width=0.75, label="episodes")
+            ax.bar(xs, success_ys, color="#22c55e", alpha=0.82, width=0.45, label="successful")
             ax.set_xticks(xs)
+            ymax = max(ys) if ys else 1
+            ax.set_ylim(0.0, ymax * 1.18 + 0.5)
+            for x, total, successful in zip(xs, ys, success_ys):
+                ax.text(
+                    x,
+                    total + max(ymax * 0.025, 0.25),
+                    f"{successful}/{total}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    color="#111827",
+                )
             mean = _mean(values)
             median = float(np.nanmedian(values))
             if math.isfinite(mean):
@@ -1143,7 +1163,7 @@ def _plot(rows: list[dict[str, Any]], summary: dict[str, Any], output: Path) -> 
                 ax.axvline(median, color="#111827", linestyle="--", label=f"med {median:.2f}")
         else:
             ax.text(0.5, 0.5, "no survivor counts", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title("Active Survivors", fontsize=10)
+        ax.set_title("Active Survivors / Success", fontsize=10)
         ax.set_xlabel("survivors / episode")
         ax.set_ylabel("episodes")
         ax.grid(axis="y", alpha=0.25)
