@@ -185,6 +185,13 @@ def build_scenario_kwargs(
     if n_ugvs is not None:
         scenario_kwargs["n_ground"] = int(n_ugvs)
         scenario_kwargs["obs_schema_n_ground"] = int(n_ugvs)
+    if args.n_survivors is not None:
+        scenario_kwargs["n_survivors"] = int(args.n_survivors)
+        scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
+    if args.active_survivors_min is not None:
+        scenario_kwargs["active_survivors_min"] = int(args.active_survivors_min)
+    if args.active_survivors_max is not None:
+        scenario_kwargs["active_survivors_max"] = int(args.active_survivors_max)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = str(args.terrain_cache_path)
@@ -1384,6 +1391,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
                         help="Override UAV count. Default uses checkpoint count when available, else joint default.")
     parser.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=None)
+    parser.add_argument("--n-survivors", type=int, default=None,
+                        help="Override survivor observation slots. Default uses checkpoint count when available.")
+    parser.add_argument("--active-survivors-min", type=int, default=None,
+                        help="Minimum active true survivors per episode. Default uses checkpoint setting.")
+    parser.add_argument("--active-survivors-max", type=int, default=None,
+                        help="Maximum active true survivors per episode. Default uses checkpoint setting.")
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
@@ -1431,6 +1444,23 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--n-drones must be positive")
     if args.n_ugvs is not None and args.n_ugvs < 1:
         parser.error("--n-ugvs must be positive")
+    if args.n_survivors is not None and args.n_survivors < 1:
+        parser.error("--n-survivors must be positive")
+    if args.active_survivors_min is not None and args.active_survivors_min < 0:
+        parser.error("--active-survivors-min must be nonnegative")
+    if args.active_survivors_max is not None and args.active_survivors_max < 0:
+        parser.error("--active-survivors-max must be nonnegative")
+    if (
+        args.active_survivors_min is not None
+        and args.active_survivors_max is not None
+        and args.active_survivors_max < args.active_survivors_min
+    ):
+        parser.error("--active-survivors-max must be >= --active-survivors-min")
+    if args.n_survivors is not None:
+        if args.active_survivors_min is not None and args.active_survivors_min > args.n_survivors:
+            parser.error("--active-survivors-min must be <= --n-survivors")
+        if args.active_survivors_max is not None and args.active_survivors_max > args.n_survivors:
+            parser.error("--active-survivors-max must be <= --n-survivors")
     if not args.seeds:
         parser.error("--seeds must contain at least one seed")
     if args.enable_fire and args.disable_fire:
