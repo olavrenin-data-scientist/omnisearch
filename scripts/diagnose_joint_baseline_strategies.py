@@ -13,6 +13,7 @@ import copy
 import json
 import math
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -1296,6 +1297,23 @@ def _print_row(row: dict[str, Any]) -> None:
     )
 
 
+def _format_duration(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not math.isfinite(seconds) or seconds < 0.0:
+        return "unknown"
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    total_seconds = int(round(seconds))
+    minutes, sec = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {sec:02d}s"
+
+
 def _print_summary(summary: dict[str, Any]) -> None:
     print("-" * 104)
     print(
@@ -1472,10 +1490,15 @@ def main() -> None:
     ))
     print(f"baseline UGV controller: {baseline_ugv_controller}")
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
+    print(f"planned rollout: {len(specs)} strategies x {len(args.seeds)} seeds x {args.steps} steps")
     print("-" * 104)
 
     rows: list[dict[str, Any]] = []
     happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] = {}
+    total_rollouts = len(specs) * len(args.seeds)
+    total_rollout_steps = total_rollouts * int(args.steps)
+    rollout_started_at = time.perf_counter()
+    completed_rollouts = 0
     for spec in specs:
         for seed in args.seeds:
             row = run_rollout(
@@ -1489,6 +1512,19 @@ def main() -> None:
             )
             rows.append(row)
             _print_row(row)
+            completed_rollouts += 1
+            elapsed_rollout_s = time.perf_counter() - rollout_started_at
+            completed_steps = int(args.steps) * completed_rollouts
+            rollout_steps_per_second = completed_steps / max(elapsed_rollout_s, 1e-9)
+            remaining_steps = max(total_rollout_steps - completed_steps, 0)
+            eta_s = (
+                remaining_steps / rollout_steps_per_second
+                if rollout_steps_per_second > 0.0
+                else float("nan")
+            )
+            if completed_rollouts == 1:
+                print(f"ETA {_format_duration(eta_s)}", flush=True)
+            print(f"progress: {completed_rollouts}/{total_rollouts} rollouts", flush=True)
 
     summary = summarize(rows, bins=args.time_bins)
     _print_summary(summary)
