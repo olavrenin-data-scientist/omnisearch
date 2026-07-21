@@ -1895,7 +1895,7 @@ def run_rollout(
         seed=seed,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=seed)
     policy.reset()
     scenario = env.scenario
     ground_index = 0
@@ -2214,7 +2214,7 @@ def run_failure_trace(
         seed=seed,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=seed)
     policy.reset()
     scenario = env.scenario
     ground_index = 0
@@ -2398,7 +2398,7 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
                 seed=seed,
                 **copy.deepcopy(scenario_kwargs),
             )
-            env.reset()
+            env.reset(seed=seed)
             scenario = env.scenario
             ground_agent_idx = _ground_agent_index(scenario, 0)
             ground = env.agents[ground_agent_idx]
@@ -2434,7 +2434,7 @@ def run_direction_probe(
         seed=123,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=123)
     scenario = env.scenario
     ground_agent_idx = _ground_agent_index(scenario, 0)
     ground = env.agents[ground_agent_idx]
@@ -2483,7 +2483,7 @@ def run_angle_bucket_probe(
         seed=123,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=123)
     scenario = env.scenario
     ground_agent_idx = _ground_agent_index(scenario, 0)
     ground = env.agents[ground_agent_idx]

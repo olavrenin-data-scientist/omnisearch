@@ -457,7 +457,7 @@ def run_rollout(
         seed=seed,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=seed)
     policy.reset()
     scenario = env.scenario
     n_drones = int(scenario.n_drones)

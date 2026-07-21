@@ -481,7 +481,7 @@ def run_rollout(
         seed=int(seed),
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=int(seed))
     scenario = env.scenario
     policy = make_policy(
         spec,

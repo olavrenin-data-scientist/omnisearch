@@ -243,7 +243,7 @@ def run_rollout(
         seed=seed,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=seed)
     policy.reset()
     scenario = env.scenario
     start_metrics = _start_metrics(scenario)
