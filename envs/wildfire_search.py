@@ -1240,6 +1240,9 @@ class WildfireSearchScenario(BaseScenario):
         self.step_drone_detections = torch.zeros(
             batch_dim, self.n_drones, self.n_survivors, dtype=torch.bool, device=device,
         )
+        self.step_drone_detection_confidence = torch.zeros(
+            batch_dim, self.n_drones, self.n_survivors, dtype=torch.float, device=device,
+        )
         self.step_ground_confirmations = torch.zeros(
             batch_dim, self.n_ground, self.n_survivors, dtype=torch.bool, device=device,
         )
@@ -2254,6 +2257,7 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.step_drone_detections.zero_()
+            self.step_drone_detection_confidence.zero_()
             self.step_ground_confirmations.zero_()
             self.known_survivors_by_agent.zero_()
             self.confirmed_survivors_by_agent.zero_()
@@ -2307,6 +2311,7 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.step_drone_detections[env_index] = False
+            self.step_drone_detection_confidence[env_index] = 0.0
             self.step_ground_confirmations[env_index] = False
             self.known_survivors_by_agent[env_index] = False
             self.confirmed_survivors_by_agent[env_index] = False
@@ -6282,7 +6287,13 @@ class WildfireSearchScenario(BaseScenario):
             return self._drone_survivor_detections_cv(drone_pos, surv_pos)
         components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
         probability = components["probability"]
-        return torch.rand_like(probability) < probability
+        detected = torch.rand_like(probability) < probability
+        self.step_drone_detection_confidence = torch.where(
+            detected,
+            probability,
+            torch.zeros_like(probability),
+        )
+        return detected
 
     def _process_decoy_false_positives(
         self,
@@ -6376,6 +6387,9 @@ class WildfireSearchScenario(BaseScenario):
         n_drones = self.n_drones
         n_survivors = self.n_survivors
         result = torch.zeros(batch_dim, n_drones, n_survivors, dtype=torch.bool, device=device)
+        confidence_result = torch.zeros(
+            batch_dim, n_drones, n_survivors, dtype=torch.float, device=device,
+        )
         self.step_cv_false_positives = 0
 
         for env_i in range(batch_dim):
@@ -6411,9 +6425,14 @@ class WildfireSearchScenario(BaseScenario):
                     matched_idx = det.get("matched_survivor_index")
                     if matched_idx is not None and 0 <= matched_idx < n_survivors:
                         result[env_i, drone_i, matched_idx] = True
+                        confidence_result[env_i, drone_i, matched_idx] = max(
+                            float(confidence_result[env_i, drone_i, matched_idx].item()),
+                            min(max(float(det.get("confidence", 1.0)), 0.0), 1.0),
+                        )
                     else:
                         self.step_cv_false_positives += 1
 
+        self.step_drone_detection_confidence = confidence_result
         return result
 
     def _drone_detection_components(
