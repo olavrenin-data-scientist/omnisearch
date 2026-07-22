@@ -649,9 +649,14 @@ class WildfireSearchScenario(BaseScenario):
         self.comms_dropout_mode = str(kwargs.pop("comms_dropout_mode", "iid")).replace("-", "_").lower()
         if self.comms_dropout_mode not in {"iid", "bursty"}:
             raise ValueError("comms_dropout_mode must be one of: iid, bursty")
-        self.comms_map_mode = str(kwargs.pop("comms_map_mode", "global")).replace("-", "_").lower()
-        if self.comms_map_mode not in {"global", "per_agent"}:
-            raise ValueError("comms_map_mode must be one of: global, per_agent")
+        configured_comms_map_mode = str(
+            kwargs.pop("comms_map_mode", "per_agent")
+        ).replace("-", "_").lower()
+        if configured_comms_map_mode not in {"global", "per_agent"}:
+            raise ValueError("comms_map_mode must be per_agent")
+        # Legacy checkpoints may record the former omniscient ``global`` mode.
+        # Runtime behavior now always uses communication-gated per-agent maps.
+        self.comms_map_mode = "per_agent"
         self.comms_dropout_min_steps = max(int(kwargs.pop("comms_dropout_min_steps", 5)), 1)
         self.comms_dropout_max_steps = max(
             int(kwargs.pop("comms_dropout_max_steps", 15)),
@@ -6773,7 +6778,20 @@ class WildfireSearchScenario(BaseScenario):
         self._invalidate_uav_local_confidence_obs_cache()
 
     def _comms_maps_enabled(self) -> bool:
-        return getattr(self, "comms_map_mode", "global") == "per_agent"
+        return True
+
+    def _per_agent_coverage_maps_available(self) -> bool:
+        return hasattr(self, "comm_agent_coverage_grid")
+
+    def _per_agent_confidence_maps_available(self) -> bool:
+        return hasattr(self, "comm_agent_confidence_grid")
+
+    def _per_agent_comm_maps_available(self) -> bool:
+        """Return whether both per-agent map buffers have been initialized."""
+        return (
+            self._per_agent_coverage_maps_available()
+            and self._per_agent_confidence_maps_available()
+        )
 
     def _agent_index(self, agent: Agent) -> int:
         try:
@@ -6913,27 +6931,39 @@ class WildfireSearchScenario(BaseScenario):
         self.comm_map_last_sync_step[due] = current_step[due]
 
     def _coverage_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
-        if agent is None or not self._comms_maps_enabled():
+        if agent is None or not self._per_agent_coverage_maps_available():
             return self.coverage_grid.float()
-        agent_idx = min(max(self._agent_index(agent), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(self._agent_index(agent), 0),
+            self.comm_agent_coverage_grid.shape[1] - 1,
+        )
         return self.comm_agent_coverage_grid[:, agent_idx].float()
 
     def _confidence_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
-        if agent is None or not self._comms_maps_enabled():
+        if agent is None or not self._per_agent_confidence_maps_available():
             return self.uav_confidence_grid.float()
-        agent_idx = min(max(self._agent_index(agent), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(self._agent_index(agent), 0),
+            self.comm_agent_confidence_grid.shape[1] - 1,
+        )
         return self.comm_agent_confidence_grid[:, agent_idx].float()
 
     def _drone_coverage_grid_for_observation(self, drone_idx: int) -> Tensor:
-        if not self._comms_maps_enabled():
+        if not self._per_agent_coverage_maps_available():
             return self.coverage_grid.float()
-        agent_idx = min(max(int(drone_idx), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(int(drone_idx), 0),
+            self.comm_agent_coverage_grid.shape[1] - 1,
+        )
         return self.comm_agent_coverage_grid[:, agent_idx].float()
 
     def _drone_confidence_grid_for_observation(self, drone_idx: int) -> Tensor:
-        if not self._comms_maps_enabled():
+        if not self._per_agent_confidence_maps_available():
             return self.uav_confidence_grid.float()
-        agent_idx = min(max(int(drone_idx), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(int(drone_idx), 0),
+            self.comm_agent_confidence_grid.shape[1] - 1,
+        )
         return self.comm_agent_confidence_grid[:, agent_idx].float()
 
     def _uav_coverage_maps_for_reward(self) -> Tensor:
@@ -6944,7 +6974,7 @@ class WildfireSearchScenario(BaseScenario):
                 self.coverage_grid.shape[-2],
                 self.coverage_grid.shape[-1],
             )
-        if self._comms_maps_enabled():
+        if self._per_agent_coverage_maps_available():
             return self.comm_agent_coverage_grid[:, : self.n_drones]
         return self.coverage_grid.unsqueeze(1).expand(-1, self.n_drones, -1, -1)
 
@@ -6956,14 +6986,14 @@ class WildfireSearchScenario(BaseScenario):
                 self.uav_confidence_grid.shape[-2],
                 self.uav_confidence_grid.shape[-1],
             )
-        if self._comms_maps_enabled():
+        if self._per_agent_confidence_maps_available():
             return self.comm_agent_confidence_grid[:, : self.n_drones]
         return self.uav_confidence_grid.unsqueeze(1).expand(-1, self.n_drones, -1, -1)
 
     def _update_comm_agent_coverage_from_claims(self, claims: Tensor) -> None:
-        if not self._comms_maps_enabled() or self.n_drones <= 0:
+        if not self._per_agent_coverage_maps_available() or self.n_drones <= 0:
             return
-        count = min(self.n_drones, self.n_agents, claims.shape[1])
+        count = min(self.n_drones, self.comm_agent_coverage_grid.shape[1], claims.shape[1])
         if count <= 0:
             return
         self.comm_agent_coverage_grid[:, :count] |= claims[:, :count].to(
@@ -6974,9 +7004,13 @@ class WildfireSearchScenario(BaseScenario):
             self.comm_map_last_sync_step.fill_(-1)
 
     def _update_comm_agent_confidence_from_probability(self, probability: Tensor) -> None:
-        if not self._comms_maps_enabled() or self.n_drones <= 0:
+        if not self._per_agent_confidence_maps_available() or self.n_drones <= 0:
             return
-        count = min(self.n_drones, self.n_agents, probability.shape[1])
+        count = min(
+            self.n_drones,
+            self.comm_agent_confidence_grid.shape[1],
+            probability.shape[1],
+        )
         if count <= 0:
             return
         current = self.comm_agent_confidence_grid[:, :count]
@@ -9273,7 +9307,7 @@ class WildfireSearchScenario(BaseScenario):
         return features
 
     def _pre_step_uav_frontier_features(self) -> Tensor:
-        if self._comms_maps_enabled() and self.n_drones > 0:
+        if self._per_agent_comm_maps_available() and self.n_drones > 0:
             features = []
             for drone_idx in range(self.n_drones):
                 features.append(self._uav_frontier_features_for_positions(
@@ -9292,7 +9326,7 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
-        if self._comms_maps_enabled():
+        if self._per_agent_comm_maps_available():
             features = []
             for drone_idx in range(self.n_drones):
                 features.append(self._uav_frontier_features_for_positions(
@@ -10313,7 +10347,7 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
-        if self._comms_maps_enabled():
+        if self._per_agent_confidence_maps_available():
             features = []
             for drone_idx in range(self.n_drones):
                 features.append(self._batched_local_grid_observation(
@@ -13588,7 +13622,7 @@ if __name__ == "__main__":
     p.add_argument("--grid-size",   type=int, default=128)
     p.add_argument("--comms-dropout", type=float, default=0.0)
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid")
-    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global")
+    p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5)
     p.add_argument("--comms-dropout-max-steps", type=int, default=15)
     args = p.parse_args()

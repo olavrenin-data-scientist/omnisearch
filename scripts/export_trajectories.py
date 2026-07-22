@@ -117,8 +117,8 @@ def main():
     )
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
                    help="Communication dropout process for trajectory export.")
-    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global",
-                   help="Coverage/confidence map observation memory for HAPPO export.")
+    p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent",
+                   help="Use communication-gated per-agent coverage/confidence maps.")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5,
                    help="Minimum outage duration for --comms-dropout-mode bursty.")
     p.add_argument("--comms-dropout-max-steps", type=int, default=15,
@@ -506,8 +506,8 @@ def main():
     if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
         raise SystemExit("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
     args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
-    if args.comms_map_mode not in {"global", "per_agent"}:
-        raise SystemExit("--comms-map-mode must be one of: global, per_agent")
+    if args.comms_map_mode != "per_agent":
+        raise SystemExit("--comms-map-mode must be per_agent")
 
     out_dir = Path(args.out)
     print(f" Output:        {_display_path(out_dir)}")
@@ -820,6 +820,8 @@ def main():
         scenario_kwargs["ugv_planner_land_cover_costs"] = tuple(
             float(v) for v in args.ugv_planner_land_cover_costs
         )
+
+    scenario_kwargs["comms_map_mode"] = "per_agent"
 
     planner_hint = str(scenario_kwargs.get("ugv_planner_hint", "none")).replace("-", "_")
     dense_reward_mode = str(scenario_kwargs.get("ugv_dense_reward_mode", "target")).replace("-", "_")

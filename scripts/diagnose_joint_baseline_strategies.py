@@ -179,7 +179,7 @@ def build_scenario_kwargs(
     scenario_kwargs.setdefault("drone_can_confirm", False)
     scenario_kwargs.setdefault("comms_dropout", 0.0)
     scenario_kwargs.setdefault("comms_dropout_mode", "iid")
-    scenario_kwargs.setdefault("comms_map_mode", "global")
+    scenario_kwargs["comms_map_mode"] = "per_agent"
     scenario_kwargs.setdefault("comms_dropout_min_steps", 5)
     scenario_kwargs.setdefault("comms_dropout_max_steps", 15)
     scenario_kwargs["uav_confidence_diagnostics"] = True
@@ -239,6 +239,7 @@ def build_scenario_kwargs(
     for key, value in overrides.items():
         if value is not None:
             scenario_kwargs[key] = value
+    scenario_kwargs["comms_map_mode"] = "per_agent"
     return scenario_kwargs
 
 
@@ -1428,7 +1429,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--comms-map-mode",
-        choices=("global", "per_agent", "per-agent"),
+        choices=("per_agent", "per-agent"),
         default=None,
     )
     parser.add_argument("--comms-dropout-min-steps", type=int, default=None)
@@ -1561,7 +1562,7 @@ def main() -> None:
         "communication: "
         f"dropout={scenario_kwargs.get('comms_dropout', 0.0):.2f}, "
         f"mode={scenario_kwargs.get('comms_dropout_mode', 'iid')}, "
-        f"maps={scenario_kwargs.get('comms_map_mode', 'global')}, "
+        f"maps={scenario_kwargs.get('comms_map_mode', 'per_agent')}, "
         f"burst={scenario_kwargs.get('comms_dropout_min_steps', 5)}.."
         f"{scenario_kwargs.get('comms_dropout_max_steps', 15)} steps"
     )

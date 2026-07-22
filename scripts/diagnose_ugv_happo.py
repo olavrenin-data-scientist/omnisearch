@@ -328,6 +328,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
             max(int(scenario_kwargs["ugv_planner_lookahead_cells"]), 1),
             max(patch_size // 2, 1),
         )
+    scenario_kwargs["comms_map_mode"] = "per_agent"
     return scenario_kwargs
 
 

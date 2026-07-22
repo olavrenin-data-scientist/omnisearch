@@ -247,6 +247,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         explicit_min=getattr(args, "active_decoys_min", None),
         explicit_max=getattr(args, "active_decoys_max", None),
     )
+    scenario_kwargs["comms_map_mode"] = "per_agent"
     return scenario_kwargs
 
 
@@ -1376,8 +1377,8 @@ def main() -> None:
                         help="Override checkpoint communication dropout probability in [0, 1].")
     parser.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default=None,
                         help="Override checkpoint communication dropout mode.")
-    parser.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default=None,
-                        help="Override checkpoint communication map sharing mode.")
+    parser.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default=None,
+                        help="Use communication-gated per-agent coverage/confidence maps.")
     parser.add_argument("--comms-dropout-min-steps", type=int, default=None,
                         help="Override minimum outage duration for bursty communication dropout.")
     parser.add_argument("--comms-dropout-max-steps", type=int, default=None,
@@ -1560,7 +1561,7 @@ def main() -> None:
         "communications: "
         f"dropout={scenario_kwargs.get('comms_dropout', 0.0)} "
         f"mode={scenario_kwargs.get('comms_dropout_mode', 'iid')} "
-        f"maps={scenario_kwargs.get('comms_map_mode', 'global')} "
+        f"maps={scenario_kwargs.get('comms_map_mode', 'per_agent')} "
         f"burst_steps={scenario_kwargs.get('comms_dropout_min_steps', 5)}"
         f"..{scenario_kwargs.get('comms_dropout_max_steps', 15)}"
     )

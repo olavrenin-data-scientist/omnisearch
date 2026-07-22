@@ -656,6 +656,17 @@ class SurvivorCommunicationTests(unittest.TestCase):
         expected = 0.3 / (0.3 + 0.7 * 10.0)
         self.assertAlmostEqual(scenario._bursty_comms_start_probability(), expected)
 
+    def test_legacy_global_map_mode_migrates_to_per_agent(self):
+        scenario = self._diagnostic_env(
+            n_drones=1,
+            n_ground=0,
+            n_survivors=1,
+            comms_map_mode="global",
+        ).scenario
+
+        self.assertEqual(scenario.comms_map_mode, "per_agent")
+        self.assertTrue(scenario._comms_maps_enabled())
+
     def test_per_agent_maps_sync_only_when_receiver_connected_iid(self):
         env = self._diagnostic_env(
             n_drones=2,

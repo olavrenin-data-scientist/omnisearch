@@ -130,3 +130,35 @@ def test_scenario_kwargs_can_override_checkpoint_comms(tmp_path) -> None:
     assert kwargs["comms_map_mode"] == "per_agent"
     assert kwargs["comms_dropout_min_steps"] == 8
     assert kwargs["comms_dropout_max_steps"] == 13
+
+
+def test_scenario_kwargs_migrate_checkpoint_global_maps(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    models_dir = run_dir / "models"
+    models_dir.mkdir(parents=True)
+    (run_dir / MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "env_args": {
+                    "scenario_kwargs": {
+                        "n_drones": 3,
+                        "n_ground": 2,
+                        "n_survivors": 5,
+                        "comms_map_mode": "global",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = MissingNoneNamespace(
+        steps=300,
+        joint_survivor_diagnostic=False,
+        joint_schema_ugv_diagnostic=False,
+        joint_diagnostic_ugvs=2,
+    )
+
+    kwargs = _scenario_kwargs(models_dir, args)
+
+    assert kwargs["comms_map_mode"] == "per_agent"

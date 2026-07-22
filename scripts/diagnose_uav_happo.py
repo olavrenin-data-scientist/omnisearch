@@ -221,6 +221,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str
         explicit_min=getattr(args, "active_decoys_min", None),
         explicit_max=getattr(args, "active_decoys_max", None),
     )
+    scenario_kwargs["comms_map_mode"] = "per_agent"
     return scenario_kwargs
 
 
