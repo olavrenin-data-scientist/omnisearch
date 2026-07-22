@@ -568,6 +568,30 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(disconnected_again[0, 0, 0]), 1.0)
         self.assertEqual(float(disconnected_again[0, 1, 0]), 1.0)
 
+    def test_disconnected_sender_does_not_share_new_survivor_message(self):
+        env = self._env(comms_dropout=0.5)
+        scenario = env.scenario
+        drone, ground = env.agents
+        scenario.known_survivors_by_agent.zero_()
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        drone.comms_up = torch.tensor([False])
+        ground.comms_up = torch.tensor([True])
+
+        message = scenario._survivor_message_observations(
+            ground,
+            torch.ones(1, 1, dtype=torch.bool),
+        ).view(1, scenario.n_survivors, 7)
+        self.assertEqual(float(message[0, 0, 0]), 0.0)
+        self.assertFalse(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+
+        drone.comms_up = torch.tensor([True])
+        message_after_reconnect = scenario._survivor_message_observations(
+            ground,
+            torch.ones(1, 1, dtype=torch.bool),
+        ).view(1, scenario.n_survivors, 7)
+        self.assertEqual(float(message_after_reconnect[0, 0, 0]), 1.0)
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+
     def test_bursty_comms_dropout_uses_persistent_outage_timer(self):
         env = self._env(
             comms_dropout=1.0,
@@ -625,12 +649,16 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.comm_team_confidence_grid.zero_()
         scenario.comm_agent_coverage_grid[0, 0, 4, 5] = True
         scenario.comm_agent_confidence_grid[0, 0, 6, 7] = 0.75
+        drone0.comms_up = torch.tensor([True])
+        drone1.comms_up = torch.tensor([False])
 
         scenario._sync_comm_agent_maps_for_observation(drone0, keep)
         scenario._sync_comm_agent_maps_for_observation(drone1, drop)
         self.assertFalse(bool(scenario.comm_agent_coverage_grid[0, 1, 4, 5]))
         self.assertEqual(float(scenario.comm_agent_confidence_grid[0, 1, 6, 7]), 0.0)
 
+        scenario.step_count += 1
+        drone1.comms_up = torch.tensor([True])
         scenario._sync_comm_agent_maps_for_observation(drone1, keep)
         self.assertTrue(bool(scenario.comm_agent_coverage_grid[0, 1, 4, 5]))
         self.assertAlmostEqual(float(scenario.comm_agent_confidence_grid[0, 1, 6, 7]), 0.75)
@@ -658,6 +686,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.comm_agent_confidence_grid[0, 0, 9, 10] = 0.6
         scenario.comms_dropout_remaining_steps[0, 0] = 0
         scenario.comms_dropout_remaining_steps[0, 1] = 4
+        drone0.comms_up = torch.tensor([True])
+        drone1.comms_up = torch.tensor([False])
 
         scenario._sync_comm_agent_maps_for_observation(drone0, keep)
         self.assertTrue(bool(scenario.comm_team_coverage_grid[0, 8, 9]))
@@ -667,6 +697,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.comms_dropout_last_update_step[:] = scenario.step_count
         scenario.comm_map_last_sync_step.fill_(-1)
         scenario.comms_dropout_remaining_steps[0, 1] = 0
+        drone1.comms_up = torch.tensor([True])
         scenario._sync_comm_agent_maps_for_observation(drone1, keep)
         self.assertTrue(bool(scenario.comm_agent_coverage_grid[0, 1, 8, 9]))
         self.assertAlmostEqual(float(scenario.comm_agent_confidence_grid[0, 1, 9, 10]), 0.6)
@@ -908,9 +939,9 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._compute_step_rewards()
 
         self.assertTrue(bool(scenario.scouted_survivors[0, 0]))
-        torch.testing.assert_close(drone.scenario_reward, torch.tensor([3.0]))
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([2.0]))
         torch.testing.assert_close(ground.scenario_reward, torch.tensor([0.0]))
-        torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([0.5]))
+        torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([0.0]))
 
     def test_disconnected_team_confirm_reward_stays_with_direct_confirmer(self):
         env = self._diagnostic_env(
@@ -951,8 +982,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertTrue(bool(scenario.found_survivors[0, 0]))
         torch.testing.assert_close(drone.scenario_reward, torch.tensor([0.0]))
-        torch.testing.assert_close(ground.scenario_reward, torch.tensor([14.0]))
-        torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([2.0]))
+        torch.testing.assert_close(ground.scenario_reward, torch.tensor([10.0]))
+        torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([0.0]))
         torch.testing.assert_close(scenario.metric_reward_ground_confirm, torch.tensor([10.0]))
 
     def test_pending_penalty_uses_each_ugv_local_known_targets(self):
@@ -1696,6 +1727,38 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(obs0[:, 6:8], torch.tensor([[0.3, -0.1]]), atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(obs1[:, :6], torch.zeros(1, 6))
         torch.testing.assert_close(obs1[:, 6:8], torch.tensor([[-0.3, 0.1]]), atol=1e-6, rtol=1e-6)
+
+    def test_neighbor_observation_hides_disconnected_sender(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            comms_dropout=0.5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.4, -0.2]])
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        drop = torch.zeros(1, 1, dtype=torch.bool)
+        ugv0.comms_up = torch.tensor([True])
+        ugv1.comms_up = torch.tensor([False])
+
+        torch.testing.assert_close(
+            scenario._neighbor_observations(ugv0, keep),
+            torch.zeros(1, 2),
+        )
+        torch.testing.assert_close(
+            scenario._neighbor_observations(ugv1, drop),
+            torch.zeros(1, 2),
+        )
+
+        ugv1.comms_up = torch.tensor([True])
+        torch.testing.assert_close(
+            scenario._neighbor_observations(ugv0, keep),
+            torch.tensor([[0.4, -0.2]]),
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
     def test_ugv_survivor_observation_keeps_all_known_survivors(self):
         env = self._diagnostic_env(

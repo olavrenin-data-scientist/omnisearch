@@ -1267,6 +1267,12 @@ class WildfireSearchScenario(BaseScenario):
         self.comms_dropout_last_update_step = torch.full(
             (batch_dim,), -1, dtype=torch.long, device=device,
         )
+        self.comms_step_up = torch.ones(
+            batch_dim, self.n_agents, dtype=torch.bool, device=device,
+        )
+        self.comms_step_last_update_step = torch.full(
+            (batch_dim,), -1, dtype=torch.long, device=device,
+        )
         self.survivor_reveal_steps = torch.full(
             (batch_dim, self.n_survivors), -1, dtype=torch.long, device=device,
         )
@@ -2257,6 +2263,8 @@ class WildfireSearchScenario(BaseScenario):
             self.step_decoy_false_detections.zero_()
             self.comms_dropout_remaining_steps.zero_()
             self.comms_dropout_last_update_step.fill_(-1)
+            self.comms_step_up.fill_(True)
+            self.comms_step_last_update_step.fill_(-1)
             self.survivor_reveal_steps.fill_(-1)
             self.survivor_oracle_revealed.zero_()
             self.decoy_reveal_steps.fill_(-1)
@@ -2308,6 +2316,8 @@ class WildfireSearchScenario(BaseScenario):
             self.step_decoy_false_detections[env_index] = False
             self.comms_dropout_remaining_steps[env_index] = 0
             self.comms_dropout_last_update_step[env_index] = -1
+            self.comms_step_up[env_index] = True
+            self.comms_step_last_update_step[env_index] = -1
             self.survivor_reveal_steps[env_index] = -1
             self.survivor_oracle_revealed[env_index] = False
             self.decoy_reveal_steps[env_index] = -1
@@ -5731,9 +5741,14 @@ class WildfireSearchScenario(BaseScenario):
         )
         all_survivors_found_reward_by_agent = torch.zeros_like(team_confirm_reward_by_agent)
         if self.r_all_survivors_found != 0.0:
+            connected_confirm_actor = (
+                confirm_actor_events.any(dim=2) & comms_up
+            ).any(dim=1, keepdim=True)
             all_found_recipients = (
-                comms_up | confirm_actor_events.any(dim=2)
-            ) & all_survivors_found_now.unsqueeze(1)
+                comms_up
+                & connected_confirm_actor
+                & all_survivors_found_now.unsqueeze(1)
+            )
             all_survivors_found_reward_by_agent = (
                 all_found_recipients.float() * float(self.r_all_survivors_found)
             )
@@ -6569,6 +6584,88 @@ class WildfireSearchScenario(BaseScenario):
         except ValueError:
             return 0
 
+    def _current_comms_up_mask(self, device: torch.device | None = None) -> Tensor:
+        """Return the sampled whole-team comms state for the current observation step."""
+        base_device = self.comms_dropout_remaining_steps.device
+        if self.n_agents <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device or base_device)
+        if self.comms_dropout <= 0.0:
+            mask = torch.ones(
+                self.world.batch_dim,
+                self.n_agents,
+                dtype=torch.bool,
+                device=base_device,
+            )
+            self.comms_step_up.copy_(mask)
+        elif self.comms_dropout_mode == "bursty":
+            self._advance_bursty_comms_dropout()
+            mask = self.comms_dropout_remaining_steps <= 0
+            self.comms_step_up.copy_(mask)
+            self.comms_step_last_update_step.copy_(
+                self.step_count.to(
+                    device=self.comms_step_last_update_step.device,
+                    dtype=self.comms_step_last_update_step.dtype,
+                )
+            )
+        else:
+            current_step = self.step_count.to(
+                device=self.comms_step_last_update_step.device,
+                dtype=self.comms_step_last_update_step.dtype,
+            )
+            due = current_step != self.comms_step_last_update_step
+            if bool(due.any().item()):
+                due_idx = due.nonzero(as_tuple=False).flatten()
+                draws = torch.rand(
+                    due_idx.numel(),
+                    self.n_agents,
+                    device=self.comms_step_up.device,
+                )
+                self.comms_step_up[due_idx] = draws > float(self.comms_dropout)
+                self.comms_step_last_update_step[due_idx] = current_step[due_idx]
+            mask = self.comms_step_up
+
+        for idx, world_agent in enumerate(self.world.agents):
+            world_agent.comms_up = mask[:, idx].to(device=world_agent.state.pos.device)
+        return mask.to(device=device or base_device)
+
+    def _latest_comms_up_mask(self, device: torch.device | None = None) -> Tensor:
+        """Return the latest observation/action comms state without resampling."""
+        base_device = self.comms_dropout_remaining_steps.device
+        if self.n_agents <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device or base_device)
+        if self.comms_dropout <= 0.0:
+            return torch.ones(
+                self.world.batch_dim,
+                self.n_agents,
+                dtype=torch.bool,
+                device=device or base_device,
+            )
+        states: list[Tensor] = []
+        missing = False
+        for idx, world_agent in enumerate(self.world.agents):
+            comms_up = getattr(world_agent, "comms_up", None)
+            if comms_up is None:
+                missing = True
+                states.append(self.comms_step_up[:, idx])
+            else:
+                states.append(comms_up.to(device=base_device, dtype=torch.bool).view(-1))
+        if missing and bool((self.comms_step_last_update_step < 0).any().item()):
+            return self._current_comms_up_mask(device=device)
+        return torch.stack(states, dim=1).to(device=device or base_device)
+
+    def _communication_exchange_mask(
+        self,
+        agent: Agent,
+        comms_keep: Tensor | None,
+        device: torch.device,
+    ) -> Tensor:
+        """Whole-team comms mask with the queried receiver state fixed."""
+        mask = self._latest_comms_up_mask(device=device).clone()
+        if comms_keep is not None and self.n_agents > 0:
+            agent_idx = self._agent_index(agent)
+            mask[:, agent_idx] = comms_keep[:, 0].to(device=device, dtype=torch.bool)
+        return mask
+
     def _sync_comm_agent_maps_for_observation(self, agent: Agent, comms_keep: Tensor) -> None:
         """Synchronize private map memories according to the active comm state.
 
@@ -6577,63 +6674,46 @@ class WildfireSearchScenario(BaseScenario):
         """
         if not self._comms_maps_enabled() or self.n_agents <= 0:
             return
-        if self.comms_dropout <= 0.0 or self.comms_dropout_mode == "bursty":
-            current_step = self.step_count.to(
-                device=self.comm_map_last_sync_step.device,
-                dtype=self.comm_map_last_sync_step.dtype,
-            )
-            due = current_step != self.comm_map_last_sync_step
-            if not bool(due.any().item()):
-                return
-            if self.comms_dropout <= 0.0:
-                connected = due.view(self.world.batch_dim, 1).expand(-1, self.n_agents)
-            else:
-                self._advance_bursty_comms_dropout()
-                connected = (self.comms_dropout_remaining_steps <= 0) & due.view(
-                    self.world.batch_dim,
-                    1,
-                )
-            if not bool(connected.any().item()):
-                self.comm_map_last_sync_step[due] = current_step[due]
-                return
-            connected_4d = connected.view(self.world.batch_dim, self.n_agents, 1, 1)
-            connected_coverage = self.comm_agent_coverage_grid & connected_4d
-            merged_coverage = self.comm_team_coverage_grid | connected_coverage.any(dim=1)
-            connected_confidence = torch.where(
-                connected_4d,
-                self.comm_agent_confidence_grid,
-                torch.zeros_like(self.comm_agent_confidence_grid),
-            )
-            merged_confidence = torch.maximum(
-                self.comm_team_confidence_grid,
-                connected_confidence.amax(dim=1),
-            )
-            self.comm_team_coverage_grid.copy_(merged_coverage)
-            self.comm_team_confidence_grid.copy_(merged_confidence)
-            self.comm_agent_coverage_grid.copy_(torch.where(
-                connected_4d,
-                self.comm_team_coverage_grid.unsqueeze(1),
-                self.comm_agent_coverage_grid,
-            ))
-            self.comm_agent_confidence_grid.copy_(torch.where(
-                connected_4d,
-                self.comm_team_confidence_grid.unsqueeze(1),
-                self.comm_agent_confidence_grid,
-            ))
+        current_step = self.step_count.to(
+            device=self.comm_map_last_sync_step.device,
+            dtype=self.comm_map_last_sync_step.dtype,
+        )
+        due = current_step != self.comm_map_last_sync_step
+        if not bool(due.any().item()):
+            return
+        connected = self._communication_exchange_mask(
+            agent,
+            comms_keep,
+            self.comm_agent_coverage_grid.device,
+        ) & due.view(self.world.batch_dim, 1)
+        if not bool(connected.any().item()):
             self.comm_map_last_sync_step[due] = current_step[due]
             return
-
-        agent_idx = self._agent_index(agent)
-        keep = comms_keep[:, 0].to(device=self.comm_agent_coverage_grid.device, dtype=torch.bool)
-        if not bool(keep.any().item()):
-            return
-        self.comm_team_coverage_grid[keep] |= self.comm_agent_coverage_grid[keep, agent_idx]
-        self.comm_team_confidence_grid[keep] = torch.maximum(
-            self.comm_team_confidence_grid[keep],
-            self.comm_agent_confidence_grid[keep, agent_idx],
+        connected_4d = connected.view(self.world.batch_dim, self.n_agents, 1, 1)
+        connected_coverage = self.comm_agent_coverage_grid & connected_4d
+        merged_coverage = self.comm_team_coverage_grid | connected_coverage.any(dim=1)
+        connected_confidence = torch.where(
+            connected_4d,
+            self.comm_agent_confidence_grid,
+            torch.zeros_like(self.comm_agent_confidence_grid),
         )
-        self.comm_agent_coverage_grid[keep, agent_idx] = self.comm_team_coverage_grid[keep]
-        self.comm_agent_confidence_grid[keep, agent_idx] = self.comm_team_confidence_grid[keep]
+        merged_confidence = torch.maximum(
+            self.comm_team_confidence_grid,
+            connected_confidence.amax(dim=1),
+        )
+        self.comm_team_coverage_grid.copy_(merged_coverage)
+        self.comm_team_confidence_grid.copy_(merged_confidence)
+        self.comm_agent_coverage_grid.copy_(torch.where(
+            connected_4d,
+            self.comm_team_coverage_grid.unsqueeze(1),
+            self.comm_agent_coverage_grid,
+        ))
+        self.comm_agent_confidence_grid.copy_(torch.where(
+            connected_4d,
+            self.comm_team_confidence_grid.unsqueeze(1),
+            self.comm_agent_confidence_grid,
+        ))
+        self.comm_map_last_sync_step[due] = current_step[due]
 
     def _coverage_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
         if agent is None or not self._comms_maps_enabled():
@@ -10349,24 +10429,7 @@ class WildfireSearchScenario(BaseScenario):
         the communication state sampled for the latest observation/action cycle;
         direct observers are handled separately by the event actor mask.
         """
-        if self.n_agents <= 0:
-            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
-        if self.comms_dropout <= 0.0:
-            return torch.ones(
-                self.world.batch_dim,
-                self.n_agents,
-                dtype=torch.bool,
-                device=device,
-            )
-
-        states = []
-        for agent in self.world.agents:
-            comms_up = getattr(agent, "comms_up", None)
-            if comms_up is None:
-                states.append(torch.ones(self.world.batch_dim, dtype=torch.bool, device=device))
-            else:
-                states.append(comms_up.to(device=device, dtype=torch.bool).view(-1))
-        return torch.stack(states, dim=1)
+        return self._latest_comms_up_mask(device=device)
 
     def _communication_gated_team_event_reward(
         self,
@@ -10378,9 +10441,10 @@ class WildfireSearchScenario(BaseScenario):
         """Distribute sparse team event rewards without leaking through dropout.
 
         ``event_by_target`` marks newly scouted/confirmed survivors. ``actor_events``
-        marks the agents that directly observed those same events. An agent gets
-        the team reward for an event if it either directly observed the event or
-        was connected at that step.
+        marks the agents that directly observed those same events. Team reward
+        reaches only agents connected to a connected event actor; disconnected
+        direct actors keep their individual event rewards but do not broadcast
+        the sparse team reward.
         """
         if reward_weight == 0.0 or event_by_target.numel() == 0 or self.n_agents <= 0:
             return torch.zeros(
@@ -10391,25 +10455,14 @@ class WildfireSearchScenario(BaseScenario):
             )
         events = event_by_target.to(device=comms_up.device, dtype=torch.bool)
         direct = actor_events.to(device=comms_up.device, dtype=torch.bool) & events.unsqueeze(1)
-        connected = comms_up.unsqueeze(-1) & events.unsqueeze(1)
-        recipients = direct | connected
+        connected_senders = (direct & comms_up.unsqueeze(-1)).any(dim=1)
+        recipients = comms_up.unsqueeze(-1) & connected_senders.unsqueeze(1)
         return recipients.float().sum(dim=2) * float(reward_weight)
 
     def _communication_keep(self, agent: Agent) -> Tensor:
-        """Sample one receiver-level communication state for this observation."""
-        if self.comms_dropout <= 0:
-            keep = torch.ones(
-                self.world.batch_dim, 1, dtype=torch.bool, device=agent.state.pos.device,
-            )
-        elif self.comms_dropout_mode == "bursty":
-            self._advance_bursty_comms_dropout()
-            agent_idx = self.world.agents.index(agent)
-            keep = (self.comms_dropout_remaining_steps[:, agent_idx] <= 0).view(-1, 1)
-        else:
-            keep = (
-                torch.rand(self.world.batch_dim, 1, device=agent.state.pos.device)
-                > self.comms_dropout
-            )
+        """Return this agent's state from the step-level communication mask."""
+        agent_idx = self.world.agents.index(agent)
+        keep = self._current_comms_up_mask(agent.state.pos.device)[:, agent_idx : agent_idx + 1]
         agent.comms_up = keep[:, 0]
         return keep
 
@@ -10431,7 +10484,7 @@ class WildfireSearchScenario(BaseScenario):
         )
 
     def _advance_bursty_comms_dropout(self) -> None:
-        """Advance receiver-level burst outage timers once per env step."""
+        """Advance agent-level burst outage timers once per env step."""
         if self.n_agents <= 0:
             return
         current_step = self.step_count.to(
@@ -10490,11 +10543,27 @@ class WildfireSearchScenario(BaseScenario):
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
 
-        team_known = self.known_survivors_by_agent.any(dim=1) & active_survivors
-        team_confirmed = self.confirmed_survivors_by_agent.any(dim=1) & active_survivors
+        comms_up = self._communication_exchange_mask(agent, comms_keep, local_known.device)
+        connected_agents = comms_up.unsqueeze(-1)
+        team_known = (
+            self.known_survivors_by_agent.to(device=local_known.device)
+            & connected_agents
+        ).any(dim=1) & active_survivors
+        team_confirmed = (
+            self.confirmed_survivors_by_agent.to(device=local_confirmed.device)
+            & connected_agents
+        ).any(dim=1) & active_survivors
         connected = comms_keep.expand_as(local_known)
-        local_known = torch.where(connected, team_known, local_known & active_survivors)
-        local_confirmed = torch.where(connected, team_confirmed, local_confirmed & active_survivors)
+        local_known = torch.where(
+            connected,
+            (local_known | team_known) & active_survivors,
+            local_known & active_survivors,
+        )
+        local_confirmed = torch.where(
+            connected,
+            (local_confirmed | team_confirmed) & active_survivors,
+            local_confirmed & active_survivors,
+        )
 
         self.known_survivors_by_agent[:, agent_idx] = local_known
         self.confirmed_survivors_by_agent[:, agent_idx] = local_confirmed
@@ -10507,9 +10576,16 @@ class WildfireSearchScenario(BaseScenario):
         if has_decoys:
             active_decoys = self._active_decoy_mask()
             local_decoy_known = self.known_decoys_by_agent[:, agent_idx]
-            team_decoy_known = self.known_decoys_by_agent.any(dim=1) & active_decoys
+            team_decoy_known = (
+                self.known_decoys_by_agent.to(device=local_decoy_known.device)
+                & connected_agents
+            ).any(dim=1) & active_decoys
             connected_decoys = comms_keep.expand_as(local_decoy_known)
-            decoy_known = torch.where(connected_decoys, team_decoy_known, local_decoy_known & active_decoys)
+            decoy_known = torch.where(
+                connected_decoys,
+                (local_decoy_known | team_decoy_known) & active_decoys,
+                local_decoy_known & active_decoys,
+            )
             self.known_decoys_by_agent[:, agent_idx] = decoy_known
             decoy_false_positive = decoy_known & self.dismissed_decoys & active_decoys
 
@@ -13015,16 +13091,22 @@ class WildfireSearchScenario(BaseScenario):
         return self.obs_schema_n_drones + (agent_idx - self.n_drones)
 
     def _neighbor_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
+        comms_up = self._communication_exchange_mask(agent, comms_keep, agent.state.pos.device)
+        agent_idx = self._agent_index(agent)
+        receiver_up = comms_up[:, agent_idx]
         if self.obs_schema_n_agents == self.n_agents:
             deltas = []
+            masks = []
             for other in self.world.agents:
                 if other is agent:
                     continue
+                other_idx = self._agent_index(other)
                 deltas.append(other.state.pos - agent.state.pos)
+                masks.append((receiver_up & comms_up[:, other_idx]).float().unsqueeze(-1))
             if not deltas:
                 return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
             rel = torch.cat(deltas, dim=-1)
-            return rel * comms_keep.float()
+            return rel * torch.cat(masks, dim=-1).repeat_interleave(2, dim=-1)
 
         schema_self = self._obs_schema_agent_index(agent)
         out = torch.zeros(
@@ -13039,9 +13121,13 @@ class WildfireSearchScenario(BaseScenario):
             other_schema = self._obs_schema_agent_index(other)
             if other_schema == schema_self or other_schema >= self.obs_schema_n_agents:
                 continue
+            other_idx = self._agent_index(other)
             compact_slot = other_schema if other_schema < schema_self else other_schema - 1
-            out[:, 2 * compact_slot : 2 * compact_slot + 2] = other.state.pos - agent.state.pos
-        return out * comms_keep.float()
+            link_up = (receiver_up & comms_up[:, other_idx]).float().unsqueeze(-1)
+            out[:, 2 * compact_slot : 2 * compact_slot + 2] = (
+                other.state.pos - agent.state.pos
+            ) * link_up
+        return out
 
     # ------------------------------------------------------------------
     # Done
