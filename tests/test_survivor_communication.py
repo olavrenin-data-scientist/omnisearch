@@ -797,6 +797,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(pending[0, 1, 7]), 0.0)
 
         scenario.dismissed_decoys[0, 0] = True
+        scenario.dismissed_decoys_by_agent[0, :, 0] = True
         dismissed = scenario._survivor_message_observations(ground, keep).view(1, 2, 8)
         self.assertEqual(float(dismissed[0, 1, 0]), 1.0)
         self.assertEqual(float(dismissed[0, 1, 6]), 0.0)
@@ -1938,6 +1939,89 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._apply_delayed_survivor_reveals(0)
         self.assertTrue(bool(scenario.scouted_survivors[0].all().item()))
         self.assertTrue(bool(scenario.known_survivors_by_agent[0].all().item()))
+
+    def test_delayed_oracle_reports_wait_for_ugv_reconnection(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            n_decoys=1,
+            known_survivors_at_reset=False,
+            delayed_survivor_knowledge=True,
+            survivor_reveal_initial_count=0,
+            survivor_reveal_start_step=1,
+            survivor_reveal_end_step=1,
+            delayed_decoy_knowledge=True,
+            decoy_reveal_initial_count=0,
+            decoy_reveal_start_step=1,
+            decoy_reveal_end_step=1,
+            comms_dropout=0.5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        scenario.step_count[0] = 1
+        scenario.survivor_reveal_steps[0, 0] = 1
+        scenario.decoy_reveal_steps[0, 0] = 1
+        ugv0.comms_up = torch.tensor([True])
+        ugv1.comms_up = torch.tensor([False])
+
+        scenario._apply_delayed_survivor_reveals(0)
+        scenario._apply_delayed_decoy_reveals(0)
+
+        self.assertTrue(bool(scenario.survivor_oracle_revealed[0, 0]))
+        self.assertTrue(bool(scenario.decoy_oracle_revealed[0, 0]))
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0, 0, 0]))
+        self.assertFalse(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+        self.assertTrue(bool(scenario.known_decoys_by_agent[0, 0, 0]))
+        self.assertFalse(bool(scenario.known_decoys_by_agent[0, 1, 0]))
+
+        ugv1.comms_up = torch.tensor([True])
+        changed = scenario._sync_delayed_oracle_ground_knowledge(0)
+
+        self.assertTrue(changed)
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+        self.assertTrue(bool(scenario.known_decoys_by_agent[0, 1, 0]))
+
+    def test_private_decoy_dismissal_syncs_only_after_reconnection(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            n_decoys=1,
+            known_survivors_at_reset=False,
+            comms_dropout=0.5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        decoy = scenario._decoys[0]
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.8, 0.0]])
+        decoy.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        scenario.scouted_decoys[0, 0] = True
+        scenario.known_decoys_by_agent[0, :, 0] = True
+        ugv0.comms_up = torch.tensor([False])
+        ugv1.comms_up = torch.tensor([True])
+
+        agent_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        scenario._process_decoy_false_positives(
+            agent_pos,
+            scenario.detection_range_by_env.view(-1, 1, 1),
+            torch.device("cpu"),
+        )
+
+        self.assertTrue(bool(scenario.dismissed_decoys[0, 0]))
+        self.assertTrue(bool(scenario.dismissed_decoys_by_agent[0, 0, 0]))
+        self.assertFalse(bool(scenario.dismissed_decoys_by_agent[0, 1, 0]))
+        _target_pos, targetable, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertTrue(bool(targetable[0, 1, 1]))
+
+        ugv0.comms_up = torch.tensor([True])
+        scenario._survivor_message_observations(
+            ugv1,
+            torch.ones(1, 1, dtype=torch.bool),
+        )
+
+        self.assertTrue(bool(scenario.dismissed_decoys_by_agent[0, 1, 0]))
+        _target_pos, targetable, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertFalse(bool(targetable[0, 1, 1]))
 
     def test_joint_schema_ugv_neighbor_slots_pad_absent_uavs(self):
         env = self._diagnostic_env(
