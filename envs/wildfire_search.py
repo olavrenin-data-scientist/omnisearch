@@ -2661,9 +2661,13 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_survivors > 0:
             survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
             active = self._active_survivor_mask()
-            unconfirmed_scouted = active & self.scouted_survivors & ~self.found_survivors
             ground_known = self.known_survivors_by_agent[:, ground_slice]
-            survivor_targetable = ground_known & unconfirmed_scouted.unsqueeze(1)
+            ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
+            survivor_targetable = (
+                ground_known
+                & ~ground_confirmed
+                & active.unsqueeze(1)
+            )
             target_pos_parts.append(survivor_pos)
             targetable_parts.append(survivor_targetable)
             is_decoy_parts.append(torch.zeros(

@@ -398,6 +398,108 @@ def _coordinated_ground_actions(
     return actions
 
 
+def _communication_aware_ground_actions(
+    sc: WildfireSearchScenario,
+    targetable_by_ground: torch.Tensor,
+    fallback_actions: List[torch.Tensor],
+    current_targets: torch.Tensor,
+    route_cache: List[dict] | None = None,
+) -> List[torch.Tensor]:
+    """Assign locally known targets without leaking through comms dropout.
+
+    Connected UGVs coordinate distinct assignments. A disconnected UGV keeps
+    its previous locally valid target; otherwise it chooses independently from
+    its private memory. Consequently, duplicate pursuit during an outage is
+    possible and is reconciled after communication returns.
+    """
+    if sc.n_ground == 0:
+        return []
+    if targetable_by_ground.ndim != 3:
+        raise ValueError("targetable_by_ground must have shape [B, G, S]")
+
+    B = sc.world.batch_dim
+    device = targetable_by_ground.device
+    n_targets = targetable_by_ground.shape[-1]
+    actions = [action.clone() for action in fallback_actions]
+    if n_targets == 0:
+        current_targets.fill_(-1)
+        return actions
+
+    target_pos_all = torch.stack([s.state.pos for s in sc._survivors], dim=1)
+    comms_up = sc._latest_comms_up_mask(device=device)
+    ground_comms_up = comms_up[:, sc.n_drones : sc.n_agents]
+    reserved_by_connected = torch.zeros(B, n_targets, dtype=torch.bool, device=device)
+    selected = torch.full((B, sc.n_ground), -1, dtype=torch.long, device=device)
+    batch_idx = torch.arange(B, device=device)
+
+    for ground_index in range(sc.n_ground):
+        agent_index = sc.n_drones + ground_index
+        position = sc.world.agents[agent_index].state.pos
+        local_targets = targetable_by_ground[:, ground_index]
+        connected = ground_comms_up[:, ground_index]
+        available = torch.where(
+            connected.unsqueeze(-1),
+            local_targets & ~reserved_by_connected,
+            local_targets,
+        )
+
+        previous = current_targets[:, ground_index]
+        previous_safe = previous.clamp(min=0)
+        previous_valid = (
+            (previous >= 0)
+            & local_targets.gather(1, previous_safe.unsqueeze(-1)).squeeze(-1)
+        )
+
+        distances = torch.linalg.norm(target_pos_all - position.unsqueeze(1), dim=-1)
+        masked_distances = torch.where(
+            available,
+            distances,
+            torch.full_like(distances, float("inf")),
+        )
+        nearest_distance, nearest = masked_distances.min(dim=1)
+        nearest = torch.where(
+            torch.isfinite(nearest_distance),
+            nearest,
+            torch.full_like(nearest, -1),
+        )
+        # While isolated, retain a still-valid route instead of silently
+        # switching among targets that were known before the outage.
+        chosen = torch.where(~connected & previous_valid, previous, nearest)
+        has_target = chosen >= 0
+        selected[:, ground_index] = chosen
+
+        reserve = connected & has_target
+        if reserve.any():
+            reserved_by_connected[batch_idx[reserve], chosen[reserve]] = True
+
+        safe_target = chosen.clamp(min=0)
+        target_pos = target_pos_all.gather(
+            1,
+            safe_target.view(B, 1, 1).expand(B, 1, 2),
+        ).squeeze(1)
+        waypoint = _route_ground_waypoints(
+            sc,
+            ground_index,
+            target_pos,
+            safe_target,
+            route_cache,
+        )
+        move = _terrain_safe_ground_action(
+            sc,
+            ground_index,
+            waypoint,
+            actions[ground_index],
+        )
+        actions[ground_index] = torch.where(
+            has_target.unsqueeze(-1),
+            move,
+            actions[ground_index],
+        )
+
+    current_targets.copy_(selected)
+    return actions
+
+
 def _scouted_unconfirmed_targets(sc: WildfireSearchScenario) -> torch.Tensor | None:
     if sc.n_ground <= 0 or getattr(sc, "n_survivors", 0) <= 0:
         return None
@@ -615,9 +717,10 @@ class LawnmowerPolicy:
     terrain. Water/ocean and rock cells do not contribute search workload,
     and each lane is trimmed to the land segment it covers.
 
-    Ground robots head to the nearest *scouted* survivor (using the
-    scenario's `scouted_survivors` mask). If no survivor has been
-    scouted yet they hold position.
+    Ground robots head to the nearest survivor in their local mission memory.
+    Connected UGVs split targets; disconnected UGVs retain their private
+    target and route until communication returns. If no locally known survivor
+    is available they hold position.
     """
 
     def __init__(self, env):
@@ -625,6 +728,13 @@ class LawnmowerPolicy:
         self.t = 0
         self._prev_step_max = -1
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
+        self.ground_target_indices = torch.full(
+            (self.scenario.world.batch_dim, self.scenario.n_ground),
+            -1,
+            dtype=torch.long,
+            device=self.scenario.fire_grid.device,
+        )
+        self._ground_previous_step_count = self.scenario.step_count.clone()
         self.drone_waypoints: list[list[list[tuple[float, float]]]] | None = None
         self.drone_waypoint_index: torch.Tensor | None = None
         self.drone_plan_signature: tuple | None = None
@@ -635,22 +745,36 @@ class LawnmowerPolicy:
         device = sc.fire_grid.device
         out: List[torch.Tensor] = []
 
+        reset_envs = sc.step_count < self._ground_previous_step_count
+        for env_index in reset_envs.nonzero(as_tuple=False).flatten().tolist():
+            self.ground_target_indices[env_index].fill_(-1)
+            for cache in self.ground_route_cache:
+                cache.pop(int(env_index), None)
+
         # ---- Drones: land-aware, workload-balanced lawnmower coverage ----
         out.extend(self._drone_lawnmower_actions())
 
-        # ---- Ground robots: split up across scouted survivors ----
-        scouted = sc.scouted_survivors        # (B, S) bool
-        found   = sc.found_survivors          # (B, S) bool
-        targetable = scouted & ~found         # not yet confirmed
+        # ---- Ground robots: coordinate only from locally shared memory ----
+        ground_slice = slice(sc.n_drones, sc.n_agents)
+        targetable = (
+            sc.known_survivors_by_agent[:, ground_slice]
+            & ~sc.confirmed_survivors_by_agent[:, ground_slice]
+            & sc._active_survivor_mask().unsqueeze(1)
+        )
 
         hold_actions = [
             torch.zeros(B, 2, device=device)
             for _ in range(sc.n_ground)
         ]
-        out.extend(_coordinated_ground_actions(
-            sc, targetable, hold_actions, route_cache=self.ground_route_cache,
+        out.extend(_communication_aware_ground_actions(
+            sc,
+            targetable,
+            hold_actions,
+            self.ground_target_indices,
+            route_cache=self.ground_route_cache,
         ))
 
+        self._ground_previous_step_count = sc.step_count.clone()
         self.t += 1
         return out
 

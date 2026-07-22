@@ -359,6 +359,33 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.tensor([0.02, 0.025, 0.03, 0.04, 0.05]),
         )
 
+    def test_disconnected_ugv_keeps_target_until_confirmation_is_shared(self):
+        env = self._diagnostic_env(
+            n_drones=0,
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        scenario.scouted_survivors[0, 0] = True
+        scenario.found_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, :, 0] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.confirmed_survivors_by_agent[0, 0, 0] = True
+
+        _target_pos, targetable, _is_decoy = scenario._ugv_ground_target_candidates()
+
+        self.assertFalse(bool(targetable[0, 0, 0]))
+        self.assertTrue(bool(targetable[0, 1, 0]))
+
+        # Once communication is restored, the confirmation reaches UGV1 and
+        # removes the stale private target without replaying any event reward.
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        scenario._survivor_message_observations(ugv1, keep)
+        _target_pos, targetable_after, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertFalse(bool(targetable_after[0, :, 0].any()))
+
     def test_legacy_drone_scouts_confirm_alias_enables_drone_confirmation(self):
         env = self._diagnostic_env(
             n_drones=1,

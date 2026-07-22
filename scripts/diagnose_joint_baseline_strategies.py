@@ -178,6 +178,10 @@ def build_scenario_kwargs(
     scenario_kwargs.setdefault("delayed_survivor_knowledge", False)
     scenario_kwargs.setdefault("drone_can_confirm", False)
     scenario_kwargs.setdefault("comms_dropout", 0.0)
+    scenario_kwargs.setdefault("comms_dropout_mode", "iid")
+    scenario_kwargs.setdefault("comms_map_mode", "global")
+    scenario_kwargs.setdefault("comms_dropout_min_steps", 5)
+    scenario_kwargs.setdefault("comms_dropout_max_steps", 15)
     scenario_kwargs["uav_confidence_diagnostics"] = True
     if args.n_drones is not None:
         scenario_kwargs["n_drones"] = int(args.n_drones)
@@ -199,6 +203,17 @@ def build_scenario_kwargs(
         scenario_kwargs["disable_fire"] = False
     if args.disable_fire:
         scenario_kwargs["disable_fire"] = True
+
+    comms_overrides = {
+        "comms_dropout": getattr(args, "comms_dropout", None),
+        "comms_dropout_mode": getattr(args, "comms_dropout_mode", None),
+        "comms_map_mode": getattr(args, "comms_map_mode", None),
+        "comms_dropout_min_steps": getattr(args, "comms_dropout_min_steps", None),
+        "comms_dropout_max_steps": getattr(args, "comms_dropout_max_steps", None),
+    }
+    for key, value in comms_overrides.items():
+        if value is not None:
+            scenario_kwargs[key] = value
 
     overrides = {
         "ugv_target_assignment_mode": (
@@ -1400,6 +1415,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--terrain-cache-path", default=None)
     parser.add_argument("--enable-fire", action="store_true")
     parser.add_argument("--disable-fire", action="store_true")
+    parser.add_argument(
+        "--comms-dropout",
+        type=float,
+        default=None,
+        help="Override the checkpoint communication outage fraction.",
+    )
+    parser.add_argument(
+        "--comms-dropout-mode",
+        choices=("iid", "bursty"),
+        default=None,
+    )
+    parser.add_argument(
+        "--comms-map-mode",
+        choices=("global", "per_agent", "per-agent"),
+        default=None,
+    )
+    parser.add_argument("--comms-dropout-min-steps", type=int, default=None)
+    parser.add_argument("--comms-dropout-max-steps", type=int, default=None)
     parser.add_argument("--ugv-target-assignment-mode",
                         choices=(
                             "nearest",
@@ -1465,6 +1498,18 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--seeds must contain at least one seed")
     if args.enable_fire and args.disable_fire:
         parser.error("--enable-fire and --disable-fire are mutually exclusive")
+    if args.comms_dropout is not None and not 0.0 <= args.comms_dropout <= 1.0:
+        parser.error("--comms-dropout must be between 0 and 1")
+    if args.comms_dropout_min_steps is not None and args.comms_dropout_min_steps < 1:
+        parser.error("--comms-dropout-min-steps must be positive")
+    if args.comms_dropout_max_steps is not None and args.comms_dropout_max_steps < 1:
+        parser.error("--comms-dropout-max-steps must be positive")
+    if (
+        args.comms_dropout_min_steps is not None
+        and args.comms_dropout_max_steps is not None
+        and args.comms_dropout_max_steps < args.comms_dropout_min_steps
+    ):
+        parser.error("--comms-dropout-max-steps must be >= --comms-dropout-min-steps")
     if args.terrain_cache_path is not None:
         args.terrain_cache_path = Path(args.terrain_cache_path)
         if not args.terrain_cache_path.is_file():
@@ -1503,7 +1548,9 @@ def main() -> None:
         f"{scenario_kwargs['n_survivors']} survivors, "
         f"steps={scenario_kwargs['max_steps']}, "
         f"fire={'on' if not scenario_kwargs.get('disable_fire', True) else 'off'}, "
-        f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}"
+        f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}, "
+        f"comms={scenario_kwargs.get('comms_dropout', 0.0):.2f}/"
+        f"{scenario_kwargs.get('comms_dropout_mode', 'iid')}"
     )
     print(
         "scenario source: "
