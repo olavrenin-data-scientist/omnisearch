@@ -1023,6 +1023,11 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(ground.scenario_reward, torch.tensor([10.0]))
         torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([0.0]))
         torch.testing.assert_close(scenario.metric_reward_ground_confirm, torch.tensor([10.0]))
+        self.assertFalse(bool(scenario.done()[0]))
+
+        ground.comms_up = torch.tensor([True])
+        self.assertTrue(bool(scenario.done()[0]))
+        self.assertTrue(bool(scenario.communicated_confirmed_survivors[0, 0]))
 
     def test_pending_penalty_uses_each_ugv_local_known_targets(self):
         env = self._diagnostic_env(

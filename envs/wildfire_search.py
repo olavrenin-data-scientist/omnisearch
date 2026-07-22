@@ -1258,6 +1258,10 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.n_agents, self.n_survivors, dtype=torch.bool, device=device,
         )
         self.confirmed_survivors_by_agent = torch.zeros_like(self.known_survivors_by_agent)
+        # Physical confirmations can occur while the confirming agent is
+        # disconnected. Mission termination waits until those confirmations
+        # have reached the connected team network.
+        self.communicated_confirmed_survivors = torch.zeros_like(self.found_survivors)
         self.scouted_decoys = torch.zeros(
             batch_dim, self.n_decoys, dtype=torch.bool, device=device,
         )
@@ -2272,6 +2276,7 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ground_confirmations.zero_()
             self.known_survivors_by_agent.zero_()
             self.confirmed_survivors_by_agent.zero_()
+            self.communicated_confirmed_survivors.zero_()
             self.scouted_decoys.zero_()
             self.dismissed_decoys.zero_()
             self.known_decoys_by_agent.zero_()
@@ -2327,6 +2332,7 @@ class WildfireSearchScenario(BaseScenario):
             self.step_ground_confirmations[env_index] = False
             self.known_survivors_by_agent[env_index] = False
             self.confirmed_survivors_by_agent[env_index] = False
+            self.communicated_confirmed_survivors[env_index] = False
             self.scouted_decoys[env_index] = False
             self.dismissed_decoys[env_index] = False
             self.known_decoys_by_agent[env_index] = False
@@ -2445,6 +2451,31 @@ class WildfireSearchScenario(BaseScenario):
     def _all_active_survivors_found(self) -> Tensor:
         active = self._active_survivor_mask()
         return (self.found_survivors | ~active).all(dim=1)
+
+    def _refresh_communicated_confirmations(self) -> Tensor:
+        """Persist confirmations that have reached the connected team network."""
+        if not hasattr(self, "communicated_confirmed_survivors"):
+            return self.found_survivors
+        active = self._active_survivor_mask()
+        if getattr(self, "comms_dropout", 0.0) <= 0.0:
+            communicated_now = self.found_survivors
+        elif getattr(self, "n_agents", 0) > 0:
+            comms_up = self._latest_comms_up_mask(
+                device=self.confirmed_survivors_by_agent.device,
+            )
+            communicated_now = (
+                self.confirmed_survivors_by_agent
+                & comms_up.unsqueeze(-1)
+            ).any(dim=1)
+        else:
+            communicated_now = torch.zeros_like(self.found_survivors)
+        self.communicated_confirmed_survivors |= communicated_now & active
+        return self.communicated_confirmed_survivors
+
+    def _all_active_survivors_communicated_confirmed(self) -> Tensor:
+        active = self._active_survivor_mask()
+        communicated = self._refresh_communicated_confirmations()
+        return (communicated | ~active).all(dim=1)
 
     def _all_active_survivors_scouted(self) -> Tensor:
         active = self._active_survivor_mask()
@@ -5531,7 +5562,11 @@ class WildfireSearchScenario(BaseScenario):
             self._all_active_survivors_found()
             & ~previously_all_found
         )
-        self._record_local_survivor_knowledge(drone_seen, eligible_ground_confirmations)
+        self._record_local_survivor_knowledge(
+            drone_seen,
+            eligible_ground_confirmations,
+            self.step_drone_confirmations,
+        )
 
         # False-positive perception: drones may misclassify decoys as survivors;
         # UGVs can waste trips investigating them. This is a zero tensor when the
@@ -10644,10 +10679,13 @@ class WildfireSearchScenario(BaseScenario):
         self,
         drone_detections: Tensor,
         ground_confirmations: Tensor,
+        drone_confirmations: Tensor | None = None,
     ) -> None:
         """Persist mission events at the agent that directly observed them."""
         if self.n_drones:
             self.known_survivors_by_agent[:, :self.n_drones] |= drone_detections
+            if drone_confirmations is not None:
+                self.confirmed_survivors_by_agent[:, :self.n_drones] |= drone_confirmations
         if self.n_ground:
             ground_slice = slice(self.n_drones, self.n_agents)
             self.known_survivors_by_agent[:, ground_slice] |= ground_confirmations
@@ -13373,7 +13411,7 @@ class WildfireSearchScenario(BaseScenario):
     # Done
     # ------------------------------------------------------------------
     def done(self) -> Tensor:
-        all_found = self._all_active_survivors_found()
+        all_found = self._all_active_survivors_communicated_confirmed()
         timed_out = self.step_count >= self.max_steps
         return all_found | timed_out
 
