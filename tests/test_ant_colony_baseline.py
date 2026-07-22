@@ -1,8 +1,11 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
 from agents.baselines import (
+    AntColonyPolicy,
     _merge_local_bool_knowledge,
     _merge_local_timestamp_maps,
 )
@@ -88,6 +91,31 @@ class AntColonyMemoryTests(unittest.TestCase):
 
         expected = torch.tensor([True, True, True]).expand_as(merged[0])
         torch.testing.assert_close(merged[0], expected)
+
+    def test_ground_dispatch_uses_persistent_communication_lease_state(self):
+        scenario = SimpleNamespace(
+            world=SimpleNamespace(batch_dim=1),
+            n_drones=1,
+            n_ground=2,
+            n_agents=3,
+            n_survivors=2,
+            fire_grid=torch.zeros(1, 2, 2),
+            _active_survivor_mask=lambda: torch.ones(1, 2, dtype=torch.bool),
+        )
+        policy = AntColonyPolicy.__new__(AntColonyPolicy)
+        policy.scenario = scenario
+        policy.known_survivors = torch.ones(1, 3, 2, dtype=torch.bool)
+        policy.known_confirmed = torch.zeros_like(policy.known_survivors)
+        policy.ground_target_indices = torch.tensor([[0, -1]])
+        policy.ground_route_cache = [dict(), dict()]
+
+        with patch(
+            "agents.baselines._communication_aware_ground_actions",
+            return_value=[torch.zeros(1, 2), torch.zeros(1, 2)],
+        ) as dispatch:
+            policy._ground_actions()
+
+        self.assertIs(dispatch.call_args.args[3], policy.ground_target_indices)
 
 
 if __name__ == "__main__":

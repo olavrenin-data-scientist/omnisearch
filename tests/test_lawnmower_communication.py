@@ -55,16 +55,14 @@ class LawnmowerCommunicationTests(unittest.TestCase):
 
         torch.testing.assert_close(current_targets, torch.tensor([[0, 1]]))
 
-    def test_disconnected_ugv_target_is_not_reserved_for_connected_team(self):
+    def test_disconnected_ugv_target_is_reserved_for_connected_team(self):
         scenario = self._scenario(torch.tensor([[True, False, True]]))
         targetable = torch.ones(1, 2, 2, dtype=torch.bool)
         current_targets = torch.tensor([[0, -1]])
 
         self._actions(scenario, targetable, current_targets)
 
-        # UGV0 retains target 0 privately. UGV1 cannot see that reservation and
-        # independently chooses the same nearest target.
-        torch.testing.assert_close(current_targets, torch.tensor([[0, 0]]))
+        torch.testing.assert_close(current_targets, torch.tensor([[0, 1]]))
 
     def test_disconnected_ugv_keeps_valid_target_instead_of_switching(self):
         scenario = self._scenario(torch.tensor([[True, False, True]]))
@@ -81,7 +79,7 @@ class LawnmowerCommunicationTests(unittest.TestCase):
         targetable = torch.ones(1, 2, 2, dtype=torch.bool)
         current_targets = torch.tensor([[0, -1]])
         self._actions(scenario, targetable, current_targets)
-        torch.testing.assert_close(current_targets, torch.tensor([[0, 0]]))
+        torch.testing.assert_close(current_targets, torch.tensor([[0, 1]]))
 
         scenario._latest_comms_up_mask = lambda device=None: torch.tensor(
             [[True, True, True]], device=device,
@@ -89,6 +87,26 @@ class LawnmowerCommunicationTests(unittest.TestCase):
         self._actions(scenario, targetable, current_targets)
 
         torch.testing.assert_close(current_targets, torch.tensor([[0, 1]]))
+
+    def test_disconnected_unassigned_ugv_receives_no_new_target(self):
+        scenario = self._scenario(torch.tensor([[True, False, True]]))
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+        current_targets = torch.full((1, 2), -1, dtype=torch.long)
+
+        self._actions(scenario, targetable, current_targets)
+
+        torch.testing.assert_close(current_targets, torch.tensor([[-1, 0]]))
+
+    def test_private_confirmation_stops_motion_without_releasing_lease(self):
+        scenario = self._scenario(torch.tensor([[True, False, True]]))
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+        targetable[0, 0, 0] = False
+        current_targets = torch.tensor([[0, -1]])
+
+        actions = self._actions(scenario, targetable, current_targets)
+
+        torch.testing.assert_close(current_targets, torch.tensor([[0, 1]]))
+        torch.testing.assert_close(actions[0], torch.zeros_like(actions[0]))
 
     def test_lawnmower_does_not_use_global_scout_mask_for_ugv_targets(self):
         agents = [

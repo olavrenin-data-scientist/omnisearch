@@ -1540,6 +1540,12 @@ class WildfireSearchScenario(BaseScenario):
         self.ugv_sequence_next_target_idx = torch.full(
             (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
         )
+        # Last assignment known to the connected team. During a communication
+        # outage this lease is frozen: the UGV keeps pursuing it privately and
+        # connected UGVs reserve the target without using the owner's live state.
+        self.ugv_assignment_lease_idx = torch.full(
+            (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
+        )
         self.ugv_assignment_cache_step = torch.full(
             (batch_dim,), -1, dtype=torch.long, device=device,
         )
@@ -2296,6 +2302,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_sticky_target_idx.fill_(-1)
             self.ugv_sticky_target_age.zero_()
             self.ugv_sequence_next_target_idx.fill_(-1)
+            self.ugv_assignment_lease_idx.fill_(-1)
             self._invalidate_ugv_assignment_cache()
             self._invalidate_ugv_route_assignment_cost_grid_cache()
             self.ground_approach_milestones_reached.zero_()
@@ -2350,6 +2357,7 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_sticky_target_idx[env_index] = -1
             self.ugv_sticky_target_age[env_index] = 0
             self.ugv_sequence_next_target_idx[env_index] = -1
+            self.ugv_assignment_lease_idx[env_index] = -1
             self._invalidate_ugv_assignment_cache(env_index)
             self._invalidate_ugv_route_assignment_cost_grid_cache(env_index)
             self.ground_approach_milestones_reached[env_index] = False
@@ -4395,6 +4403,7 @@ class WildfireSearchScenario(BaseScenario):
         targetable: Tensor,
     ) -> tuple[Tensor, Tensor]:
         cached = getattr(self, "_ugv_assignment_result_cache", None)
+        ground_comms_up = self._ugv_ground_comms_up_mask(device=ground_pos.device)
         step_key = tuple(int(v) for v in self.step_count.detach().cpu().reshape(-1).tolist())
         cache_key = (
             step_key,
@@ -4411,6 +4420,8 @@ class WildfireSearchScenario(BaseScenario):
                 torch.equal(cached["ground_pos"], ground_pos)
                 and torch.equal(cached["survivor_pos"], survivor_pos)
                 and torch.equal(cached["targetable"], targetable)
+                and torch.equal(cached["ground_comms_up"], ground_comms_up)
+                and torch.equal(cached["assignment_leases"], self.ugv_assignment_lease_idx)
             ):
                 return cached["assigned_idx"], cached["assigned_dist"]
 
@@ -4418,18 +4429,163 @@ class WildfireSearchScenario(BaseScenario):
             ground_pos,
             survivor_pos,
             targetable,
+            ground_comms_up=ground_comms_up,
         )
         self._ugv_assignment_result_cache = {
             "key": cache_key,
             "ground_pos": ground_pos.detach().clone(),
             "survivor_pos": survivor_pos.detach().clone(),
             "targetable": targetable.detach().clone(),
+            "ground_comms_up": ground_comms_up.detach().clone(),
+            "assignment_leases": self.ugv_assignment_lease_idx.detach().clone(),
             "assigned_idx": assigned_idx,
             "assigned_dist": assigned_dist,
         }
         return assigned_idx, assigned_dist
 
+    def _ugv_ground_comms_up_mask(self, device: torch.device) -> Tensor:
+        if self.n_ground <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
+        comms_up = self._latest_comms_up_mask(device=device)
+        return comms_up[:, self.n_drones : self.n_agents]
+
+    def _ugv_disconnected_assignment_lease_mask(
+        self,
+        n_targets: int,
+        *,
+        device: torch.device,
+    ) -> Tensor:
+        """Return targets reserved by UGVs that are currently disconnected."""
+        mask = torch.zeros(
+            self.world.batch_dim,
+            self.n_ground,
+            n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        if self.n_ground <= 0 or n_targets <= 0:
+            return mask
+        leases = self.ugv_assignment_lease_idx.to(device=device)
+        disconnected = ~self._ugv_ground_comms_up_mask(device=device)
+        valid = disconnected & (leases >= 0) & (leases < n_targets)
+        mask.scatter_(
+            dim=2,
+            index=leases.clamp(min=0, max=max(n_targets - 1, 0)).unsqueeze(-1),
+            src=valid.unsqueeze(-1),
+        )
+        return mask
+
     def _ugv_assigned_target_indices_uncached(
+        self,
+        ground_pos: Tensor,
+        survivor_pos: Tensor,
+        targetable: Tensor,
+        *,
+        ground_comms_up: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply disconnected-UGV leases around the configured assignment solver."""
+        batch_dim = ground_pos.shape[0]
+        device = ground_pos.device
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
+            return (
+                torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device),
+                torch.full((batch_dim, self.n_ground), float("inf"), device=device),
+            )
+
+        if ground_comms_up is None:
+            ground_comms_up = self._ugv_ground_comms_up_mask(device=device)
+        else:
+            ground_comms_up = ground_comms_up.to(device=device, dtype=torch.bool)
+
+        if bool(ground_comms_up.all().item()):
+            assigned_idx, assigned_dist = self._ugv_assigned_target_indices_without_leases(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            self.ugv_assignment_lease_idx.copy_(assigned_idx)
+            return assigned_idx, assigned_dist
+
+        disconnected = ~ground_comms_up
+        leases_before = self.ugv_assignment_lease_idx.to(device=device).clone()
+        valid_lease = (leases_before >= 0) & (leases_before < n_targets)
+        disconnected_leases = disconnected & valid_lease
+
+        reserved_targets = torch.zeros(
+            batch_dim,
+            n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        lease_env, lease_ground = disconnected_leases.nonzero(as_tuple=True)
+        if lease_env.numel() > 0:
+            reserved_targets[
+                lease_env,
+                leases_before[lease_env, lease_ground],
+            ] = True
+        solver_targetable = (
+            targetable
+            & ground_comms_up.unsqueeze(-1)
+            & ~reserved_targets.unsqueeze(1)
+        )
+        # A disconnected UGV's current position must not influence assignment
+        # ordering, Euclidean scores, or route-cost calculations.
+        solver_ground_pos = torch.where(
+            ground_comms_up.unsqueeze(-1),
+            ground_pos,
+            torch.zeros_like(ground_pos),
+        )
+
+        sticky_before = self.ugv_sticky_target_idx.clone()
+        sticky_age_before = self.ugv_sticky_target_age.clone()
+        assigned_idx, assigned_dist = self._ugv_assigned_target_indices_without_leases(
+            solver_ground_pos,
+            survivor_pos,
+            solver_targetable,
+        )
+
+        lease_safe = leases_before.clamp(min=0, max=n_targets - 1)
+        lease_still_local = targetable.gather(
+            dim=2,
+            index=lease_safe.unsqueeze(-1),
+        ).squeeze(-1)
+        active_private_lease = disconnected_leases & lease_still_local
+        private_dist = torch.linalg.norm(
+            survivor_pos.gather(
+                dim=1,
+                index=lease_safe.unsqueeze(-1).expand(-1, -1, 2),
+            )
+            - ground_pos,
+            dim=-1,
+        )
+        assigned_idx = torch.where(active_private_lease, leases_before, assigned_idx)
+        assigned_dist = torch.where(active_private_lease, private_dist, assigned_dist)
+
+        # Only connected UGVs publish assignment changes. Disconnected leases
+        # remain frozen even if the owner privately confirms the target.
+        self.ugv_assignment_lease_idx.copy_(torch.where(
+            ground_comms_up,
+            assigned_idx,
+            leases_before,
+        ))
+        self.ugv_sticky_target_idx.copy_(torch.where(
+            disconnected,
+            torch.where(valid_lease, leases_before, sticky_before),
+            self.ugv_sticky_target_idx,
+        ))
+        self.ugv_sticky_target_age.copy_(torch.where(
+            disconnected,
+            sticky_age_before,
+            self.ugv_sticky_target_age,
+        ))
+        # A future sequence target is not an active lease and is released while
+        # its owner is disconnected.
+        self.ugv_sequence_next_target_idx.masked_fill_(disconnected, -1)
+        self.ugv_assignment_cache_idx.copy_(assigned_idx)
+        return assigned_idx, assigned_dist
+
+    def _ugv_assigned_target_indices_without_leases(
         self,
         ground_pos: Tensor,
         survivor_pos: Tensor,
@@ -5037,14 +5193,24 @@ class WildfireSearchScenario(BaseScenario):
         Assigned UGVs are pressured only for their own target. Unassigned UGVs
         are pressured only when they know a pending target that no UGV owns.
         """
-        if self.ugv_target_assignment_mode not in {
+        unique_mode = self.ugv_target_assignment_mode in {
             "greedy",
             "greedy_sticky",
             "greedy_sequence_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
             "route_sequence_sticky",
-        }:
+        }
+        lease_mask = self._ugv_disconnected_assignment_lease_mask(
+            local_pending_targets.shape[2] if local_pending_targets.ndim == 3 else 0,
+            device=local_pending_targets.device,
+        )
+        ground_comms_up = self._ugv_ground_comms_up_mask(device=local_pending_targets.device)
+        if (
+            not unique_mode
+            and not bool(lease_mask.any().item())
+            and bool(ground_comms_up.all().item())
+        ):
             return local_pending_targets
         if local_pending_targets.numel() == 0 or local_pending_targets.shape[2] == 0:
             return local_pending_targets
@@ -5055,7 +5221,7 @@ class WildfireSearchScenario(BaseScenario):
             index=assigned_idx.clamp(min=0).unsqueeze(-1),
             src=valid_target.unsqueeze(-1),
         )
-        owned_mask = active_assignment_mask.clone()
+        owned_mask = active_assignment_mask | lease_mask
         if self.ugv_target_assignment_mode in {"greedy_sequence_sticky", "route_sequence_sticky"}:
             next_idx = self.ugv_sequence_next_target_idx.to(device=local_pending_targets.device)
             next_valid = next_idx >= 0
@@ -5067,10 +5233,18 @@ class WildfireSearchScenario(BaseScenario):
         assigned_any = owned_mask.any(dim=1, keepdim=True)
         assigned_to_me = local_pending_targets & active_assignment_mask
         unassigned_pending = local_pending_targets & ~assigned_any
-        return torch.where(
+        filtered = torch.where(
             valid_target.unsqueeze(-1),
             assigned_to_me,
             unassigned_pending,
+        )
+        # An isolated, unassigned UGV cannot accept newly pending work and
+        # therefore must not be pressured for it until communication returns.
+        inactive_disconnected = ~ground_comms_up & ~valid_target
+        return torch.where(
+            inactive_disconnected.unsqueeze(-1),
+            torch.zeros_like(filtered),
+            filtered,
         )
 
     def _ugv_route_assignment_costs_m(
@@ -10647,33 +10821,42 @@ class WildfireSearchScenario(BaseScenario):
                 )
                 assigned_valid = assigned_idx >= 0
                 n_assignment_targets = targetable.shape[2]
-                assignment_mask = torch.zeros(
+                active_assignment_mask = torch.zeros(
                     self.world.batch_dim,
                     self.n_ground,
                     n_assignment_targets,
                     dtype=torch.bool,
                     device=obs_known.device,
                 )
-                assignment_mask.scatter_(
+                active_assignment_mask.scatter_(
                     dim=2,
                     index=assigned_idx.clamp(min=0).unsqueeze(-1),
                     src=assigned_valid.unsqueeze(-1),
                 )
+                reserved_assignment_mask = self._ugv_disconnected_assignment_lease_mask(
+                    n_assignment_targets,
+                    device=obs_known.device,
+                )
+                team_assignment_mask = active_assignment_mask | reserved_assignment_mask
                 if not agent.is_drone:
                     ground_index = agent_idx - self.n_drones
-                    assigned_to_me = assignment_mask[:, ground_index, :self.n_survivors]
+                    assigned_to_me = active_assignment_mask[:, ground_index, :self.n_survivors]
                     if self.n_ground > 1:
-                        other_mask = assignment_mask.clone()
+                        other_mask = team_assignment_mask.clone()
                         other_mask[:, ground_index, :] = False
                         assigned_to_other = other_mask.any(dim=1)[:, :self.n_survivors]
                     if has_decoys:
-                        decoy_assigned_to_me = assignment_mask[:, ground_index, self.n_survivors:]
+                        decoy_assigned_to_me = active_assignment_mask[:, ground_index, self.n_survivors:]
                         if self.n_ground > 1:
                             decoy_assigned_to_other = other_mask.any(dim=1)[:, self.n_survivors:]
                 else:
-                    assigned_to_other = assignment_mask.any(dim=1)[:, :self.n_survivors]
+                    assigned_to_other = team_assignment_mask.any(dim=1)[:, :self.n_survivors]
                     if has_decoys:
-                        decoy_assigned_to_other = assignment_mask.any(dim=1)[:, self.n_survivors:]
+                        decoy_assigned_to_other = team_assignment_mask.any(dim=1)[:, self.n_survivors:]
+                receiver_connected = comms_keep.to(device=obs_known.device, dtype=torch.bool)
+                assigned_to_other &= receiver_connected.expand_as(assigned_to_other)
+                if has_decoys:
+                    decoy_assigned_to_other &= receiver_connected.expand_as(decoy_assigned_to_other)
 
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
         relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)

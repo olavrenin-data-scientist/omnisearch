@@ -1113,6 +1113,197 @@ class SurvivorCommunicationTests(unittest.TestCase):
         )
         torch.testing.assert_close(duplicate_fraction, torch.tensor([0.0]))
 
+    def test_disconnected_ugv_lease_is_reserved_across_assignment_modes(self):
+        modes = [
+            "nearest",
+            "greedy",
+            "greedy_sticky",
+            "greedy_sequence_sticky",
+            "route_cost_greedy",
+            "route_cost_sticky",
+            "route_sequence_sticky",
+            "route_cost_global",
+        ]
+        route_modes = {
+            "route_cost_greedy",
+            "route_cost_sticky",
+            "route_sequence_sticky",
+            "route_cost_global",
+        }
+        for mode in modes:
+            with self.subTest(mode=mode):
+                env = self._diagnostic_env(
+                    n_ground=2,
+                    n_survivors=3,
+                    comms_dropout=0.5,
+                    ugv_target_assignment_mode=mode,
+                    ugv_planner_hint="global_astar" if mode in route_modes else "none",
+                )
+                scenario = env.scenario
+                ground_pos = torch.tensor([[[0.00, 0.0], [0.05, 0.0]]])
+                survivor_pos = torch.tensor([[[0.10, 0.0], [0.50, 0.0], [0.90, 0.0]]])
+                targetable = torch.ones(1, 2, 3, dtype=torch.bool)
+                scenario.ugv_assignment_lease_idx[:] = torch.tensor([[0, -1]])
+                scenario.ugv_sticky_target_idx[:] = torch.tensor([[0, -1]])
+                scenario.ugv_sequence_next_target_idx[:] = torch.tensor([[2, -1]])
+                env.agents[0].comms_up = torch.tensor([False])
+                env.agents[1].comms_up = torch.tensor([True])
+
+                if mode in route_modes:
+                    scenario._ugv_route_assignment_costs_m = (
+                        lambda positions, targets, available: torch.where(
+                            available,
+                            torch.cdist(positions, targets),
+                            torch.full(
+                                available.shape,
+                                float("inf"),
+                                device=positions.device,
+                            ),
+                        )
+                    )
+                    scenario._ugv_target_pair_route_costs_m = (
+                        lambda targets, _available: torch.cdist(targets, targets)
+                    )
+
+                scenario._invalidate_ugv_assignment_cache()
+                assigned, _ = scenario._ugv_assigned_target_indices(
+                    ground_pos,
+                    survivor_pos,
+                    targetable,
+                )
+                self.assertEqual(int(assigned[0, 0]), 0)
+                self.assertNotEqual(int(assigned[0, 1]), 0)
+                self.assertEqual(int(scenario.ugv_sequence_next_target_idx[0, 0]), -1)
+
+                connected_assignment = int(assigned[0, 1])
+                moved_disconnected = ground_pos.clone()
+                moved_disconnected[0, 0] = torch.tensor([10.0, 10.0])
+                scenario._invalidate_ugv_assignment_cache()
+                reassigned, _ = scenario._ugv_assigned_target_indices(
+                    moved_disconnected,
+                    survivor_pos,
+                    targetable,
+                )
+                self.assertEqual(int(reassigned[0, 1]), connected_assignment)
+
+    def test_disconnected_unassigned_ugv_is_excluded_from_new_assignment(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            comms_dropout=0.5,
+            ugv_target_assignment_mode="greedy",
+        )
+        scenario = env.scenario
+        env.agents[0].comms_up = torch.tensor([False])
+        env.agents[1].comms_up = torch.tensor([True])
+        scenario.ugv_assignment_lease_idx.fill_(-1)
+        scenario._invalidate_ugv_assignment_cache()
+
+        assigned, _ = scenario._ugv_assigned_target_indices(
+            torch.tensor([[[0.0, 0.0], [0.8, 0.0]]]),
+            torch.tensor([[[0.1, 0.0], [0.9, 0.0]]]),
+            torch.ones(1, 2, 2, dtype=torch.bool),
+        )
+
+        self.assertEqual(int(assigned[0, 0]), -1)
+        self.assertGreaterEqual(int(assigned[0, 1]), 0)
+
+    def test_zero_dropout_assignment_matches_original_solver(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=3,
+            comms_dropout=0.0,
+            ugv_target_assignment_mode="greedy",
+        )
+        scenario = env.scenario
+        ground_pos = torch.tensor([[[0.0, 0.0], [0.7, 0.0]]])
+        survivor_pos = torch.tensor([[[0.1, 0.0], [0.6, 0.0], [0.9, 0.0]]])
+        targetable = torch.ones(1, 2, 3, dtype=torch.bool)
+
+        expected_idx, expected_dist = scenario._ugv_assigned_target_indices_without_leases(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+        scenario._invalidate_ugv_assignment_cache()
+        actual_idx, actual_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        torch.testing.assert_close(actual_idx, expected_idx)
+        torch.testing.assert_close(actual_dist, expected_dist)
+
+    def test_private_confirmation_stops_assignment_but_keeps_team_lease(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            comms_dropout=0.5,
+            ugv_target_assignment_mode="greedy_sticky",
+        )
+        scenario = env.scenario
+        env.agents[0].comms_up = torch.tensor([False])
+        env.agents[1].comms_up = torch.tensor([True])
+        scenario.ugv_assignment_lease_idx[:] = torch.tensor([[0, -1]])
+        scenario.ugv_sticky_target_idx[:] = torch.tensor([[0, -1]])
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+        targetable[0, 0, 0] = False
+        scenario._invalidate_ugv_assignment_cache()
+
+        assigned, _ = scenario._ugv_assigned_target_indices(
+            torch.tensor([[[0.0, 0.0], [0.8, 0.0]]]),
+            torch.tensor([[[0.1, 0.0], [0.9, 0.0]]]),
+            targetable,
+        )
+
+        self.assertEqual(int(assigned[0, 0]), -1)
+        self.assertEqual(int(assigned[0, 1]), 1)
+        self.assertEqual(int(scenario.ugv_assignment_lease_idx[0, 0]), 0)
+        filtered = scenario._ugv_assignment_aware_pending_targets(
+            targetable,
+            assigned,
+            assigned >= 0,
+        )
+        self.assertFalse(bool(filtered[0, 0].any()))
+        self.assertFalse(bool(filtered[0, 1, 0]))
+
+        env.agents[0].comms_up = torch.tensor([True])
+        targetable[:, :, 0] = False
+        scenario._invalidate_ugv_assignment_cache()
+        scenario._ugv_assigned_target_indices(
+            torch.tensor([[[0.0, 0.0], [0.8, 0.0]]]),
+            torch.tensor([[[0.1, 0.0], [0.9, 0.0]]]),
+            targetable,
+        )
+        self.assertNotEqual(int(scenario.ugv_assignment_lease_idx[0, 0]), 0)
+
+    def test_disconnected_ugv_does_not_receive_new_other_assignment_flags(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            comms_dropout=0.5,
+            ugv_target_assignment_mode="greedy_sticky",
+            survivor_assignment_obs=True,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.comms_up = torch.tensor([False])
+        ugv1.comms_up = torch.tensor([True])
+        scenario.known_survivors_by_agent[:] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.ugv_assignment_lease_idx[:] = torch.tensor([[0, -1]])
+        scenario.ugv_sticky_target_idx[:] = torch.tensor([[0, -1]])
+        scenario._invalidate_ugv_assignment_cache()
+
+        message = scenario._survivor_message_observations(
+            ugv0,
+            torch.zeros(1, 1, dtype=torch.bool),
+        ).view(1, 2, 9)
+
+        torch.testing.assert_close(message[0, :, 7], torch.tensor([1.0, 0.0]))
+        torch.testing.assert_close(message[0, :, 8], torch.zeros(2))
+
     def test_unique_greedy_assignment_modes_leave_extra_ugvs_unassigned(self):
         modes = [
             "greedy",
