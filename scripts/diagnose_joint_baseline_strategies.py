@@ -1541,16 +1541,29 @@ def main() -> None:
     scenario_checkpoint = _scenario_checkpoint_from_specs(args, specs)
     scenario_kwargs = build_scenario_kwargs(args, scenario_checkpoint, specs=specs)
     baseline_ugv_controller = args.baseline_ugv_controller.replace("-", "_")
+    survivor_slots = int(scenario_kwargs["n_survivors"])
+    active_survivors_min = int(
+        scenario_kwargs.get("active_survivors_min", survivor_slots)
+    )
+    active_survivors_max = int(
+        scenario_kwargs.get("active_survivors_max", survivor_slots)
+    )
     print(
         "scenario: "
         f"{scenario_kwargs['n_drones']} UAVs, "
         f"{scenario_kwargs['n_ground']} UGVs, "
-        f"{scenario_kwargs['n_survivors']} survivors, "
+        f"{survivor_slots} survivors ({active_survivors_min}..{active_survivors_max} active), "
         f"steps={scenario_kwargs['max_steps']}, "
         f"fire={'on' if not scenario_kwargs.get('disable_fire', True) else 'off'}, "
-        f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}, "
-        f"comms={scenario_kwargs.get('comms_dropout', 0.0):.2f}/"
-        f"{scenario_kwargs.get('comms_dropout_mode', 'iid')}"
+        f"assignment={scenario_kwargs.get('ugv_target_assignment_mode')}"
+    )
+    print(
+        "communication: "
+        f"dropout={scenario_kwargs.get('comms_dropout', 0.0):.2f}, "
+        f"mode={scenario_kwargs.get('comms_dropout_mode', 'iid')}, "
+        f"maps={scenario_kwargs.get('comms_map_mode', 'global')}, "
+        f"burst={scenario_kwargs.get('comms_dropout_min_steps', 5)}.."
+        f"{scenario_kwargs.get('comms_dropout_max_steps', 15)} steps"
     )
     print(
         "scenario source: "
