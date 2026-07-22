@@ -115,6 +115,7 @@ class HighestConfidenceBaselineTests(unittest.TestCase):
             get_random_actions=lambda: [torch.zeros(1, 2) for _ in range(3)],
         )
         policy = HighestConfidencePolicy(env)
+        policy.survivor_confidence_by_agent[0, 1, 1] = 0.95
 
         with (
             patch.object(
@@ -125,13 +126,18 @@ class HighestConfidenceBaselineTests(unittest.TestCase):
             patch(
                 "agents.baselines._communication_aware_ground_actions",
                 return_value=[torch.zeros(1, 2), torch.zeros(1, 2)],
-            ),
+            ) as ground_actions,
         ):
             policy(env)
 
         self.assertAlmostEqual(float(policy.survivor_confidence_by_agent[0, 0, 0]), 0.8)
         self.assertAlmostEqual(float(policy.survivor_confidence_by_agent[0, 1, 0]), 0.0)
         self.assertAlmostEqual(float(policy.survivor_confidence_by_agent[0, 2, 0]), 0.8)
+        self.assertAlmostEqual(float(policy.survivor_confidence_by_agent[0, 1, 1]), 0.95)
+        torch.testing.assert_close(
+            ground_actions.call_args.kwargs["priority"],
+            torch.tensor([[0.8, 0.0]]),
+        )
 
     def test_abstract_detector_retains_score_only_for_successful_detection(self):
         probability = torch.tensor([[[0.80, 0.30]]])

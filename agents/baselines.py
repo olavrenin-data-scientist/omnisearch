@@ -1249,7 +1249,13 @@ class HighestConfidencePolicy:
         ]
         if sc.n_ground > 0:
             ground_slice = slice(sc.n_drones, sc.n_agents)
-            priority = self.survivor_confidence_by_agent[:, ground_slice].amax(dim=1)
+            ground_comms_up = comms_up[:, ground_slice]
+            connected_ground_confidence = torch.where(
+                ground_comms_up.unsqueeze(-1),
+                self.survivor_confidence_by_agent[:, ground_slice],
+                torch.zeros_like(self.survivor_confidence_by_agent[:, ground_slice]),
+            )
+            priority = connected_ground_confidence.amax(dim=1)
             actions.extend(_communication_aware_ground_actions(
                 sc,
                 targetable,
