@@ -335,8 +335,13 @@ def _merge_local_timestamp_maps(
     local_maps: torch.Tensor,
     comms_up: torch.Tensor,
 ) -> torch.Tensor:
-    """Merge team timestamps into agents that can currently receive comms."""
-    team_latest = local_maps.amax(dim=1, keepdim=True)
+    """Merge timestamps only between agents with bidirectional communication."""
+    connected_maps = torch.where(
+        comms_up[:, :, None, None],
+        local_maps,
+        torch.full_like(local_maps, PHEROMONE_UNSEEN_STEP),
+    )
+    team_latest = connected_maps.amax(dim=1, keepdim=True)
     return torch.where(comms_up[:, :, None, None], team_latest, local_maps)
 
 
@@ -344,8 +349,9 @@ def _merge_local_bool_knowledge(
     local_knowledge: torch.Tensor,
     comms_up: torch.Tensor,
 ) -> torch.Tensor:
-    """Merge monotonic event knowledge into agents with a live receiver."""
-    team_knowledge = local_knowledge.any(dim=1, keepdim=True)
+    """Merge event knowledge only between agents with bidirectional comms."""
+    connected_knowledge = local_knowledge & comms_up[:, :, None]
+    team_knowledge = connected_knowledge.any(dim=1, keepdim=True)
     return torch.where(comms_up[:, :, None], team_knowledge, local_knowledge)
 
 
@@ -1067,11 +1073,12 @@ class AntColonyPolicy:
     """Distributed stigmergic coverage with dropout-sensitive local memory.
 
     Each drone stores the last observation step for every map cell and
-    deposits timestamps over its physical camera footprint. A receiver with
-    live communications merges the newest timestamps and survivor events from
-    the team; during dropout it retains that stale map and adds only its own
-    observations. Drones move toward the nearest least-recently-seen searchable
-    cell. UGVs route to survivors known in their own local event memory.
+    deposits timestamps over its physical camera footprint. Connected agents
+    merge the newest timestamps and survivor events from connected peers;
+    during dropout an agent cannot send or receive, retains its private map,
+    and adds only its own observations. Drones move toward the nearest
+    least-recently-seen searchable cell. UGVs route to survivors known in their
+    own local event memory.
     """
 
     def __init__(self, env):
