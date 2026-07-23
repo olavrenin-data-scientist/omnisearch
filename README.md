@@ -7,6 +7,8 @@ can coordinate this handoff better than strong heuristic baselines.
 
 MIDS Capstone · Summer 2026 · UC Berkeley
 
+![OmniSearch 3D strategy viewer showing UAV and UGV wildfire search and rescue](web/web_demo.png)
+
 ## What Is Included
 
 - A VMAS-based wildfire search environment with UAVs, UGVs, survivors, fire,
@@ -61,13 +63,16 @@ python scripts/export_trajectories.py
 Serve the viewer:
 
 ```bash
-python -m http.server -d web 8080
+.venv/bin/python -m http.server 8080 --directory web
 ```
 
-Open:
+[Open the OmniSearch trajectory viewer](http://127.0.0.1:8080/index.html)
 
-```text
-http://localhost:8080
+The link works while the local server above is running. To open it from another
+terminal instead:
+
+```bash
+.venv/bin/python -m webbrowser -t http://127.0.0.1:8080/index.html
 ```
 
 Train a HAPPO run:

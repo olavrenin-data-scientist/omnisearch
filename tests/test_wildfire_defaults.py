@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from envs.wildfire_defaults import (
+    COMMS_DROPOUT_MODE,
     DRONE_CAMERA_FOV_DEG,
     DRONE_ENVIRONMENT_DETECTION_FACTORS,
     DRONE_FLIGHT_LEVELS_M,
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class WildfireDefaultsTests(unittest.TestCase):
     def test_happo_operational_defaults_are_canonical(self):
+        self.assertEqual(COMMS_DROPOUT_MODE, "bursty")
         self.assertEqual(DRONE_FLIGHT_LEVELS_M, (20.0, 35.0, 50.0))
         self.assertEqual(DRONE_CAMERA_FOV_DEG, 90.0)
         self.assertEqual(DRONE_ENVIRONMENT_DETECTION_FACTORS, (1.0, 1.0, 0.71, 0.56, 0.86, 0.78))

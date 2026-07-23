@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 import vmas
 
 from envs.wildfire_defaults import (
+    COMMS_DROPOUT_MODE,
     DRONE_CAMERA_FOV_DEG,
     DRONE_FIRE_SAFETY_CLEARANCE_M,
     DRONE_FLIGHT_LEVELS_M,
@@ -43,6 +44,98 @@ from envs.wildfire_defaults import (
 from envs.wildfire_search import WildfireSearchScenario
 from agents.baselines import BASELINES, UGV_CONTROLLER_CHOICES, get_baseline
 from evaluation.trajectory_export import export_trajectory
+
+
+DEFAULT_HAPPO_CHECKPOINT = (
+    ROOT
+    / "results"
+    / "harl_runs"
+    / "wildfire"
+    / "wildfire_search"
+    / "happo"
+    / "happo_uav4_ugv3_area_1sqkm_malibu_grid256_steps900_fire_survivors_10"
+    / "seed-00001-2026-07-19-00-15-35"
+    / "models"
+)
+DEFAULT_TERRAIN_CACHE_PATH = (
+    ROOT / "data" / "terrain_cache" / "malibu_creek_1sqkm_256.npz"
+)
+DEFAULT_EXPORT_STEPS = 900
+DEFAULT_EXPORT_GRID_SIZE = 256
+DEFAULT_EXPORT_DRONES = 4
+DEFAULT_EXPORT_UGVS = 3
+DEFAULT_EXPORT_SURVIVORS = 10
+DEFAULT_EXPORT_DRONE_FLIGHT_LEVELS_M = (30.0, 50.0, 75.0)
+
+
+def _reference_scenario_defaults() -> dict[str, object]:
+    """Fallback settings matching the default joint HAPPO training profile."""
+
+    return {
+        "n_drones": DEFAULT_EXPORT_DRONES,
+        "n_ground": DEFAULT_EXPORT_UGVS,
+        "n_survivors": DEFAULT_EXPORT_SURVIVORS,
+        "active_survivors_min": DEFAULT_EXPORT_SURVIVORS,
+        "active_survivors_max": DEFAULT_EXPORT_SURVIVORS,
+        "n_decoys": 0,
+        "active_decoys_min": 0,
+        "active_decoys_max": 0,
+        "known_survivors_at_reset": False,
+        "delayed_survivor_knowledge": False,
+        "drone_can_confirm": False,
+        "disable_fire": False,
+        "fire_grid_size": DEFAULT_EXPORT_GRID_SIZE,
+        "terrain_source": "real",
+        "terrain_cache_path": str(DEFAULT_TERRAIN_CACHE_PATH),
+        "local_map_patch_size": 7,
+        "drone_flight_levels_m": DEFAULT_EXPORT_DRONE_FLIGHT_LEVELS_M,
+        "drone_perception_mode": "rgb_thermal",
+        "coverage_obs_grid": 0,
+        "local_coverage_obs_grid": 0,
+        "uav_confidence_obs_grid": 32,
+        "local_confidence_obs_grid": 9,
+        "local_confidence_obs_radius_m": 60.0,
+        "uav_frontier_obs": True,
+        "uav_frontier_obs_radius_m": 60.0,
+        "uav_frontier_mode": "local_global",
+        "uav_frontier_source": "confidence",
+        "uav_cleanup_target_obs": False,
+        "uav_astar_route_obs": False,
+        "survivor_assignment_obs": True,
+        "ugv_planner_hint": "global_astar",
+        "ugv_dense_reward_mode": "planner_follow",
+        "ugv_global_planner_heuristic": "euclidean",
+        "ugv_global_planner_lookahead_m": 20.0,
+        "ugv_target_assignment_mode": "greedy_sticky",
+        "ugv_planner_fire_mode": "block",
+        "ugv_planner_fire_replan_policy": "lazy",
+        "ugv_planner_fire_replan_interval_steps": 15,
+        "ugv_planner_fire_block_threshold": 0.6,
+        "ugv_planner_fire_cost": 25.0,
+        "ugv_planner_smoke_cost": 5.0,
+        "ugv_planner_smolder_cost": 3.0,
+        "ugv_planner_fire_buffer_m": 10.0,
+        "ugv_planner_fire_buffer_cost": 8.0,
+        "ugv_planner_land_cover_costs": (0.85, 1.0, 1.15, 1.35, 4.0, 8.0),
+        "r_found_survivor": 4.0,
+        "r_team_scout": 1.0,
+        "r_drone_scout": 2.0,
+        "r_ground_confirm": 10.0,
+        "r_ground_shaping": 0.5,
+        "r_ground_approach": 0.0,
+        "r_pending_penalty": -0.02,
+        "r_ugv_movement_alignment": 0.2,
+        "r_ugv_planner_progress": 0.0,
+        "r_ugv_route_progress_shortfall_penalty": 0.0025,
+        "r_uav_confidence": 30.0,
+        "r_uav_confidence_move": 0.1,
+        "r_uav_confidence_overlap": 0.06,
+        "r_uav_inefficient_move": 0.005,
+        "uav_inefficient_move_source": "confidence",
+        "r_uav_frontier_alignment": 0.05,
+        "r_uav_fire_footprint": 0.05,
+        "uav_fire_penalty_threshold": 0.6,
+    }
 
 
 def _selected_baselines(approach: str) -> list[str]:
@@ -95,7 +188,7 @@ def main():
              "latest HAPPO checkpoint environment. Intended for baseline-only "
              "terrain experiments.",
     )
-    p.add_argument("--steps", type=int, default=500)
+    p.add_argument("--steps", type=int, default=DEFAULT_EXPORT_STEPS)
     p.add_argument("--frame-stride", type=int, default=1, help="Record every Nth frame (keeps long-run JSON loadable; physics still runs every step).")
     p.add_argument("--seed",  type=int, default=0)
     p.add_argument("--out",   default=str(ROOT / "web" / "trajectories"))
@@ -104,8 +197,8 @@ def main():
     p.add_argument(
         "--grid-size",
         type=int,
-        default=128,
-        help="Fire/terrain grid resolution (default: 128).",
+        default=DEFAULT_EXPORT_GRID_SIZE,
+        help=f"Fire/terrain grid resolution (default: {DEFAULT_EXPORT_GRID_SIZE}).",
     )
     p.add_argument(
         "--comms-dropout",
@@ -115,8 +208,12 @@ def main():
              "0.0 = perfect radio, 0.3 = visible dropouts in viewer, "
              "0.8 = mostly broken.",
     )
-    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
-                   help="Communication dropout process for trajectory export.")
+    p.add_argument(
+        "--comms-dropout-mode",
+        choices=("iid", "bursty"),
+        default=COMMS_DROPOUT_MODE,
+        help="Communication dropout process for trajectory export.",
+    )
     p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent",
                    help="Use communication-gated per-agent coverage/confidence maps.")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5,
@@ -131,7 +228,7 @@ def main():
                    help="Export the joint UAV+UGV diagnostic scenario when not relying on a checkpoint manifest.")
     p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
                    help="Export the 2-UGV delayed-knowledge joint-schema curriculum scenario.")
-    p.add_argument("--joint-diagnostic-ugvs", type=int, default=1,
+    p.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_EXPORT_UGVS,
                    help="Number of UGVs for --joint-survivor-diagnostic manual exports.")
     p.add_argument(
         "--baseline-ugv-controller",
@@ -223,7 +320,7 @@ def main():
     )
     p.add_argument("--terrain-place", default="Malibu Creek State Park, California")
     p.add_argument("--terrain-cache-dir", default=str(ROOT / "data" / "terrain_cache"))
-    p.add_argument("--terrain-cache-path", default=None)
+    p.add_argument("--terrain-cache-path", default=str(DEFAULT_TERRAIN_CACHE_PATH))
     p.add_argument(
         "--drone-min-footprint-radius-m",
         dest="drone_min_footprint_radius_m",
@@ -307,9 +404,9 @@ def main():
     )
     p.add_argument(
         "--happo-checkpoint",
-        default=None,
+        default=str(DEFAULT_HAPPO_CHECKPOINT),
         help="Path to a HAPPO checkpoint models/ directory, or to its parent run directory. "
-             "Defaults to the newest checkpoint under results/harl_runs.",
+             f"Default: {DEFAULT_HAPPO_CHECKPOINT.relative_to(ROOT)}.",
     )
     p.add_argument(
         "--drone-safety-clearance-m",
@@ -489,7 +586,6 @@ def main():
     args = p.parse_args()
     steps_cli = _cli_option_present("--steps")
     comms_dropout_cli = _cli_option_present("--comms-dropout")
-    comms_dropout_mode_cli = _cli_option_present("--comms-dropout-mode")
     comms_map_mode_cli = _cli_option_present("--comms-map-mode")
     comms_dropout_min_cli = _cli_option_present("--comms-dropout-min-steps")
     comms_dropout_max_cli = _cli_option_present("--comms-dropout-max-steps")
@@ -530,6 +626,7 @@ def main():
         "drone_smoke_clearance_threshold",
     )
     scenario_kwargs = {
+        **_reference_scenario_defaults(),
         "max_steps":        args.steps,
         "x_semidim":        args.x_semidim,
         "y_semidim":        args.y_semidim,
@@ -543,7 +640,11 @@ def main():
         "terrain_place":    args.terrain_place,
         "terrain_cache_dir": args.terrain_cache_dir,
         "terrain_cache_path": args.terrain_cache_path,
-        "drone_flight_levels_m": tuple(args.drone_flight_levels_m),
+        "drone_flight_levels_m": (
+            tuple(args.drone_flight_levels_m)
+            if _cli_option_present("--drone-flight-levels-m")
+            else DEFAULT_EXPORT_DRONE_FLIGHT_LEVELS_M
+        ),
         "drone_camera_fov_deg": args.drone_camera_fov_deg,
         "drone_safety_clearance_m": args.drone_safety_clearance_m,
         "sim_step_seconds": args.sim_step_seconds,
@@ -617,8 +718,6 @@ def main():
                 max_steps=args.steps if steps_cli else None,
                 comms_dropout=args.comms_dropout if comms_dropout_cli else None,
             )
-            if comms_dropout_mode_cli:
-                scenario_kwargs["comms_dropout_mode"] = args.comms_dropout_mode
             if comms_map_mode_cli:
                 scenario_kwargs["comms_map_mode"] = args.comms_map_mode
             if comms_dropout_min_cli:
@@ -679,6 +778,16 @@ def main():
         scenario_kwargs["ground_speed_mps"] = args.ground_speed_mps
     if _cli_option_present("--ground-accel-mps2"):
         scenario_kwargs["ground_accel_mps2"] = args.ground_accel_mps2
+    if _cli_option_present("--drone-perception-mode"):
+        scenario_kwargs["drone_perception_mode"] = (
+            args.drone_perception_mode.replace("+", "_").replace("-", "_")
+        )
+    if _cli_option_present("--uav-fire-block-threshold"):
+        scenario_kwargs["uav_fire_block_threshold"] = float(args.uav_fire_block_threshold)
+    if _cli_option_present("--uav-fire-footprint-penalty"):
+        scenario_kwargs["r_uav_fire_footprint"] = float(args.uav_fire_footprint_penalty)
+    if _cli_option_present("--uav-fire-penalty-threshold"):
+        scenario_kwargs["uav_fire_penalty_threshold"] = float(args.uav_fire_penalty_threshold)
 
     if args.ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = max(args.ground_confirmation_range_m, 0.0)
@@ -694,9 +803,11 @@ def main():
         )
     if args.joint_survivor_diagnostic and not restored_happo_manifest:
         scenario_kwargs.update({
-            "n_drones": 3,
+            "n_drones": DEFAULT_EXPORT_DRONES,
             "n_ground": max(int(args.joint_diagnostic_ugvs), 1),
-            "n_survivors": 5,
+            "n_survivors": DEFAULT_EXPORT_SURVIVORS,
+            "active_survivors_min": DEFAULT_EXPORT_SURVIVORS,
+            "active_survivors_max": DEFAULT_EXPORT_SURVIVORS,
             "known_survivors_at_reset": False,
             "drone_can_confirm": False,
             "comms_dropout": args.comms_dropout,
@@ -710,18 +821,20 @@ def main():
             "ugv_planner_hint": "global_astar",
             "ugv_dense_reward_mode": "planner_follow",
             "ugv_global_planner_lookahead_m": 20.0,
-            "disable_fire": True,
+            "disable_fire": False,
         })
     elif args.joint_survivor_diagnostic:
         print(" HAPPO env:     kept checkpoint scenario; --joint-survivor-diagnostic preset not applied")
     if args.joint_schema_ugv_diagnostic and not restored_happo_manifest:
         scenario_kwargs.update({
             "n_drones": 0,
-            "n_ground": 2,
-            "n_survivors": 5,
-            "obs_schema_n_drones": 3,
-            "obs_schema_n_ground": 2,
-            "obs_schema_n_survivors": 5,
+            "n_ground": DEFAULT_EXPORT_UGVS,
+            "n_survivors": DEFAULT_EXPORT_SURVIVORS,
+            "active_survivors_min": DEFAULT_EXPORT_SURVIVORS,
+            "active_survivors_max": DEFAULT_EXPORT_SURVIVORS,
+            "obs_schema_n_drones": DEFAULT_EXPORT_DRONES,
+            "obs_schema_n_ground": DEFAULT_EXPORT_UGVS,
+            "obs_schema_n_survivors": DEFAULT_EXPORT_SURVIVORS,
             "known_survivors_at_reset": False,
             "delayed_survivor_knowledge": True,
             "survivor_reveal_schedule": "stratified_uniform",
@@ -741,16 +854,17 @@ def main():
             "ugv_dense_reward_mode": "planner_follow",
             "ugv_global_planner_lookahead_m": 20.0,
             "ugv_zero_uav_search_observations": True,
-            "coverage_obs_grid": 6,
-            "local_coverage_obs_grid": 9,
-            "local_coverage_obs_radius_m": 150.0,
-            "uav_confidence_obs_grid": 6,
+            "coverage_obs_grid": 0,
+            "local_coverage_obs_grid": 0,
+            "uav_confidence_obs_grid": 32,
+            "local_confidence_obs_grid": 9,
+            "local_confidence_obs_radius_m": 60.0,
             "uav_frontier_obs": True,
             "uav_frontier_obs_radius_m": 60.0,
             "uav_frontier_mode": "local_global",
             "uav_frontier_source": "confidence",
-            "uav_cleanup_target_obs": True,
-            "disable_fire": True,
+            "uav_cleanup_target_obs": False,
+            "disable_fire": False,
         })
     elif args.joint_schema_ugv_diagnostic:
         print(" HAPPO env:     kept checkpoint scenario; --joint-schema-ugv-diagnostic preset not applied")
@@ -765,6 +879,7 @@ def main():
         scenario_kwargs["ugv_target_assignment_mode"] = "greedy_sticky"
     if args.enable_fire is not None:
         scenario_kwargs["disable_fire"] = not bool(args.enable_fire)
+    scenario_kwargs["comms_dropout_mode"] = args.comms_dropout_mode
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
     if args.ugv_planner_hint is not None:

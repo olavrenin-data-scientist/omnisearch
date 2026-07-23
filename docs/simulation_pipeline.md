@@ -142,7 +142,7 @@ Communication export options:
 | Flag | Default | Description |
 |---|---:|---|
 | `--comms-dropout` | `0.0` | Agent-level dropout fraction |
-| `--comms-dropout-mode` | `iid` | `iid` or `bursty` |
+| `--comms-dropout-mode` | `bursty` | `iid` or `bursty` |
 | `--comms-map-mode` | `per_agent` | Communication-gated per-agent map memories |
 | `--comms-dropout-min-steps` | `5` | Minimum burst length |
 | `--comms-dropout-max-steps` | `15` | Maximum burst length |

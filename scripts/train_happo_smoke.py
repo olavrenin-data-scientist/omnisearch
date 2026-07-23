@@ -8,9 +8,13 @@ HARL doesn't ship a VMAS interface, so this script:
   3. Builds algo_args + env_args from CLI flags
   4. Runs HARL's OnPolicyHARunner
 
-Budgets:
-  smoke    (default)    ~2 000 steps, episode_length=150   ≈ 5-10 s on CPU
-  research (--research)  400 000 steps, episode_length=500 ≈ tens of minutes on CPU
+Default training profile:
+  4 UAVs + 3 UGVs, 10 survivors, 1 km Malibu terrain at 256x256,
+  fire enabled, 900-step episodes, 8 rollout environments, and
+  1 800 000 total environment steps (250 training episodes).
+
+The legacy research and diagnostic profiles remain available through their
+explicit mode flags.
 
 Run from repo root:
 
@@ -47,6 +51,7 @@ from agents.harl_terrain_cnn import (
     wildfire_single_observation_dim,
 )
 from envs.wildfire_defaults import (
+    COMMS_DROPOUT_MODE,
     DRONE_FIRE_SAFETY_CLEARANCE_M,
     DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M,
     DRONE_SAFETY_CLEARANCE_BY_OBJECT_M,
@@ -130,6 +135,235 @@ DEFAULT_UAV_FRONTIER_TOP_K = 2
 DEFAULT_UAV_FRONTIER_OWNERSHIP = True
 DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE = "fixed_hold"
 DEFAULT_HAPPO_HIDDEN_SIZES = (256, 256)
+DEFAULT_JOINT_TRAINING_NUM_ENV_STEPS = 1_800_000
+DEFAULT_JOINT_TRAINING_EPISODE_LENGTH = 900
+DEFAULT_JOINT_TRAINING_N_ROLLOUT_THREADS = 8
+DEFAULT_JOINT_TRAINING_DRONES = 4
+DEFAULT_JOINT_TRAINING_UGVS = 3
+DEFAULT_JOINT_TRAINING_SURVIVORS = 10
+DEFAULT_JOINT_TRAINING_FIRE_GRID_SIZE = 256
+DEFAULT_JOINT_TRAINING_HIDDEN_SIZES = (128, 128)
+DEFAULT_JOINT_TRAINING_ROUTE_SHORTFALL_PENALTY = 0.0025
+DEFAULT_JOINT_TRAINING_ASSIGNMENT_MODE = "greedy_sticky"
+DEFAULT_JOINT_TRAINING_UAV_FIRE_PENALTY = 0.05
+DEFAULT_JOINT_TRAINING_EXP_NAME = (
+    "happo_uav4_ugv3_area_1sqkm_malibu_grid256_steps900_fire_survivors_10"
+)
+DEFAULT_JOINT_TRAINING_TERRAIN_CACHE_PATH = (
+    ROOT / "data" / "terrain_cache" / "malibu_creek_1sqkm_256.npz"
+)
+
+
+def _cli_option_was_supplied(argv: list[str], *options: str) -> bool:
+    """Return whether argv explicitly contains one of the named options."""
+
+    return any(
+        token == option or token.startswith(f"{option}=")
+        for token in argv
+        for option in options
+    )
+
+
+def _apply_reference_training_profile(
+    args: argparse.Namespace,
+    argv: list[str],
+) -> bool:
+    """Apply reference joint/class settings without overriding CLI values."""
+
+    diagnostic_mode_selected = any(
+        (
+            args.ugv_known_survivor_diagnostic,
+            args.uav_survivor_diagnostic,
+            args.joint_schema_uav_diagnostic,
+            args.joint_survivor_diagnostic,
+            args.joint_schema_ugv_diagnostic,
+        )
+    )
+    if (
+        not diagnostic_mode_selected
+        and not args.research
+        and args.preset == "smoke"
+    ):
+        args.joint_survivor_diagnostic = True
+
+    reference_mode = any(
+        (
+            args.ugv_known_survivor_diagnostic,
+            args.uav_survivor_diagnostic,
+            args.joint_schema_uav_diagnostic,
+            args.joint_survivor_diagnostic,
+            args.joint_schema_ugv_diagnostic,
+        )
+    )
+    if not reference_mode:
+        return False
+
+    def set_if_omitted(attribute: str, value, *options: str) -> None:
+        if not _cli_option_was_supplied(argv, *options):
+            setattr(args, attribute, value)
+
+    has_physical_uavs = (
+        args.uav_survivor_diagnostic
+        or args.joint_schema_uav_diagnostic
+        or args.joint_survivor_diagnostic
+    )
+    has_physical_ugvs = (
+        args.ugv_known_survivor_diagnostic
+        or args.joint_schema_ugv_diagnostic
+        or args.joint_survivor_diagnostic
+    )
+    if has_physical_uavs:
+        uav_only_mode = args.uav_survivor_diagnostic or args.joint_schema_uav_diagnostic
+        if (
+            uav_only_mode
+            and _cli_option_was_supplied(argv, "--uav-diagnostic-drones")
+            and not _cli_option_was_supplied(argv, "--n-drones", "--n-uavs")
+        ):
+            args.n_drones = int(args.uav_diagnostic_drones)
+        else:
+            set_if_omitted(
+                "n_drones",
+                DEFAULT_JOINT_TRAINING_DRONES,
+                "--n-drones",
+                "--n-uavs",
+            )
+        if uav_only_mode:
+            args.uav_diagnostic_drones = int(args.n_drones)
+    elif args.joint_schema_ugv_diagnostic:
+        # No UAVs are instantiated; this count only fixes the padded joint schema.
+        set_if_omitted("n_drones", DEFAULT_JOINT_TRAINING_DRONES, "--n-drones", "--n-uavs")
+    if has_physical_ugvs:
+        set_if_omitted("n_ugvs", DEFAULT_JOINT_TRAINING_UGVS, "--n-ugvs", "--n-ground")
+        set_if_omitted(
+            "found_survivor_reward",
+            DEFAULT_JOINT_DIAG_TEAM_CONFIRM_REWARD,
+            "--found-survivor-reward",
+        )
+        set_if_omitted(
+            "ground_confirm_reward",
+            DEFAULT_JOINT_DIAG_GROUND_CONFIRM_REWARD,
+            "--ground-confirm-reward",
+        )
+        set_if_omitted(
+            "ugv_ground_shaping_reward",
+            0.50,
+            "--ugv-ground-shaping-reward",
+        )
+        set_if_omitted(
+            "ugv_pending_penalty",
+            DEFAULT_JOINT_DIAG_PENDING_PENALTY,
+            "--ugv-pending-penalty",
+        )
+        set_if_omitted("ugv_approach_reward", 0.0, "--ugv-approach-reward")
+        set_if_omitted(
+            "survivor_assignment_obs",
+            True,
+            "--survivor-assignment-obs",
+            "--no-survivor-assignment-obs",
+        )
+        if (
+            args.ugv_known_survivor_diagnostic
+            and not _cli_option_was_supplied(
+                argv,
+                "--share-param",
+                "--no-share-param",
+                "--share-param-by-agent-class",
+                "--no-share-param-by-agent-class",
+            )
+        ):
+            args.share_param = True
+    if not _cli_option_was_supplied(argv, "--obs-schema-n-ugvs"):
+        args.obs_schema_n_ugvs = max(
+            DEFAULT_JOINT_TRAINING_UGVS,
+            int(args.n_ugvs or 0),
+        )
+    set_if_omitted("n_survivors", DEFAULT_JOINT_TRAINING_SURVIVORS, "--n-survivors")
+    survivor_slots = int(args.n_survivors)
+    set_if_omitted(
+        "active_survivors_min",
+        survivor_slots,
+        "--active-survivors-min",
+    )
+    set_if_omitted(
+        "active_survivors_max",
+        survivor_slots,
+        "--active-survivors-max",
+    )
+    set_if_omitted(
+        "terrain_cache_path",
+        str(DEFAULT_JOINT_TRAINING_TERRAIN_CACHE_PATH),
+        "--terrain-cache-path",
+    )
+    set_if_omitted(
+        "fire_grid_size",
+        DEFAULT_JOINT_TRAINING_FIRE_GRID_SIZE,
+        "--fire-grid-size",
+    )
+    if not _cli_option_was_supplied(argv, "--enable-fire", "--disable-fire"):
+        args.enable_fire = True
+    set_if_omitted("local_map_patch_size", 7, "--local-map-patch-size")
+    set_if_omitted("entropy_coef", DEFAULT_UAV_DIAG_ENTROPY_COEF, "--entropy-coef")
+    set_if_omitted("lr", DEFAULT_UGV_DIAG_LR, "--lr")
+    set_if_omitted("critic_lr", DEFAULT_UGV_DIAG_CRITIC_LR, "--critic-lr")
+    if not _cli_option_was_supplied(argv, "--linear-lr-decay", "--no-linear-lr-decay"):
+        args.linear_lr_decay = True
+    set_if_omitted(
+        "n_rollout_threads",
+        DEFAULT_JOINT_TRAINING_N_ROLLOUT_THREADS,
+        "--n-rollout-threads",
+    )
+    set_if_omitted(
+        "hidden_sizes",
+        list(DEFAULT_JOINT_TRAINING_HIDDEN_SIZES),
+        "--hidden-sizes",
+    )
+    if has_physical_ugvs or args.joint_schema_uav_diagnostic:
+        set_if_omitted("ugv_planner_hint", DEFAULT_UGV_DIAG_PLANNER_HINT, "--ugv-planner-hint")
+    if has_physical_ugvs:
+        set_if_omitted(
+            "ugv_dense_reward_mode",
+            DEFAULT_UGV_DIAG_DENSE_REWARD_MODE,
+            "--ugv-dense-reward-mode",
+        )
+        set_if_omitted(
+            "ugv_target_assignment_mode",
+            DEFAULT_JOINT_TRAINING_ASSIGNMENT_MODE,
+            "--ugv-target-assignment-mode",
+        )
+        set_if_omitted(
+            "ugv_route_progress_shortfall_penalty",
+            DEFAULT_JOINT_TRAINING_ROUTE_SHORTFALL_PENALTY,
+            "--ugv-route-progress-shortfall-penalty",
+        )
+    set_if_omitted("action_transform", DEFAULT_UGV_DIAG_ACTION_TRANSFORM, "--action-transform")
+    if has_physical_uavs:
+        set_if_omitted(
+            "uav_fire_footprint_penalty",
+            DEFAULT_JOINT_TRAINING_UAV_FIRE_PENALTY,
+            "--uav-fire-footprint-penalty",
+        )
+        set_if_omitted(
+            "team_scout_reward",
+            DEFAULT_JOINT_DIAG_TEAM_SCOUT_REWARD,
+            "--team-scout-reward",
+            "--uav-team-scout-reward",
+        )
+        set_if_omitted(
+            "drone_flight_levels_m",
+            ",".join(
+                str(int(value))
+                for value in DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M
+            ),
+            "--drone-flight-levels-m",
+        )
+        set_if_omitted(
+            "drone_perception_mode",
+            DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE,
+            "--drone-perception-mode",
+        )
+    if args.joint_survivor_diagnostic:
+        set_if_omitted("exp_name", DEFAULT_JOINT_TRAINING_EXP_NAME, "--exp-name")
+    return True
 
 
 def _resolve_uav_reward_defaults(
@@ -208,7 +442,7 @@ def build_args(
     comms_dropout:  float,
     entropy_coef:   float,
     exp_name:       str,
-    comms_dropout_mode: str = "iid",
+    comms_dropout_mode: str = COMMS_DROPOUT_MODE,
     comms_map_mode: str = "per_agent",
     comms_dropout_min_steps: int = 5,
     comms_dropout_max_steps: int = 15,
@@ -287,7 +521,7 @@ def build_args(
     joint_survivor_diagnostic: bool = False,
     joint_schema_ugv_diagnostic: bool = False,
     uav_diagnostic_drones: int = DEFAULT_UAV_DIAG_DRONES,
-    joint_diagnostic_ugvs: int = DEFAULT_JOINT_DIAG_UGVS,
+    obs_schema_n_ugvs: int | None = None,
     n_drones: int | None = None,
     n_ugvs: int | None = None,
     n_survivors: int | None = None,
@@ -394,6 +628,7 @@ def build_args(
     ugv_sticky_switch_ratio: float = 0.80,
     ugv_sticky_min_age_steps: int = 10,
     enable_fire: bool | None = None,
+    mode_defaults_resolved: bool = False,
 ) -> tuple[dict, dict, dict]:
     survivor_count = (
         DEFAULT_JOINT_DIAG_SURVIVORS
@@ -418,6 +653,11 @@ def build_args(
     active_survivors_min, active_survivors_max = _active_survivor_range_for(survivor_count)
     joint_drone_count = DEFAULT_JOINT_DIAG_DRONES if n_drones is None else max(int(n_drones), 0)
     joint_ugv_count = DEFAULT_JOINT_DIAG_UGVS if n_ugvs is None else max(int(n_ugvs), 0)
+    schema_ugv_count = (
+        joint_ugv_count
+        if obs_schema_n_ugvs is None
+        else max(int(obs_schema_n_ugvs), 0)
+    )
     decoy_count = 0 if n_decoys is None else max(int(n_decoys), 0)
     active_decoys_min_arg = active_decoys_min
     active_decoys_max_arg = active_decoys_max
@@ -437,8 +677,6 @@ def build_args(
     active_decoys_min, active_decoys_max = _active_decoy_range_for(decoy_count)
     if n_drones is not None:
         uav_diagnostic_drones = max(int(n_drones), 1)
-    if n_ugvs is not None:
-        joint_diagnostic_ugvs = max(int(n_ugvs), 1)
     ugv_planner_hint = str(ugv_planner_hint).replace("-", "_")
     uav_search_diagnostic = (
         uav_survivor_diagnostic
@@ -460,7 +698,7 @@ def build_args(
         or joint_survivor_diagnostic
         or joint_schema_ugv_diagnostic
     )
-    if ugv_global_diagnostic:
+    if ugv_global_diagnostic and not mode_defaults_resolved:
         defaulted_ugv_planner_hint = ugv_planner_hint == "none"
         if terrain_cache_path is None:
             terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
@@ -627,7 +865,11 @@ def build_args(
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
     if uav_fire_block_threshold is not None and float(uav_fire_block_threshold) > 1.0:
         raise ValueError("uav_fire_block_threshold must be <= 1; use a negative value to disable")
-    if uav_search_diagnostic:
+    if uav_search_diagnostic and mode_defaults_resolved:
+        uav_diagnostic_drones = int(uav_diagnostic_drones)
+        if uav_diagnostic_drones < 1:
+            raise ValueError("uav_diagnostic_drones must be positive")
+    if uav_search_diagnostic and not mode_defaults_resolved:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
             raise ValueError("uav_diagnostic_drones must be positive")
@@ -1349,7 +1591,7 @@ def build_args(
             "r_fire_penalty": 0.0,
             "r_ground_travel_cost": 0.0,
             "r_drone_climb_cost": 0.0,
-            "r_time_penalty": -0.0005,
+            "r_time_penalty": 0.0,
             "r_coverage": 0.0,
         })
     if uav_survivor_diagnostic or joint_schema_uav_diagnostic:
@@ -1436,14 +1678,16 @@ def build_args(
         if joint_schema_uav_diagnostic:
             scenario_kwargs.update({
                 "obs_schema_n_drones": joint_drone_count,
-                "obs_schema_n_ground": joint_ugv_count,
+                "obs_schema_n_ground": schema_ugv_count,
                 "obs_schema_n_survivors": survivor_count,
                 "ugv_assigned_target_obs_only": False,
                 "survivor_assignment_obs": True,
             })
     if joint_survivor_diagnostic:
-        joint_diagnostic_ugvs = max(int(joint_diagnostic_ugvs), 1)
         joint_drone_count = max(int(joint_drone_count), 1)
+        joint_ugv_count = max(int(joint_ugv_count), 1)
+        if schema_ugv_count < joint_ugv_count:
+            raise ValueError("obs_schema_n_ugvs must be >= the physical UGV count")
         coverage_threshold_reward = (
             0.0
             if uav_coverage_threshold_reward is None
@@ -1451,8 +1695,9 @@ def build_args(
         )
         scenario_kwargs.update({
             "n_drones": joint_drone_count,
-            "n_ground": joint_diagnostic_ugvs,
+            "n_ground": joint_ugv_count,
             "n_survivors": survivor_count,
+            "obs_schema_n_ground": schema_ugv_count,
             "known_survivors_at_reset": _known_survivors_default(False),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
@@ -1516,13 +1761,15 @@ def build_args(
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
     if joint_schema_ugv_diagnostic:
+        if schema_ugv_count < joint_ugv_count:
+            raise ValueError("obs_schema_n_ugvs must be >= the physical UGV count")
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": joint_ugv_count,
             "n_survivors": survivor_count,
             "n_decoys": decoy_count,
             "obs_schema_n_drones": joint_drone_count,
-            "obs_schema_n_ground": joint_ugv_count,
+            "obs_schema_n_ground": schema_ugv_count,
             "obs_schema_n_survivors": survivor_count,
             "known_survivors_at_reset": _known_survivors_default(False),
             "delayed_survivor_knowledge": _delayed_survivor_default(True),
@@ -1640,13 +1887,13 @@ def main():
     p.add_argument("--research",       action="store_true",
                    help="Larger budget: 400k steps, episode_length=500 (tens of minutes on CPU).")
     p.add_argument("--num-env-steps",  type=int,   default=None,
-                   help="Total env steps override (default: 2000 smoke / 400000 research).")
+                   help="Total env steps override (default joint profile: 1800000).")
     p.add_argument("--episode-length", type=int,   default=None,
-                   help="Episode length override (default: 150 smoke / 500 research).")
+                   help="Episode length override (default joint profile: 900).")
     p.add_argument("--seed",           type=int,   default=1)
     p.add_argument("--comms-dropout",  type=float, default=0.0,
                    help="Per-step prob each agent's comms are dropped (default: 0.0).")
-    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default=COMMS_DROPOUT_MODE,
                    help="Communication dropout process: iid preserves one-step Bernoulli dropout; "
                         "bursty creates temporary outages with resync on reconnect.")
     p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent",
@@ -1693,7 +1940,8 @@ def main():
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
                    help="Embedding size per local terrain patch when --terrain-cnn-encoder is enabled.")
-    p.add_argument("--exp-name",       default="happo_smoke")
+    p.add_argument("--exp-name",       default="happo_smoke",
+                   help=f"Experiment name (default joint profile: {DEFAULT_JOINT_TRAINING_EXP_NAME}).")
     p.add_argument("--n-rollout-threads", type=int, default=1,
                    help="Parallel rollout envs. More threads => more diverse data per "
                         "update and faster wall-clock (e.g. 8).")
@@ -1892,7 +2140,8 @@ def main():
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
-                   help="Actor/critic MLP hidden layer sizes. Default: 256 256. "
+                   help="Actor/critic MLP hidden layer sizes. Default joint profile: 128 128; "
+                        "other profiles: 256 256. "
                         "Example: --hidden-sizes 256 256")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
@@ -2048,25 +2297,27 @@ def main():
                    help="Preset for defaults. 'floor0-1km' (recommended) trains on the 1km terrain "
                         "with wide-FOV/high-altitude sensors so detection works at floor 0.")
     p.add_argument("--ugv-known-survivor-diagnostic", action="store_true",
-                   help="Train a minimal diagnostic task: 0 drones, 1 UGV, 1 survivor known at reset, no fire.")
+                   help="Train UGVs only with the reference joint UGV settings and survivors known at reset. "
+                        "Uses a compact UGV-only observation rather than joint-schema padding.")
     p.add_argument("--uav-survivor-diagnostic", action="store_true",
-                   help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, no fire; drone scouting counts as success.")
+                   help="Train UAVs only with the reference joint UAV settings. "
+                        "Uses a compact UAV-only observation rather than joint-schema padding.")
     p.add_argument("--joint-schema-uav-diagnostic", action="store_true",
-                   help="Train UAV-only search with final joint-schema observations, padding absent UGV slots.")
-    p.add_argument("--joint-survivor-diagnostic", action="store_true",
-                   help="Train a joint task: UAVs scout unknown survivors, UGVs confirm known targets.")
+                   help="Train UAVs only with reference joint UAV settings and padded joint-schema observations.")
+    p.set_defaults(joint_survivor_diagnostic=False)
     p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
-                   help="Train 2 UGVs with delayed survivor knowledge and final joint-schema observations.")
+                   help="Train UGVs only with reference joint UGV settings, delayed survivor knowledge, "
+                        "and padded joint-schema observations.")
     p.add_argument("--uav-diagnostic-drones", type=int, default=DEFAULT_UAV_DIAG_DRONES,
-                   help="Number of UAVs in --uav-survivor-diagnostic mode.")
-    p.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS,
-                   help="Number of UGVs in --joint-survivor-diagnostic mode.")
+                   help="Physical UAV count in UAV-only diagnostic modes.")
+    p.add_argument("--obs-schema-n-ugvs", type=int, default=None,
+                   help="Number of UGV slots reserved in joint-schema observations. "
+                        "This does not instantiate physical UGVs.")
     p.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
                    help="Override the number of UAVs/drones for training scenarios. "
-                        "Joint-schema modes use the same value for the UAV observation schema.")
+                        "In UGV-only joint-schema mode this sets reserved UAV slots only.")
     p.add_argument("--n-ugvs", "--n-ground", dest="n_ugvs", type=int, default=None,
-                   help="Override the number of UGVs/ground agents for training scenarios. "
-                        "Joint-schema modes use the same value for the UGV observation schema.")
+                   help="Override the number of physical UGVs/ground agents for training scenarios.")
     p.add_argument("--n-survivors", type=int, default=None,
                    help="Override the number of survivors for training/diagnostic scenarios. "
                         "Joint-schema modes use the same value for the survivor observation schema.")
@@ -2285,7 +2536,9 @@ def main():
                         "'clip' is the HARL-compatible default; 'tanh' is an experimental "
                         "plain tanh post-transform; 'radial_tanh' preserves raw action "
                         "direction while smoothly bounding vector magnitude.")
-    args = p.parse_args()
+    argv = sys.argv[1:]
+    args = p.parse_args(argv)
+    _apply_reference_training_profile(args, argv)
     args.action_transform = args.action_transform.replace("-", "_")
     args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
     if args.ugv_target_assignment_mode is not None:
@@ -2297,14 +2550,20 @@ def main():
         or args.joint_survivor_diagnostic
         or args.joint_schema_ugv_diagnostic
     ):
-        defaulted_ugv_planner_hint = args.ugv_planner_hint == "none"
+        defaulted_ugv_planner_hint = (
+            args.ugv_planner_hint == "none"
+            and not _cli_option_was_supplied(argv, "--ugv-planner-hint")
+        )
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
-        if args.local_map_patch_size == 3:
+        if (
+            args.local_map_patch_size == 3
+            and not _cli_option_was_supplied(argv, "--local-map-patch-size")
+        ):
             args.local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.lr == 5e-4:
+        if args.lr == 5e-4 and not _cli_option_was_supplied(argv, "--lr"):
             args.lr = DEFAULT_UGV_DIAG_LR
-        if args.critic_lr == 5e-4:
+        if args.critic_lr == 5e-4 and not _cli_option_was_supplied(argv, "--critic-lr"):
             args.critic_lr = DEFAULT_UGV_DIAG_CRITIC_LR
         if args.linear_lr_decay is None:
             args.linear_lr_decay = True
@@ -2318,16 +2577,25 @@ def main():
             args.ugv_global_planner_lookahead_m = DEFAULT_UGV_DIAG_GLOBAL_PLANNER_LOOKAHEAD_M
         if args.ugv_planner_progress_reward == 0.0:
             args.ugv_planner_progress_reward = DEFAULT_UGV_DIAG_PLANNER_PROGRESS_REWARD
-        if args.action_transform == "clip":
+        if (
+            args.action_transform == "clip"
+            and not _cli_option_was_supplied(argv, "--action-transform")
+        ):
             args.action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
         if args.enable_fire is None:
             args.enable_fire = bool(args.ugv_known_survivor_diagnostic)
         if (args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic) and args.enable_fire is False:
             args.ugv_planner_fire_mode = "off"
-        if args.ugv_planner_fire_mode == "off":
+        if (
+            args.ugv_planner_fire_mode == "off"
+            and not _cli_option_was_supplied(argv, "--ugv-planner-fire-mode")
+        ):
             if args.enable_fire:
                 args.ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
-        if args.ugv_planner_fire_replan_policy == "always":
+        if (
+            args.ugv_planner_fire_replan_policy == "always"
+            and not _cli_option_was_supplied(argv, "--ugv-planner-fire-replan-policy")
+        ):
             args.ugv_planner_fire_replan_policy = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY
         if args.ugv_planner_fire_replan_interval_steps == 15:
             args.ugv_planner_fire_replan_interval_steps = (
@@ -2335,7 +2603,10 @@ def main():
             )
         if args.ugv_planner_fire_cost == 25.0:
             args.ugv_planner_fire_cost = DEFAULT_UGV_DIAG_PLANNER_FIRE_COST
-        if args.ugv_planner_fire_block_threshold == 0.0:
+        if (
+            args.ugv_planner_fire_block_threshold == 0.0
+            and not _cli_option_was_supplied(argv, "--ugv-planner-fire-block-threshold")
+        ):
             args.ugv_planner_fire_block_threshold = DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD
         if args.ugv_planner_smoke_cost == 5.0:
             args.ugv_planner_smoke_cost = DEFAULT_UGV_DIAG_PLANNER_SMOKE_COST
@@ -2398,8 +2669,8 @@ def main():
         p.error("--clip-param must be positive")
     if args.terrain_cnn_embed_dim <= 0:
         p.error("--terrain-cnn-embed-dim must be positive")
-    if args.joint_diagnostic_ugvs < 1:
-        p.error("--joint-diagnostic-ugvs must be positive")
+    if args.obs_schema_n_ugvs is not None and args.obs_schema_n_ugvs < 0:
+        p.error("--obs-schema-n-ugvs must be nonnegative")
     if args.coverage_obs_grid is not None and args.coverage_obs_grid < 0:
         p.error("--coverage-obs-grid must be nonnegative")
     if args.local_coverage_obs_grid is not None and (
@@ -2726,7 +2997,7 @@ def main():
         p.error(
             "Choose only one diagnostic mode: --ugv-known-survivor-diagnostic, "
             "--uav-survivor-diagnostic, --joint-schema-uav-diagnostic, "
-            "--joint-survivor-diagnostic, or --joint-schema-ugv-diagnostic"
+            "or --joint-schema-ugv-diagnostic"
         )
     if args.ugv_target_assignment_mode is None and (
         args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
@@ -2768,13 +3039,17 @@ def main():
         drone_flight_levels_m = tuple(
             float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
         )
-    uav_joint_search_diagnostic = args.joint_schema_uav_diagnostic or args.joint_survivor_diagnostic
-    if drone_flight_levels_m is None and uav_joint_search_diagnostic:
+    uav_perception_diagnostic = (
+        args.uav_survivor_diagnostic
+        or args.joint_schema_uav_diagnostic
+        or args.joint_survivor_diagnostic
+    )
+    if drone_flight_levels_m is None and uav_perception_diagnostic:
         drone_flight_levels_m = DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M
     if args.drone_perception_mode is None:
         args.drone_perception_mode = (
             DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE
-            if uav_joint_search_diagnostic
+            if uav_perception_diagnostic
             else "rgb"
         )
     drone_safety_clearance_by_land_cover_m = (
@@ -2803,9 +3078,15 @@ def main():
     if uav_search_diagnostic:
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
-        if args.local_map_patch_size == 3:
+        if (
+            args.local_map_patch_size == 3
+            and not _cli_option_was_supplied(argv, "--local-map-patch-size")
+        ):
             args.local_map_patch_size = DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.entropy_coef == 0.01:
+        if (
+            args.entropy_coef == 0.01
+            and not _cli_option_was_supplied(argv, "--entropy-coef")
+        ):
             args.entropy_coef = DEFAULT_UAV_DIAG_ENTROPY_COEF
         if args.uav_no_global_coverage_obs:
             args.coverage_obs_grid = 0
@@ -2859,11 +3140,17 @@ def main():
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
         if args.uav_start_edge_margin_m is None:
             args.uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
-        if args.action_transform == "clip":
+        if (
+            args.action_transform == "clip"
+            and not _cli_option_was_supplied(argv, "--action-transform")
+        ):
             args.action_transform = "radial_tanh"
         if args.joint_schema_uav_diagnostic and args.ugv_planner_hint == "none":
             args.ugv_planner_hint = DEFAULT_UGV_DIAG_PLANNER_HINT
-        if args.n_rollout_threads == 1:
+        if (
+            args.n_rollout_threads == 1
+            and not _cli_option_was_supplied(argv, "--n-rollout-threads")
+        ):
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
     if args.joint_schema_ugv_diagnostic:
         args.uav_coverage_reward = 0.0
@@ -2995,9 +3282,17 @@ def main():
     if args.research:
         num_env_steps  = args.num_env_steps  or 400_000
         episode_length = args.episode_length or (1_000 if args.preset == "floor0-1km" else 500)
-    elif args.uav_survivor_diagnostic or args.joint_schema_uav_diagnostic or args.joint_survivor_diagnostic:
-        num_env_steps  = args.num_env_steps  or 2_000
-        episode_length = args.episode_length or DEFAULT_UAV_DIAG_EPISODE_LENGTH
+    elif any(
+        (
+            args.ugv_known_survivor_diagnostic,
+            args.uav_survivor_diagnostic,
+            args.joint_schema_uav_diagnostic,
+            args.joint_survivor_diagnostic,
+            args.joint_schema_ugv_diagnostic,
+        )
+    ):
+        num_env_steps = args.num_env_steps or DEFAULT_JOINT_TRAINING_NUM_ENV_STEPS
+        episode_length = args.episode_length or DEFAULT_JOINT_TRAINING_EPISODE_LENGTH
     elif args.preset == "floor0-1km":
         num_env_steps  = args.num_env_steps  or 240_000
         episode_length = args.episode_length or 1_000
@@ -3095,7 +3390,7 @@ def main():
         f"{args.active_decoys_min if args.active_decoys_min is not None else 'all'}-"
         f"{args.active_decoys_max if args.active_decoys_max is not None else 'all'}"
     )
-    print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
+    print(f" obs_schema_n_ugvs: {args.obs_schema_n_ugvs}")
     print(
         " survivor_reveal: "
         f"known_at_reset={args.known_survivors_at_reset if args.known_survivors_at_reset is not None else 'preset'} "
@@ -3306,7 +3601,7 @@ def main():
         joint_survivor_diagnostic = args.joint_survivor_diagnostic,
         joint_schema_ugv_diagnostic = args.joint_schema_ugv_diagnostic,
         uav_diagnostic_drones = args.uav_diagnostic_drones,
-        joint_diagnostic_ugvs = args.joint_diagnostic_ugvs,
+        obs_schema_n_ugvs = args.obs_schema_n_ugvs,
         n_drones = args.n_drones,
         n_ugvs = args.n_ugvs,
         n_survivors = args.n_survivors,
@@ -3415,6 +3710,7 @@ def main():
         ugv_sticky_switch_ratio = args.ugv_sticky_switch_ratio,
         ugv_sticky_min_age_steps = args.ugv_sticky_min_age_steps,
         enable_fire = bool(args.enable_fire),
+        mode_defaults_resolved = True,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)

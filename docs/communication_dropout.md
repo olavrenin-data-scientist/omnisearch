@@ -69,7 +69,7 @@ The current defaults are:
 
 | Parameter | Default |
 |---|---:|
-| `comms_dropout_mode` | `iid` |
+| `comms_dropout_mode` | `bursty` |
 | `comms_dropout_min_steps` | 5 |
 | `comms_dropout_max_steps` | 15 |
 | `comms_map_mode` | `per_agent` |
@@ -466,7 +466,7 @@ aware per-agent maps:
 
 ```text
 comms_map_mode = per_agent
-comms_dropout_mode = iid
+comms_dropout_mode = bursty
 ```
 
 The web trajectory export also writes `comms_up` for each agent, so the viewer
