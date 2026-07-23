@@ -2195,14 +2195,13 @@ def main():
                    help="Train a UAV-only diagnostic task: UAVs only, 0 UGVs, no fire; drone scouting counts as success.")
     p.add_argument("--joint-schema-uav-diagnostic", action="store_true",
                    help="Train UAV-only search with final joint-schema observations, padding absent UGV slots.")
-    p.add_argument("--joint-survivor-diagnostic", action="store_true",
-                   help="Train a joint task: UAVs scout unknown survivors, UGVs confirm known targets.")
+    p.set_defaults(joint_survivor_diagnostic=False)
     p.add_argument("--joint-schema-ugv-diagnostic", action="store_true",
                    help="Train 2 UGVs with delayed survivor knowledge and final joint-schema observations.")
     p.add_argument("--uav-diagnostic-drones", type=int, default=DEFAULT_UAV_DIAG_DRONES,
                    help="Number of UAVs in --uav-survivor-diagnostic mode.")
     p.add_argument("--joint-diagnostic-ugvs", type=int, default=DEFAULT_JOINT_DIAG_UGVS,
-                   help="Number of UGVs in --joint-survivor-diagnostic mode.")
+                   help="Number of UGVs in the default joint-survivor training scenario.")
     p.add_argument("--n-drones", "--n-uavs", dest="n_drones", type=int, default=None,
                    help="Override the number of UAVs/drones for training scenarios. "
                         "Joint-schema modes use the same value for the UAV observation schema.")
@@ -2888,7 +2887,7 @@ def main():
         p.error(
             "Choose only one diagnostic mode: --ugv-known-survivor-diagnostic, "
             "--uav-survivor-diagnostic, --joint-schema-uav-diagnostic, "
-            "--joint-survivor-diagnostic, or --joint-schema-ugv-diagnostic"
+            "or --joint-schema-ugv-diagnostic"
         )
     if args.ugv_target_assignment_mode is None and (
         args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic
