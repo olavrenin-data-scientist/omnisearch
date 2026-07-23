@@ -314,6 +314,64 @@ class ScenarioRngInvarianceTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(torch.random.get_rng_state(), state_before))
 
+    def test_unseeded_full_reset_does_not_advance_global_rng(self):
+        env = self._env(
+            seed=1000,
+            n_drones=3,
+            n_ground=2,
+            num_envs=2,
+            disable_fire=False,
+        )
+        env.reset(seed=1000)
+        torch.manual_seed(2468)
+        state_before = torch.random.get_rng_state().clone()
+
+        env.reset(return_observations=False)
+
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), state_before))
+
+    def test_bootstrap_positions_are_repeatable_and_non_overlapping(self):
+        first = self._env(seed=1000, n_drones=3, n_ground=2)
+        second = self._env(seed=1000, n_drones=3, n_ground=2)
+        first.reset(seed=1000)
+        second.reset(seed=1000)
+        first_scenario = first.scenario
+        second_scenario = second.scenario
+        first_scenario._reset_rng_contexts[0] = _ResetRngContext(
+            base_seed=1000,
+            env_index=0,
+            episode_index=4,
+        )
+        second_scenario._reset_rng_contexts[0] = _ResetRngContext(
+            base_seed=1000,
+            env_index=0,
+            episode_index=4,
+        )
+
+        first_scenario._bootstrap_entity_positions(0)
+        second_scenario._bootstrap_entity_positions(0)
+        first_positions = self._entity_positions(
+            first_scenario._survivors
+            + first_scenario._decoys
+            + first_scenario.world.agents,
+            0,
+        )
+        second_positions = self._entity_positions(
+            second_scenario._survivors
+            + second_scenario._decoys
+            + second_scenario.world.agents,
+            0,
+        )
+
+        self.assertTrue(torch.equal(first_positions, second_positions))
+        distances = torch.cdist(first_positions, first_positions)
+        distances.fill_diagonal_(float("inf"))
+        min_distance = (
+            2 * first_scenario.agent_radius
+            + float(first_scenario.spawn_padding_by_env.max().item())
+        )
+        self.assertTrue(bool((distances >= min_distance).all().item()))
+
     def test_cell_sampling_changes_only_when_selected_cell_is_infeasible(self):
         scenario = WildfireSearchScenario()
         scenario.fire_grid_size = 16

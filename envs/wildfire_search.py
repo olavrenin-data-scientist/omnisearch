@@ -2403,19 +2403,67 @@ class WildfireSearchScenario(BaseScenario):
             raise RuntimeError(f"reset RNG context for environment {env_index} is not initialized")
         return context
 
+    def _bootstrap_entity_positions(self, env_index: int | None) -> None:
+        """Initialize entity state without consuming PyTorch's global RNG.
+
+        Terrain-aware placement below replaces these positions during ordinary
+        resets. The bootstrap remains necessary as a valid deterministic
+        fallback when a terrain layer contains no feasible placement cells.
+        """
+        entities = self._survivors + self._decoys + self.world.agents
+        if not entities:
+            return
+
+        min_distance = (
+            2 * self.agent_radius
+            + float(self.spawn_padding_by_env.max().item())
+        )
+        x_bounds = (-float(self.x_semidim), float(self.x_semidim))
+        y_bounds = (-float(self.y_semidim), float(self.y_semidim))
+        env_indices = (
+            range(self.world.batch_dim)
+            if env_index is None
+            else (int(env_index),)
+        )
+
+        for batch_index in env_indices:
+            occupied: list[Tensor] = []
+            context = self._reset_rng_context(batch_index)
+            for entity_index, entity in enumerate(entities):
+                generator = context.generator("bootstrap", entity_index)
+                candidate = None
+                for _ in range(50_001):
+                    unit = torch.rand(2, generator=generator, device="cpu")
+                    proposed = torch.stack(
+                        (
+                            x_bounds[0] + unit[0] * (x_bounds[1] - x_bounds[0]),
+                            y_bounds[0] + unit[1] * (y_bounds[1] - y_bounds[0]),
+                        )
+                    )
+                    if not occupied:
+                        candidate = proposed
+                        break
+                    distances = torch.linalg.vector_norm(
+                        torch.stack(occupied, dim=0) - proposed,
+                        dim=1,
+                    )
+                    if bool((distances >= min_distance).all().item()):
+                        candidate = proposed
+                        break
+                if candidate is None:
+                    raise RuntimeError(
+                        "Could not bootstrap non-overlapping entity positions "
+                        "within 50001 attempts"
+                    )
+                occupied.append(candidate)
+                entity.set_pos(
+                    candidate.to(device=self.world.device),
+                    batch_index=batch_index,
+                )
+
     def reset_world_at(self, env_index: int = None):
         self._begin_reset_rng(env_index)
-        ScenarioUtils.spawn_entities_randomly(
-            entities=self._survivors + self._decoys + self.world.agents,
-            world=self.world,
-            env_index=env_index,
-            min_dist_between_entities=(
-                2 * self.agent_radius
-                + float(self.spawn_padding_by_env.max().item())
-            ),
-            x_bounds=(-self.x_semidim, self.x_semidim),
-            y_bounds=(-self.y_semidim, self.y_semidim),
-        )
+        self._bootstrap_entity_positions(env_index)
 
         if env_index is None:
             self.active_survivors.fill_(True)
