@@ -21,7 +21,11 @@ from scripts.diagnose_uav_happo import (
 )
 from scripts.diagnose_joint_happo import _scenario_kwargs as diagnose_joint_scenario_kwargs
 from scripts.diagnose_ugv_happo import _scenario_kwargs as diagnose_ugv_scenario_kwargs
-from scripts.train_happo_smoke import build_args
+from scripts.train_happo_smoke import (
+    DEFAULT_JOINT_TRAINING_EXP_NAME,
+    _apply_default_joint_training_profile,
+    build_args,
+)
 
 
 class MissingNoneNamespace(types.SimpleNamespace):
@@ -30,6 +34,92 @@ class MissingNoneNamespace(types.SimpleNamespace):
 
 
 class HappoCheckpointTests(unittest.TestCase):
+    @staticmethod
+    def _default_training_cli_namespace():
+        return types.SimpleNamespace(
+            ugv_known_survivor_diagnostic=False,
+            uav_survivor_diagnostic=False,
+            joint_schema_uav_diagnostic=False,
+            joint_survivor_diagnostic=False,
+            joint_schema_ugv_diagnostic=False,
+            research=False,
+            preset="smoke",
+            n_drones=None,
+            n_ugvs=None,
+            joint_diagnostic_ugvs=2,
+            n_survivors=None,
+            active_survivors_min=None,
+            active_survivors_max=None,
+            terrain_cache_path=None,
+            fire_grid_size=128,
+            enable_fire=None,
+            local_map_patch_size=3,
+            entropy_coef=0.01,
+            lr=5e-4,
+            critic_lr=5e-4,
+            linear_lr_decay=None,
+            n_rollout_threads=1,
+            hidden_sizes=None,
+            ugv_planner_hint="none",
+            ugv_dense_reward_mode="target",
+            action_transform="clip",
+            ugv_target_assignment_mode=None,
+            ugv_route_progress_shortfall_penalty=None,
+            uav_fire_footprint_penalty=0.0,
+            exp_name="happo_smoke",
+        )
+
+    def test_default_training_cli_uses_reference_joint_profile(self):
+        args = self._default_training_cli_namespace()
+
+        applied = _apply_default_joint_training_profile(args, [])
+
+        self.assertTrue(applied)
+        self.assertTrue(args.joint_survivor_diagnostic)
+        self.assertEqual((args.n_drones, args.n_ugvs), (4, 3))
+        self.assertEqual(args.joint_diagnostic_ugvs, 3)
+        self.assertEqual(args.n_survivors, 10)
+        self.assertEqual((args.active_survivors_min, args.active_survivors_max), (10, 10))
+        self.assertEqual(args.fire_grid_size, 256)
+        self.assertTrue(args.enable_fire)
+        self.assertEqual(args.n_rollout_threads, 8)
+        self.assertEqual(args.hidden_sizes, [128, 128])
+        self.assertEqual(args.ugv_target_assignment_mode, "greedy_sticky")
+        self.assertEqual(args.ugv_route_progress_shortfall_penalty, 0.0025)
+        self.assertEqual(args.uav_fire_footprint_penalty, 0.05)
+        self.assertEqual(args.exp_name, DEFAULT_JOINT_TRAINING_EXP_NAME)
+
+    def test_default_training_cli_preserves_explicit_overrides(self):
+        args = self._default_training_cli_namespace()
+        args.n_survivors = 5
+        args.fire_grid_size = 128
+        args.enable_fire = False
+        args.n_rollout_threads = 1
+        args.hidden_sizes = [64, 64]
+
+        _apply_default_joint_training_profile(
+            args,
+            [
+                "--n-survivors",
+                "5",
+                "--fire-grid-size",
+                "128",
+                "--disable-fire",
+                "--n-rollout-threads",
+                "1",
+                "--hidden-sizes",
+                "64",
+                "64",
+            ],
+        )
+
+        self.assertEqual(args.n_survivors, 5)
+        self.assertEqual((args.active_survivors_min, args.active_survivors_max), (5, 5))
+        self.assertEqual(args.fire_grid_size, 128)
+        self.assertFalse(args.enable_fire)
+        self.assertEqual(args.n_rollout_threads, 1)
+        self.assertEqual(args.hidden_sizes, [64, 64])
+
     def test_manifest_round_trip_beside_models_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"

@@ -8,9 +8,13 @@ HARL doesn't ship a VMAS interface, so this script:
   3. Builds algo_args + env_args from CLI flags
   4. Runs HARL's OnPolicyHARunner
 
-Budgets:
-  smoke    (default)    ~2 000 steps, episode_length=150   ≈ 5-10 s on CPU
-  research (--research)  400 000 steps, episode_length=500 ≈ tens of minutes on CPU
+Default training profile:
+  4 UAVs + 3 UGVs, 10 survivors, 1 km Malibu terrain at 256x256,
+  fire enabled, 900-step episodes, 8 rollout environments, and
+  1 800 000 total environment steps (250 training episodes).
+
+The legacy research and diagnostic profiles remain available through their
+explicit mode flags.
 
 Run from repo root:
 
@@ -130,6 +134,137 @@ DEFAULT_UAV_FRONTIER_TOP_K = 2
 DEFAULT_UAV_FRONTIER_OWNERSHIP = True
 DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE = "fixed_hold"
 DEFAULT_HAPPO_HIDDEN_SIZES = (256, 256)
+DEFAULT_JOINT_TRAINING_NUM_ENV_STEPS = 1_800_000
+DEFAULT_JOINT_TRAINING_EPISODE_LENGTH = 900
+DEFAULT_JOINT_TRAINING_N_ROLLOUT_THREADS = 8
+DEFAULT_JOINT_TRAINING_DRONES = 4
+DEFAULT_JOINT_TRAINING_UGVS = 3
+DEFAULT_JOINT_TRAINING_SURVIVORS = 10
+DEFAULT_JOINT_TRAINING_FIRE_GRID_SIZE = 256
+DEFAULT_JOINT_TRAINING_HIDDEN_SIZES = (128, 128)
+DEFAULT_JOINT_TRAINING_ROUTE_SHORTFALL_PENALTY = 0.0025
+DEFAULT_JOINT_TRAINING_ASSIGNMENT_MODE = "greedy_sticky"
+DEFAULT_JOINT_TRAINING_UAV_FIRE_PENALTY = 0.05
+DEFAULT_JOINT_TRAINING_EXP_NAME = (
+    "happo_uav4_ugv3_area_1sqkm_malibu_grid256_steps900_fire_survivors_10"
+)
+DEFAULT_JOINT_TRAINING_TERRAIN_CACHE_PATH = (
+    ROOT / "data" / "terrain_cache" / "malibu_creek_1sqkm_256.npz"
+)
+
+
+def _cli_option_was_supplied(argv: list[str], *options: str) -> bool:
+    """Return whether argv explicitly contains one of the named options."""
+
+    return any(
+        token == option or token.startswith(f"{option}=")
+        for token in argv
+        for option in options
+    )
+
+
+def _apply_default_joint_training_profile(
+    args: argparse.Namespace,
+    argv: list[str],
+) -> bool:
+    """Apply the reference joint-training profile without overriding CLI values."""
+
+    diagnostic_mode_selected = any(
+        (
+            args.ugv_known_survivor_diagnostic,
+            args.uav_survivor_diagnostic,
+            args.joint_schema_uav_diagnostic,
+            args.joint_survivor_diagnostic,
+            args.joint_schema_ugv_diagnostic,
+        )
+    )
+    if (
+        not diagnostic_mode_selected
+        and not args.research
+        and args.preset == "smoke"
+    ):
+        args.joint_survivor_diagnostic = True
+
+    if not args.joint_survivor_diagnostic:
+        return False
+
+    def set_if_omitted(attribute: str, value, *options: str) -> None:
+        if not _cli_option_was_supplied(argv, *options):
+            setattr(args, attribute, value)
+
+    set_if_omitted("n_drones", DEFAULT_JOINT_TRAINING_DRONES, "--n-drones", "--n-uavs")
+    if not _cli_option_was_supplied(
+        argv,
+        "--n-ugvs",
+        "--n-ground",
+        "--joint-diagnostic-ugvs",
+    ):
+        args.n_ugvs = DEFAULT_JOINT_TRAINING_UGVS
+        args.joint_diagnostic_ugvs = DEFAULT_JOINT_TRAINING_UGVS
+    set_if_omitted("n_survivors", DEFAULT_JOINT_TRAINING_SURVIVORS, "--n-survivors")
+    survivor_slots = int(args.n_survivors)
+    set_if_omitted(
+        "active_survivors_min",
+        survivor_slots,
+        "--active-survivors-min",
+    )
+    set_if_omitted(
+        "active_survivors_max",
+        survivor_slots,
+        "--active-survivors-max",
+    )
+    set_if_omitted(
+        "terrain_cache_path",
+        str(DEFAULT_JOINT_TRAINING_TERRAIN_CACHE_PATH),
+        "--terrain-cache-path",
+    )
+    set_if_omitted(
+        "fire_grid_size",
+        DEFAULT_JOINT_TRAINING_FIRE_GRID_SIZE,
+        "--fire-grid-size",
+    )
+    if not _cli_option_was_supplied(argv, "--enable-fire", "--disable-fire"):
+        args.enable_fire = True
+    set_if_omitted("local_map_patch_size", 7, "--local-map-patch-size")
+    set_if_omitted("entropy_coef", DEFAULT_UAV_DIAG_ENTROPY_COEF, "--entropy-coef")
+    set_if_omitted("lr", DEFAULT_UGV_DIAG_LR, "--lr")
+    set_if_omitted("critic_lr", DEFAULT_UGV_DIAG_CRITIC_LR, "--critic-lr")
+    if not _cli_option_was_supplied(argv, "--linear-lr-decay", "--no-linear-lr-decay"):
+        args.linear_lr_decay = True
+    set_if_omitted(
+        "n_rollout_threads",
+        DEFAULT_JOINT_TRAINING_N_ROLLOUT_THREADS,
+        "--n-rollout-threads",
+    )
+    set_if_omitted(
+        "hidden_sizes",
+        list(DEFAULT_JOINT_TRAINING_HIDDEN_SIZES),
+        "--hidden-sizes",
+    )
+    set_if_omitted("ugv_planner_hint", DEFAULT_UGV_DIAG_PLANNER_HINT, "--ugv-planner-hint")
+    set_if_omitted(
+        "ugv_dense_reward_mode",
+        DEFAULT_UGV_DIAG_DENSE_REWARD_MODE,
+        "--ugv-dense-reward-mode",
+    )
+    set_if_omitted("action_transform", DEFAULT_UGV_DIAG_ACTION_TRANSFORM, "--action-transform")
+    set_if_omitted(
+        "ugv_target_assignment_mode",
+        DEFAULT_JOINT_TRAINING_ASSIGNMENT_MODE,
+        "--ugv-target-assignment-mode",
+    )
+    set_if_omitted(
+        "ugv_route_progress_shortfall_penalty",
+        DEFAULT_JOINT_TRAINING_ROUTE_SHORTFALL_PENALTY,
+        "--ugv-route-progress-shortfall-penalty",
+    )
+    set_if_omitted(
+        "uav_fire_footprint_penalty",
+        DEFAULT_JOINT_TRAINING_UAV_FIRE_PENALTY,
+        "--uav-fire-footprint-penalty",
+    )
+    set_if_omitted("exp_name", DEFAULT_JOINT_TRAINING_EXP_NAME, "--exp-name")
+    return True
 
 
 def _resolve_uav_reward_defaults(
@@ -394,6 +529,7 @@ def build_args(
     ugv_sticky_switch_ratio: float = 0.80,
     ugv_sticky_min_age_steps: int = 10,
     enable_fire: bool | None = None,
+    mode_defaults_resolved: bool = False,
 ) -> tuple[dict, dict, dict]:
     survivor_count = (
         DEFAULT_JOINT_DIAG_SURVIVORS
@@ -460,7 +596,7 @@ def build_args(
         or joint_survivor_diagnostic
         or joint_schema_ugv_diagnostic
     )
-    if ugv_global_diagnostic:
+    if ugv_global_diagnostic and not mode_defaults_resolved:
         defaulted_ugv_planner_hint = ugv_planner_hint == "none"
         if terrain_cache_path is None:
             terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
@@ -627,7 +763,11 @@ def build_args(
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
     if uav_fire_block_threshold is not None and float(uav_fire_block_threshold) > 1.0:
         raise ValueError("uav_fire_block_threshold must be <= 1; use a negative value to disable")
-    if uav_search_diagnostic:
+    if uav_search_diagnostic and mode_defaults_resolved:
+        uav_diagnostic_drones = int(uav_diagnostic_drones)
+        if uav_diagnostic_drones < 1:
+            raise ValueError("uav_diagnostic_drones must be positive")
+    if uav_search_diagnostic and not mode_defaults_resolved:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
             raise ValueError("uav_diagnostic_drones must be positive")
@@ -1640,9 +1780,9 @@ def main():
     p.add_argument("--research",       action="store_true",
                    help="Larger budget: 400k steps, episode_length=500 (tens of minutes on CPU).")
     p.add_argument("--num-env-steps",  type=int,   default=None,
-                   help="Total env steps override (default: 2000 smoke / 400000 research).")
+                   help="Total env steps override (default joint profile: 1800000).")
     p.add_argument("--episode-length", type=int,   default=None,
-                   help="Episode length override (default: 150 smoke / 500 research).")
+                   help="Episode length override (default joint profile: 900).")
     p.add_argument("--seed",           type=int,   default=1)
     p.add_argument("--comms-dropout",  type=float, default=0.0,
                    help="Per-step prob each agent's comms are dropped (default: 0.0).")
@@ -1693,7 +1833,8 @@ def main():
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
                    help="Embedding size per local terrain patch when --terrain-cnn-encoder is enabled.")
-    p.add_argument("--exp-name",       default="happo_smoke")
+    p.add_argument("--exp-name",       default="happo_smoke",
+                   help=f"Experiment name (default joint profile: {DEFAULT_JOINT_TRAINING_EXP_NAME}).")
     p.add_argument("--n-rollout-threads", type=int, default=1,
                    help="Parallel rollout envs. More threads => more diverse data per "
                         "update and faster wall-clock (e.g. 8).")
@@ -1892,7 +2033,8 @@ def main():
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
-                   help="Actor/critic MLP hidden layer sizes. Default: 256 256. "
+                   help="Actor/critic MLP hidden layer sizes. Default joint profile: 128 128; "
+                        "other profiles: 256 256. "
                         "Example: --hidden-sizes 256 256")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
@@ -2285,7 +2427,9 @@ def main():
                         "'clip' is the HARL-compatible default; 'tanh' is an experimental "
                         "plain tanh post-transform; 'radial_tanh' preserves raw action "
                         "direction while smoothly bounding vector magnitude.")
-    args = p.parse_args()
+    argv = sys.argv[1:]
+    args = p.parse_args(argv)
+    _apply_default_joint_training_profile(args, argv)
     args.action_transform = args.action_transform.replace("-", "_")
     args.ugv_planner_hint = args.ugv_planner_hint.replace("-", "_")
     if args.ugv_target_assignment_mode is not None:
@@ -2297,14 +2441,20 @@ def main():
         or args.joint_survivor_diagnostic
         or args.joint_schema_ugv_diagnostic
     ):
-        defaulted_ugv_planner_hint = args.ugv_planner_hint == "none"
+        defaulted_ugv_planner_hint = (
+            args.ugv_planner_hint == "none"
+            and not _cli_option_was_supplied(argv, "--ugv-planner-hint")
+        )
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
-        if args.local_map_patch_size == 3:
+        if (
+            args.local_map_patch_size == 3
+            and not _cli_option_was_supplied(argv, "--local-map-patch-size")
+        ):
             args.local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.lr == 5e-4:
+        if args.lr == 5e-4 and not _cli_option_was_supplied(argv, "--lr"):
             args.lr = DEFAULT_UGV_DIAG_LR
-        if args.critic_lr == 5e-4:
+        if args.critic_lr == 5e-4 and not _cli_option_was_supplied(argv, "--critic-lr"):
             args.critic_lr = DEFAULT_UGV_DIAG_CRITIC_LR
         if args.linear_lr_decay is None:
             args.linear_lr_decay = True
@@ -2318,16 +2468,25 @@ def main():
             args.ugv_global_planner_lookahead_m = DEFAULT_UGV_DIAG_GLOBAL_PLANNER_LOOKAHEAD_M
         if args.ugv_planner_progress_reward == 0.0:
             args.ugv_planner_progress_reward = DEFAULT_UGV_DIAG_PLANNER_PROGRESS_REWARD
-        if args.action_transform == "clip":
+        if (
+            args.action_transform == "clip"
+            and not _cli_option_was_supplied(argv, "--action-transform")
+        ):
             args.action_transform = DEFAULT_UGV_DIAG_ACTION_TRANSFORM
         if args.enable_fire is None:
             args.enable_fire = bool(args.ugv_known_survivor_diagnostic)
         if (args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic) and args.enable_fire is False:
             args.ugv_planner_fire_mode = "off"
-        if args.ugv_planner_fire_mode == "off":
+        if (
+            args.ugv_planner_fire_mode == "off"
+            and not _cli_option_was_supplied(argv, "--ugv-planner-fire-mode")
+        ):
             if args.enable_fire:
                 args.ugv_planner_fire_mode = DEFAULT_UGV_DIAG_PLANNER_FIRE_MODE
-        if args.ugv_planner_fire_replan_policy == "always":
+        if (
+            args.ugv_planner_fire_replan_policy == "always"
+            and not _cli_option_was_supplied(argv, "--ugv-planner-fire-replan-policy")
+        ):
             args.ugv_planner_fire_replan_policy = DEFAULT_UGV_DIAG_PLANNER_FIRE_REPLAN_POLICY
         if args.ugv_planner_fire_replan_interval_steps == 15:
             args.ugv_planner_fire_replan_interval_steps = (
@@ -2335,7 +2494,10 @@ def main():
             )
         if args.ugv_planner_fire_cost == 25.0:
             args.ugv_planner_fire_cost = DEFAULT_UGV_DIAG_PLANNER_FIRE_COST
-        if args.ugv_planner_fire_block_threshold == 0.0:
+        if (
+            args.ugv_planner_fire_block_threshold == 0.0
+            and not _cli_option_was_supplied(argv, "--ugv-planner-fire-block-threshold")
+        ):
             args.ugv_planner_fire_block_threshold = DEFAULT_UGV_DIAG_PLANNER_FIRE_BLOCK_THRESHOLD
         if args.ugv_planner_smoke_cost == 5.0:
             args.ugv_planner_smoke_cost = DEFAULT_UGV_DIAG_PLANNER_SMOKE_COST
@@ -2803,9 +2965,15 @@ def main():
     if uav_search_diagnostic:
         if args.terrain_cache_path is None:
             args.terrain_cache_path = str(DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH)
-        if args.local_map_patch_size == 3:
+        if (
+            args.local_map_patch_size == 3
+            and not _cli_option_was_supplied(argv, "--local-map-patch-size")
+        ):
             args.local_map_patch_size = DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.entropy_coef == 0.01:
+        if (
+            args.entropy_coef == 0.01
+            and not _cli_option_was_supplied(argv, "--entropy-coef")
+        ):
             args.entropy_coef = DEFAULT_UAV_DIAG_ENTROPY_COEF
         if args.uav_no_global_coverage_obs:
             args.coverage_obs_grid = 0
@@ -2859,11 +3027,17 @@ def main():
             args.uav_start_min_separation_m = DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M
         if args.uav_start_edge_margin_m is None:
             args.uav_start_edge_margin_m = DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M
-        if args.action_transform == "clip":
+        if (
+            args.action_transform == "clip"
+            and not _cli_option_was_supplied(argv, "--action-transform")
+        ):
             args.action_transform = "radial_tanh"
         if args.joint_schema_uav_diagnostic and args.ugv_planner_hint == "none":
             args.ugv_planner_hint = DEFAULT_UGV_DIAG_PLANNER_HINT
-        if args.n_rollout_threads == 1:
+        if (
+            args.n_rollout_threads == 1
+            and not _cli_option_was_supplied(argv, "--n-rollout-threads")
+        ):
             args.n_rollout_threads = DEFAULT_UAV_DIAG_N_ROLLOUT_THREADS
     if args.joint_schema_ugv_diagnostic:
         args.uav_coverage_reward = 0.0
@@ -2995,7 +3169,10 @@ def main():
     if args.research:
         num_env_steps  = args.num_env_steps  or 400_000
         episode_length = args.episode_length or (1_000 if args.preset == "floor0-1km" else 500)
-    elif args.uav_survivor_diagnostic or args.joint_schema_uav_diagnostic or args.joint_survivor_diagnostic:
+    elif args.joint_survivor_diagnostic:
+        num_env_steps = args.num_env_steps or DEFAULT_JOINT_TRAINING_NUM_ENV_STEPS
+        episode_length = args.episode_length or DEFAULT_JOINT_TRAINING_EPISODE_LENGTH
+    elif args.uav_survivor_diagnostic or args.joint_schema_uav_diagnostic:
         num_env_steps  = args.num_env_steps  or 2_000
         episode_length = args.episode_length or DEFAULT_UAV_DIAG_EPISODE_LENGTH
     elif args.preset == "floor0-1km":
@@ -3415,6 +3592,7 @@ def main():
         ugv_sticky_switch_ratio = args.ugv_sticky_switch_ratio,
         ugv_sticky_min_age_steps = args.ugv_sticky_min_age_steps,
         enable_fire = bool(args.enable_fire),
+        mode_defaults_resolved = True,
     )
     print(f" log dir: {algo_args['logger']['log_dir']}")
     print("-" * 60)
