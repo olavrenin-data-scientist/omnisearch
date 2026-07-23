@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
 import math
 import sys
 import time
@@ -28,6 +27,11 @@ from agents.happo_policy import (
     find_latest_happo_checkpoint,
 )
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.diagnostic_json import (
+    partial_json_path,
+    write_final_json,
+    write_partial_json,
+)
 from scripts.train_happo_smoke import build_args
 
 
@@ -1571,10 +1575,28 @@ def main() -> None:
     print(f"planned rollout: {len(args.seeds)} seeds x {args.steps} steps")
     print("-" * 88)
 
+    json_path = Path(args.json_output) if args.json_output else None
+    if json_path is not None:
+        print(f"partial JSON checkpoint: {partial_json_path(json_path)}")
+
     rows = []
     rollout_started_at = time.perf_counter()
     for seed_index, seed in enumerate(args.seeds, start=1):
         rows.append(run_rollout(policy, scenario_kwargs, seed, time_bins=args.time_bins))
+        if json_path is not None:
+            partial_summary = summarize(rows, bins=args.time_bins)
+            write_partial_json(
+                json_path,
+                {
+                    "checkpoint": str(checkpoint_dir),
+                    "deterministic": not args.stochastic,
+                    "scenario": scenario_kwargs,
+                    "summary": partial_summary,
+                    "rows": rows,
+                },
+                completed_rollouts=seed_index,
+                total_rollouts=len(args.seeds),
+            )
         elapsed_rollout_s = time.perf_counter() - rollout_started_at
         completed_steps = int(args.steps) * seed_index
         rollout_steps_per_second = completed_steps / max(elapsed_rollout_s, 1e-9)
@@ -1626,10 +1648,14 @@ def main() -> None:
         "summary": summary,
         "rows": rows,
     }
-    if args.json_output:
-        output = Path(args.json_output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if json_path is not None:
+        write_final_json(
+            json_path,
+            payload,
+            completed_rollouts=len(rows),
+            total_rollouts=len(args.seeds),
+        )
+        print(f"wrote JSON diagnostics: {json_path}")
     if args.plots_output and args.diagnostic_level == "fast":
         print("fast diagnostic level skips plot generation; ignoring --plots-output")
     elif args.plots_output:

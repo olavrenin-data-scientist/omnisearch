@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
 import math
-import os
 import sys
 import time
 from collections import Counter
@@ -36,6 +34,11 @@ from agents.happo_policy import (
     find_latest_happo_checkpoint,
 )
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.diagnostic_json import (
+    partial_json_path,
+    write_final_json,
+    write_partial_json,
+)
 from scripts.train_happo_smoke import (
     DEFAULT_JOINT_DIAG_DRONES,
     DEFAULT_JOINT_DIAG_UGVS,
@@ -1367,22 +1370,6 @@ def _spec_metadata(spec: StrategySpec, *, baseline_ugv_controller: str = "native
     }
 
 
-def _partial_json_path(final_path: Path) -> Path:
-    if final_path.suffix:
-        return final_path.with_name(f"{final_path.stem}.partial{final_path.suffix}")
-    return final_path.with_name(f"{final_path.name}.partial.json")
-
-
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, allow_nan=True),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-
-
 def _diagnostic_payload(
     *,
     scenario_kwargs: dict[str, Any],
@@ -1393,8 +1380,6 @@ def _diagnostic_payload(
     stochastic: bool,
     rows: list[dict[str, Any]],
     summary: dict[str, Any],
-    complete: bool,
-    total_rollouts: int,
 ) -> dict[str, Any]:
     return {
         "scenario_kwargs": scenario_kwargs,
@@ -1417,9 +1402,6 @@ def _diagnostic_payload(
             ),
             "seeds": [int(seed) for seed in seeds],
             "scenario_kwargs": scenario_kwargs,
-            "complete": bool(complete),
-            "completed_rollouts": len(rows),
-            "total_rollouts": int(total_rollouts),
         },
         "rows": rows,
         "summary": summary,
@@ -1645,9 +1627,9 @@ def main() -> None:
     print("-" * 104)
 
     json_path = Path(args.json_output) if args.json_output else None
-    partial_json_path = _partial_json_path(json_path) if json_path is not None else None
-    if partial_json_path is not None:
-        print(f"partial JSON checkpoint: {partial_json_path}")
+    partial_path = partial_json_path(json_path) if json_path is not None else None
+    if partial_path is not None:
+        print(f"partial JSON checkpoint: {partial_path}")
 
     rows: list[dict[str, Any]] = []
     happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] = {}
@@ -1669,7 +1651,7 @@ def main() -> None:
             rows.append(row)
             _print_row(row)
             completed_rollouts += 1
-            if partial_json_path is not None:
+            if json_path is not None:
                 partial_summary = summarize(rows, bins=args.time_bins)
                 partial_payload = _diagnostic_payload(
                     scenario_kwargs=scenario_kwargs,
@@ -1680,10 +1662,13 @@ def main() -> None:
                     stochastic=args.stochastic,
                     rows=rows,
                     summary=partial_summary,
-                    complete=False,
+                )
+                write_partial_json(
+                    json_path,
+                    partial_payload,
+                    completed_rollouts=completed_rollouts,
                     total_rollouts=total_rollouts,
                 )
-                _write_json_atomic(partial_json_path, partial_payload)
             elapsed_rollout_s = time.perf_counter() - rollout_started_at
             completed_steps = int(args.steps) * completed_rollouts
             rollout_steps_per_second = completed_steps / max(elapsed_rollout_s, 1e-9)
@@ -1708,13 +1693,14 @@ def main() -> None:
         stochastic=args.stochastic,
         rows=rows,
         summary=summary,
-        complete=True,
-        total_rollouts=total_rollouts,
     )
     if json_path is not None:
-        _write_json_atomic(json_path, payload)
-        if partial_json_path is not None:
-            partial_json_path.unlink(missing_ok=True)
+        write_final_json(
+            json_path,
+            payload,
+            completed_rollouts=completed_rollouts,
+            total_rollouts=total_rollouts,
+        )
         print(f"wrote json: {json_path}")
     if args.plots_output:
         write_plots(rows, summary, Path(args.plots_output))

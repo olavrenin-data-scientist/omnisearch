@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
 import math
 import sys
 from collections import deque
@@ -26,6 +25,11 @@ from agents.happo_policy import (
     find_latest_happo_checkpoint,
 )
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.diagnostic_json import (
+    partial_json_path,
+    write_final_json,
+    write_partial_json,
+)
 
 TIME_BIN_COUNT = 5
 CONFIDENCE_REVISIT_THRESHOLD = 0.10
@@ -2797,16 +2801,37 @@ def main() -> None:
             f"contains {expected_agents} agents; use the checkpoint manifest settings or "
             "matching --n-drones/--n-ugvs overrides for legacy checkpoints"
         )
-    rows = [
-        run_rollout(
-            policy,
-            scenario_kwargs,
-            seed,
-            moving_no_confidence_gain_threshold=DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
-            diagnostic_level=args.diagnostic_level,
+    json_path = Path(args.json_output) if args.json_output else None
+    if json_path is not None:
+        print(f"partial JSON checkpoint: {partial_json_path(json_path)}")
+
+    rows = []
+    for seed_index, seed in enumerate(args.seeds, start=1):
+        rows.append(
+            run_rollout(
+                policy,
+                scenario_kwargs,
+                seed,
+                moving_no_confidence_gain_threshold=DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
+                diagnostic_level=args.diagnostic_level,
+            )
         )
-        for seed in args.seeds
-    ]
+        if json_path is not None:
+            partial_summary = summarize(rows)
+            partial_label_counts = _label_counts(rows)
+            write_partial_json(
+                json_path,
+                {
+                    "checkpoint": str(checkpoint_dir),
+                    "diagnostic_level": args.diagnostic_level,
+                    "scenario_kwargs": scenario_kwargs,
+                    "rows": rows,
+                    "summary": partial_summary,
+                    "label_counts": partial_label_counts,
+                },
+                completed_rollouts=seed_index,
+                total_rollouts=len(args.seeds),
+            )
     for row in rows:
         print(
             f"seed {row['seed']:>4}: "
@@ -2907,7 +2932,7 @@ def main() -> None:
     print("note: fast diagnostics include only recall, final coverage/confidence, movement, failure labels, and reward-scale time bins.")
     print("note: all_scouted_successes averages only episodes that scouted every survivor.")
 
-    if args.json_output:
+    if json_path is not None:
         output = {
             "checkpoint": str(checkpoint_dir),
             "diagnostic_level": args.diagnostic_level,
@@ -2916,8 +2941,13 @@ def main() -> None:
             "summary": summary,
             "label_counts": label_counts,
         }
-        Path(args.json_output).write_text(json.dumps(output, indent=2), encoding="utf-8")
-        print(f"wrote: {args.json_output}")
+        write_final_json(
+            json_path,
+            output,
+            completed_rollouts=len(rows),
+            total_rollouts=len(args.seeds),
+        )
+        print(f"wrote: {json_path}")
 
     if args.plots_output:
         write_distribution_plots(

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
 import math
 import sys
 from dataclasses import dataclass
@@ -23,6 +22,11 @@ if str(ROOT) not in sys.path:
 from agents.baselines import AntColonyPolicy, LawnmowerPolicy
 from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.diagnostic_json import (
+    partial_json_path,
+    write_final_json,
+    write_partial_json,
+)
 from scripts.train_happo_smoke import build_args
 
 
@@ -765,8 +769,13 @@ def main() -> None:
     print(f"seeds: {len(args.seeds)} ({args.seeds[0]}..{args.seeds[-1]})")
     print("-" * 96)
 
+    json_path = Path(args.json_output) if args.json_output else None
+    if json_path is not None:
+        print(f"partial JSON checkpoint: {partial_json_path(json_path)}")
+
     rows: list[dict[str, Any]] = []
     happo_cache: dict[tuple[Path, bool], HappoPolicy] = {}
+    total_rollouts = len(specs) * len(args.seeds)
     for spec in specs:
         for seed in args.seeds:
             row = run_rollout(
@@ -779,6 +788,25 @@ def main() -> None:
             )
             rows.append(row)
             _print_row(row)
+            if json_path is not None:
+                partial_summary = summarize(rows)
+                write_partial_json(
+                    json_path,
+                    {
+                        "scenario_kwargs": scenario_kwargs,
+                        "metadata": {
+                            "strategies": [_spec_metadata(item) for item in specs],
+                            "happo_deterministic": not args.stochastic,
+                            "steps": int(args.steps),
+                            "seeds": [int(item) for item in args.seeds],
+                            "scenario_kwargs": scenario_kwargs,
+                        },
+                        "rows": rows,
+                        "summary": partial_summary,
+                    },
+                    completed_rollouts=len(rows),
+                    total_rollouts=total_rollouts,
+                )
 
     summary = summarize(rows)
     _print_summary(summary)
@@ -794,11 +822,14 @@ def main() -> None:
         "rows": rows,
         "summary": summary,
     }
-    if args.json_output:
-        path = Path(args.json_output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, allow_nan=True), encoding="utf-8")
-        print(f"wrote json: {path}")
+    if json_path is not None:
+        write_final_json(
+            json_path,
+            payload,
+            completed_rollouts=len(rows),
+            total_rollouts=total_rollouts,
+        )
+        print(f"wrote json: {json_path}")
     if args.plots_output:
         write_plots(rows, summary, Path(args.plots_output))
         print(f"wrote plots: {args.plots_output}")

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
 import math
 import sys
 from pathlib import Path
@@ -30,6 +29,11 @@ from agents.happo_policy import (
     find_latest_happo_checkpoint,
 )
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.diagnostic_json import (
+    partial_json_path,
+    write_final_json,
+    write_partial_json,
+)
 from scripts.train_happo_smoke import build_args
 
 
@@ -2934,16 +2938,40 @@ def main() -> None:
     )
     print("-" * 72)
 
-    rows = [
-        run_rollout(
-            checkpoint_dir,
-            scenario_kwargs,
-            seed,
-            deterministic=not args.stochastic,
-            actor_file_indices=actor_file_indices,
+    json_path = Path(args.json_output) if args.json_output else None
+    if json_path is not None:
+        print(f"partial JSON checkpoint: {partial_json_path(json_path)}")
+
+    rows = []
+    for seed_index, seed in enumerate(args.seeds, start=1):
+        rows.append(
+            run_rollout(
+                checkpoint_dir,
+                scenario_kwargs,
+                seed,
+                deterministic=not args.stochastic,
+                actor_file_indices=actor_file_indices,
+            )
         )
-        for seed in args.seeds
-    ]
+        if json_path is not None:
+            partial_summary = _summarize_rows(rows, args.time_bins)
+            write_partial_json(
+                json_path,
+                _json_sanitize(
+                    {
+                        "checkpoint": str(checkpoint_dir),
+                        "deterministic": not args.stochastic,
+                        "steps": int(args.steps),
+                        "seeds": list(args.seeds),
+                        "scenario_kwargs": scenario_kwargs,
+                        "summary": partial_summary,
+                        "rows": rows,
+                    }
+                ),
+                completed_rollouts=seed_index,
+                total_rollouts=len(args.seeds),
+                sort_keys=True,
+            )
     summary = _summarize_rows(rows, args.time_bins)
     for row in rows:
         print(
@@ -3062,9 +3090,7 @@ def main() -> None:
             if args.trace_all or result["full_success"] <= 0.0:
                 _print_failure_trace(result, tail=args.trace_tail, stride=args.trace_stride)
 
-    if args.json_output:
-        output = Path(args.json_output)
-        output.parent.mkdir(parents=True, exist_ok=True)
+    if json_path is not None:
         payload = {
             "checkpoint": str(checkpoint_dir),
             "deterministic": not args.stochastic,
@@ -3074,11 +3100,14 @@ def main() -> None:
             "summary": summary,
             "rows": rows,
         }
-        output.write_text(
-            json.dumps(_json_sanitize(payload), indent=2, sort_keys=True),
-            encoding="utf-8",
+        write_final_json(
+            json_path,
+            _json_sanitize(payload),
+            completed_rollouts=len(rows),
+            total_rollouts=len(args.seeds),
+            sort_keys=True,
         )
-        print(f"wrote JSON diagnostics: {output}")
+        print(f"wrote JSON diagnostics: {json_path}")
 
     if args.plots_output:
         output = Path(args.plots_output)
