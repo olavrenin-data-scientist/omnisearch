@@ -17,7 +17,7 @@ TERRAIN_500M_CACHE = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.np
 
 class SurvivorCommunicationTests(unittest.TestCase):
     def _env(self, *, n_survivors=2, comms_dropout=0.0, **kwargs):
-        return vmas.make_env(
+        return WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
             device="cpu",
@@ -49,7 +49,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "terrain_cache_path": str(TERRAIN_CACHE),
         }
         params.update(kwargs)
-        return vmas.make_env(
+        return WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=num_envs,
             device="cpu",
@@ -57,6 +57,31 @@ class SurvivorCommunicationTests(unittest.TestCase):
             seed=1,
             **params,
         )
+
+    def test_ugv_confirms_survivor_scouted_in_same_step(self):
+        env = self._env(n_survivors=1, disable_fire=True)
+        scenario = env.scenario
+
+        survivor_pos = scenario._survivors[0].state.pos.clone()
+        scenario.world.agents[0].state.pos[:] = survivor_pos
+        scenario.world.agents[1].state.pos[:] = survivor_pos
+        scenario._pre_step_ground_pos = scenario.world.agents[1].state.pos.unsqueeze(1).clone()
+        scenario.scouted_survivors.zero_()
+        scenario.found_survivors.zero_()
+
+        def forced_drone_detection(drone_dists, drone_pos, surv_pos):
+            return torch.ones(
+                drone_dists.shape,
+                dtype=torch.bool,
+                device=drone_dists.device,
+            )
+
+        scenario._drone_survivor_detections = forced_drone_detection
+        scenario._compute_step_rewards()
+
+        self.assertTrue(bool(scenario.scouted_survivors[0, 0].item()))
+        self.assertTrue(bool(scenario.found_survivors[0, 0].item()))
+        self.assertTrue(bool(scenario.step_ground_confirmations[0, 0, 0].item()))
 
     def _reference_local_astar_route(self, scenario, env_index, pos, target_pos):
         patch_size = scenario.ugv_planner_patch_size
@@ -218,6 +243,94 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario = env.scenario
 
         self.assertEqual(scenario.r_found_survivor, 10.0)
+
+    def test_ugv_spawns_are_traversable_under_runtime_lookup(self):
+        env = WildfireSearchScenario.make_env(
+            scenario=WildfireSearchScenario(),
+            num_envs=1,
+            device="cpu",
+            continuous_actions=True,
+            seed=1022,
+            n_drones=3,
+            n_ground=2,
+            n_survivors=5,
+            disable_fire=True,
+            fire_grid_size=128,
+            max_steps=10,
+            terrain_source="real",
+            terrain_cache_path=str(TERRAIN_500M_CACHE),
+        )
+        env.reset()
+        scenario = env.scenario
+        ground_pos = torch.stack(
+            [agent.state.pos for agent in scenario.world.agents[scenario.n_drones:]],
+            dim=1,
+        )
+
+        traversable = scenario._grid_values_at_positions(
+            scenario.traversable_grid.float(),
+            ground_pos,
+        )
+        speed = scenario._grid_values_at_positions(
+            scenario.speed_multiplier_grid,
+            ground_pos,
+        )
+
+        self.assertTrue(bool((traversable > 0.5).all().item()))
+        self.assertTrue(bool((speed > 0.0).all().item()))
+
+    def test_sticky_assignment_recomputes_when_targets_appear_same_step(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            ugv_planner_hint="global_astar",
+            ugv_target_assignment_mode="route_cost_sticky",
+        )
+        scenario = env.scenario
+        device = scenario.world.agents[0].state.pos.device
+        dtype = scenario.world.agents[0].state.pos.dtype
+
+        scenario.traversable_grid.fill_(True)
+        scenario.mobility_cost_grid.fill_(1.0)
+        scenario._invalidate_ugv_planner_route_cache(terrain_changed=True)
+        ground_slice = slice(scenario.n_drones, scenario.n_agents)
+        ground_positions = [(20, 64), (36, 64)]
+        for ground_index, cell in enumerate(ground_positions):
+            scenario.world.agents[ground_slice.start + ground_index].state.pos[:] = (
+                scenario._grid_cell_center_to_world(cell, device=device, dtype=dtype).view(1, 2)
+            )
+        scenario._survivors[0].state.pos[:] = scenario._grid_cell_center_to_world(
+            (80, 64),
+            device=device,
+            dtype=dtype,
+        ).view(1, 2)
+
+        target_pos, targetable, _ = scenario._ugv_ground_target_candidates()
+        ground_pos = torch.stack([a.state.pos for a in scenario.world.agents[ground_slice]], dim=1)
+        poisoned_idx, _ = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            target_pos,
+            targetable,
+        )
+        self.assertTrue(torch.all(poisoned_idx < 0))
+
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, ground_slice, 0] = True
+        target_pos, targetable, _ = scenario._ugv_ground_target_candidates()
+        assigned_idx, _ = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            target_pos,
+            targetable,
+        )
+
+        self.assertEqual(int((assigned_idx == 0).sum().item()), 1)
+        self.assertEqual(int((assigned_idx < 0).sum().item()), 1)
+        unassigned_ground = int(torch.nonzero(assigned_idx[0] < 0, as_tuple=False)[0].item())
+        hint = scenario._ugv_planner_hint_observations(
+            scenario.world.agents[ground_slice.start + unassigned_ground],
+        )
+        torch.testing.assert_close(hint, torch.zeros_like(hint))
         self.assertEqual(scenario.r_all_survivors_found, 0.0)
         self.assertEqual(scenario.r_drone_scout, 2.0)
         self.assertEqual(scenario.r_ground_confirm, 4.0)
@@ -246,12 +359,38 @@ class SurvivorCommunicationTests(unittest.TestCase):
             torch.tensor([0.02, 0.025, 0.03, 0.04, 0.05]),
         )
 
+    def test_disconnected_ugv_keeps_target_until_confirmation_is_shared(self):
+        env = self._diagnostic_env(
+            n_drones=0,
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        scenario.scouted_survivors[0, 0] = True
+        scenario.found_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[0, :, 0] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.confirmed_survivors_by_agent[0, 0, 0] = True
+
+        _target_pos, targetable, _is_decoy = scenario._ugv_ground_target_candidates()
+
+        self.assertFalse(bool(targetable[0, 0, 0]))
+        self.assertTrue(bool(targetable[0, 1, 0]))
+
+        # Once communication is restored, the confirmation reaches UGV1 and
+        # removes the stale private target without replaying any event reward.
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        scenario._survivor_message_observations(ugv1, keep)
+        _target_pos, targetable_after, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertFalse(bool(targetable_after[0, :, 0].any()))
+
     def test_legacy_drone_scouts_confirm_alias_enables_drone_confirmation(self):
         env = self._diagnostic_env(
             n_drones=1,
             n_ground=0,
             known_survivors_at_reset=False,
-            survivor_spawn_reference="drone",
             drone_scouts_confirm_survivors=True,
         )
         scenario = env.scenario
@@ -455,6 +594,30 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(disconnected_again[0, 0, 0]), 1.0)
         self.assertEqual(float(disconnected_again[0, 1, 0]), 1.0)
 
+    def test_disconnected_sender_does_not_share_new_survivor_message(self):
+        env = self._env(comms_dropout=0.5)
+        scenario = env.scenario
+        drone, ground = env.agents
+        scenario.known_survivors_by_agent.zero_()
+        scenario.known_survivors_by_agent[0, 0, 0] = True
+        drone.comms_up = torch.tensor([False])
+        ground.comms_up = torch.tensor([True])
+
+        message = scenario._survivor_message_observations(
+            ground,
+            torch.ones(1, 1, dtype=torch.bool),
+        ).view(1, scenario.n_survivors, 7)
+        self.assertEqual(float(message[0, 0, 0]), 0.0)
+        self.assertFalse(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+
+        drone.comms_up = torch.tensor([True])
+        message_after_reconnect = scenario._survivor_message_observations(
+            ground,
+            torch.ones(1, 1, dtype=torch.bool),
+        ).view(1, scenario.n_survivors, 7)
+        self.assertEqual(float(message_after_reconnect[0, 0, 0]), 1.0)
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+
     def test_bursty_comms_dropout_uses_persistent_outage_timer(self):
         env = self._env(
             comms_dropout=1.0,
@@ -492,6 +655,17 @@ class SurvivorCommunicationTests(unittest.TestCase):
         expected = 0.3 / (0.3 + 0.7 * 10.0)
         self.assertAlmostEqual(scenario._bursty_comms_start_probability(), expected)
 
+    def test_legacy_global_map_mode_migrates_to_per_agent(self):
+        scenario = self._diagnostic_env(
+            n_drones=1,
+            n_ground=0,
+            n_survivors=1,
+            comms_map_mode="global",
+        ).scenario
+
+        self.assertEqual(scenario.comms_map_mode, "per_agent")
+        self.assertTrue(scenario._comms_maps_enabled())
+
     def test_per_agent_maps_sync_only_when_receiver_connected_iid(self):
         env = self._diagnostic_env(
             n_drones=2,
@@ -512,12 +686,16 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.comm_team_confidence_grid.zero_()
         scenario.comm_agent_coverage_grid[0, 0, 4, 5] = True
         scenario.comm_agent_confidence_grid[0, 0, 6, 7] = 0.75
+        drone0.comms_up = torch.tensor([True])
+        drone1.comms_up = torch.tensor([False])
 
         scenario._sync_comm_agent_maps_for_observation(drone0, keep)
         scenario._sync_comm_agent_maps_for_observation(drone1, drop)
         self.assertFalse(bool(scenario.comm_agent_coverage_grid[0, 1, 4, 5]))
         self.assertEqual(float(scenario.comm_agent_confidence_grid[0, 1, 6, 7]), 0.0)
 
+        scenario.step_count += 1
+        drone1.comms_up = torch.tensor([True])
         scenario._sync_comm_agent_maps_for_observation(drone1, keep)
         self.assertTrue(bool(scenario.comm_agent_coverage_grid[0, 1, 4, 5]))
         self.assertAlmostEqual(float(scenario.comm_agent_confidence_grid[0, 1, 6, 7]), 0.75)
@@ -545,6 +723,8 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.comm_agent_confidence_grid[0, 0, 9, 10] = 0.6
         scenario.comms_dropout_remaining_steps[0, 0] = 0
         scenario.comms_dropout_remaining_steps[0, 1] = 4
+        drone0.comms_up = torch.tensor([True])
+        drone1.comms_up = torch.tensor([False])
 
         scenario._sync_comm_agent_maps_for_observation(drone0, keep)
         self.assertTrue(bool(scenario.comm_team_coverage_grid[0, 8, 9]))
@@ -554,6 +734,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario.comms_dropout_last_update_step[:] = scenario.step_count
         scenario.comm_map_last_sync_step.fill_(-1)
         scenario.comms_dropout_remaining_steps[0, 1] = 0
+        drone1.comms_up = torch.tensor([True])
         scenario._sync_comm_agent_maps_for_observation(drone1, keep)
         self.assertTrue(bool(scenario.comm_agent_coverage_grid[0, 1, 8, 9]))
         self.assertAlmostEqual(float(scenario.comm_agent_confidence_grid[0, 1, 9, 10]), 0.6)
@@ -615,6 +796,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(pending[0, 1, 7]), 0.0)
 
         scenario.dismissed_decoys[0, 0] = True
+        scenario.dismissed_decoys_by_agent[0, :, 0] = True
         dismissed = scenario._survivor_message_observations(ground, keep).view(1, 2, 8)
         self.assertEqual(float(dismissed[0, 1, 0]), 1.0)
         self.assertEqual(float(dismissed[0, 1, 6]), 0.0)
@@ -795,9 +977,9 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._compute_step_rewards()
 
         self.assertTrue(bool(scenario.scouted_survivors[0, 0]))
-        torch.testing.assert_close(drone.scenario_reward, torch.tensor([3.0]))
+        torch.testing.assert_close(drone.scenario_reward, torch.tensor([2.0]))
         torch.testing.assert_close(ground.scenario_reward, torch.tensor([0.0]))
-        torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([0.5]))
+        torch.testing.assert_close(scenario.metric_reward_team_scout, torch.tensor([0.0]))
 
     def test_disconnected_team_confirm_reward_stays_with_direct_confirmer(self):
         env = self._diagnostic_env(
@@ -838,9 +1020,14 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertTrue(bool(scenario.found_survivors[0, 0]))
         torch.testing.assert_close(drone.scenario_reward, torch.tensor([0.0]))
-        torch.testing.assert_close(ground.scenario_reward, torch.tensor([14.0]))
-        torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([2.0]))
+        torch.testing.assert_close(ground.scenario_reward, torch.tensor([10.0]))
+        torch.testing.assert_close(scenario.metric_reward_team, torch.tensor([0.0]))
         torch.testing.assert_close(scenario.metric_reward_ground_confirm, torch.tensor([10.0]))
+        self.assertFalse(bool(scenario.done()[0]))
+
+        ground.comms_up = torch.tensor([True])
+        self.assertTrue(bool(scenario.done()[0]))
+        self.assertTrue(bool(scenario.communicated_confirmed_survivors[0, 0]))
 
     def test_pending_penalty_uses_each_ugv_local_known_targets(self):
         env = self._diagnostic_env(
@@ -880,6 +1067,44 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(ugv1.scenario_reward, torch.tensor([0.0]))
         torch.testing.assert_close(scenario.metric_reward_pending_penalty, torch.tensor([-0.5]))
 
+    def test_unassigned_ugv_has_no_pending_penalty_when_target_is_owned(self):
+        env = self._diagnostic_env(
+            n_drones=0,
+            n_ground=2,
+            n_survivors=1,
+            known_survivors_at_reset=False,
+            ugv_target_assignment_mode="greedy_sticky",
+            ugv_planner_hint="none",
+            r_found_survivor=0.0,
+            r_ground_confirm=0.0,
+            r_ground_shaping=0.0,
+            r_ground_approach=0.0,
+            r_ugv_movement_alignment=0.0,
+            r_ugv_planner_progress=0.0,
+            r_pending_penalty=-0.5,
+            r_fire_penalty=0.0,
+            r_ground_travel_cost=0.0,
+            r_time_penalty=0.0,
+            r_coverage=0.0,
+        )
+        env.reset()
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.8, 0.0]])
+        scenario._survivors[0].state.pos[:] = torch.tensor([[0.1, 0.0]])
+        scenario.detection_range_by_env.zero_()
+        scenario.scouted_survivors[0, 0] = True
+        scenario.known_survivors_by_agent[:, :, 0] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario._invalidate_ugv_assignment_cache()
+
+        scenario._compute_step_rewards()
+
+        torch.testing.assert_close(ugv0.scenario_reward, torch.tensor([-0.5]))
+        torch.testing.assert_close(ugv1.scenario_reward, torch.tensor([0.0]))
+        torch.testing.assert_close(scenario.metric_reward_pending_penalty, torch.tensor([-0.5]))
+
     def test_greedy_ugv_assignment_prefers_distinct_known_targets(self):
         env = self._diagnostic_env(
             n_ground=2,
@@ -903,6 +1128,247 @@ class SurvivorCommunicationTests(unittest.TestCase):
             target_idx >= 0,
         )
         torch.testing.assert_close(duplicate_fraction, torch.tensor([0.0]))
+
+    def test_disconnected_ugv_lease_is_reserved_across_assignment_modes(self):
+        modes = [
+            "nearest",
+            "greedy",
+            "greedy_sticky",
+            "greedy_sequence_sticky",
+            "route_cost_greedy",
+            "route_cost_sticky",
+            "route_sequence_sticky",
+            "route_cost_global",
+        ]
+        route_modes = {
+            "route_cost_greedy",
+            "route_cost_sticky",
+            "route_sequence_sticky",
+            "route_cost_global",
+        }
+        for mode in modes:
+            with self.subTest(mode=mode):
+                env = self._diagnostic_env(
+                    n_ground=2,
+                    n_survivors=3,
+                    comms_dropout=0.5,
+                    ugv_target_assignment_mode=mode,
+                    ugv_planner_hint="global_astar" if mode in route_modes else "none",
+                )
+                scenario = env.scenario
+                ground_pos = torch.tensor([[[0.00, 0.0], [0.05, 0.0]]])
+                survivor_pos = torch.tensor([[[0.10, 0.0], [0.50, 0.0], [0.90, 0.0]]])
+                targetable = torch.ones(1, 2, 3, dtype=torch.bool)
+                scenario.ugv_assignment_lease_idx[:] = torch.tensor([[0, -1]])
+                scenario.ugv_sticky_target_idx[:] = torch.tensor([[0, -1]])
+                scenario.ugv_sequence_next_target_idx[:] = torch.tensor([[2, -1]])
+                env.agents[0].comms_up = torch.tensor([False])
+                env.agents[1].comms_up = torch.tensor([True])
+
+                if mode in route_modes:
+                    scenario._ugv_route_assignment_costs_m = (
+                        lambda positions, targets, available: torch.where(
+                            available,
+                            torch.cdist(positions, targets),
+                            torch.full(
+                                available.shape,
+                                float("inf"),
+                                device=positions.device,
+                            ),
+                        )
+                    )
+                    scenario._ugv_target_pair_route_costs_m = (
+                        lambda targets, _available: torch.cdist(targets, targets)
+                    )
+
+                scenario._invalidate_ugv_assignment_cache()
+                assigned, _ = scenario._ugv_assigned_target_indices(
+                    ground_pos,
+                    survivor_pos,
+                    targetable,
+                )
+                self.assertEqual(int(assigned[0, 0]), 0)
+                self.assertNotEqual(int(assigned[0, 1]), 0)
+                self.assertEqual(int(scenario.ugv_sequence_next_target_idx[0, 0]), -1)
+
+                connected_assignment = int(assigned[0, 1])
+                moved_disconnected = ground_pos.clone()
+                moved_disconnected[0, 0] = torch.tensor([10.0, 10.0])
+                scenario._invalidate_ugv_assignment_cache()
+                reassigned, _ = scenario._ugv_assigned_target_indices(
+                    moved_disconnected,
+                    survivor_pos,
+                    targetable,
+                )
+                self.assertEqual(int(reassigned[0, 1]), connected_assignment)
+
+    def test_disconnected_unassigned_ugv_is_excluded_from_new_assignment(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            comms_dropout=0.5,
+            ugv_target_assignment_mode="greedy",
+        )
+        scenario = env.scenario
+        env.agents[0].comms_up = torch.tensor([False])
+        env.agents[1].comms_up = torch.tensor([True])
+        scenario.ugv_assignment_lease_idx.fill_(-1)
+        scenario._invalidate_ugv_assignment_cache()
+
+        assigned, _ = scenario._ugv_assigned_target_indices(
+            torch.tensor([[[0.0, 0.0], [0.8, 0.0]]]),
+            torch.tensor([[[0.1, 0.0], [0.9, 0.0]]]),
+            torch.ones(1, 2, 2, dtype=torch.bool),
+        )
+
+        self.assertEqual(int(assigned[0, 0]), -1)
+        self.assertGreaterEqual(int(assigned[0, 1]), 0)
+
+    def test_zero_dropout_assignment_matches_original_solver(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=3,
+            comms_dropout=0.0,
+            ugv_target_assignment_mode="greedy",
+        )
+        scenario = env.scenario
+        ground_pos = torch.tensor([[[0.0, 0.0], [0.7, 0.0]]])
+        survivor_pos = torch.tensor([[[0.1, 0.0], [0.6, 0.0], [0.9, 0.0]]])
+        targetable = torch.ones(1, 2, 3, dtype=torch.bool)
+
+        expected_idx, expected_dist = scenario._ugv_assigned_target_indices_without_leases(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+        scenario._invalidate_ugv_assignment_cache()
+        actual_idx, actual_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        torch.testing.assert_close(actual_idx, expected_idx)
+        torch.testing.assert_close(actual_dist, expected_dist)
+
+    def test_private_confirmation_stops_assignment_but_keeps_team_lease(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            comms_dropout=0.5,
+            ugv_target_assignment_mode="greedy_sticky",
+        )
+        scenario = env.scenario
+        env.agents[0].comms_up = torch.tensor([False])
+        env.agents[1].comms_up = torch.tensor([True])
+        scenario.ugv_assignment_lease_idx[:] = torch.tensor([[0, -1]])
+        scenario.ugv_sticky_target_idx[:] = torch.tensor([[0, -1]])
+        targetable = torch.ones(1, 2, 2, dtype=torch.bool)
+        targetable[0, 0, 0] = False
+        scenario._invalidate_ugv_assignment_cache()
+
+        assigned, _ = scenario._ugv_assigned_target_indices(
+            torch.tensor([[[0.0, 0.0], [0.8, 0.0]]]),
+            torch.tensor([[[0.1, 0.0], [0.9, 0.0]]]),
+            targetable,
+        )
+
+        self.assertEqual(int(assigned[0, 0]), -1)
+        self.assertEqual(int(assigned[0, 1]), 1)
+        self.assertEqual(int(scenario.ugv_assignment_lease_idx[0, 0]), 0)
+        filtered = scenario._ugv_assignment_aware_pending_targets(
+            targetable,
+            assigned,
+            assigned >= 0,
+        )
+        self.assertFalse(bool(filtered[0, 0].any()))
+        self.assertFalse(bool(filtered[0, 1, 0]))
+
+        env.agents[0].comms_up = torch.tensor([True])
+        targetable[:, :, 0] = False
+        scenario._invalidate_ugv_assignment_cache()
+        scenario._ugv_assigned_target_indices(
+            torch.tensor([[[0.0, 0.0], [0.8, 0.0]]]),
+            torch.tensor([[[0.1, 0.0], [0.9, 0.0]]]),
+            targetable,
+        )
+        self.assertNotEqual(int(scenario.ugv_assignment_lease_idx[0, 0]), 0)
+
+    def test_disconnected_ugv_does_not_receive_new_other_assignment_flags(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=2,
+            comms_dropout=0.5,
+            ugv_target_assignment_mode="greedy_sticky",
+            survivor_assignment_obs=True,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.comms_up = torch.tensor([False])
+        ugv1.comms_up = torch.tensor([True])
+        scenario.known_survivors_by_agent[:] = True
+        scenario.confirmed_survivors_by_agent.zero_()
+        scenario.ugv_assignment_lease_idx[:] = torch.tensor([[0, -1]])
+        scenario.ugv_sticky_target_idx[:] = torch.tensor([[0, -1]])
+        scenario._invalidate_ugv_assignment_cache()
+
+        message = scenario._survivor_message_observations(
+            ugv0,
+            torch.zeros(1, 1, dtype=torch.bool),
+        ).view(1, 2, 9)
+
+        torch.testing.assert_close(message[0, :, 7], torch.tensor([1.0, 0.0]))
+        torch.testing.assert_close(message[0, :, 8], torch.zeros(2))
+
+    def test_unique_greedy_assignment_modes_leave_extra_ugvs_unassigned(self):
+        modes = [
+            "greedy",
+            "greedy_sticky",
+            "greedy_sequence_sticky",
+            "route_cost_greedy",
+            "route_cost_sticky",
+            "route_sequence_sticky",
+        ]
+        route_modes = {"route_cost_greedy", "route_cost_sticky", "route_sequence_sticky"}
+        for mode in modes:
+            with self.subTest(mode=mode):
+                env = self._diagnostic_env(
+                    n_ground=3,
+                    n_survivors=1,
+                    ugv_target_assignment_mode=mode,
+                    ugv_planner_hint="global_astar" if mode in route_modes else "none",
+                )
+                scenario = env.scenario
+                scenario.ugv_sticky_target_idx.fill_(-1)
+                scenario.ugv_sticky_target_age.zero_()
+                scenario._invalidate_ugv_assignment_cache()
+                ground_pos = torch.tensor([[[0.00, 0.0], [0.25, 0.0], [0.80, 0.0]]])
+                survivor_pos = torch.tensor([[[0.30, 0.0]]])
+                targetable = torch.ones(1, 3, 1, dtype=torch.bool)
+
+                if mode in route_modes:
+                    def route_costs(_ground_pos, _survivor_pos, _targetable):
+                        return torch.tensor([[[30.0], [5.0], [50.0]]])
+
+                    scenario._ugv_route_assignment_costs_m = route_costs
+                    scenario._ugv_target_pair_route_costs_m = (
+                        lambda _survivor_pos, _targetable: torch.full((1, 1, 1), float("inf"))
+                    )
+
+                target_idx, target_dist = scenario._ugv_assigned_target_indices(
+                    ground_pos,
+                    survivor_pos,
+                    targetable,
+                )
+
+                self.assertEqual(int((target_idx == 0).sum().item()), 1)
+                self.assertEqual(int((target_idx < 0).sum().item()), 2)
+                assigned_ground = int(torch.nonzero(target_idx[0] == 0, as_tuple=False)[0].item())
+                self.assertEqual(assigned_ground, 1)
+                self.assertTrue(torch.isfinite(target_dist[0, assigned_ground]))
+                for ground_index in range(3):
+                    if ground_index != assigned_ground:
+                        self.assertTrue(torch.isinf(target_dist[0, ground_index]))
 
     def test_nearest_ugv_assignment_preserves_shared_target_behavior(self):
         env = self._diagnostic_env(
@@ -1304,6 +1770,128 @@ class SurvivorCommunicationTests(unittest.TestCase):
 
         self.assertEqual(target_idx.tolist(), [[1]])
 
+    def test_route_sequence_sticky_can_reorder_current_and_new_target(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_sequence_sticky",
+            ugv_planner_hint="global_astar",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=20.0,
+            ugv_sticky_switch_ratio=0.8,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[1.0, 0.0], [0.2, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+        scenario._ugv_route_assignment_costs_m = (
+            lambda _ground_pos, _survivor_pos, _targetable: torch.tensor([[[20.0, 10.0]]])
+        )
+        scenario._ugv_target_pair_route_costs_m = (
+            lambda _survivor_pos, _targetable: torch.tensor([[[float("inf"), 100.0], [10.0, float("inf")]]])
+        )
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[1]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[0]])
+
+    def test_greedy_sequence_sticky_can_reorder_current_and_new_target(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="greedy_sequence_sticky",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=0.0,
+            ugv_sticky_switch_ratio=1.0,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[12.0, 0.0], [10.0, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[1]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[0]])
+
+    def test_greedy_sequence_sticky_keeps_current_and_queues_next_target(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="greedy_sequence_sticky",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=0.0,
+            ugv_sticky_switch_ratio=1.0,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[10.0, 0.0], [15.0, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[1]])
+
+    def test_route_sequence_sticky_keeps_current_for_marginal_reorder_gain(self):
+        env = self._diagnostic_env(
+            n_ground=1,
+            n_survivors=2,
+            ugv_target_assignment_mode="route_sequence_sticky",
+            ugv_planner_hint="global_astar",
+            ugv_sticky_min_age_steps=0,
+            ugv_sticky_switch_margin_m=20.0,
+            ugv_sticky_switch_ratio=0.8,
+        )
+        scenario = env.scenario
+        scenario.ugv_sticky_target_idx[0] = torch.tensor([0])
+        scenario.ugv_sticky_target_age[0] = torch.tensor([5])
+        scenario.ugv_sequence_next_target_idx[0] = torch.tensor([-1])
+        scenario._invalidate_ugv_assignment_cache()
+        ground_pos = torch.tensor([[[0.0, 0.0]]])
+        survivor_pos = torch.tensor([[[0.2, 0.0], [0.3, 0.0]]])
+        targetable = torch.ones(1, 1, 2, dtype=torch.bool)
+        scenario._ugv_route_assignment_costs_m = (
+            lambda _ground_pos, _survivor_pos, _targetable: torch.tensor([[[20.0, 15.0]]])
+        )
+        scenario._ugv_target_pair_route_costs_m = (
+            lambda _survivor_pos, _targetable: torch.tensor([[[float("inf"), 10.0], [10.0, float("inf")]]])
+        )
+
+        target_idx, _target_dist = scenario._ugv_assigned_target_indices(
+            ground_pos,
+            survivor_pos,
+            targetable,
+        )
+
+        self.assertEqual(target_idx.tolist(), [[0]])
+        self.assertEqual(scenario.ugv_sequence_next_target_idx.tolist(), [[1]])
+
     def test_known_survivors_at_reset_initializes_ground_mission_memory(self):
         env = self._diagnostic_env()
         scenario = env.scenario
@@ -1351,6 +1939,89 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertTrue(bool(scenario.scouted_survivors[0].all().item()))
         self.assertTrue(bool(scenario.known_survivors_by_agent[0].all().item()))
 
+    def test_delayed_oracle_reports_wait_for_ugv_reconnection(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            n_decoys=1,
+            known_survivors_at_reset=False,
+            delayed_survivor_knowledge=True,
+            survivor_reveal_initial_count=0,
+            survivor_reveal_start_step=1,
+            survivor_reveal_end_step=1,
+            delayed_decoy_knowledge=True,
+            decoy_reveal_initial_count=0,
+            decoy_reveal_start_step=1,
+            decoy_reveal_end_step=1,
+            comms_dropout=0.5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        scenario.step_count[0] = 1
+        scenario.survivor_reveal_steps[0, 0] = 1
+        scenario.decoy_reveal_steps[0, 0] = 1
+        ugv0.comms_up = torch.tensor([True])
+        ugv1.comms_up = torch.tensor([False])
+
+        scenario._apply_delayed_survivor_reveals(0)
+        scenario._apply_delayed_decoy_reveals(0)
+
+        self.assertTrue(bool(scenario.survivor_oracle_revealed[0, 0]))
+        self.assertTrue(bool(scenario.decoy_oracle_revealed[0, 0]))
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0, 0, 0]))
+        self.assertFalse(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+        self.assertTrue(bool(scenario.known_decoys_by_agent[0, 0, 0]))
+        self.assertFalse(bool(scenario.known_decoys_by_agent[0, 1, 0]))
+
+        ugv1.comms_up = torch.tensor([True])
+        changed = scenario._sync_delayed_oracle_ground_knowledge(0)
+
+        self.assertTrue(changed)
+        self.assertTrue(bool(scenario.known_survivors_by_agent[0, 1, 0]))
+        self.assertTrue(bool(scenario.known_decoys_by_agent[0, 1, 0]))
+
+    def test_private_decoy_dismissal_syncs_only_after_reconnection(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            n_decoys=1,
+            known_survivors_at_reset=False,
+            comms_dropout=0.5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        decoy = scenario._decoys[0]
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.8, 0.0]])
+        decoy.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        scenario.scouted_decoys[0, 0] = True
+        scenario.known_decoys_by_agent[0, :, 0] = True
+        ugv0.comms_up = torch.tensor([False])
+        ugv1.comms_up = torch.tensor([True])
+
+        agent_pos = torch.stack([a.state.pos for a in env.agents], dim=1)
+        scenario._process_decoy_false_positives(
+            agent_pos,
+            scenario.detection_range_by_env.view(-1, 1, 1),
+            torch.device("cpu"),
+        )
+
+        self.assertTrue(bool(scenario.dismissed_decoys[0, 0]))
+        self.assertTrue(bool(scenario.dismissed_decoys_by_agent[0, 0, 0]))
+        self.assertFalse(bool(scenario.dismissed_decoys_by_agent[0, 1, 0]))
+        _target_pos, targetable, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertTrue(bool(targetable[0, 1, 1]))
+
+        ugv0.comms_up = torch.tensor([True])
+        scenario._survivor_message_observations(
+            ugv1,
+            torch.ones(1, 1, dtype=torch.bool),
+        )
+
+        self.assertTrue(bool(scenario.dismissed_decoys_by_agent[0, 1, 0]))
+        _target_pos, targetable, _is_decoy = scenario._ugv_ground_target_candidates()
+        self.assertFalse(bool(targetable[0, 1, 1]))
+
     def test_joint_schema_ugv_neighbor_slots_pad_absent_uavs(self):
         env = self._diagnostic_env(
             n_ground=2,
@@ -1373,6 +2044,38 @@ class SurvivorCommunicationTests(unittest.TestCase):
         torch.testing.assert_close(obs0[:, 6:8], torch.tensor([[0.3, -0.1]]), atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(obs1[:, :6], torch.zeros(1, 6))
         torch.testing.assert_close(obs1[:, 6:8], torch.tensor([[-0.3, 0.1]]), atol=1e-6, rtol=1e-6)
+
+    def test_neighbor_observation_hides_disconnected_sender(self):
+        env = self._diagnostic_env(
+            n_ground=2,
+            n_survivors=1,
+            comms_dropout=0.5,
+        )
+        scenario = env.scenario
+        ugv0, ugv1 = env.agents
+        ugv0.state.pos[:] = torch.tensor([[0.0, 0.0]])
+        ugv1.state.pos[:] = torch.tensor([[0.4, -0.2]])
+        keep = torch.ones(1, 1, dtype=torch.bool)
+        drop = torch.zeros(1, 1, dtype=torch.bool)
+        ugv0.comms_up = torch.tensor([True])
+        ugv1.comms_up = torch.tensor([False])
+
+        torch.testing.assert_close(
+            scenario._neighbor_observations(ugv0, keep),
+            torch.zeros(1, 2),
+        )
+        torch.testing.assert_close(
+            scenario._neighbor_observations(ugv1, drop),
+            torch.zeros(1, 2),
+        )
+
+        ugv1.comms_up = torch.tensor([True])
+        torch.testing.assert_close(
+            scenario._neighbor_observations(ugv0, keep),
+            torch.tensor([[0.4, -0.2]]),
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
     def test_ugv_survivor_observation_keeps_all_known_survivors(self):
         env = self._diagnostic_env(
@@ -1467,52 +2170,23 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertTrue(bool(scenario.found_survivors[0, 0]))
         self.assertTrue(bool(scenario.step_ground_confirmations[0, 0, 0]))
 
-    def test_known_survivor_spawn_distance_places_candidate_near_ground(self):
-        env = self._diagnostic_env(
+    def test_legacy_distance_conditioning_keys_are_ignored(self):
+        expected = self._diagnostic_env()
+        legacy = self._diagnostic_env(
+            survivor_spawn_reference="ground",
             known_survivor_spawn_distance_m=80.0,
-            ground_confirm_min_m=20.0,
-        )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        scale = float(scenario.terrain_sim_units_per_meter[0])
-        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
-
-        self.assertGreater(distance_m, 20.0)
-        self.assertLess(distance_m, 120.0)
-
-    def test_known_survivor_spawn_distance_range_is_supported(self):
-        env = self._diagnostic_env(
-            known_survivor_spawn_distance_m=65.0,
             known_survivor_spawn_distance_min_m=30.0,
             known_survivor_spawn_distance_max_m=100.0,
-            ground_confirm_min_m=20.0,
         )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        scale = float(scenario.terrain_sim_units_per_meter[0])
-        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
 
-        self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
-        self.assertEqual(scenario.known_survivor_spawn_distance_max_m, 100.0)
-        self.assertGreater(distance_m, 20.0)
-        self.assertLess(distance_m, 150.0)
-
-    def test_known_survivor_spawn_distance_min_without_max_is_unbounded(self):
-        env = self._diagnostic_env(
-            known_survivor_spawn_distance_min_m=30.0,
-            terrain_cache_path=str(TERRAIN_500M_CACHE),
-        )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        scale = float(scenario.terrain_sim_units_per_meter[0])
-        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
-
-        self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
-        self.assertTrue(math.isinf(scenario.known_survivor_spawn_distance_max_m))
-        self.assertGreaterEqual(distance_m, 30.0)
+        self.assertTrue(torch.equal(
+            expected.scenario._survivors[0].state.pos,
+            legacy.scenario._survivors[0].state.pos,
+        ))
+        self.assertFalse(hasattr(legacy.scenario, "survivor_spawn_reference"))
+        self.assertFalse(hasattr(legacy.scenario, "known_survivor_spawn_distance_m"))
+        self.assertFalse(hasattr(legacy.scenario, "known_survivor_spawn_distance_min_m"))
+        self.assertFalse(hasattr(legacy.scenario, "known_survivor_spawn_distance_max_m"))
 
     def test_ugv_planner_patch_size_must_be_positive_odd(self):
         with self.assertRaises(ValueError):
@@ -1698,6 +2372,85 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertGreaterEqual(len(plan["path"]), 2)
         self.assertNotIn((68, 64), plan["path"])
         self.assertNotEqual(plan["waypoint"][1], 64)
+
+    def test_global_astar_replans_when_ugv_drifts_off_cached_route(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+
+        first = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(first["path"][0], (64, 64))
+
+        ground.state.pos[:] = scenario._grid_cell_center_to_world(
+            (64, 78),
+            device=ground.state.pos.device,
+            dtype=ground.state.pos.dtype,
+        ).view(1, 2)
+        second = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+
+        self.assertIsNotNone(second)
+        self.assertEqual(second["path"][0], (64, 78))
+        self.assertEqual(scenario.ugv_global_route_paths[0][0][0], (64, 78))
+
+    def test_global_astar_replans_when_cached_waypoint_becomes_blocked(self):
+        env = self._diagnostic_env(
+            ugv_planner_hint="global_astar",
+            ugv_global_planner_lookahead_m=20.0,
+        )
+        scenario = env.scenario
+        ground, survivor = self._set_local_astar_case(
+            scenario,
+            (64, 64),
+            (96, 64),
+        )
+
+        first = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+        self.assertIsNotNone(first)
+        self.assertIn((65, 64), first["path"])
+
+        scenario.traversable_grid[0, 64, 65] = False
+        scenario._invalidate_ugv_planner_layer_cache(0)
+        second = scenario._global_astar_route_info_for_env(
+            0,
+            ground.state.pos[0],
+            survivor.state.pos[0],
+            ground_index=0,
+            target_idx=0,
+            update_index=True,
+        )
+
+        self.assertIsNotNone(second)
+        self.assertNotIn((65, 64), second["path"])
+        self.assertNotIn((65, 64), scenario.ugv_global_route_paths[0][0])
 
     def test_global_astar_terrain_heuristic_preserves_route_cost(self):
         env = self._diagnostic_env(
@@ -2702,40 +3455,6 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, target_idx, gate)
         self.assertEqual(calls["count"], 2)
 
-    def test_known_survivor_spawn_distance_range_samples_angles(self):
-        labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
-        counts = {label: 0 for label in labels}
-        distances_m = []
-        torch.manual_seed(123)
-        env = self._diagnostic_env(
-            known_survivor_spawn_distance_m=55.0,
-            known_survivor_spawn_distance_min_m=30.0,
-            known_survivor_spawn_distance_max_m=80.0,
-            terrain_cache_path=str(TERRAIN_500M_CACHE),
-        )
-        scenario = env.scenario
-
-        for _ in range(320):
-            env.reset()
-            ground_pos = env.agents[0].state.pos[0]
-            survivor_pos = scenario._survivors[0].state.pos[0]
-            offset = survivor_pos - ground_pos
-            angle = float(torch.atan2(offset[1], offset[0]))
-            bucket = int(((angle + math.pi / 8.0) % (2.0 * math.pi)) / (math.pi / 4.0))
-            counts[labels[bucket]] += 1
-            scale = float(scenario.terrain_sim_units_per_meter[0])
-            distances_m.append(float(torch.linalg.norm(offset) / scale))
-
-        self.assertEqual(set(counts.keys()), set(labels))
-        self.assertGreaterEqual(min(counts.values()), 20)
-        self.assertLessEqual(max(counts.values()), 70)
-        self.assertGreater(sum(counts[label] for label in ("S", "SW")), 0)
-        self.assertLessEqual(sum(counts[label] for label in ("S", "SW")), 130)
-        self.assertGreater(min(distances_m), 20.0)
-        self.assertLess(max(distances_m), 95.0)
-        self.assertGreater(sum(distances_m) / len(distances_m), 45.0)
-        self.assertLess(sum(distances_m) / len(distances_m), 65.0)
-
     def test_local_map_patch_size_uses_flattened_patch_features_for_ugv(self):
         env = self._diagnostic_env(local_map_patch_size=11)
         obs = env.scenario.observation(env.agents[0])
@@ -3007,7 +3726,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         scale = float(scenario.terrain_sim_units_per_meter[0])
 
         scenario.r_ugv_route_progress_shortfall_penalty = 0.02
-        scenario.step_count[0] = 90
+        scenario.step_count[0] = 99
         scenario.scouted_survivors[0, 0] = True
         scenario.known_survivors_by_agent[0, 0, 0] = True
         survivor.state.pos[:] = torch.tensor([[80.0 * scale, 0.0]])
@@ -3017,13 +3736,14 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(float(scenario.metric_reward_ugv_route_progress_shortfall_penalty[0]), 0.0)
 
         scenario._pre_step_ground_pos[:, 0, :] = torch.tensor([[0.0, 0.0]])
-        ground.state.pos[:] = torch.tensor([[0.5 * scale, 0.0]])
-        scenario.step_ugv_actual_displacement_m[0, 0] = 0.5
+        ground.state.pos[:] = torch.tensor([[0.05 * scale, 0.0]])
+        scenario.step_ugv_actual_displacement_m[0, 0] = 0.05
         scenario._compute_step_rewards()
 
         required = float(scenario.metric_ugv_route_progress_required_m[0])
+        progress = float(scenario.metric_ugv_global_route_progress_m[0])
         shortfall = float(scenario.metric_ugv_route_progress_shortfall_m[0])
-        self.assertGreater(required, 0.5)
+        self.assertGreater(required, progress)
         self.assertGreater(shortfall, 0.0)
         self.assertAlmostEqual(
             float(scenario.metric_reward_ugv_route_progress_shortfall_penalty[0]),

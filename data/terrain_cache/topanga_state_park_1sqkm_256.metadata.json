@@ -1,0 +1,127 @@
+{
+  "builder": "terrain.usgs_osm_builder.build_real_terrain_cache",
+  "cache_path": "/Users/aschuetz/Software/capstone/omnisearch/data/terrain_cache/7c322a25d45b_256.npz",
+  "fuel": {
+    "derived_seed": 3782405409,
+    "landfire_layer_list": [],
+    "landfire_output_projection": null,
+    "landfire_resample_resolution_m": 31,
+    "source": "derived"
+  },
+  "generated_at": "2026-07-20T22:30:42.247553+00:00",
+  "inputs": {
+    "landfire": null,
+    "openstreetmap": {
+      "bbox": [
+        -118.59273607,
+        34.08867441,
+        -118.58189993,
+        34.09768959
+      ],
+      "building_feature_count": 82,
+      "client": "osmnx",
+      "client_version": "2.1.0",
+      "provider": "OpenStreetMap",
+      "road_feature_count": 44,
+      "tags": {
+        "buildings": {
+          "building": true
+        },
+        "roads": {
+          "highway": true
+        },
+        "water": {
+          "natural": [
+            "water",
+            "bay",
+            "strait",
+            "coastline"
+          ],
+          "water": true,
+          "waterway": [
+            "riverbank",
+            "dock"
+          ]
+        }
+      },
+      "timeout_s": 180,
+      "water_feature_count": 1
+    },
+    "usgs_3dep": {
+      "bbox": [
+        -118.59273607,
+        34.08867441,
+        -118.58189993,
+        34.09768959
+      ],
+      "bbox_crs": "EPSG:4326",
+      "cell_size_m": 4.752350536021678,
+      "endpoint": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage",
+      "grid_size": [
+        256,
+        256
+      ],
+      "image_crs": "EPSG:3857",
+      "interpolation": "RSP_BilinearInterpolation",
+      "meters_per_world_unit": 605.9246933427639,
+      "pixel_type": "F32",
+      "projected_bounds": [
+        -13201682.991093487,
+        4040715.056793806,
+        -13200476.717506522,
+        4041926.9061804917
+      ],
+      "projected_crs": "EPSG:3857",
+      "provider": "USGS 3DEP",
+      "sim_units_per_meter": 0.00165037010537267
+    }
+  },
+  "metadata_path": "/Users/aschuetz/Software/capstone/omnisearch/data/terrain_cache/7c322a25d45b_256.metadata.json",
+  "outputs": {
+    "building_cell_count": 1673,
+    "land_cover_counts": {
+      "0": 9090,
+      "1": 34386,
+      "2": 2834,
+      "3": 14138,
+      "4": 4941,
+      "5": 147
+    },
+    "obstacle_type_counts": {
+      "0": 63957,
+      "2": 1579
+    },
+    "road_cell_count": 9090,
+    "water_cell_count": 147
+  },
+  "parameters": {
+    "bbox": [
+      -118.59273607,
+      34.08867441,
+      -118.58189993,
+      34.09768959
+    ],
+    "brush_height_m": 4.0,
+    "building_height_m": 7.0,
+    "building_height_sim": 0.01155259073760869,
+    "building_height_source": "meters",
+    "forest_height_m": 40.0,
+    "fuel_source": "derived",
+    "grid_size": 256,
+    "house_height_m": 10.0,
+    "place": "Topanga State Park, California",
+    "requested_dem_resolution_m": 10,
+    "road_width_m": 8.0,
+    "source_cache_dir": "/Users/aschuetz/Software/capstone/omnisearch/data/source_cache",
+    "terrain_elevation_scale": 0.3
+  },
+  "schema_version": 3,
+  "source_description": "USGS 3DEP DEM 10m + OpenStreetMap roads/buildings/water; fuel_source=derived; place='Topanga State Park, California'; bbox=(-118.592736, 34.088674, -118.5819, 34.09769)",
+  "source_note": null,
+  "units": {
+    "horizontal": "simulation world units, with x/y spanning roughly [-1, 1]",
+    "meters_per_world_unit": 605.9246933427639,
+    "sim_units_per_meter": 0.00165037010537267,
+    "vertical": "normalized simulation units"
+  }
+}

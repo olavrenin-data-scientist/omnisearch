@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==82.0.1", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,77 +10,77 @@ readme = "README.md"
 requires-python = ">=3.10,<3.12"
 license = { text = "MIT" }
 dependencies = [
-  "torch",
-  "torchvision",
-  "vmas",
-  "torchrl",
-  "benchmarl",
-  "ultralytics",
-  "pettingzoo[mpe]",
-  "gymnasium",
-  "networkx",
-  "pillow",
-  "wandb",
-  "tensorboard",
-  "tqdm",
-  "hydra-core",
-  "omegaconf",
-  "matplotlib",
-  "seaborn",
-  "pandas",
-  "numpy",
-  "pyyaml",
-  "scipy",
+  "torch==2.9.0",
+  "torchvision==0.24.0",
+  "vmas==1.5.2",
+  "torchrl==0.10.1",
+  "benchmarl==1.5.2",
+  "ultralytics==8.4.104",
+  "pettingzoo[mpe]==1.24.4",
+  "gymnasium==1.3.0",
+  "networkx==3.5",
+  "pillow==12.2.0",
+  "wandb==0.28.1",
+  "tensorboard==2.20.0",
+  "tqdm==4.67.1",
+  "hydra-core==1.3.4",
+  "omegaconf==2.3.1",
+  "matplotlib==3.10.6",
+  "seaborn==0.13.2",
+  "pandas==2.3.3",
+  "numpy==1.26.4",
+  "pyyaml==6.0.3",
+  "scipy==1.12.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest",
-  "black",
-  "ruff",
-  "ipykernel",
-  "jupyter",
-  "nbformat",
-  "nbconvert",
-  "moviepy<2.0.0",
+  "pytest==8.4.2",
+  "black==26.3.1",
+  "ruff==0.15.22",
+  "ipykernel==6.30.1",
+  "jupyter==1.1.1",
+  "nbformat==5.10.4",
+  "nbconvert==7.16.6",
+  "moviepy==1.0.3",
 ]
 geo = [
-  "osmnx",
-  "rasterio",
-  "geopandas",
-  "shapely",
-  "pyproj",
-  "requests",
+  "osmnx==2.1.0",
+  "rasterio==1.4.4",
+  "geopandas==1.1.3",
+  "shapely==2.1.2",
+  "pyproj==3.7.2",
+  "requests==2.32.5",
 ]
 cv = [
-  "opencv-python",
+  "opencv-python==4.11.0.86",
 ]
 docs = [
-  "pygments",
-  "reportlab",
+  "pygments==2.19.2",
+  "reportlab==5.0.0",
 ]
 happo = [
-  "harl @ git+https://github.com/PKU-MARL/HARL.git",
+  "harl @ git+https://github.com/PKU-MARL/HARL.git@b1af98b0dbab72a2eee9d160751cd09aedbb8ce2",
 ]
 all = [
-  "pytest",
-  "black",
-  "ruff",
-  "ipykernel",
-  "jupyter",
-  "nbformat",
-  "nbconvert",
-  "moviepy<2.0.0",
-  "osmnx",
-  "rasterio",
-  "geopandas",
-  "shapely",
-  "pyproj",
-  "requests",
-  "opencv-python",
-  "pygments",
-  "reportlab",
-  "harl @ git+https://github.com/PKU-MARL/HARL.git",
+  "pytest==8.4.2",
+  "black==26.3.1",
+  "ruff==0.15.22",
+  "ipykernel==6.30.1",
+  "jupyter==1.1.1",
+  "nbformat==5.10.4",
+  "nbconvert==7.16.6",
+  "moviepy==1.0.3",
+  "osmnx==2.1.0",
+  "rasterio==1.4.4",
+  "geopandas==1.1.3",
+  "shapely==2.1.2",
+  "pyproj==3.7.2",
+  "requests==2.32.5",
+  "opencv-python==4.11.0.86",
+  "pygments==2.19.2",
+  "reportlab==5.0.0",
+  "harl @ git+https://github.com/PKU-MARL/HARL.git@b1af98b0dbab72a2eee9d160751cd09aedbb8ce2",
 ]
 
 [tool.setuptools.packages.find]

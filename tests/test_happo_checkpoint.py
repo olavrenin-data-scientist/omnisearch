@@ -10,7 +10,11 @@ from agents.happo_checkpoint import (
     merge_training_scenario,
     save_training_manifest,
 )
-from agents.happo_policy import _action_transform_from_manifest, _scenario_kwargs_from_manifest
+from agents.happo_policy import (
+    _action_transform_from_manifest,
+    _scenario_kwargs_from_manifest,
+    actor_file_indices_for_scenario,
+)
 from scripts.diagnose_uav_happo import (
     _scenario_kwargs as diagnose_uav_scenario_kwargs,
     _summarize_per_drone,
@@ -47,7 +51,10 @@ class HappoCheckpointTests(unittest.TestCase):
             )
 
             self.assertEqual(path, run_dir / MANIFEST_FILENAME)
-            self.assertEqual(load_training_manifest(models_dir)["env_args"], env_args)
+            manifest = load_training_manifest(models_dir)
+            self.assertEqual(manifest["env_args"], env_args)
+            self.assertIn("git", manifest)
+            self.assertIsInstance(manifest["git"], dict)
 
     def test_missing_manifest_is_supported_for_legacy_checkpoints(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +104,30 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(merged["ground_confirm_min"], 0.12)
         self.assertEqual(merged["max_steps"], 1_000)
         self.assertEqual(merged["comms_dropout"], 0.8)
+
+    def test_training_scenario_preserves_checkpoint_controls_when_not_overridden(self):
+        manifest = {
+            "env_args": {
+                "scenario_kwargs": {
+                    "max_steps": 500,
+                    "comms_dropout": 0.1,
+                    "ugv_planner_hint": "global_astar",
+                },
+            },
+        }
+
+        merged = merge_training_scenario(
+            {
+                "max_steps": 100,
+                "comms_dropout": 0.0,
+                "ugv_planner_hint": "local_astar",
+            },
+            manifest,
+        )
+
+        self.assertEqual(merged["max_steps"], 500)
+        self.assertEqual(merged["comms_dropout"], 0.1)
+        self.assertEqual(merged["ugv_planner_hint"], "global_astar")
 
     def test_policy_loader_extracts_manifest_scenario_kwargs(self):
         manifest = {
@@ -209,6 +240,50 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertTrue(algo_args["algo"]["share_param"])
         self.assertFalse(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertFalse(algo_args["algo"]["split_critic_by_agent_class"])
+
+    def test_joint_survivor_defaults_to_class_shared_split_critics(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint-split",
+            joint_survivor_diagnostic=True,
+        )
+
+        self.assertFalse(algo_args["algo"]["share_param"])
+        self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertTrue(algo_args["algo"]["split_critic_by_agent_class"])
+        self.assertEqual(algo_args["algo"]["share_param_group_names"], ["uav", "ugv"])
+
+    def test_non_joint_class_shared_runs_do_not_default_to_split_critics(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="ugv-no-split",
+            joint_schema_ugv_diagnostic=True,
+        )
+
+        self.assertTrue(algo_args["algo"]["share_param_by_agent_class"])
+        self.assertFalse(algo_args["algo"]["split_critic_by_agent_class"])
+
+    def test_split_critics_require_class_shared_policy(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="bad-split",
+                share_param_by_agent_class=False,
+                split_critic_by_agent_class=True,
+            )
 
     def test_build_args_rejects_global_and_class_parameter_sharing_together(self):
         with self.assertRaises(ValueError):
@@ -239,6 +314,33 @@ class HappoCheckpointTests(unittest.TestCase):
 
         self.assertEqual(algo_args["train"]["warmstart_uav_model_dir"], "/tmp/uav/models")
         self.assertEqual(algo_args["train"]["warmstart_ugv_model_dir"], "/tmp/ugv/models")
+
+    def test_build_args_exposes_warmstart_actor_freeze_episodes(self):
+        _, algo_args, _ = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="class_warmstart_freeze",
+            joint_survivor_diagnostic=True,
+            share_param_by_agent_class=True,
+            warmstart_actor_freeze_episodes=25,
+        )
+
+        self.assertEqual(algo_args["train"]["warmstart_actor_freeze_episodes"], 25)
+
+    def test_build_args_rejects_negative_warmstart_actor_freeze_episodes(self):
+        with self.assertRaises(ValueError):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="class_warmstart_freeze_negative",
+                warmstart_actor_freeze_episodes=-1,
+            )
 
     def test_build_args_rejects_class_warmstart_without_class_sharing(self):
         with self.assertRaises(ValueError):
@@ -464,8 +566,6 @@ class HappoCheckpointTests(unittest.TestCase):
             terrain_cache_path="terrain.npz",
             ground_confirm_min_m=20.0,
             ugv_known_survivor_diagnostic=True,
-            ugv_diagnostic_target_distance_min_m=30.0,
-            ugv_diagnostic_target_distance_max_m=100.0,
             local_map_patch_size=11,
             slope_speed_weight=0.5,
             land_cover_speeds=(1.0, 0.95, 0.8, 0.7, 0.0, 0.0),
@@ -480,9 +580,9 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["local_map_patch_size"], 11)
         self.assertTrue(scenario["known_survivors_at_reset"])
-        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 65.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 100.0)
+        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
         self.assertTrue(scenario["disable_fire"])
         self.assertEqual(scenario["comms_dropout"], 0.5)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
@@ -522,7 +622,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         self.assertEqual(scenario["local_map_patch_size"], 7)
         self.assertTrue(scenario["terrain_cache_path"].endswith("malibu_creek_500m_128.npz"))
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
         self.assertFalse(scenario["disable_fire"])
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
@@ -936,6 +1036,36 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_greedy")
 
+    def test_joint_survivor_diagnostic_accepts_route_sequence_sticky_assignment(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_diag_route_sequence",
+            joint_survivor_diagnostic=True,
+            ugv_target_assignment_mode="route-sequence-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_sequence_sticky")
+
+    def test_joint_survivor_diagnostic_accepts_greedy_sequence_sticky_assignment(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_diag_greedy_sequence",
+            joint_survivor_diagnostic=True,
+            ugv_target_assignment_mode="greedy-sequence-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sequence_sticky")
+
     def test_joint_schema_ugv_diagnostic_uses_delayed_joint_schema_defaults(self):
         _, algo_args, env_args = build_args(
             num_env_steps=100,
@@ -981,6 +1111,29 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["r_uav_frontier_alignment"], 0.0)
         self.assertEqual(algo_args["model"]["terrain_cnn_single_obs_dim"], 1302)
 
+    def test_joint_schema_ugv_diagnostic_respects_reveal_cli_overrides(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_reveal_override",
+            joint_schema_ugv_diagnostic=True,
+            known_survivors_at_reset=True,
+            delayed_survivor_knowledge=False,
+            survivor_reveal_initial_count=0,
+            survivor_reveal_start_step=20,
+            survivor_reveal_end_step=40,
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertTrue(scenario["known_survivors_at_reset"])
+        self.assertFalse(scenario["delayed_survivor_knowledge"])
+        self.assertEqual(scenario["survivor_reveal_initial_count"], 0)
+        self.assertEqual(scenario["survivor_reveal_start_step"], 20)
+        self.assertEqual(scenario["survivor_reveal_end_step"], 40)
+
     def test_joint_schema_ugv_diagnostic_preserves_assignment_override(self):
         _, _algo_args, env_args = build_args(
             num_env_steps=100,
@@ -1014,6 +1167,36 @@ class HappoCheckpointTests(unittest.TestCase):
 
         scenario = env_args["scenario_kwargs"]
         self.assertEqual(scenario["ugv_target_assignment_mode"], "route_cost_greedy")
+
+    def test_joint_schema_ugv_diagnostic_accepts_route_sequence_sticky_assignment(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_route_sequence",
+            joint_schema_ugv_diagnostic=True,
+            ugv_target_assignment_mode="route-sequence-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "route_sequence_sticky")
+
+    def test_joint_schema_ugv_diagnostic_accepts_greedy_sequence_sticky_assignment(self):
+        _, _algo_args, env_args = build_args(
+            num_env_steps=100,
+            episode_length=50,
+            seed=1,
+            comms_dropout=0.0,
+            entropy_coef=0.01,
+            exp_name="joint_schema_ugv_greedy_sequence",
+            joint_schema_ugv_diagnostic=True,
+            ugv_target_assignment_mode="greedy-sequence-sticky",
+        )
+
+        scenario = env_args["scenario_kwargs"]
+        self.assertEqual(scenario["ugv_target_assignment_mode"], "greedy_sequence_sticky")
 
     def test_joint_schema_uav_diagnostic_uses_padded_joint_observation_defaults(self):
         _, algo_args, env_args = build_args(
@@ -1251,7 +1434,40 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 5)
         self.assertEqual(scenario["max_steps"], 123)
 
-    def test_uav_diagnostics_can_enable_fire(self):
+    def test_uav_diagnostics_keeps_checkpoint_joint_schema_without_physical_ugvs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 4,
+                        "n_ground": 3,
+                        "n_survivors": 6,
+                        "obs_schema_n_drones": 4,
+                        "obs_schema_n_ground": 3,
+                        "obs_schema_n_survivors": 6,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(steps=300)
+
+            scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            actor_indices = actor_file_indices_for_scenario(models_dir, scenario)
+
+        self.assertEqual(scenario["n_drones"], 4)
+        self.assertEqual(scenario["n_ground"], 0)
+        self.assertEqual(scenario["obs_schema_n_drones"], 4)
+        self.assertEqual(scenario["obs_schema_n_ground"], 3)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 6)
+        self.assertEqual(actor_indices, [0, 1, 2, 3])
+
+    def test_uav_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
             models_dir = run_dir / "models"
@@ -1270,15 +1486,18 @@ class HappoCheckpointTests(unittest.TestCase):
                 terrain_cache_path=None,
                 local_map_patch_size=None,
                 drone_min_footprint_radius_m=None,
-                enable_fire=False,
+                enable_fire=None,
             )
 
             default_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
             args.enable_fire = True
             fire_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
+            args.enable_fire = False
+            no_fire_scenario = diagnose_uav_scenario_kwargs(models_dir, args)
 
-        self.assertTrue(default_scenario["disable_fire"])
+        self.assertFalse(default_scenario["disable_fire"])
         self.assertFalse(fire_scenario["disable_fire"])
+        self.assertTrue(no_fire_scenario["disable_fire"])
 
     def test_uav_diagnostics_can_override_communication_dropout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1344,7 +1563,7 @@ class HappoCheckpointTests(unittest.TestCase):
                 steps=123,
                 n_survivors=5,
                 n_decoys=1,
-                enable_fire=False,
+                enable_fire=None,
                 terrain_cache_path=None,
                 local_map_patch_size=None,
                 drone_min_footprint_radius_m=None,
@@ -1387,8 +1606,7 @@ class HappoCheckpointTests(unittest.TestCase):
                 joint_survivor_diagnostic=False,
                 joint_schema_ugv_diagnostic=False,
                 joint_diagnostic_ugvs=2,
-                enable_fire=False,
-                disable_fire=False,
+                enable_fire=None,
                 terrain_cache_path=None,
                 ugv_target_assignment_mode=None,
             )
@@ -1402,7 +1620,39 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["active_decoys_min"], 0)
         self.assertEqual(scenario["active_decoys_max"], 2)
 
-    def test_ugv_known_diagnostics_reset_stale_variable_survivor_range(self):
+    def test_joint_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={"scenario_kwargs": {"disable_fire": False}},
+            )
+            args = MissingNoneNamespace(
+                steps=300,
+                joint_survivor_diagnostic=False,
+                joint_schema_ugv_diagnostic=False,
+                joint_diagnostic_ugvs=2,
+                enable_fire=None,
+                terrain_cache_path=None,
+                ugv_target_assignment_mode=None,
+            )
+
+            default_scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+            args.enable_fire = False
+            no_fire_scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+            args.enable_fire = True
+            fire_scenario = diagnose_joint_scenario_kwargs(models_dir, args)
+
+        self.assertFalse(default_scenario["disable_fire"])
+        self.assertTrue(no_fire_scenario["disable_fire"])
+        self.assertFalse(fire_scenario["disable_fire"])
+
+    def test_ugv_known_diagnostics_preserve_checkpoint_survivor_slots(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
             models_dir = run_dir / "models"
@@ -1425,15 +1675,81 @@ class HappoCheckpointTests(unittest.TestCase):
             args = MissingNoneNamespace(
                 steps=150,
                 joint_schema_ugv_diagnostic=False,
-                enable_fire=False,
+                enable_fire=None,
                 terrain_cache_path=None,
             )
 
             scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
 
-        self.assertEqual(scenario["n_survivors"], 1)
-        self.assertEqual(scenario["active_survivors_min"], 1)
-        self.assertEqual(scenario["active_survivors_max"], 1)
+        self.assertEqual(scenario["n_survivors"], 8)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 8)
+        self.assertEqual(scenario["active_survivors_min"], 3)
+        self.assertEqual(scenario["active_survivors_max"], 8)
+
+    def test_ugv_diagnostics_keep_checkpoint_joint_schema_without_physical_uavs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={
+                    "scenario_kwargs": {
+                        "n_drones": 4,
+                        "n_ground": 3,
+                        "n_survivors": 6,
+                        "obs_schema_n_drones": 4,
+                        "obs_schema_n_ground": 3,
+                        "obs_schema_n_survivors": 6,
+                    },
+                },
+            )
+            args = MissingNoneNamespace(
+                steps=300,
+                joint_schema_ugv_diagnostic=False,
+            )
+
+            scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+            actor_indices = actor_file_indices_for_scenario(models_dir, scenario)
+
+        self.assertEqual(scenario["n_drones"], 0)
+        self.assertEqual(scenario["n_ground"], 3)
+        self.assertEqual(scenario["obs_schema_n_drones"], 4)
+        self.assertEqual(scenario["obs_schema_n_ground"], 3)
+        self.assertEqual(scenario["obs_schema_n_survivors"], 6)
+        self.assertEqual(actor_indices, [4, 5, 6])
+
+    def test_ugv_diagnostics_preserves_checkpoint_fire_and_allows_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            models_dir = run_dir / "models"
+            models_dir.mkdir(parents=True)
+            runner = types.SimpleNamespace(save_dir=models_dir)
+            save_training_manifest(
+                runner,
+                harl_args={},
+                algo_args={},
+                env_args={"scenario_kwargs": {"disable_fire": False}},
+            )
+            args = MissingNoneNamespace(
+                steps=150,
+                joint_schema_ugv_diagnostic=False,
+                enable_fire=None,
+                terrain_cache_path=None,
+            )
+
+            default_scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+            args.enable_fire = False
+            no_fire_scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+            args.enable_fire = True
+            fire_scenario = diagnose_ugv_scenario_kwargs(models_dir, args)
+
+        self.assertFalse(default_scenario["disable_fire"])
+        self.assertTrue(no_fire_scenario["disable_fire"])
+        self.assertFalse(fire_scenario["disable_fire"])
 
     def test_uav_diagnostics_summarizes_per_drone_metrics(self):
         rows = [
@@ -1803,7 +2119,7 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertTrue(scenario["known_survivors_at_reset"])
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
         self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["active_survivors_min"], 1)
@@ -1833,42 +2149,6 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_decoys"], 4)
         self.assertEqual(scenario["active_decoys_min"], 0)
         self.assertEqual(scenario["active_decoys_max"], 4)
-
-    def test_ugv_known_survivor_exact_distance_uses_min_equals_max(self):
-        _, _, env_args = build_args(
-            num_env_steps=100,
-            episode_length=50,
-            seed=1,
-            comms_dropout=0.5,
-            entropy_coef=0.01,
-            exp_name="diag",
-            ugv_known_survivor_diagnostic=True,
-            ugv_diagnostic_target_distance_min_m=80.0,
-            ugv_diagnostic_target_distance_max_m=80.0,
-        )
-
-        scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 80.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 80.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 80.0)
-
-    def test_ugv_known_survivor_min_distance_can_omit_max(self):
-        _, _, env_args = build_args(
-            num_env_steps=100,
-            episode_length=50,
-            seed=1,
-            comms_dropout=0.5,
-            entropy_coef=0.01,
-            exp_name="diag",
-            ugv_known_survivor_diagnostic=True,
-            ugv_diagnostic_target_distance_min_m=80.0,
-        )
-
-        scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 80.0)
-        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
-        self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
-
 
 if __name__ == "__main__":
     unittest.main()

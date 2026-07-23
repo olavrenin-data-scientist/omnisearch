@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
 
@@ -99,6 +101,77 @@ def wildfire_single_observation_dim(
         + uav_cleanup_target_obs_dim  # optional persistent cleanup target destination
         + uav_astar_route_obs_dim  # optional A* route waypoint toward cleanup target
     )
+
+
+def wildfire_observation_slices(
+    *,
+    local_map_patch_size: int,
+    n_agents: int,
+    n_survivors: int,
+    n_decoys: int = 0,
+    ugv_planner_hint: str = "none",
+    ugv_planner_detour_obs: bool = False,
+    coverage_obs_grid: int = 0,
+    local_coverage_obs_grid: int = 0,
+    uav_confidence_obs_grid: int = 0,
+    local_confidence_obs_grid: int = 0,
+    uav_frontier_obs: bool = False,
+    uav_frontier_mode: str = "centroid",
+    uav_frontier_top_k: int = 2,
+    uav_cleanup_target_obs: bool = False,
+    uav_astar_route_obs: bool = False,
+    survivor_assignment_obs: bool = False,
+) -> "OrderedDict[str, slice]":
+    """Named slices for the flat wildfire observation layout."""
+    patch_size = int(local_map_patch_size)
+    planner_hint_dim = 0
+    if str(ugv_planner_hint).replace("-", "_") in {"local_astar", "local_escape_astar", "global_astar"}:
+        planner_hint_dim = UGV_PLANNER_HINT_DIM + int(bool(ugv_planner_detour_obs))
+    coverage_grid = max(int(coverage_obs_grid), 0)
+    coverage_obs_dim = coverage_grid * coverage_grid + 1 if coverage_grid > 0 else 0
+    local_coverage_grid = max(int(local_coverage_obs_grid), 0)
+    local_coverage_obs_dim = local_coverage_grid * local_coverage_grid
+    confidence_grid = max(int(uav_confidence_obs_grid), 0)
+    confidence_obs_dim = confidence_grid * confidence_grid + 1 if confidence_grid > 0 else 0
+    local_confidence_grid = max(int(local_confidence_obs_grid), 0)
+    local_confidence_obs_dim = local_confidence_grid * local_confidence_grid
+    uav_frontier_obs_dim = uav_frontier_observation_dim(
+        uav_frontier_obs=uav_frontier_obs,
+        uav_frontier_mode=uav_frontier_mode,
+        uav_frontier_top_k=uav_frontier_top_k,
+    )
+    decoys_enabled = max(int(n_decoys), 0) > 0
+    survivor_message_dim = SURVIVOR_MESSAGE_BASE_DIM + int(decoys_enabled) + (
+        SURVIVOR_ASSIGNMENT_OBS_DIM if bool(survivor_assignment_obs) else 0
+    )
+    candidate_slots = max(int(n_survivors), 0) + max(int(n_decoys), 0)
+
+    widths = [
+        ("kinematics", 4),
+        ("lidar", 12),
+        ("local_fire_density", 1),
+        ("terrain_mobility_blocked", TERRAIN_CNN_CHANNELS * patch_size * patch_size),
+        ("air_clearance", 9),
+        ("ugv_planner_hint", planner_hint_dim),
+        ("flight_state", 2),
+        ("boundary", BOUNDARY_OBS_DIM),
+        ("neighbors", max(int(n_agents) - 1, 0) * 2),
+        ("survivor_messages", candidate_slots * survivor_message_dim),
+        ("coverage", coverage_obs_dim),
+        ("local_coverage", local_coverage_obs_dim),
+        ("uav_confidence", confidence_obs_dim),
+        ("local_confidence", local_confidence_obs_dim),
+        ("uav_frontier", uav_frontier_obs_dim),
+        ("uav_cleanup_target", UAV_CLEANUP_TARGET_OBS_DIM if bool(uav_cleanup_target_obs) else 0),
+        ("uav_astar_route", UAV_ASTAR_ROUTE_OBS_DIM if bool(uav_astar_route_obs) else 0),
+    ]
+    out: "OrderedDict[str, slice]" = OrderedDict()
+    offset = 0
+    for name, width in widths:
+        width = max(int(width), 0)
+        out[name] = slice(offset, offset + width)
+        offset += width
+    return out
 
 
 class TerrainCNNMLPBase(nn.Module):

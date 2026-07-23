@@ -20,6 +20,9 @@ import numpy as np
 
 LAND_ROAD, LAND_OPEN, LAND_BRUSH, LAND_FOREST, LAND_ROCK, LAND_WATER = range(6)
 OBJECT_NONE, OBJECT_TREE, OBJECT_HOUSE = range(3)
+DEFAULT_BRUSH_HEIGHT_M = 4.0
+DEFAULT_FOREST_HEIGHT_M = 40.0
+DEFAULT_HOUSE_HEIGHT_M = 10.0
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,17 @@ def _sanitize(terrain: RealTerrainMap) -> RealTerrainMap:
         OBJECT_NONE,
         OBJECT_HOUSE,
     ).astype(np.int64)
+    obstacle_height = np.clip(
+        np.nan_to_num(terrain.obstacle_height, nan=0.0),
+        0.0,
+        None,
+    ).astype(np.float32)
+    obstacle_height = _apply_standard_obstacle_heights(
+        land_cover=land_cover,
+        obstacle_type=obstacle_type,
+        obstacle_height=obstacle_height,
+        sim_units_per_meter=_sim_units_per_meter_from_metadata(terrain.metadata),
+    )
     return RealTerrainMap(
         land_cover=land_cover,
         elevation=_finite01ish(terrain.elevation),
@@ -164,10 +178,46 @@ def _sanitize(terrain: RealTerrainMap) -> RealTerrainMap:
         fuel_density=_finite01ish(terrain.fuel_density),
         rockiness=_finite01ish(terrain.rockiness),
         obstacle_type=obstacle_type,
-        obstacle_height=np.clip(np.nan_to_num(terrain.obstacle_height, nan=0.0), 0.0, None).astype(np.float32),
+        obstacle_height=obstacle_height,
         source=terrain.source,
         metadata=dict(terrain.metadata),
     )
+
+
+def _sim_units_per_meter_from_metadata(metadata: dict) -> float:
+    candidates = (
+        metadata.get("units", {}).get("sim_units_per_meter"),
+        metadata.get("inputs", {}).get("usgs_3dep", {}).get("sim_units_per_meter"),
+        metadata.get("sim_units_per_meter"),
+    )
+    for value in candidates:
+        try:
+            scale = float(value)
+        except (TypeError, ValueError):
+            continue
+        if scale > 0.0:
+            return scale
+    return 0.0
+
+
+def _apply_standard_obstacle_heights(
+    *,
+    land_cover: np.ndarray,
+    obstacle_type: np.ndarray,
+    obstacle_height: np.ndarray,
+    sim_units_per_meter: float,
+) -> np.ndarray:
+    """Apply canonical physical obstacle heights to cache and runtime terrain."""
+    scale = float(sim_units_per_meter)
+    if scale <= 0.0:
+        return obstacle_height.astype(np.float32)
+
+    heights = obstacle_height.astype(np.float32, copy=True)
+    heights[land_cover == LAND_BRUSH] = DEFAULT_BRUSH_HEIGHT_M * scale
+    heights[land_cover == LAND_FOREST] = DEFAULT_FOREST_HEIGHT_M * scale
+    heights[obstacle_type == OBJECT_TREE] = DEFAULT_FOREST_HEIGHT_M * scale
+    heights[obstacle_type == OBJECT_HOUSE] = DEFAULT_HOUSE_HEIGHT_M * scale
+    return heights.astype(np.float32)
 
 
 def _finite01ish(array: np.ndarray) -> np.ndarray:

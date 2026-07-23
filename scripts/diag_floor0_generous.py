@@ -52,7 +52,7 @@ def run_one(strategy: str, seed: int, steps: int, extra: dict) -> float:
         max_steps=steps,
     )
     kwargs.update(extra)
-    env = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=2, device="cpu",
+    env = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(), num_envs=2, device="cpu",
                         continuous_actions=True, seed=seed, **kwargs)
     env.reset()
     policy = BASELINES[strategy](env)

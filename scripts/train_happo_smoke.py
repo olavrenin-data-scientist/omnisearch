@@ -46,6 +46,13 @@ from agents.harl_terrain_cnn import (
     TERRAIN_CNN_OBS_OFFSET,
     wildfire_single_observation_dim,
 )
+from envs.wildfire_defaults import (
+    DRONE_FIRE_SAFETY_CLEARANCE_M,
+    DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M,
+    DRONE_SAFETY_CLEARANCE_BY_OBJECT_M,
+    DRONE_SMOKE_CLEARANCE_THRESHOLD,
+    DRONE_SMOKE_SAFETY_CLEARANCE_M,
+)
 
 DEFAULT_UGV_APPROACH_REWARD = 0.05
 DEFAULT_UGV_APPROACH_MILESTONE_RADII_M = (75.0, 50.0, 40.0, 30.0, 20.0)
@@ -79,8 +86,14 @@ DEFAULT_UAV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
 DEFAULT_UAV_DIAG_START_MIN_SEPARATION_M = 150.0
 DEFAULT_UAV_DIAG_START_EDGE_MARGIN_M = 50.0
 DEFAULT_UAV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
+DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M = (30.0, 50.0, 75.0)
+DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE = "rgb_thermal"
+DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_LAND_COVER_M = DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M
+DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_OBJECT_M = DRONE_SAFETY_CLEARANCE_BY_OBJECT_M
+DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M = DRONE_FIRE_SAFETY_CLEARANCE_M
+DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M = DRONE_SMOKE_SAFETY_CLEARANCE_M
+DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD = DRONE_SMOKE_CLEARANCE_THRESHOLD
 DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
-DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M = 30.0
 DEFAULT_UGV_DIAG_LR = 2.5e-4
 DEFAULT_UGV_DIAG_CRITIC_LR = 5.0e-4
 DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
@@ -116,6 +129,7 @@ DEFAULT_UAV_FRONTIER_SECTORS = 8
 DEFAULT_UAV_FRONTIER_TOP_K = 2
 DEFAULT_UAV_FRONTIER_OWNERSHIP = True
 DEFAULT_UAV_DIAG_CLEANUP_TARGET_REFRESH_MODE = "fixed_hold"
+DEFAULT_HAPPO_HIDDEN_SIZES = (256, 256)
 
 
 def _resolve_uav_reward_defaults(
@@ -195,19 +209,26 @@ def build_args(
     entropy_coef:   float,
     exp_name:       str,
     comms_dropout_mode: str = "iid",
-    comms_map_mode: str = "global",
+    comms_map_mode: str = "per_agent",
     comms_dropout_min_steps: int = 5,
     comms_dropout_max_steps: int = 15,
     lr: float = 5e-4,
     critic_lr: float = 5e-4,
+    uav_critic_lr: float | None = None,
+    ugv_critic_lr: float | None = None,
+    clip_param: float = 0.2,
     linear_lr_decay: bool | None = None,
     share_param: bool | None = None,
     share_param_by_agent_class: bool | None = None,
+    split_critic_by_agent_class: bool | None = None,
     n_rollout_threads: int = 1,
     terrain_cache_path: str | None = None,
     drone_min_footprint_m: float = 0.0,
     ground_confirm_min_m: float = 0.0,
     fire_grid_size: int = 128,
+    fire_spread_prob: float = 0.035,
+    fire_spread_reference_cell_size_m: float = 31.25,
+    smoke_advection_strength: float = 0.30,
     reward_search: bool = False,
     reward_confirm: bool = False,
     recurrent: bool = False,
@@ -215,9 +236,16 @@ def build_args(
     model_dir: str | None = None,
     warmstart_uav_model_dir: str | None = None,
     warmstart_ugv_model_dir: str | None = None,
+    warmstart_actor_freeze_episodes: int = 0,
     drone_camera_fov_deg: float | None = None,
     drone_flight_levels_m: tuple[float, ...] | None = None,
-    drone_perception_mode: str = "rgb",
+    drone_perception_mode: str | None = None,
+    drone_safety_clearance_by_land_cover_m: tuple[float, ...] | None = DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_LAND_COVER_M,
+    drone_safety_clearance_by_object_m: tuple[float, ...] | None = DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_OBJECT_M,
+    drone_fire_safety_clearance_m: float = DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M,
+    drone_smoke_safety_clearance_m: float = DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M,
+    drone_smoke_clearance_threshold: float = DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD,
+    uav_fire_block_threshold: float | None = None,
     ground_confirmation_range_m: float | None = None,
     coverage_obs_grid: int | None = None,
     confirm_requires_los: bool = False,
@@ -268,14 +296,15 @@ def build_args(
     n_decoys: int | None = None,
     active_decoys_min: int | None = None,
     active_decoys_max: int | None = None,
-    delayed_survivor_knowledge: bool = False,
+    known_survivors_at_reset: bool | None = None,
+    delayed_survivor_knowledge: bool | None = None,
     survivor_reveal_schedule: str = "stratified_uniform",
     survivor_reveal_initial_count: int = 1,
     survivor_reveal_start_step: int = 10,
     survivor_reveal_end_step: int = 180,
     survivor_assignment_obs: bool | None = None,
-    ugv_diagnostic_target_distance_min_m: float | None = None,
-    ugv_diagnostic_target_distance_max_m: float | None = None,
+    found_survivor_reward: float | None = None,
+    ground_confirm_reward: float | None = None,
     uav_no_global_coverage_obs: bool = False,
     uav_coverage_only: bool = False,
     uav_found_survivor_reward: float | None = None,
@@ -313,6 +342,8 @@ def build_args(
     uav_inter_uav_overlap_penalty: float = 0.0,
     uav_inter_uav_overlap_allowed: float = 0.20,
     uav_outside_footprint_penalty: float | None = None,
+    uav_fire_footprint_penalty: float = 0.0,
+    uav_fire_penalty_threshold: float = 0.6,
     uav_boundary_soft_margin_m: float = 25.0,
     uav_start_min_separation_m: float | None = None,
     uav_start_edge_margin_m: float | None = None,
@@ -415,6 +446,15 @@ def build_args(
         or joint_survivor_diagnostic
         or joint_schema_ugv_diagnostic
     )
+    uav_joint_search_diagnostic = joint_schema_uav_diagnostic or joint_survivor_diagnostic
+    if drone_perception_mode is None:
+        drone_perception_mode = (
+            DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE
+            if uav_joint_search_diagnostic
+            else "rgb"
+        )
+    if drone_flight_levels_m is None and uav_joint_search_diagnostic:
+        drone_flight_levels_m = DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M
     ugv_global_diagnostic = (
         ugv_known_survivor_diagnostic
         or joint_survivor_diagnostic
@@ -426,8 +466,6 @@ def build_args(
             terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
         if local_map_patch_size == 3:
             local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if ugv_known_survivor_diagnostic and ugv_diagnostic_target_distance_min_m is None:
-            ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
         if lr == 5e-4:
             lr = DEFAULT_UGV_DIAG_LR
         if critic_lr == 5e-4:
@@ -535,14 +573,17 @@ def build_args(
         "nearest",
         "greedy",
         "greedy_sticky",
+        "greedy_sequence_sticky",
         "route_cost_greedy",
         "route_cost_sticky",
+        "route_sequence_sticky",
         "route_cost_global",
     }
     if ugv_target_assignment_mode not in valid_assignment_modes:
         raise ValueError(
             "ugv_target_assignment_mode must be one of: nearest, greedy, "
-            "greedy_sticky, route_cost_greedy, route_cost_sticky, route_cost_global"
+            "greedy_sticky, greedy_sequence_sticky, route_cost_greedy, "
+            "route_cost_sticky, route_sequence_sticky, route_cost_global"
         )
     if ugv_assigned_target_obs_only is None:
         ugv_assigned_target_obs_only = False
@@ -572,6 +613,10 @@ def build_args(
         raise ValueError("survivor reveal steps must be nonnegative")
     if int(survivor_reveal_end_step) < int(survivor_reveal_start_step):
         raise ValueError("survivor_reveal_end_step must be >= survivor_reveal_start_step")
+    def _known_survivors_default(default: bool) -> bool:
+        return bool(default if known_survivors_at_reset is None else known_survivors_at_reset)
+    def _delayed_survivor_default(default: bool) -> bool:
+        return bool(default if delayed_survivor_knowledge is None else delayed_survivor_knowledge)
     if float(ugv_sticky_switch_margin_m) < 0.0:
         raise ValueError("ugv_sticky_switch_margin_m must be nonnegative")
     if float(ugv_sticky_switch_ratio) < 0.0:
@@ -580,6 +625,8 @@ def build_args(
         raise ValueError("ugv_sticky_min_age_steps must be nonnegative")
     if not 0.0 <= float(ugv_planner_fire_block_threshold) <= 1.0:
         raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
+    if uav_fire_block_threshold is not None and float(uav_fire_block_threshold) > 1.0:
+        raise ValueError("uav_fire_block_threshold must be <= 1; use a negative value to disable")
     if uav_search_diagnostic:
         uav_diagnostic_drones = int(uav_diagnostic_drones)
         if uav_diagnostic_drones < 1:
@@ -681,14 +728,23 @@ def build_args(
             (joint_survivor_diagnostic or joint_schema_ugv_diagnostic)
             and not bool(share_param)
         )
+    if split_critic_by_agent_class is None:
+        split_critic_by_agent_class = bool(
+            joint_survivor_diagnostic and share_param_by_agent_class
+        )
     if share_param is None:
         share_param = False
     if bool(share_param) and bool(share_param_by_agent_class):
         raise ValueError("share_param and share_param_by_agent_class are mutually exclusive")
+    if bool(split_critic_by_agent_class) and not bool(share_param_by_agent_class):
+        raise ValueError("split_critic_by_agent_class requires share_param_by_agent_class=True")
     if model_dir and (warmstart_uav_model_dir or warmstart_ugv_model_dir):
         raise ValueError("model_dir cannot be combined with class warm-start model dirs")
     if (warmstart_uav_model_dir or warmstart_ugv_model_dir) and not bool(share_param_by_agent_class):
         raise ValueError("class warm-start model dirs require share_param_by_agent_class=True")
+    warmstart_actor_freeze_episodes = int(warmstart_actor_freeze_episodes)
+    if warmstart_actor_freeze_episodes < 0:
+        raise ValueError("warmstart_actor_freeze_episodes must be nonnegative")
     uav_confidence_reward = float(uav_confidence_reward)
     if uav_confidence_reward < 0.0:
         raise ValueError("uav_confidence_reward must be nonnegative")
@@ -819,6 +875,12 @@ def build_args(
     uav_outside_footprint_penalty = float(uav_outside_footprint_penalty)
     if uav_outside_footprint_penalty < 0.0:
         raise ValueError("uav_outside_footprint_penalty must be nonnegative")
+    uav_fire_footprint_penalty = float(uav_fire_footprint_penalty)
+    if uav_fire_footprint_penalty < 0.0:
+        raise ValueError("uav_fire_footprint_penalty must be nonnegative")
+    uav_fire_penalty_threshold = float(uav_fire_penalty_threshold)
+    if uav_fire_penalty_threshold > 1.0:
+        raise ValueError("uav_fire_penalty_threshold must be <= 1; use a negative value to disable")
     uav_boundary_soft_margin_m = max(float(uav_boundary_soft_margin_m), 1e-6)
     if uav_start_min_separation_m is not None:
         uav_start_min_separation_m = max(float(uav_start_min_separation_m), 0.0)
@@ -849,6 +911,7 @@ def build_args(
             "model_dir":              model_dir,
             "warmstart_uav_model_dir": warmstart_uav_model_dir,
             "warmstart_ugv_model_dir": warmstart_ugv_model_dir,
+            "warmstart_actor_freeze_episodes": warmstart_actor_freeze_episodes,
         },
         "eval": {
             "use_eval":               False,
@@ -860,7 +923,7 @@ def build_args(
             "render_episodes": 1,
         },
         "model": {
-            "hidden_sizes":               list(hidden_sizes or (128, 128)),
+            "hidden_sizes":               list(hidden_sizes or DEFAULT_HAPPO_HIDDEN_SIZES),
             "activation_func":            "relu",
             "use_feature_normalization":  True,
             "initialization_method":      "orthogonal_",
@@ -871,6 +934,8 @@ def build_args(
             "data_chunk_length":          10,
             "lr":                         lr,
             "critic_lr":                  critic_lr,
+            "uav_critic_lr":              critic_lr if uav_critic_lr is None else float(uav_critic_lr),
+            "ugv_critic_lr":              critic_lr if ugv_critic_lr is None else float(ugv_critic_lr),
             "opti_eps":                   1e-5,
             "weight_decay":               0,
             "std_x_coef":                 1,
@@ -887,7 +952,7 @@ def build_args(
             "ppo_epoch":               2,
             "critic_epoch":            2,
             "use_clipped_value_loss":  True,
-            "clip_param":              0.2,
+            "clip_param":              float(clip_param),
             "actor_num_mini_batch":    1,
             "critic_num_mini_batch":   1,
             "entropy_coef":            entropy_coef,
@@ -903,6 +968,7 @@ def build_args(
             "action_aggregation":      "prod",
             "share_param":             bool(share_param),
             "share_param_by_agent_class": bool(share_param_by_agent_class),
+            "split_critic_by_agent_class": bool(split_critic_by_agent_class),
             "share_param_groups":      [],
             "share_param_group_names": [],
             "fixed_order":             False,
@@ -928,6 +994,9 @@ def build_args(
         "comms_dropout_min_steps": comms_dropout_min_steps,
         "comms_dropout_max_steps": comms_dropout_max_steps,
         "fire_grid_size": fire_grid_size,
+        "fire_spread_prob": fire_spread_prob,
+        "fire_spread_reference_cell_size_m": fire_spread_reference_cell_size_m,
+        "smoke_advection_strength": smoke_advection_strength,
         "local_map_patch_size": local_map_patch_size,
         "ugv_planner_hint": ugv_planner_hint,
         "ugv_planner_detour_obs": bool(ugv_planner_detour_obs),
@@ -958,7 +1027,8 @@ def build_args(
         "ugv_sticky_switch_margin_m": ugv_sticky_switch_margin_m,
         "ugv_sticky_switch_ratio": ugv_sticky_switch_ratio,
         "ugv_sticky_min_age_steps": ugv_sticky_min_age_steps,
-        "delayed_survivor_knowledge": bool(delayed_survivor_knowledge),
+        "known_survivors_at_reset": _known_survivors_default(False),
+        "delayed_survivor_knowledge": _delayed_survivor_default(False),
         "survivor_reveal_schedule": survivor_reveal_schedule,
         "survivor_reveal_initial_count": survivor_reveal_initial_count,
         "survivor_reveal_start_step": survivor_reveal_start_step,
@@ -970,6 +1040,9 @@ def build_args(
         "decoy_reveal_end_step": survivor_reveal_end_step,
         "drone_min_footprint_m": drone_min_footprint_m,
         "drone_perception_mode": str(drone_perception_mode).replace("+", "_").replace("-", "_"),
+        "uav_fire_block_threshold": -1.0 if uav_fire_block_threshold is None else float(uav_fire_block_threshold),
+        "r_uav_fire_footprint": uav_fire_footprint_penalty,
+        "uav_fire_penalty_threshold": uav_fire_penalty_threshold,
         "ground_confirm_min_m": ground_confirm_min_m,
         "r_found_survivor": 10.0,
         "r_team_scout": 0.0 if team_scout_reward is None else float(team_scout_reward),
@@ -1010,6 +1083,24 @@ def build_args(
         scenario_kwargs["drone_camera_fov_deg"] = float(drone_camera_fov_deg)
     if drone_flight_levels_m is not None:
         scenario_kwargs["drone_flight_levels_m"] = tuple(float(v) for v in drone_flight_levels_m)
+    has_physical_drones_for_clearance = (
+        joint_drone_count > 0
+        and not ugv_known_survivor_diagnostic
+        and not joint_schema_ugv_diagnostic
+    )
+    if has_physical_drones_for_clearance and drone_safety_clearance_by_land_cover_m is not None:
+        scenario_kwargs["drone_safety_clearance_by_land_cover_m"] = tuple(
+            float(v) for v in drone_safety_clearance_by_land_cover_m
+        )
+    if has_physical_drones_for_clearance and drone_safety_clearance_by_object_m is not None:
+        scenario_kwargs["drone_safety_clearance_by_object_m"] = tuple(
+            float(v) for v in drone_safety_clearance_by_object_m
+        )
+    if has_physical_drones_for_clearance and drone_fire_safety_clearance_m > 0.0:
+        scenario_kwargs["drone_fire_safety_clearance_m"] = float(drone_fire_safety_clearance_m)
+    if has_physical_drones_for_clearance and drone_smoke_safety_clearance_m > 0.0:
+        scenario_kwargs["drone_smoke_safety_clearance_m"] = float(drone_smoke_safety_clearance_m)
+        scenario_kwargs["drone_smoke_clearance_threshold"] = float(drone_smoke_clearance_threshold)
     if ground_confirmation_range_m is not None:
         scenario_kwargs["ground_confirmation_range_m"] = float(ground_confirmation_range_m)
     coverage_obs_grid = 0 if coverage_obs_grid is None else int(coverage_obs_grid)
@@ -1235,37 +1326,13 @@ def build_args(
     if ugv_known_survivor_diagnostic:
         ugv_known_survivor_count = 1 if n_survivors is None else survivor_count
         ugv_active_min, ugv_active_max = _active_survivor_range_for(ugv_known_survivor_count)
-        distance_kwargs = {}
-        if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
-            pass
-        else:
-            target_distance_min_m = max(
-                float(0.0 if ugv_diagnostic_target_distance_min_m is None else ugv_diagnostic_target_distance_min_m),
-                0.0,
-            )
-            distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
-            if ugv_diagnostic_target_distance_max_m is not None:
-                target_distance_max_m = max(
-                    float(ugv_diagnostic_target_distance_max_m),
-                    0.0,
-                )
-                if target_distance_max_m < target_distance_min_m:
-                    raise ValueError(
-                        "ugv_diagnostic_target_distance_max_m must be >= "
-                        "ugv_diagnostic_target_distance_min_m"
-                    )
-                target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-                distance_kwargs.update({
-                    "known_survivor_spawn_distance_m": target_distance_m,
-                    "known_survivor_spawn_distance_max_m": target_distance_max_m,
-                })
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1 if n_ugvs is None else max(int(n_ugvs), 1),
             "n_survivors": ugv_known_survivor_count,
             "active_survivors_min": ugv_active_min,
             "active_survivors_max": ugv_active_max,
-            "known_survivors_at_reset": True,
+            "known_survivors_at_reset": _known_survivors_default(True),
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
             "r_found_survivor": 10.0,
@@ -1285,7 +1352,6 @@ def build_args(
             "r_time_penalty": -0.0005,
             "r_coverage": 0.0,
         })
-        scenario_kwargs.update(distance_kwargs)
     if uav_survivor_diagnostic or joint_schema_uav_diagnostic:
         found_reward = 0.0
         all_survivors_reward = 0.0
@@ -1306,7 +1372,7 @@ def build_args(
             "n_drones": uav_diagnostic_drones,
             "n_ground": 0,
             "n_survivors": survivor_count,
-            "known_survivors_at_reset": False,
+            "known_survivors_at_reset": _known_survivors_default(False),
             "drone_can_confirm": True,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
@@ -1363,6 +1429,8 @@ def build_args(
             "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
             "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
+            "r_uav_fire_footprint": uav_fire_footprint_penalty,
+            "uav_fire_penalty_threshold": uav_fire_penalty_threshold,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
         if joint_schema_uav_diagnostic:
@@ -1385,7 +1453,7 @@ def build_args(
             "n_drones": joint_drone_count,
             "n_ground": joint_diagnostic_ugvs,
             "n_survivors": survivor_count,
-            "known_survivors_at_reset": False,
+            "known_survivors_at_reset": _known_survivors_default(False),
             "drone_can_confirm": False,
             "disable_fire": not bool(enable_fire),
             "comms_dropout": comms_dropout,
@@ -1443,6 +1511,8 @@ def build_args(
             "r_uav_inter_uav_overlap": uav_inter_uav_overlap_penalty,
             "uav_inter_uav_overlap_allowed": uav_inter_uav_overlap_allowed,
             "r_uav_outside_footprint": uav_outside_footprint_penalty,
+            "r_uav_fire_footprint": uav_fire_footprint_penalty,
+            "uav_fire_penalty_threshold": uav_fire_penalty_threshold,
             "uav_boundary_soft_margin_m": uav_boundary_soft_margin_m,
         })
     if joint_schema_ugv_diagnostic:
@@ -1454,8 +1524,8 @@ def build_args(
             "obs_schema_n_drones": joint_drone_count,
             "obs_schema_n_ground": joint_ugv_count,
             "obs_schema_n_survivors": survivor_count,
-            "known_survivors_at_reset": False,
-            "delayed_survivor_knowledge": True,
+            "known_survivors_at_reset": _known_survivors_default(False),
+            "delayed_survivor_knowledge": _delayed_survivor_default(True),
             "delayed_decoy_knowledge": decoy_count > 0,
             "survivor_reveal_schedule": survivor_reveal_schedule,
             "survivor_reveal_initial_count": int(survivor_reveal_initial_count),
@@ -1522,6 +1592,10 @@ def build_args(
         algo_args["algo"]["share_param_group_names"] = share_param_group_names
     if ugv_ground_shaping_reward is not None:
         scenario_kwargs["r_ground_shaping"] = float(ugv_ground_shaping_reward)
+    if found_survivor_reward is not None:
+        scenario_kwargs["r_found_survivor"] = float(found_survivor_reward)
+    if ground_confirm_reward is not None:
+        scenario_kwargs["r_ground_confirm"] = float(ground_confirm_reward)
     if ugv_pending_penalty is not None:
         scenario_kwargs["r_pending_penalty"] = float(ugv_pending_penalty)
     obs_dim_n_agents = int(scenario_kwargs.get("obs_schema_n_drones", scenario_kwargs["n_drones"])) + int(
@@ -1575,9 +1649,8 @@ def main():
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
                    help="Communication dropout process: iid preserves one-step Bernoulli dropout; "
                         "bursty creates temporary outages with resync on reconnect.")
-    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global",
-                   help="Coverage/confidence map observation memory: global preserves current shared maps; "
-                        "per_agent gives each agent a private map that syncs only when comms are up.")
+    p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent",
+                   help="Coverage/confidence map memory is private per agent and syncs only when comms are up.")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5,
                    help="Minimum outage duration in steps for --comms-dropout-mode bursty.")
     p.add_argument("--comms-dropout-max-steps", type=int, default=15,
@@ -1589,6 +1662,12 @@ def main():
                    help="Actor learning rate.")
     p.add_argument("--critic-lr", type=float, default=5e-4,
                    help="Critic learning rate.")
+    p.add_argument("--uav-critic-lr", type=float, default=None,
+                   help="UAV split-critic learning rate. Defaults to --critic-lr.")
+    p.add_argument("--ugv-critic-lr", type=float, default=None,
+                   help="UGV split-critic learning rate. Defaults to --critic-lr.")
+    p.add_argument("--clip-param", type=float, default=0.2,
+                   help="PPO/HAPPO clipping epsilon. Default 0.2 clips policy ratios to about [0.8, 1.2].")
     p.set_defaults(linear_lr_decay=None)
     p.add_argument("--linear-lr-decay", dest="linear_lr_decay", action="store_true",
                    help="Linearly decay actor/critic learning rates over training.")
@@ -1605,6 +1684,11 @@ def main():
                    help="Share actor parameters within each agent class, e.g. one UAV policy and one UGV policy.")
     p.add_argument("--no-share-param-by-agent-class", dest="share_param_by_agent_class", action="store_false",
                    help="Disable class-wise actor parameter sharing, overriding joint diagnostic defaults.")
+    p.set_defaults(split_critic_by_agent_class=None)
+    p.add_argument("--split-critic-by-agent-class", dest="split_critic_by_agent_class", action="store_true",
+                   help="Use separate centralized critics for UAV and UGV policy classes.")
+    p.add_argument("--no-split-critic-by-agent-class", dest="split_critic_by_agent_class", action="store_false",
+                   help="Disable class-wise split critics, overriding joint diagnostic defaults.")
     p.add_argument("--terrain-cnn-encoder", action="store_true",
                    help="Encode the mobility/blocked local map patch with a tiny CNN before the HAPPO MLP.")
     p.add_argument("--terrain-cnn-embed-dim", type=int, default=16,
@@ -1637,6 +1721,24 @@ def main():
                    dest="ground_min_confirm_radius_m",
                    type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.add_argument("--fire-grid-size", type=int, default=128)
+    p.add_argument(
+        "--fire-spread-prob",
+        type=float,
+        default=0.035,
+        help="Base ignition probability per fire update before fuel/moisture/wind/slope scaling.",
+    )
+    p.add_argument(
+        "--fire-spread-reference-cell-size-m",
+        type=float,
+        default=31.25,
+        help="Reference physical cell size used to keep fire spread speed grid/terrain-size invariant.",
+    )
+    p.add_argument(
+        "--smoke-advection-strength",
+        type=float,
+        default=0.30,
+        help="Wind-driven smoke transport blend per env step, separate from fire-spread wind strength.",
+    )
     p.add_argument("--local-map-patch-size", type=int, default=3,
                    help="Odd square patch size for local mobility and blocked-cell observations. "
                         "All agents receive this patch plus a fixed 3x3 aerial-clearance patch.")
@@ -1746,10 +1848,14 @@ def main():
                        "greedy",
                        "greedy_sticky",
                        "greedy-sticky",
+                       "greedy_sequence_sticky",
+                       "greedy-sequence-sticky",
                        "route_cost_greedy",
                        "route-cost-greedy",
                        "route_cost_sticky",
                        "route-cost-sticky",
+                       "route_sequence_sticky",
+                       "route-sequence-sticky",
                        "route_cost_global",
                        "route-cost-global",
                    ),
@@ -1779,10 +1885,14 @@ def main():
                    help="Warm-start the class-shared UAV actor from actor_agent0.pt in this models/ directory.")
     p.add_argument("--warmstart-ugv-model-dir", default=None,
                    help="Warm-start the class-shared UGV actor from actor_agent0.pt in this models/ directory.")
+    p.add_argument("--warmstart-actor-freeze-episodes", type=int, default=0,
+                   help="Skip actor updates for the first N training episodes while still training the critic. "
+                        "Useful after class warm-starts when the critic is fresh and early PPO updates "
+                        "would otherwise damage a good imported policy. Default: 0.")
     p.add_argument("--recurrent", action="store_true",
                    help="Use a recurrent (GRU) policy so agents remember where they have searched.")
     p.add_argument("--hidden-sizes", type=int, nargs="+", default=None,
-                   help="Actor/critic MLP hidden layer sizes. Default: 128 128. "
+                   help="Actor/critic MLP hidden layer sizes. Default: 256 256. "
                         "Example: --hidden-sizes 256 256")
     p.add_argument("--reward-search", action="store_true",
                    help="Use a search-dominant reward (survivor find/scout >> movement/hazard cost) "
@@ -1797,11 +1907,34 @@ def main():
     p.add_argument("--drone-flight-levels-m", default=None,
                    help="Comma-separated flight altitudes in meters (>=2 values), e.g. '50,80,100'. "
                         "Higher altitude => larger scout footprint.")
+    p.add_argument("--drone-safety-clearance-by-land-cover-m", type=float, nargs="+",
+                   default=list(DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_LAND_COVER_M),
+                   help="Variable UAV safety margin by land cover in meters: "
+                        "road open brush forest rock [water]. Default: 10 10 10 20 10 10.")
+    p.add_argument("--drone-safety-clearance-by-object-m", type=float, nargs=3,
+                   default=list(DEFAULT_DRONE_VARIABLE_CLEARANCE_BY_OBJECT_M),
+                   metavar=("NONE", "TREE", "HOUSE"),
+                   help="Variable UAV safety margin by object in meters. Default: 0 20 15.")
+    p.add_argument("--drone-fire-safety-clearance-m", type=float,
+                   default=DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M,
+                   help="Minimum UAV safety margin in active-fire cells, in meters. Default: 25.")
+    p.add_argument("--drone-smoke-safety-clearance-m", type=float,
+                   default=DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M,
+                   help="Minimum UAV safety margin in smoke-plume cells, in meters. Default: 25.")
+    p.add_argument("--drone-smoke-clearance-threshold", type=float,
+                   default=DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD,
+                   help="Smoke-grid threshold for applying smoke safety clearance. Default: 0.20.")
+    p.add_argument("--no-variable-drone-clearance", action="store_true",
+                   help="Disable variable UAV clearance margins and use only drone_safety_clearance_m.")
     p.add_argument("--drone-perception-mode",
                    choices=("rgb", "rgb_thermal", "rgb+thermal", "rgb-thermal"),
-                   default="rgb",
+                   default=None,
                    help="Abstract UAV perception sensor stack. rgb_thermal keeps RGB altitude/range/"
-                        "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6.")
+                        "environment factors and uses smoke quality eta + (1-eta)*q_rgb with eta=0.6. "
+                        "Joint UAV diagnostics default to rgb_thermal; other modes default to rgb.")
+    p.add_argument("--uav-fire-block-threshold", type=float, default=None,
+                   help="If set, UAV local blocked-observation cells include active fire cells with "
+                        "fire intensity >= this threshold. Use e.g. 0.6. Omitted/negative disables it.")
     p.add_argument("--ground-confirmation-range-m", type=float, default=None,
                    help="Ground confirmation range in meters (physical, not a floor), e.g. 30.")
     p.add_argument("--coverage-obs-grid", type=int, default=None,
@@ -1952,8 +2085,12 @@ def main():
     p.add_argument("--active-decoys-max", type=int, default=None,
                    help="Maximum active decoy slots sampled per env reset. "
                         "Example: --n-decoys 4 --active-decoys-min 0 --active-decoys-max 4.")
-    p.add_argument("--delayed-survivor-knowledge", action="store_true",
-                   help="Reveal survivors over time as oracle scout events for curriculum scenarios.")
+    p.add_argument("--known-survivors-at-reset", action=argparse.BooleanOptionalAction, default=None,
+                   help="Initialize survivors as known to UGVs at reset. "
+                        "Use --no-known-survivors-at-reset to force unknown survivors.")
+    p.add_argument("--delayed-survivor-knowledge", action=argparse.BooleanOptionalAction, default=None,
+                   help="Reveal survivors over time as oracle scout events for curriculum scenarios. "
+                        "Use --no-delayed-survivor-knowledge to disable preset delayed reveals.")
     p.add_argument("--survivor-reveal-schedule", choices=("stratified_uniform", "stratified-uniform"),
                    default="stratified_uniform",
                    help="Sampling scheme for delayed survivor knowledge reveal times.")
@@ -1963,18 +2100,18 @@ def main():
                    help="Earliest delayed reveal step after the initial survivors.")
     p.add_argument("--survivor-reveal-end-step", type=int, default=180,
                    help="Latest delayed reveal step after the initial survivors.")
-    p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
-                   help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
-    p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
-                   help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
-                        "Omit for no upper bound; use min=max for an exact target distance.")
     p.add_argument("--uav-coverage-only", action="store_true",
                    help="In UAV diagnostic mode, disable survivor and time rewards; "
                         "leave only coverage rewards and coverage-quality penalties.")
     p.add_argument("--uav-no-global-coverage-obs", action="store_true",
                    help="In UAV diagnostic mode, keep local coverage observation but disable the default global coverage map.")
+    p.add_argument("--found-survivor-reward", type=float, default=None,
+                   help="Override r_found_survivor, the team reward paid when a survivor is confirmed/found.")
+    p.add_argument("--ground-confirm-reward", type=float, default=None,
+                   help="Override r_ground_confirm, the individual UGV reward for confirming a survivor.")
     p.add_argument("--uav-found-survivor-reward", type=float, default=None,
-                   help="Override r_found_survivor in UAV diagnostic mode.")
+                   help="Legacy alias for overriding r_found_survivor in UAV diagnostic mode. "
+                        "Prefer --found-survivor-reward for joint or UGV diagnostics.")
     p.add_argument("--uav-all-survivors-reward", type=float, default=None,
                    help="One-time team reward when the final survivor is found in UAV diagnostic mode. "
                         "Omit for 0; pass a positive value to add an explicit mission-completion bonus.")
@@ -2088,6 +2225,12 @@ def main():
                    help="Maximum per-UAV per-step penalty when the camera footprint is fully outside the map. "
                         "Penalty scales linearly with the estimated outside-footprint fraction. "
                         "Omit in UAV diagnostic mode for its default; pass 0 to disable.")
+    p.add_argument("--uav-fire-footprint-penalty", type=float, default=0.0,
+                   help="Maximum per-UAV per-step penalty when the camera footprint is fully over "
+                        "active fire. Default 0 disables this optional fire-avoidance penalty.")
+    p.add_argument("--uav-fire-penalty-threshold", type=float, default=0.6,
+                   help="Fire intensity threshold used by --uav-fire-footprint-penalty. "
+                        "Use a negative value to disable the penalty even if the scale is nonzero.")
     p.add_argument("--uav-boundary-soft-margin-m", type=float, default=25.0,
                    help="Physical margin from map edge used for UAV boundary risk diagnostics.")
     p.add_argument("--uav-start-min-separation-m", type=float, default=None,
@@ -2159,8 +2302,6 @@ def main():
             args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
         if args.local_map_patch_size == 3:
             args.local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.ugv_known_survivor_diagnostic and args.ugv_diagnostic_target_distance_min_m is None:
-            args.ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
         if args.lr == 5e-4:
             args.lr = DEFAULT_UGV_DIAG_LR
         if args.critic_lr == 5e-4:
@@ -2237,8 +2378,8 @@ def main():
     if not 0.0 <= args.comms_dropout <= 1.0:
         p.error("--comms-dropout must be in [0, 1]")
     args.comms_map_mode = str(args.comms_map_mode).replace("-", "_")
-    if args.comms_map_mode not in {"global", "per_agent"}:
-        p.error("--comms-map-mode must be one of: global, per_agent")
+    if args.comms_map_mode != "per_agent":
+        p.error("--comms-map-mode must be per_agent")
     if args.comms_dropout_min_steps < 1:
         p.error("--comms-dropout-min-steps must be >= 1")
     if args.comms_dropout_max_steps < args.comms_dropout_min_steps:
@@ -2249,6 +2390,12 @@ def main():
         p.error("--lr must be positive")
     if args.critic_lr <= 0.0:
         p.error("--critic-lr must be positive")
+    if args.uav_critic_lr is not None and args.uav_critic_lr <= 0.0:
+        p.error("--uav-critic-lr must be positive")
+    if args.ugv_critic_lr is not None and args.ugv_critic_lr <= 0.0:
+        p.error("--ugv-critic-lr must be positive")
+    if args.clip_param <= 0.0:
+        p.error("--clip-param must be positive")
     if args.terrain_cnn_embed_dim <= 0:
         p.error("--terrain-cnn-embed-dim must be positive")
     if args.joint_diagnostic_ugvs < 1:
@@ -2329,6 +2476,12 @@ def main():
         p.error("--ugv-pending-penalty must be zero or negative")
     if args.uav_coverage_reward is not None and args.uav_coverage_reward < 0.0:
         p.error("--uav-coverage-reward must be nonnegative")
+    if args.found_survivor_reward is not None and args.found_survivor_reward < 0.0:
+        p.error("--found-survivor-reward must be nonnegative")
+    if args.ground_confirm_reward is not None and args.ground_confirm_reward < 0.0:
+        p.error("--ground-confirm-reward must be nonnegative")
+    if args.found_survivor_reward is not None and args.uav_found_survivor_reward is not None:
+        p.error("Use either --found-survivor-reward or --uav-found-survivor-reward, not both")
     if args.uav_found_survivor_reward is not None and args.uav_found_survivor_reward < 0.0:
         p.error("--uav-found-survivor-reward must be nonnegative")
     if args.uav_all_survivors_reward is not None and args.uav_all_survivors_reward < 0.0:
@@ -2425,6 +2578,10 @@ def main():
         and args.uav_outside_footprint_penalty < 0.0
     ):
         p.error("--uav-outside-footprint-penalty must be nonnegative")
+    if args.uav_fire_footprint_penalty < 0.0:
+        p.error("--uav-fire-footprint-penalty must be nonnegative")
+    if args.uav_fire_penalty_threshold > 1.0:
+        p.error("--uav-fire-penalty-threshold must be <= 1; use a negative value to disable")
     if args.uav_boundary_soft_margin_m <= 0.0:
         p.error("--uav-boundary-soft-margin-m must be positive")
     if args.uav_start_min_separation_m is not None and args.uav_start_min_separation_m < 0.0:
@@ -2476,6 +2633,8 @@ def main():
         p.error("--ugv-planner-fire-replan-interval-steps must be positive")
     if not 0.0 <= args.ugv_planner_fire_block_threshold <= 1.0:
         p.error("--ugv-planner-fire-block-threshold must be in [0, 1]")
+    if args.uav_fire_block_threshold is not None and args.uav_fire_block_threshold > 1.0:
+        p.error("--uav-fire-block-threshold must be <= 1; use a negative value to disable")
     for flag_name in (
         "ugv_planner_fire_cost",
         "ugv_planner_smoke_cost",
@@ -2549,6 +2708,12 @@ def main():
         p.error("--active-decoys-max must be <= --n-decoys")
     if args.fire_grid_size < 2:
         p.error("--fire-grid-size must be at least 2")
+    if args.fire_spread_prob < 0.0 or args.fire_spread_prob > 1.0:
+        p.error("--fire-spread-prob must be in [0, 1]")
+    if args.fire_spread_reference_cell_size_m <= 0.0:
+        p.error("--fire-spread-reference-cell-size-m must be positive")
+    if args.smoke_advection_strength < 0.0 or args.smoke_advection_strength > 0.95:
+        p.error("--smoke-advection-strength must be in [0, 0.95]")
     if sum(
         (
             bool(args.ugv_known_survivor_diagnostic),
@@ -2585,12 +2750,49 @@ def main():
         )
     if args.terrain_cache_path is not None and not Path(args.terrain_cache_path).is_file():
         p.error(f"--terrain-cache-path does not exist: {args.terrain_cache_path}")
+    if len(args.drone_safety_clearance_by_land_cover_m) not in {5, 6}:
+        p.error("--drone-safety-clearance-by-land-cover-m must contain 5 or 6 values")
+    if any(v < 0.0 for v in args.drone_safety_clearance_by_land_cover_m):
+        p.error("--drone-safety-clearance-by-land-cover-m values must be nonnegative")
+    if any(v < 0.0 for v in args.drone_safety_clearance_by_object_m):
+        p.error("--drone-safety-clearance-by-object-m values must be nonnegative")
+    if args.drone_fire_safety_clearance_m < 0.0:
+        p.error("--drone-fire-safety-clearance-m must be nonnegative")
+    if args.drone_smoke_safety_clearance_m < 0.0:
+        p.error("--drone-smoke-safety-clearance-m must be nonnegative")
+    if not (0.0 <= args.drone_smoke_clearance_threshold <= 1.0):
+        p.error("--drone-smoke-clearance-threshold must be in [0, 1]")
 
     drone_flight_levels_m = None
     if args.drone_flight_levels_m:
         drone_flight_levels_m = tuple(
             float(v) for v in str(args.drone_flight_levels_m).split(",") if v.strip()
         )
+    uav_joint_search_diagnostic = args.joint_schema_uav_diagnostic or args.joint_survivor_diagnostic
+    if drone_flight_levels_m is None and uav_joint_search_diagnostic:
+        drone_flight_levels_m = DEFAULT_UAV_JOINT_DIAG_DRONE_FLIGHT_LEVELS_M
+    if args.drone_perception_mode is None:
+        args.drone_perception_mode = (
+            DEFAULT_UAV_JOINT_DIAG_DRONE_PERCEPTION_MODE
+            if uav_joint_search_diagnostic
+            else "rgb"
+        )
+    drone_safety_clearance_by_land_cover_m = (
+        None
+        if args.no_variable_drone_clearance
+        else tuple(float(v) for v in args.drone_safety_clearance_by_land_cover_m)
+    )
+    drone_safety_clearance_by_object_m = (
+        None
+        if args.no_variable_drone_clearance
+        else tuple(float(v) for v in args.drone_safety_clearance_by_object_m)
+    )
+    drone_fire_safety_clearance_m = (
+        0.0 if args.no_variable_drone_clearance else float(args.drone_fire_safety_clearance_m)
+    )
+    drone_smoke_safety_clearance_m = (
+        0.0 if args.no_variable_drone_clearance else float(args.drone_smoke_safety_clearance_m)
+    )
 
     uav_search_diagnostic = (
         args.uav_survivor_diagnostic
@@ -2718,10 +2920,16 @@ def main():
             (args.joint_survivor_diagnostic or args.joint_schema_ugv_diagnostic)
             and not bool(args.share_param)
         )
+    if args.split_critic_by_agent_class is None:
+        args.split_critic_by_agent_class = bool(
+            args.joint_survivor_diagnostic and args.share_param_by_agent_class
+        )
     if args.share_param is None:
         args.share_param = False
     if bool(args.share_param) and bool(args.share_param_by_agent_class):
         p.error("--share-param and --share-param-by-agent-class are mutually exclusive")
+    if bool(args.split_critic_by_agent_class) and not bool(args.share_param_by_agent_class):
+        p.error("--split-critic-by-agent-class requires --share-param-by-agent-class")
     class_warmstart_dirs = [
         value for value in (args.warmstart_uav_model_dir, args.warmstart_ugv_model_dir)
         if value
@@ -2802,6 +3010,8 @@ def main():
         p.error("--episode-length must be positive")
     if args.hidden_sizes is not None and any(size <= 0 for size in args.hidden_sizes):
         p.error("--hidden-sizes values must be positive")
+    if args.warmstart_actor_freeze_episodes < 0:
+        p.error("--warmstart-actor-freeze-episodes must be nonnegative")
 
     if args.preset == "tuned":
         # Keep explicit user values, but upgrade defaults to convergence-oriented
@@ -2830,10 +3040,14 @@ def main():
     print(f" entropy_coef:   {args.entropy_coef}")
     print(f" lr:             {args.lr}")
     print(f" critic_lr:      {args.critic_lr}")
+    print(f" uav_critic_lr:  {args.uav_critic_lr if args.uav_critic_lr is not None else args.critic_lr}")
+    print(f" ugv_critic_lr:  {args.ugv_critic_lr if args.ugv_critic_lr is not None else args.critic_lr}")
+    print(f" clip_param:     {args.clip_param}")
     print(f" linear_lr_decay: {args.linear_lr_decay}")
     print(f" share_param:    {args.share_param}")
     print(f" share_param_by_agent_class: {args.share_param_by_agent_class}")
-    print(f" hidden_sizes:   {args.hidden_sizes or [128, 128]}")
+    print(f" split_critic_by_agent_class: {args.split_critic_by_agent_class}")
+    print(f" hidden_sizes:   {args.hidden_sizes or list(DEFAULT_HAPPO_HIDDEN_SIZES)}")
     print(f" terrain_cnn_encoder: {args.terrain_cnn_encoder}")
     print(f" local_map_patch_size: {args.local_map_patch_size}")
     print(f" local_coverage_obs_grid: {args.local_coverage_obs_grid}")
@@ -2884,7 +3098,8 @@ def main():
     print(f" joint_diagnostic_ugvs: {args.joint_diagnostic_ugvs}")
     print(
         " survivor_reveal: "
-        f"delayed={args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic} "
+        f"known_at_reset={args.known_survivors_at_reset if args.known_survivors_at_reset is not None else 'preset'} "
+        f"delayed={args.delayed_survivor_knowledge if args.delayed_survivor_knowledge is not None else 'preset'} "
         f"schedule={args.survivor_reveal_schedule} "
         f"initial={args.survivor_reveal_initial_count} "
         f"range={args.survivor_reveal_start_step}-{args.survivor_reveal_end_step}"
@@ -2928,6 +3143,8 @@ def main():
     print(f" ugv_route_progress_shortfall_penalty: {args.ugv_route_progress_shortfall_penalty}")
     print(f" uav_coverage_only: {args.uav_coverage_only}")
     print(f" uav_all_survivors_reward: {args.uav_all_survivors_reward}")
+    print(f" found_survivor_reward: {args.found_survivor_reward}")
+    print(f" ground_confirm_reward: {args.ground_confirm_reward}")
     print(f" team_scout_reward: {args.team_scout_reward}")
     print(f" uav_coverage_reward: {args.uav_coverage_reward}")
     print(f" uav_coverage_normalization: {args.uav_coverage_normalization}")
@@ -2948,6 +3165,28 @@ def main():
     print(f" uav_confidence_overlap_mode: {args.uav_confidence_overlap_mode}")
     print(f" uav_confidence_overlap_allowed_regret: {args.uav_confidence_overlap_allowed_regret}")
     print(f" drone_perception_mode: {args.drone_perception_mode}")
+    print(f" uav_fire_block_threshold: {args.uav_fire_block_threshold}")
+    print(
+        " drone_flight_levels_m: "
+        f"{list(drone_flight_levels_m) if drone_flight_levels_m is not None else 'default'}"
+    )
+    print(
+        " drone_variable_clearance: "
+        f"{'off' if args.no_variable_drone_clearance else 'on'}"
+    )
+    print(
+        " drone_clearance_land_m: "
+        f"{list(drone_safety_clearance_by_land_cover_m) if drone_safety_clearance_by_land_cover_m else 'scalar'}"
+    )
+    print(
+        " drone_clearance_object_m: "
+        f"{list(drone_safety_clearance_by_object_m) if drone_safety_clearance_by_object_m else 'scalar'}"
+    )
+    print(
+        " drone_clearance_fire_smoke_m: "
+        f"{drone_fire_safety_clearance_m}/{drone_smoke_safety_clearance_m} "
+        f"threshold={args.drone_smoke_clearance_threshold}"
+    )
     print(f" uav_cleanup_target_progress_reward: {args.uav_cleanup_target_progress_reward}")
     print(f" uav_astar_progress_reward: {args.uav_astar_progress_reward}")
     print(f" uav_confidence_overlap_threshold: {args.uav_confidence_overlap_threshold}")
@@ -2960,12 +3199,18 @@ def main():
     print(f" uav_inter_uav_overlap_penalty: {args.uav_inter_uav_overlap_penalty}")
     print(f" uav_inter_uav_overlap_allowed: {args.uav_inter_uav_overlap_allowed}")
     print(f" uav_outside_footprint_penalty: {args.uav_outside_footprint_penalty}")
+    print(f" uav_fire_footprint_penalty: {args.uav_fire_footprint_penalty}")
+    print(f" uav_fire_penalty_threshold: {args.uav_fire_penalty_threshold}")
+    print(f" fire_spread_prob: {args.fire_spread_prob}")
+    print(f" fire_spread_reference_cell_size_m: {args.fire_spread_reference_cell_size_m}")
+    print(f" smoke_advection_strength: {args.smoke_advection_strength}")
     print(f" uav_boundary_soft_margin_m: {args.uav_boundary_soft_margin_m}")
     print(f" uav_start_min_separation_m: {args.uav_start_min_separation_m}")
     print(f" uav_start_edge_margin_m: {args.uav_start_edge_margin_m}")
     print(f" action_transform: {args.action_transform}")
     print(f" warmstart_uav_model_dir: {args.warmstart_uav_model_dir}")
     print(f" warmstart_ugv_model_dir: {args.warmstart_ugv_model_dir}")
+    print(f" warmstart_actor_freeze_episodes: {args.warmstart_actor_freeze_episodes}")
     print(f" exp_name:       {args.exp_name}")
     print("=" * 60)
 
@@ -2986,15 +3231,22 @@ def main():
         entropy_coef   = args.entropy_coef,
         lr             = args.lr,
         critic_lr      = args.critic_lr,
+        uav_critic_lr  = args.uav_critic_lr,
+        ugv_critic_lr  = args.ugv_critic_lr,
+        clip_param     = args.clip_param,
         linear_lr_decay = args.linear_lr_decay,
         share_param    = args.share_param,
         share_param_by_agent_class = args.share_param_by_agent_class,
+        split_critic_by_agent_class = args.split_critic_by_agent_class,
         exp_name       = args.exp_name,
         n_rollout_threads = args.n_rollout_threads,
         terrain_cache_path = args.terrain_cache_path,
         drone_min_footprint_m = args.drone_min_footprint_radius_m,
         ground_confirm_min_m = args.ground_min_confirm_radius_m,
         fire_grid_size = args.fire_grid_size,
+        fire_spread_prob = args.fire_spread_prob,
+        fire_spread_reference_cell_size_m = args.fire_spread_reference_cell_size_m,
+        smoke_advection_strength = args.smoke_advection_strength,
         local_map_patch_size = args.local_map_patch_size,
         reward_search = args.reward_search,
         reward_confirm = args.reward_confirm,
@@ -3003,9 +3255,16 @@ def main():
         model_dir = args.model_dir,
         warmstart_uav_model_dir = args.warmstart_uav_model_dir,
         warmstart_ugv_model_dir = args.warmstart_ugv_model_dir,
+        warmstart_actor_freeze_episodes = args.warmstart_actor_freeze_episodes,
         drone_camera_fov_deg = args.drone_camera_fov_deg,
         drone_flight_levels_m = drone_flight_levels_m,
         drone_perception_mode = args.drone_perception_mode,
+        drone_safety_clearance_by_land_cover_m = drone_safety_clearance_by_land_cover_m,
+        drone_safety_clearance_by_object_m = drone_safety_clearance_by_object_m,
+        drone_fire_safety_clearance_m = drone_fire_safety_clearance_m,
+        drone_smoke_safety_clearance_m = drone_smoke_safety_clearance_m,
+        drone_smoke_clearance_threshold = args.drone_smoke_clearance_threshold,
+        uav_fire_block_threshold = args.uav_fire_block_threshold,
         ground_confirmation_range_m = args.ground_confirmation_range_m,
         coverage_obs_grid = args.coverage_obs_grid,
         confirm_requires_los = args.confirm_requires_los,
@@ -3056,16 +3315,15 @@ def main():
         n_decoys = args.n_decoys,
         active_decoys_min = args.active_decoys_min,
         active_decoys_max = args.active_decoys_max,
-        delayed_survivor_knowledge = bool(
-            args.delayed_survivor_knowledge or args.joint_schema_ugv_diagnostic
-        ),
+        known_survivors_at_reset = args.known_survivors_at_reset,
+        delayed_survivor_knowledge = args.delayed_survivor_knowledge,
         survivor_reveal_schedule = args.survivor_reveal_schedule,
         survivor_reveal_initial_count = args.survivor_reveal_initial_count,
         survivor_reveal_start_step = args.survivor_reveal_start_step,
         survivor_reveal_end_step = args.survivor_reveal_end_step,
         survivor_assignment_obs = args.survivor_assignment_obs,
-        ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
-        ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
+        found_survivor_reward = args.found_survivor_reward,
+        ground_confirm_reward = args.ground_confirm_reward,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
         uav_coverage_only = args.uav_coverage_only,
         uav_found_survivor_reward = args.uav_found_survivor_reward,
@@ -3103,6 +3361,8 @@ def main():
         uav_inter_uav_overlap_penalty = args.uav_inter_uav_overlap_penalty,
         uav_inter_uav_overlap_allowed = args.uav_inter_uav_overlap_allowed,
         uav_outside_footprint_penalty = args.uav_outside_footprint_penalty,
+        uav_fire_footprint_penalty = args.uav_fire_footprint_penalty,
+        uav_fire_penalty_threshold = args.uav_fire_penalty_threshold,
         uav_boundary_soft_margin_m = args.uav_boundary_soft_margin_m,
         uav_start_min_separation_m = args.uav_start_min_separation_m,
         uav_start_edge_margin_m = args.uav_start_edge_margin_m,

@@ -50,7 +50,7 @@ def run_one(cache_path: Path, strategy: str, seed: int, steps: int,
     )
     if confirm_m is not None:
         kwargs["ground_confirmation_range_m"] = confirm_m
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=2, device="cpu",
         continuous_actions=True, seed=seed,

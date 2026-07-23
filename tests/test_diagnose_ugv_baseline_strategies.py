@@ -156,7 +156,7 @@ class DiagnoseUgvBaselineStrategiesTests(unittest.TestCase):
             survivor_reveal_end_step=5,
             **overrides,
         ))
-        return vmas.make_env(
+        return WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
             device="cpu",

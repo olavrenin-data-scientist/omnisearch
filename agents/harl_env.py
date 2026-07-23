@@ -62,7 +62,7 @@ class WildfireHARLEnv:
     # HARL contract — attributes
     # ------------------------------------------------------------------
     def _build_env(self):
-        self._env = vmas.make_env(
+        self._env = WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
             device="cpu",

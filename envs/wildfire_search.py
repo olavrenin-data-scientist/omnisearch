@@ -27,6 +27,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from agents.harl_terrain_cnn import wildfire_observation_slices
 from vmas.simulator.core import Agent, Landmark, Sphere, World
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
@@ -38,6 +39,9 @@ from envs.wildfire_defaults import (
     DRONE_FLIGHT_LEVELS_M,
     DRONE_PERCEPTION_MODE,
     DRONE_SAFETY_CLEARANCE_M,
+    DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M,
+    DRONE_SAFETY_CLEARANCE_BY_OBJECT_M,
+    DRONE_SMOKE_CLEARANCE_THRESHOLD,
     DRONE_SPEED_MPS,
     DRONE_U_MULTIPLIER,
     GROUND_ACCEL_MPS2,
@@ -84,6 +88,98 @@ UGV_GLOBAL_PLANNER_HEURISTICS = {"euclidean", "terrain"}
 _SCIPY_SPARSE_TOOLS = None
 _SCIPY_SPARSE_UNAVAILABLE = False
 
+# These IDs are part of seeded-scenario reproducibility. Never renumber an
+# existing stream; append a new ID when adding another reset subsystem.
+_RESET_RNG_STREAM_IDS = {
+    "terrain": 1,
+    "survivor_activation": 2,
+    "survivor_positions": 3,
+    "survivor_reveals": 4,
+    "decoy_activation": 5,
+    "decoy_positions": 6,
+    "decoy_reveals": 7,
+    "uav_starts": 8,
+    "ugv_starts": 9,
+    "initial_fire": 10,
+    "bootstrap": 11,
+    "uav_survivor_detection": 12,
+    "fire_spread_rate": 13,
+    "fire_ignition": 14,
+    "fire_spotting": 15,
+    "fire_burn_lifetime": 16,
+    "fire_ignition_intensity": 17,
+    "uav_decoy_false_detection": 18,
+    "comms_iid": 19,
+    "comms_burst_start": 20,
+    "comms_burst_duration": 21,
+}
+_RESET_RNG_UINT64_MASK = (1 << 64) - 1
+_RESET_RNG_TORCH_SEED_MASK = (1 << 63) - 1
+
+
+def _splitmix64(value: int) -> int:
+    """Mix one integer without depending on Python's process-randomized hash."""
+    value = (int(value) + 0x9E3779B97F4A7C15) & _RESET_RNG_UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _RESET_RNG_UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _RESET_RNG_UINT64_MASK
+    return (value ^ (value >> 31)) & _RESET_RNG_UINT64_MASK
+
+
+def _stable_reset_stream_seed(
+    *,
+    base_seed: int,
+    env_index: int,
+    episode_index: int,
+    stream_id: int,
+    slot_index: int | None,
+) -> int:
+    mixed = _splitmix64(base_seed)
+    slot_component = 0 if slot_index is None else int(slot_index) + 1
+    for component in (int(env_index) + 1, int(episode_index) + 1, stream_id, slot_component):
+        mixed = _splitmix64(mixed ^ _splitmix64(component))
+    return mixed & _RESET_RNG_TORCH_SEED_MASK
+
+
+class _ResetRngContext:
+    """Independent scenario random streams for one environment episode.
+
+    Stable entities must use ``slot_index`` so removing another entity or
+    changing its retry count cannot advance their random sequence.
+    """
+
+    def __init__(self, *, base_seed: int, env_index: int, episode_index: int):
+        self.base_seed = int(base_seed)
+        self.env_index = int(env_index)
+        self.episode_index = int(episode_index)
+        self._generators: dict[tuple[str, int | None], torch.Generator] = {}
+
+    def stream_seed(self, stream_name: str, slot_index: int | None = None) -> int:
+        if stream_name not in _RESET_RNG_STREAM_IDS:
+            valid = ", ".join(sorted(_RESET_RNG_STREAM_IDS))
+            raise ValueError(f"unknown reset RNG stream {stream_name!r}; expected one of: {valid}")
+        if slot_index is not None and int(slot_index) < 0:
+            raise ValueError("reset RNG slot_index must be nonnegative")
+        return _stable_reset_stream_seed(
+            base_seed=self.base_seed,
+            env_index=self.env_index,
+            episode_index=self.episode_index,
+            stream_id=_RESET_RNG_STREAM_IDS[stream_name],
+            slot_index=slot_index,
+        )
+
+    def generator(
+        self,
+        stream_name: str,
+        slot_index: int | None = None,
+    ) -> torch.Generator:
+        key = (stream_name, None if slot_index is None else int(slot_index))
+        generator = self._generators.get(key)
+        if generator is None:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(self.stream_seed(stream_name, slot_index))
+            self._generators[key] = generator
+        return generator
+
 
 def _scipy_sparse_tools():
     global _SCIPY_SPARSE_TOOLS, _SCIPY_SPARSE_UNAVAILABLE
@@ -127,6 +223,13 @@ class WildfireSearchScenario(BaseScenario):
     # ------------------------------------------------------------------
     # World construction
     # ------------------------------------------------------------------
+    @staticmethod
+    def make_env(**kwargs):
+        """Build the reset-aware VMAS environment required by this scenario."""
+        from envs.wildfire_vmas import make_wildfire_env
+
+        return make_wildfire_env(**kwargs)
+
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         # Team composition
         self.n_drones    = kwargs.pop("n_drones", 3)
@@ -151,6 +254,17 @@ class WildfireSearchScenario(BaseScenario):
         if self.obs_schema_n_survivors < self.n_survivors:
             raise ValueError("obs_schema_n_survivors must be >= n_survivors")
         self.obs_schema_n_agents = self.obs_schema_n_drones + self.obs_schema_n_ground
+        self._physical_agent_schema_slots = torch.tensor(
+            [
+                *range(self.n_drones),
+                *range(
+                    self.obs_schema_n_drones,
+                    self.obs_schema_n_drones + self.n_ground,
+                ),
+            ],
+            dtype=torch.long,
+            device=device,
+        )
 
         # World geometry
         self.x_semidim = float(kwargs.pop("x_semidim", 1.0))
@@ -289,9 +403,12 @@ class WildfireSearchScenario(BaseScenario):
         self.disable_fire = bool(kwargs.pop("disable_fire", False))
         self.fire_grid_size      = kwargs.pop("fire_grid_size", 128)
         self.terrain_reference_grid_size = kwargs.pop("terrain_reference_grid_size", 16)
-        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.065)
+        self.fire_spread_prob    = kwargs.pop("fire_spread_prob", 0.035)
         self.fire_spread_variability = kwargs.pop("fire_spread_variability", 0.55)
         self.fire_spotting_prob = kwargs.pop("fire_spotting_prob", 0.00008)
+        self.fire_spread_reference_cell_size_m = max(
+            float(kwargs.pop("fire_spread_reference_cell_size_m", 31.25)), 1e-6
+        )
         self.fire_wind_spread_weight = max(float(kwargs.pop("fire_wind_spread_weight", 1.25)), 0.0)
         self.fire_slope_spread_weight = max(float(kwargs.pop("fire_slope_spread_weight", 1.65)), 0.0)
         self.fire_moisture_damping = max(float(kwargs.pop("fire_moisture_damping", 1.15)), 0.0)
@@ -333,6 +450,10 @@ class WildfireSearchScenario(BaseScenario):
         self.smoke_emission = max(float(kwargs.pop("smoke_emission", 0.18)), 0.0)
         self.smoke_decay = min(max(float(kwargs.pop("smoke_decay", 0.985)), 0.0), 1.0)
         self.smoke_diffusion = min(max(float(kwargs.pop("smoke_diffusion", 0.16)), 0.0), 1.0)
+        self.smoke_advection_strength = min(
+            max(float(kwargs.pop("smoke_advection_strength", 0.30)), 0.0),
+            0.95,
+        )
         self.smolder_smoke_emission = max(float(kwargs.pop("smolder_smoke_emission", 0.04)), 0.0)
         self.smolder_decay = min(max(float(kwargs.pop("smolder_decay", 0.995)), 0.0), 1.0)
         self.smolder_start_fraction = min(max(float(kwargs.pop("smolder_start_fraction", 0.65)), 0.0), 1.0)
@@ -423,6 +544,9 @@ class WildfireSearchScenario(BaseScenario):
         )
         if not 0.0 <= self.ugv_planner_fire_block_threshold <= 1.0:
             raise ValueError("ugv_planner_fire_block_threshold must be in [0, 1]")
+        self.uav_fire_block_threshold = float(kwargs.pop("uav_fire_block_threshold", -1.0))
+        if self.uav_fire_block_threshold > 1.0:
+            raise ValueError("uav_fire_block_threshold must be <= 1; use a negative value to disable")
         self.ugv_planner_smoke_cost = max(float(kwargs.pop("ugv_planner_smoke_cost", 5.0)), 0.0)
         self.ugv_planner_smolder_cost = max(float(kwargs.pop("ugv_planner_smolder_cost", 3.0)), 0.0)
         self.ugv_planner_fire_buffer_m = max(float(kwargs.pop("ugv_planner_fire_buffer_m", 10.0)), 0.0)
@@ -589,6 +713,38 @@ class WildfireSearchScenario(BaseScenario):
         self.drone_safety_clearance_m = max(
             float(kwargs.pop("drone_safety_clearance_m", DRONE_SAFETY_CLEARANCE_M)), 0.0,
         )
+        drone_land_clearance = kwargs.pop("drone_safety_clearance_by_land_cover_m", None)
+        self.drone_safety_clearance_by_land_cover_m = (
+            _land_cover_values(
+                drone_land_clearance,
+                water_value=DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M[LAND_WATER],
+                name="drone_safety_clearance_by_land_cover_m",
+            )
+            if drone_land_clearance is not None else None
+        )
+        drone_object_clearance = kwargs.pop("drone_safety_clearance_by_object_m", None)
+        if drone_object_clearance is None:
+            self.drone_safety_clearance_by_object_m = None
+        else:
+            self.drone_safety_clearance_by_object_m = tuple(float(v) for v in drone_object_clearance)
+            if len(self.drone_safety_clearance_by_object_m) != 3:
+                raise ValueError("drone_safety_clearance_by_object_m must cover none/tree/house")
+        self.drone_fire_safety_clearance_m = max(
+            float(kwargs.pop("drone_fire_safety_clearance_m", 0.0)), 0.0,
+        )
+        self.drone_smoke_safety_clearance_m = max(
+            float(kwargs.pop("drone_smoke_safety_clearance_m", 0.0)), 0.0,
+        )
+        self.drone_smoke_clearance_threshold = min(
+            max(float(kwargs.pop("drone_smoke_clearance_threshold", DRONE_SMOKE_CLEARANCE_THRESHOLD)), 0.0),
+            1.0,
+        )
+        self.drone_variable_clearance_enabled = (
+            self.drone_safety_clearance_by_land_cover_m is not None
+            or self.drone_safety_clearance_by_object_m is not None
+            or self.drone_fire_safety_clearance_m > 0.0
+            or self.drone_smoke_safety_clearance_m > 0.0
+        )
         self.drone_climb_rate = max(float(kwargs.pop("drone_climb_rate", 0.035)), 0.0)
         self.drone_descent_rate = max(float(kwargs.pop("drone_descent_rate", 0.020)), 0.0)
         self.drone_climb_rate_m = max(float(kwargs.pop("drone_climb_rate_m", 10.0)), 0.0)
@@ -603,9 +759,14 @@ class WildfireSearchScenario(BaseScenario):
         self.comms_dropout_mode = str(kwargs.pop("comms_dropout_mode", "iid")).replace("-", "_").lower()
         if self.comms_dropout_mode not in {"iid", "bursty"}:
             raise ValueError("comms_dropout_mode must be one of: iid, bursty")
-        self.comms_map_mode = str(kwargs.pop("comms_map_mode", "global")).replace("-", "_").lower()
-        if self.comms_map_mode not in {"global", "per_agent"}:
-            raise ValueError("comms_map_mode must be one of: global, per_agent")
+        configured_comms_map_mode = str(
+            kwargs.pop("comms_map_mode", "per_agent")
+        ).replace("-", "_").lower()
+        if configured_comms_map_mode not in {"global", "per_agent"}:
+            raise ValueError("comms_map_mode must be per_agent")
+        # Legacy checkpoints may record the former omniscient ``global`` mode.
+        # Runtime behavior now always uses communication-gated per-agent maps.
+        self.comms_map_mode = "per_agent"
         self.comms_dropout_min_steps = max(int(kwargs.pop("comms_dropout_min_steps", 5)), 1)
         self.comms_dropout_max_steps = max(
             int(kwargs.pop("comms_dropout_max_steps", 15)),
@@ -655,35 +816,18 @@ class WildfireSearchScenario(BaseScenario):
             int(kwargs.pop("decoy_reveal_end_step", self.survivor_reveal_end_step)),
             self.decoy_reveal_start_step,
         )
-        self.survivor_spawn_reference = str(kwargs.pop("survivor_spawn_reference", "auto")).lower()
-        if self.survivor_spawn_reference not in {"auto", "ground", "drone"}:
-            raise ValueError("survivor_spawn_reference must be one of: auto, ground, drone")
         self.drone_can_confirm = self.drone_can_confirm or bool(
             kwargs.pop("drone_scouts_confirm_survivors", False)
         )
-        self.known_survivor_spawn_distance_m = max(
-            float(kwargs.pop("known_survivor_spawn_distance_m", 0.0)), 0.0,
-        )
-        known_spawn_min_m = kwargs.pop("known_survivor_spawn_distance_min_m", None)
-        known_spawn_max_m = kwargs.pop("known_survivor_spawn_distance_max_m", None)
-        if known_spawn_min_m is None and known_spawn_max_m is None:
-            self.known_survivor_spawn_distance_min_m = self.known_survivor_spawn_distance_m
-            self.known_survivor_spawn_distance_max_m = self.known_survivor_spawn_distance_m
-        else:
-            self.known_survivor_spawn_distance_min_m = max(
-                float(self.known_survivor_spawn_distance_m if known_spawn_min_m is None else known_spawn_min_m),
-                0.0,
-            )
-            self.known_survivor_spawn_distance_max_m = (
-                math.inf
-                if known_spawn_max_m is None
-                else max(float(known_spawn_max_m), 0.0)
-            )
-            if (
-                math.isfinite(self.known_survivor_spawn_distance_max_m)
-                and self.known_survivor_spawn_distance_max_m < self.known_survivor_spawn_distance_min_m
-            ):
-                raise ValueError("known_survivor_spawn_distance_max_m must be >= known_survivor_spawn_distance_min_m")
+        # Obsolete distance-conditioned placement keys are consumed only so
+        # checkpoints created before uniform placement remain loadable.
+        for legacy_key in (
+            "survivor_spawn_reference",
+            "known_survivor_spawn_distance_m",
+            "known_survivor_spawn_distance_min_m",
+            "known_survivor_spawn_distance_max_m",
+        ):
+            kwargs.pop(legacy_key, None)
         kwargs.pop("action_transform", None)  # obsolete diagnostic option, ignored for old manifests
 
         # Reward weights
@@ -705,14 +849,17 @@ class WildfireSearchScenario(BaseScenario):
             "nearest",
             "greedy",
             "greedy_sticky",
+            "greedy_sequence_sticky",
             "route_cost_greedy",
             "route_cost_sticky",
+            "route_sequence_sticky",
             "route_cost_global",
         }
         if self.ugv_target_assignment_mode not in valid_assignment_modes:
             raise ValueError(
                 "ugv_target_assignment_mode must be one of: nearest, greedy, "
-                "greedy_sticky, route_cost_greedy, route_cost_sticky, route_cost_global"
+                "greedy_sticky, greedy_sequence_sticky, route_cost_greedy, "
+                "route_cost_sticky, route_sequence_sticky, route_cost_global"
             )
         self.ugv_sticky_switch_margin_m = max(
             float(kwargs.pop("ugv_sticky_switch_margin_m", 20.0)),
@@ -893,6 +1040,10 @@ class WildfireSearchScenario(BaseScenario):
             0.999,
         )
         self.r_uav_outside_footprint = max(float(kwargs.pop("r_uav_outside_footprint", 0.0)), 0.0)
+        self.r_uav_fire_footprint = max(float(kwargs.pop("r_uav_fire_footprint", 0.0)), 0.0)
+        self.uav_fire_penalty_threshold = float(kwargs.pop("uav_fire_penalty_threshold", 0.6))
+        if self.uav_fire_penalty_threshold > 1.0:
+            raise ValueError("uav_fire_penalty_threshold must be <= 1; use a negative value to disable")
         kwargs.pop("coverage_radius_cells", None)  # obsolete fixed-grid footprint
         # Per-step penalty for each survivor that is scouted but not yet
         # confirmed. This makes standing still cost something while survivors
@@ -1187,6 +1338,23 @@ class WildfireSearchScenario(BaseScenario):
         self.step_drone_detections = torch.zeros(
             batch_dim, self.n_drones, self.n_survivors, dtype=torch.bool, device=device,
         )
+        self.step_drone_detection_confidence = torch.zeros(
+            batch_dim, self.n_drones, self.n_survivors, dtype=torch.float, device=device,
+        )
+        self.step_uav_survivor_detection_uniforms = torch.zeros(
+            batch_dim,
+            self.obs_schema_n_drones,
+            self.obs_schema_n_survivors,
+            dtype=torch.float,
+            device=device,
+        )
+        self.step_uav_decoy_false_detection_uniforms = torch.zeros(
+            batch_dim,
+            self.obs_schema_n_drones,
+            self.n_decoys,
+            dtype=torch.float,
+            device=device,
+        )
         self.step_ground_confirmations = torch.zeros(
             batch_dim, self.n_ground, self.n_survivors, dtype=torch.bool, device=device,
         )
@@ -1197,6 +1365,10 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.n_agents, self.n_survivors, dtype=torch.bool, device=device,
         )
         self.confirmed_survivors_by_agent = torch.zeros_like(self.known_survivors_by_agent)
+        # Physical confirmations can occur while the confirming agent is
+        # disconnected. Mission termination waits until those confirmations
+        # have reached the connected team network.
+        self.communicated_confirmed_survivors = torch.zeros_like(self.found_survivors)
         self.scouted_decoys = torch.zeros(
             batch_dim, self.n_decoys, dtype=torch.bool, device=device,
         )
@@ -1205,6 +1377,9 @@ class WildfireSearchScenario(BaseScenario):
         self.known_decoys_by_agent = torch.zeros(
             batch_dim, self.n_agents, self.n_decoys, dtype=torch.bool, device=device,
         )
+        # Physical dismissal is global for metrics; this tensor controls when
+        # that result becomes available to each agent through communication.
+        self.dismissed_decoys_by_agent = torch.zeros_like(self.known_decoys_by_agent)
         self.step_decoy_false_detections = torch.zeros(
             batch_dim, self.n_drones, self.n_decoys, dtype=torch.bool, device=device,
         )
@@ -1212,6 +1387,12 @@ class WildfireSearchScenario(BaseScenario):
             batch_dim, self.n_agents, dtype=torch.long, device=device,
         )
         self.comms_dropout_last_update_step = torch.full(
+            (batch_dim,), -1, dtype=torch.long, device=device,
+        )
+        self.comms_step_up = torch.ones(
+            batch_dim, self.n_agents, dtype=torch.bool, device=device,
+        )
+        self.comms_step_last_update_step = torch.full(
             (batch_dim,), -1, dtype=torch.long, device=device,
         )
         self.survivor_reveal_steps = torch.full(
@@ -1352,6 +1533,15 @@ class WildfireSearchScenario(BaseScenario):
             torch.tensor(planner_land_cover_costs, dtype=torch.float, device=device)
             if planner_land_cover_costs is not None else None
         )
+        self.drone_safety_clearance_land_values = (
+            torch.tensor(self.drone_safety_clearance_by_land_cover_m, dtype=torch.float, device=device)
+            if self.drone_safety_clearance_by_land_cover_m is not None else None
+        )
+        self.drone_safety_clearance_object_values = (
+            torch.tensor(self.drone_safety_clearance_by_object_m, dtype=torch.float, device=device)
+            if self.drone_safety_clearance_by_object_m is not None else None
+        )
+        self.drone_safety_clearance_margin_grid = torch.zeros_like(self.elevation_grid)
         self.land_cover_speed_values = torch.tensor(land_cover_speeds, dtype=torch.float, device=device)
         self.land_cover_fire_fuel = torch.tensor(land_cover_fire_fuel, dtype=torch.float, device=device)
         self.land_cover_fire_burnout_min = torch.tensor(
@@ -1465,6 +1655,15 @@ class WildfireSearchScenario(BaseScenario):
         )
         self.ugv_sticky_target_age = torch.zeros(
             batch_dim, self.n_ground, dtype=torch.long, device=device,
+        )
+        self.ugv_sequence_next_target_idx = torch.full(
+            (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
+        )
+        # Last assignment known to the connected team. During a communication
+        # outage this lease is frozen: the UGV keeps pursuing it privately and
+        # connected UGVs reserve the target without using the owner's live state.
+        self.ugv_assignment_lease_idx = torch.full(
+            (batch_dim, self.n_ground), -1, dtype=torch.long, device=device,
         )
         self.ugv_assignment_cache_step = torch.full(
             (batch_dim,), -1, dtype=torch.long, device=device,
@@ -1611,6 +1810,12 @@ class WildfireSearchScenario(BaseScenario):
         self._zero_step_metric_buffers(batch_dim, device)
         self.terrain_source_description = ["real"] * batch_dim
         self.terrain_source_metadata = [{} for _ in range(batch_dim)]
+        self._reset_rng_base_seed: int | None = None
+        self._reset_rng_pending_explicit_seed: int | None = None
+        self._reset_rng_episode_indices = [-1 for _ in range(batch_dim)]
+        self._reset_rng_contexts: list[_ResetRngContext | None] = [
+            None for _ in range(batch_dim)
+        ]
 
         # Per-agent reward buffers (filled in _compute_step_rewards)
         for agent in world.agents:
@@ -1659,6 +1864,9 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_reward_uav_outside_footprint = torch.zeros(batch_dim, device=device)
         self.metric_uav_outside_footprint_fraction = torch.zeros(batch_dim, device=device)
         self.metric_uav_outside_footprint_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
+        self.metric_reward_uav_fire_footprint = torch.zeros(batch_dim, device=device)
+        self.metric_uav_fire_footprint_fraction = torch.zeros(batch_dim, device=device)
+        self.metric_uav_fire_footprint_fraction_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
         self.metric_uav_boundary_soft_risk = torch.zeros(batch_dim, device=device)
         self.metric_uav_boundary_distance_m = torch.zeros(batch_dim, device=device)
         self.metric_uav_boundary_distance_m_by_drone = torch.zeros(batch_dim, self.n_drones, device=device)
@@ -1887,6 +2095,9 @@ class WildfireSearchScenario(BaseScenario):
             self.metric_reward_uav_outside_footprint,
             self.metric_uav_outside_footprint_fraction,
             self.metric_uav_outside_footprint_fraction_by_drone,
+            self.metric_reward_uav_fire_footprint,
+            self.metric_uav_fire_footprint_fraction,
+            self.metric_uav_fire_footprint_fraction_by_drone,
             self.metric_uav_boundary_soft_risk,
             self.metric_uav_boundary_distance_m,
             self.metric_uav_boundary_distance_m_by_drone,
@@ -2158,18 +2369,119 @@ class WildfireSearchScenario(BaseScenario):
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
-    def reset_world_at(self, env_index: int = None):
-        ScenarioUtils.spawn_entities_randomly(
-            entities=self._survivors + self._decoys + self.world.agents,
-            world=self.world,
-            env_index=env_index,
-            min_dist_between_entities=(
-                2 * self.agent_radius
-                + float(self.spawn_padding_by_env.max().item())
-            ),
-            x_bounds=(-self.x_semidim, self.x_semidim),
-            y_bounds=(-self.y_semidim, self.y_semidim),
+    def _notify_explicit_reset_seed(self, seed: int) -> None:
+        """Receive reset(seed=...) intent from the reset-aware VMAS boundary."""
+        self._reset_rng_pending_explicit_seed = int(seed)
+
+    def _begin_reset_rng(self, env_index: int | None) -> dict[int, _ResetRngContext]:
+        """Create deterministic reset identities without consuming global RNG."""
+        explicit_seed = self._reset_rng_pending_explicit_seed
+        base_seed = int(torch.initial_seed()) if explicit_seed is None else explicit_seed
+        batch_dim = int(self.world.batch_dim)
+
+        if env_index is None:
+            if explicit_seed is not None or self._reset_rng_base_seed != base_seed:
+                self._reset_rng_episode_indices = [0 for _ in range(batch_dim)]
+            else:
+                self._reset_rng_episode_indices = [
+                    max(episode_index + 1, 0)
+                    for episode_index in self._reset_rng_episode_indices
+                ]
+            env_indices = range(batch_dim)
+        else:
+            env_index = int(env_index)
+            if env_index < 0 or env_index >= batch_dim:
+                raise IndexError(
+                    f"reset env_index {env_index} outside batch dimension {batch_dim}"
+                )
+            if explicit_seed is not None or self._reset_rng_base_seed != base_seed:
+                self._reset_rng_episode_indices = [-1 for _ in range(batch_dim)]
+            self._reset_rng_episode_indices[env_index] = max(
+                self._reset_rng_episode_indices[env_index] + 1,
+                0,
+            )
+            env_indices = (env_index,)
+
+        self._reset_rng_base_seed = base_seed
+        self._reset_rng_pending_explicit_seed = None
+        contexts: dict[int, _ResetRngContext] = {}
+        for index in env_indices:
+            context = _ResetRngContext(
+                base_seed=base_seed,
+                env_index=index,
+                episode_index=self._reset_rng_episode_indices[index],
+            )
+            self._reset_rng_contexts[index] = context
+            contexts[index] = context
+        return contexts
+
+    def _reset_rng_context(self, env_index: int) -> _ResetRngContext:
+        context = self._reset_rng_contexts[int(env_index)]
+        if context is None:
+            raise RuntimeError(f"reset RNG context for environment {env_index} is not initialized")
+        return context
+
+    def _bootstrap_entity_positions(self, env_index: int | None) -> None:
+        """Initialize entity state without consuming PyTorch's global RNG.
+
+        Terrain-aware placement below replaces these positions during ordinary
+        resets. The bootstrap remains necessary as a valid deterministic
+        fallback when a terrain layer contains no feasible placement cells.
+        """
+        entities = self._survivors + self._decoys + self.world.agents
+        if not entities:
+            return
+
+        min_distance = (
+            2 * self.agent_radius
+            + float(self.spawn_padding_by_env.max().item())
         )
+        x_bounds = (-float(self.x_semidim), float(self.x_semidim))
+        y_bounds = (-float(self.y_semidim), float(self.y_semidim))
+        env_indices = (
+            range(self.world.batch_dim)
+            if env_index is None
+            else (int(env_index),)
+        )
+
+        for batch_index in env_indices:
+            occupied: list[Tensor] = []
+            context = self._reset_rng_context(batch_index)
+            for entity_index, entity in enumerate(entities):
+                generator = context.generator("bootstrap", entity_index)
+                candidate = None
+                for _ in range(50_001):
+                    unit = torch.rand(2, generator=generator, device="cpu")
+                    proposed = torch.stack(
+                        (
+                            x_bounds[0] + unit[0] * (x_bounds[1] - x_bounds[0]),
+                            y_bounds[0] + unit[1] * (y_bounds[1] - y_bounds[0]),
+                        )
+                    )
+                    if not occupied:
+                        candidate = proposed
+                        break
+                    distances = torch.linalg.vector_norm(
+                        torch.stack(occupied, dim=0) - proposed,
+                        dim=1,
+                    )
+                    if bool((distances >= min_distance).all().item()):
+                        candidate = proposed
+                        break
+                if candidate is None:
+                    raise RuntimeError(
+                        "Could not bootstrap non-overlapping entity positions "
+                        "within 50001 attempts"
+                    )
+                occupied.append(candidate)
+                entity.set_pos(
+                    candidate.to(device=self.world.device),
+                    batch_index=batch_index,
+                )
+
+    def reset_world_at(self, env_index: int = None):
+        self._begin_reset_rng(env_index)
+        self._bootstrap_entity_positions(env_index)
 
         if env_index is None:
             self.active_survivors.fill_(True)
@@ -2177,15 +2489,22 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors.zero_()
             self.scouted_survivors.zero_()
             self.step_drone_detections.zero_()
+            self.step_drone_detection_confidence.zero_()
+            self.step_uav_survivor_detection_uniforms.zero_()
+            self.step_uav_decoy_false_detection_uniforms.zero_()
             self.step_ground_confirmations.zero_()
             self.known_survivors_by_agent.zero_()
             self.confirmed_survivors_by_agent.zero_()
+            self.communicated_confirmed_survivors.zero_()
             self.scouted_decoys.zero_()
             self.dismissed_decoys.zero_()
             self.known_decoys_by_agent.zero_()
+            self.dismissed_decoys_by_agent.zero_()
             self.step_decoy_false_detections.zero_()
             self.comms_dropout_remaining_steps.zero_()
             self.comms_dropout_last_update_step.fill_(-1)
+            self.comms_step_up.fill_(True)
+            self.comms_step_last_update_step.fill_(-1)
             self.survivor_reveal_steps.fill_(-1)
             self.survivor_oracle_revealed.zero_()
             self.decoy_reveal_steps.fill_(-1)
@@ -2212,6 +2531,8 @@ class WildfireSearchScenario(BaseScenario):
             self.prev_ground_target_idx.fill_(-1)
             self.ugv_sticky_target_idx.fill_(-1)
             self.ugv_sticky_target_age.zero_()
+            self.ugv_sequence_next_target_idx.fill_(-1)
+            self.ugv_assignment_lease_idx.fill_(-1)
             self._invalidate_ugv_assignment_cache()
             self._invalidate_ugv_route_assignment_cost_grid_cache()
             self.ground_approach_milestones_reached.zero_()
@@ -2227,15 +2548,22 @@ class WildfireSearchScenario(BaseScenario):
             self.found_survivors[env_index] = False
             self.scouted_survivors[env_index] = False
             self.step_drone_detections[env_index] = False
+            self.step_drone_detection_confidence[env_index] = 0.0
+            self.step_uav_survivor_detection_uniforms[env_index] = 0.0
+            self.step_uav_decoy_false_detection_uniforms[env_index] = 0.0
             self.step_ground_confirmations[env_index] = False
             self.known_survivors_by_agent[env_index] = False
             self.confirmed_survivors_by_agent[env_index] = False
+            self.communicated_confirmed_survivors[env_index] = False
             self.scouted_decoys[env_index] = False
             self.dismissed_decoys[env_index] = False
             self.known_decoys_by_agent[env_index] = False
+            self.dismissed_decoys_by_agent[env_index] = False
             self.step_decoy_false_detections[env_index] = False
             self.comms_dropout_remaining_steps[env_index] = 0
             self.comms_dropout_last_update_step[env_index] = -1
+            self.comms_step_up[env_index] = True
+            self.comms_step_last_update_step[env_index] = -1
             self.survivor_reveal_steps[env_index] = -1
             self.survivor_oracle_revealed[env_index] = False
             self.decoy_reveal_steps[env_index] = -1
@@ -2262,6 +2590,8 @@ class WildfireSearchScenario(BaseScenario):
             self.prev_ground_target_idx[env_index] = -1
             self.ugv_sticky_target_idx[env_index] = -1
             self.ugv_sticky_target_age[env_index] = 0
+            self.ugv_sequence_next_target_idx[env_index] = -1
+            self.ugv_assignment_lease_idx[env_index] = -1
             self._invalidate_ugv_assignment_cache(env_index)
             self._invalidate_ugv_route_assignment_cost_grid_cache(env_index)
             self.ground_approach_milestones_reached[env_index] = False
@@ -2277,23 +2607,13 @@ class WildfireSearchScenario(BaseScenario):
             self._generate_terrain(b)
             self._sample_active_survivors(b)
             self._sample_active_decoys(b)
-            ScenarioUtils.spawn_entities_randomly(
-                entities=self._active_survivor_entities(b) + self._active_decoy_entities(b) + self.world.agents,
-                world=self.world,
-                env_index=b,
-                min_dist_between_entities=(
-                    2 * self.agent_radius
-                    + float(self.spawn_padding_by_env[b].item())
-                ),
-                x_bounds=(-self.x_semidim, self.x_semidim),
-                y_bounds=(-self.y_semidim, self.y_semidim),
-            )
+            self._place_land_entities_uniformly_on_valid_cells(b)
             self._place_drones_jointly_uniform_interior(b)
-            self._place_diagnostic_survivors_near_reference_agents(b)
             self._move_inactive_survivors_outside_map(b)
             self._move_inactive_decoys_outside_map(b)
             if not self.disable_fire:
                 self._seed_initial_fire(b, H, W)
+                self._refresh_drone_required_clearance_layer(b)
             if self.delayed_survivor_knowledge:
                 self._sample_delayed_survivor_reveals(b)
             else:
@@ -2354,6 +2674,31 @@ class WildfireSearchScenario(BaseScenario):
         active = self._active_survivor_mask()
         return (self.found_survivors | ~active).all(dim=1)
 
+    def _refresh_communicated_confirmations(self) -> Tensor:
+        """Persist confirmations that have reached the connected team network."""
+        if not hasattr(self, "communicated_confirmed_survivors"):
+            return self.found_survivors
+        active = self._active_survivor_mask()
+        if getattr(self, "comms_dropout", 0.0) <= 0.0:
+            communicated_now = self.found_survivors
+        elif getattr(self, "n_agents", 0) > 0:
+            comms_up = self._latest_comms_up_mask(
+                device=self.confirmed_survivors_by_agent.device,
+            )
+            communicated_now = (
+                self.confirmed_survivors_by_agent
+                & comms_up.unsqueeze(-1)
+            ).any(dim=1)
+        else:
+            communicated_now = torch.zeros_like(self.found_survivors)
+        self.communicated_confirmed_survivors |= communicated_now & active
+        return self.communicated_confirmed_survivors
+
+    def _all_active_survivors_communicated_confirmed(self) -> Tensor:
+        active = self._active_survivor_mask()
+        communicated = self._refresh_communicated_confirmations()
+        return (communicated | ~active).all(dim=1)
+
     def _all_active_survivors_scouted(self) -> Tensor:
         active = self._active_survivor_mask()
         return (self.scouted_survivors | ~active).all(dim=1)
@@ -2362,15 +2707,29 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_survivors <= 0:
             return
         device = self.active_survivors.device
+        generator = self._reset_rng_context(env_index).generator("survivor_activation")
         min_count = min(max(int(self.active_survivors_min), 0), self.n_survivors)
         max_count = min(max(int(self.active_survivors_max), min_count), self.n_survivors)
         if min_count == max_count:
             count = min_count
         else:
-            count = int(torch.randint(min_count, max_count + 1, (1,), device=device).item())
+            count = int(
+                torch.randint(
+                    min_count,
+                    max_count + 1,
+                    (1,),
+                    generator=generator,
+                    device="cpu",
+                ).item()
+            )
         mask = torch.zeros(self.n_survivors, dtype=torch.bool, device=device)
         if count > 0:
-            mask[torch.randperm(self.n_survivors, device=device)[:count]] = True
+            active_indices = torch.randperm(
+                self.n_survivors,
+                generator=generator,
+                device="cpu",
+            )[:count].to(device=device)
+            mask[active_indices] = True
         self.active_survivors[env_index] = mask
 
     def _active_survivor_entities(self, env_index: int) -> list[Landmark]:
@@ -2404,15 +2763,29 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_decoys <= 0:
             return
         device = self.active_decoys.device
+        generator = self._reset_rng_context(env_index).generator("decoy_activation")
         min_count = min(max(int(self.active_decoys_min), 0), self.n_decoys)
         max_count = min(max(int(self.active_decoys_max), min_count), self.n_decoys)
         if min_count == max_count:
             count = min_count
         else:
-            count = int(torch.randint(min_count, max_count + 1, (1,), device=device).item())
+            count = int(
+                torch.randint(
+                    min_count,
+                    max_count + 1,
+                    (1,),
+                    generator=generator,
+                    device="cpu",
+                ).item()
+            )
         mask = torch.zeros(self.n_decoys, dtype=torch.bool, device=device)
         if count > 0:
-            mask[torch.randperm(self.n_decoys, device=device)[:count]] = True
+            active_indices = torch.randperm(
+                self.n_decoys,
+                generator=generator,
+                device="cpu",
+            )[:count].to(device=device)
+            mask[active_indices] = True
         self.active_decoys[env_index] = mask
 
     def _active_decoy_entities(self, env_index: int) -> list[Landmark]:
@@ -2455,69 +2828,97 @@ class WildfireSearchScenario(BaseScenario):
         if not self.delayed_survivor_knowledge or self.n_survivors <= 0:
             return
         device = self.survivor_reveal_steps.device
+        generator = self._reset_rng_context(env_index).generator("survivor_reveals")
         active_idx = torch.nonzero(
-            self._active_survivor_mask()[env_index],
+            self._active_survivor_mask()[env_index].detach().to(device="cpu"),
             as_tuple=False,
         ).flatten()
         count = int(active_idx.numel())
-        reveal_steps = torch.full((self.n_survivors,), -1, dtype=torch.long, device=device)
+        reveal_steps = torch.full((self.n_survivors,), -1, dtype=torch.long, device="cpu")
         if count <= 0:
-            self.survivor_reveal_steps[env_index] = reveal_steps
+            self.survivor_reveal_steps[env_index] = reveal_steps.to(device=device)
             return
         initial_count = min(int(self.survivor_reveal_initial_count), count)
-        active_reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
-        order = torch.randperm(count, device=device)
+        active_reveal_steps = torch.full(
+            (count,),
+            self.max_steps + 1,
+            dtype=torch.long,
+            device="cpu",
+        )
+        order = torch.randperm(count, generator=generator, device="cpu")
         if initial_count > 0:
             active_reveal_steps[order[:initial_count]] = 0
         remaining = count - initial_count
         if remaining > 0:
             start = int(min(max(self.survivor_reveal_start_step, 0), self.max_steps))
             end = int(min(max(self.survivor_reveal_end_step, start), self.max_steps))
-            edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
+            edges = torch.linspace(float(start), float(end), remaining + 1, device="cpu")
             for k, active_order_idx in enumerate(order[initial_count:]):
                 lo = int(torch.floor(edges[k]).item())
                 hi = int(torch.floor(edges[k + 1]).item())
                 if hi <= lo:
                     step = lo
                 else:
-                    step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
+                    step = int(
+                        torch.randint(
+                            lo,
+                            hi + 1,
+                            (1,),
+                            generator=generator,
+                            device="cpu",
+                        ).item()
+                    )
                 active_reveal_steps[active_order_idx] = step
         reveal_steps[active_idx] = active_reveal_steps
-        self.survivor_reveal_steps[env_index] = reveal_steps
+        self.survivor_reveal_steps[env_index] = reveal_steps.to(device=device)
 
     def _sample_delayed_decoy_reveals(self, env_index: int) -> None:
         if not self.delayed_decoy_knowledge or self.n_decoys <= 0:
             return
         device = self.decoy_reveal_steps.device
+        generator = self._reset_rng_context(env_index).generator("decoy_reveals")
         active_idx = torch.nonzero(
-            self._active_decoy_mask()[env_index],
+            self._active_decoy_mask()[env_index].detach().to(device="cpu"),
             as_tuple=False,
         ).flatten()
         count = int(active_idx.numel())
-        reveal_steps = torch.full((self.n_decoys,), -1, dtype=torch.long, device=device)
+        reveal_steps = torch.full((self.n_decoys,), -1, dtype=torch.long, device="cpu")
         if count <= 0:
-            self.decoy_reveal_steps[env_index] = reveal_steps
+            self.decoy_reveal_steps[env_index] = reveal_steps.to(device=device)
             return
         initial_count = min(int(self.decoy_reveal_initial_count), count)
-        active_reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
-        order = torch.randperm(count, device=device)
+        active_reveal_steps = torch.full(
+            (count,),
+            self.max_steps + 1,
+            dtype=torch.long,
+            device="cpu",
+        )
+        order = torch.randperm(count, generator=generator, device="cpu")
         if initial_count > 0:
             active_reveal_steps[order[:initial_count]] = 0
         remaining = count - initial_count
         if remaining > 0:
             start = int(min(max(self.decoy_reveal_start_step, 0), self.max_steps))
             end = int(min(max(self.decoy_reveal_end_step, start), self.max_steps))
-            edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
+            edges = torch.linspace(float(start), float(end), remaining + 1, device="cpu")
             for k, active_order_idx in enumerate(order[initial_count:]):
                 lo = int(torch.floor(edges[k]).item())
                 hi = int(torch.floor(edges[k + 1]).item())
                 if hi <= lo:
                     step = lo
                 else:
-                    step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
+                    step = int(
+                        torch.randint(
+                            lo,
+                            hi + 1,
+                            (1,),
+                            generator=generator,
+                            device="cpu",
+                        ).item()
+                    )
                 active_reveal_steps[active_order_idx] = step
         reveal_steps[active_idx] = active_reveal_steps
-        self.decoy_reveal_steps[env_index] = reveal_steps
+        self.decoy_reveal_steps[env_index] = reveal_steps.to(device=device)
 
     def _apply_delayed_survivor_reveals(self, env_index: int | None = None) -> None:
         if not self.delayed_survivor_knowledge or self.n_survivors <= 0:
@@ -2534,18 +2935,18 @@ class WildfireSearchScenario(BaseScenario):
             & ~self.survivor_oracle_revealed[env_slice]
             & self._active_survivor_mask()[env_slice]
         )
-        if due.numel() == 0 or not bool(due.any().item()):
-            return
-        self.survivor_oracle_revealed[env_slice] |= due
-        self.scouted_survivors[env_slice] |= due
-        if self.n_ground > 0:
-            self.known_survivors_by_agent[env_slice, self.n_drones:, :] |= due.unsqueeze(1)
+        has_due = due.numel() > 0 and bool(due.any().item())
+        if has_due:
+            self.survivor_oracle_revealed[env_slice] |= due
+            self.scouted_survivors[env_slice] |= due
+        knowledge_changed = self._sync_delayed_oracle_ground_knowledge(env_index)
         reveal_counts = due.float().sum(dim=1)
         if env_index is None:
             self.metric_survivor_oracle_reveals.copy_(reveal_counts)
         else:
             self.metric_survivor_oracle_reveals[env_index] = reveal_counts[0]
-        self._invalidate_ugv_assignment_cache(env_index)
+        if has_due or knowledge_changed:
+            self._invalidate_ugv_assignment_cache(env_index)
 
     def _apply_delayed_decoy_reveals(self, env_index: int | None = None) -> None:
         if not self.delayed_decoy_knowledge or self.n_decoys <= 0:
@@ -2560,21 +2961,56 @@ class WildfireSearchScenario(BaseScenario):
             (self.decoy_reveal_steps[env_slice] >= 0)
             & (self.decoy_reveal_steps[env_slice] <= steps)
             & ~self.decoy_oracle_revealed[env_slice]
-            & ~self.dismissed_decoys[env_slice]
             & self._active_decoy_mask()[env_slice]
         )
-        if due.numel() == 0 or not bool(due.any().item()):
-            return
-        self.decoy_oracle_revealed[env_slice] |= due
-        self.scouted_decoys[env_slice] |= due
-        if self.n_ground > 0:
-            self.known_decoys_by_agent[env_slice, self.n_drones:, :] |= due.unsqueeze(1)
+        has_due = due.numel() > 0 and bool(due.any().item())
+        if has_due:
+            self.decoy_oracle_revealed[env_slice] |= due
+            self.scouted_decoys[env_slice] |= due
+        knowledge_changed = self._sync_delayed_oracle_ground_knowledge(env_index)
         reveal_counts = due.float().sum(dim=1)
         if env_index is None:
             self.metric_decoy_oracle_reveals.copy_(reveal_counts)
         else:
             self.metric_decoy_oracle_reveals[env_index] = reveal_counts[0]
-        self._invalidate_ugv_assignment_cache(env_index)
+        if has_due or knowledge_changed:
+            self._invalidate_ugv_assignment_cache(env_index)
+
+    def _sync_delayed_oracle_ground_knowledge(
+        self,
+        env_index: int | None = None,
+    ) -> bool:
+        """Deliver stored oracle reports only to UGVs currently on the network."""
+        if self.n_ground <= 0 or not (
+            self.delayed_survivor_knowledge or self.delayed_decoy_knowledge
+        ):
+            return False
+        env_slice = slice(None) if env_index is None else slice(env_index, env_index + 1)
+        comms_up = self._latest_comms_up_mask(device=self.known_survivors_by_agent.device)
+        ground_up = comms_up[env_slice, self.n_drones : self.n_agents].unsqueeze(-1)
+        changed = torch.zeros((), dtype=torch.bool, device=ground_up.device)
+
+        if self.delayed_survivor_knowledge and self.n_survivors > 0:
+            reports = (
+                self.survivor_oracle_revealed[env_slice]
+                & self._active_survivor_mask()[env_slice]
+            ).unsqueeze(1)
+            delivered = ground_up & reports
+            ground_known = self.known_survivors_by_agent[env_slice, self.n_drones :, :]
+            changed |= (delivered & ~ground_known).any()
+            ground_known |= delivered
+
+        if self.delayed_decoy_knowledge and self.n_decoys > 0:
+            reports = (
+                self.decoy_oracle_revealed[env_slice]
+                & self._active_decoy_mask()[env_slice]
+            ).unsqueeze(1)
+            delivered = ground_up & reports
+            ground_known = self.known_decoys_by_agent[env_slice, self.n_drones :, :]
+            changed |= (delivered & ~ground_known).any()
+            ground_known |= delivered
+
+        return bool(changed.item())
 
     def _ugv_ground_target_candidates(self) -> tuple[Tensor, Tensor, Tensor]:
         """Return combined UGV targets: true survivors first, then decoys."""
@@ -2587,9 +3023,13 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_survivors > 0:
             survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
             active = self._active_survivor_mask()
-            unconfirmed_scouted = active & self.scouted_survivors & ~self.found_survivors
             ground_known = self.known_survivors_by_agent[:, ground_slice]
-            survivor_targetable = ground_known & unconfirmed_scouted.unsqueeze(1)
+            ground_confirmed = self.confirmed_survivors_by_agent[:, ground_slice]
+            survivor_targetable = (
+                ground_known
+                & ~ground_confirmed
+                & active.unsqueeze(1)
+            )
             target_pos_parts.append(survivor_pos)
             targetable_parts.append(survivor_targetable)
             is_decoy_parts.append(torch.zeros(
@@ -2602,10 +3042,11 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_decoys > 0:
             decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
             ground_decoy_known = self.known_decoys_by_agent[:, ground_slice]
+            ground_decoy_dismissed = self.dismissed_decoys_by_agent[:, ground_slice]
             decoy_targetable = (
                 ground_decoy_known
                 & self.scouted_decoys.unsqueeze(1)
-                & ~self.dismissed_decoys.unsqueeze(1)
+                & ~ground_decoy_dismissed
                 & self._active_decoy_mask().unsqueeze(1)
             )
             target_pos_parts.append(decoy_pos)
@@ -2638,188 +3079,26 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_assignment_cache_step[env_index] = -1
         self._ugv_assignment_result_cache = None
 
-    def _place_diagnostic_survivors_near_reference_agents(self, env_index: int) -> None:
-        """For diagnostic episodes, place survivors near UGV or UAV starts."""
-        if (
-            self.known_survivor_spawn_distance_min_m <= 0.0
-            and self.known_survivor_spawn_distance_max_m <= 0.0
-        ) or self.n_survivors <= 0:
-            return
-
-        reference_kind = self.survivor_spawn_reference
-        if reference_kind == "auto":
-            if not self.known_survivors_at_reset:
-                return
-            reference_kind = "ground"
-        if (
-            (reference_kind == "ground" and self.n_ground <= 0)
-            or (reference_kind == "drone" and self.n_drones <= 0)
-        ):
-            return
-
-        candidates = self._land_entity_spawn_candidate_mask(env_index)
-        if not bool(candidates.any().item()):
-            return
-
-        size = self.fire_grid_size
-        device = self.fire_grid.device
-        available = candidates.clone()
-
-        reference_agents = (
-            self.world.agents[self.n_drones:]
-            if reference_kind == "ground"
-            else self.world.agents[:self.n_drones]
-        )
-        for survivor_idx, survivor in enumerate(self._survivors):
-            if not bool(self._active_survivor_mask()[env_index, survivor_idx].item()):
-                continue
-            reference_agent = reference_agents[survivor_idx % len(reference_agents)]
-            gx, gy = self._positions_to_grid(reference_agent.state.pos[env_index].view(1, 1, 2))
-            x, y = int(gx.item()), int(gy.item())
-            if not math.isfinite(self.known_survivor_spawn_distance_max_m):
-                new_x, new_y = self._sample_known_survivor_cell_beyond_min_distance(
-                    env_index=env_index,
-                    ground_grid_x=x,
-                    ground_grid_y=y,
-                    available=available,
-                    fallback_candidates=candidates,
-                    min_distance_m=self.known_survivor_spawn_distance_min_m,
-                )
-            else:
-                if self.known_survivor_spawn_distance_max_m > self.known_survivor_spawn_distance_min_m:
-                    sample = torch.rand((), device=device)
-                    target_m = (
-                        self.known_survivor_spawn_distance_min_m
-                        + sample * (
-                            self.known_survivor_spawn_distance_max_m
-                            - self.known_survivor_spawn_distance_min_m
-                        )
-                    )
-                else:
-                    target_m = torch.tensor(
-                        self.known_survivor_spawn_distance_min_m,
-                        device=device,
-                        dtype=torch.float32,
-                    )
-                new_x, new_y = self._sample_known_survivor_cell_near_ground(
-                    env_index=env_index,
-                    ground_grid_x=x,
-                    ground_grid_y=y,
-                    available=available,
-                    fallback_candidates=candidates,
-                    target_distance_m=target_m,
-                )
-            new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
-            all_pos = survivor.state.pos.clone()
-            all_pos[env_index] = new_pos
-            survivor.set_pos(all_pos, batch_index=None)
-            available[new_y, new_x] = False
-
-    def _sample_known_survivor_cell_near_ground(
+    def _sample_random_cell_from_mask(
         self,
+        mask: Tensor,
         *,
-        env_index: int,
-        ground_grid_x: int,
-        ground_grid_y: int,
-        available: Tensor,
-        fallback_candidates: Tensor,
-        target_distance_m: Tensor,
+        generator: torch.Generator | None = None,
     ) -> tuple[int, int]:
-        """Sample a survivor cell near a UGV without imposing row-major angle bias."""
-        size = self.fire_grid_size
-        device = self.fire_grid.device
-        yy, xx = torch.meshgrid(
-            torch.arange(size, device=device),
-            torch.arange(size, device=device),
-            indexing="ij",
-        )
-        cell_size_sim = (2.0 * self.x_semidim) / float(size)
-        scale = float(self.terrain_sim_units_per_meter[env_index])
-        cell_size_m = cell_size_sim / max(scale, 1e-9)
-        cell_diag_m = cell_size_m * math.sqrt(2.0)
-        target_m = float(target_distance_m)
+        if generator is not None:
+            flat_mask = mask.detach().to(device="cpu", dtype=torch.bool).flatten()
+            if not bool(flat_mask.any().item()):
+                raise ValueError("Cannot sample from an empty cell mask")
+            # A fixed random priority over all cells makes fallback stable:
+            # changing an unrelated infeasible cell cannot change the winner.
+            priority = torch.randperm(
+                flat_mask.numel(),
+                generator=generator,
+                device="cpu",
+            )
+            choice = int(priority[flat_mask[priority]][0].item())
+            return choice % self.fire_grid_size, choice // self.fire_grid_size
 
-        dx = (xx - int(ground_grid_x)).float()
-        dy = (yy - int(ground_grid_y)).float()
-        dist_m = torch.sqrt(dx.square() + dy.square()) * cell_size_m
-        angle = torch.atan2(dy, dx)
-        target_angle = torch.rand((), device=device) * (2.0 * math.pi) - math.pi
-        angular_error = torch.atan2(
-            torch.sin(angle - target_angle),
-            torch.cos(angle - target_angle),
-        ).abs()
-
-        confirm_m = float(self.detection_range_by_env[env_index]) / max(scale, 1e-9)
-        min_m = max(confirm_m * 1.5, target_m * 0.25)
-        distance_tolerance_m = max(1.5 * cell_diag_m, 0.10 * target_m)
-        base_mask = available & (dist_m >= min_m)
-        radial_mask = base_mask & ((dist_m - target_m).abs() <= distance_tolerance_m)
-
-        for tolerance_deg in (22.5, 45.0, 90.0, 180.0):
-            sector_mask = radial_mask & (angular_error <= math.radians(tolerance_deg))
-            if bool(sector_mask.any().item()):
-                return self._sample_random_cell_from_mask(sector_mask)
-
-        candidate_mask = radial_mask if bool(radial_mask.any().item()) else base_mask
-        if bool(candidate_mask.any().item()):
-            radial_error = torch.where(
-                candidate_mask,
-                (dist_m - target_m).abs(),
-                torch.full_like(dist_m, float("inf")),
-            ).flatten()
-            k = min(128, int(torch.isfinite(radial_error).sum().item()))
-            top_indices = torch.topk(radial_error, k=k, largest=False).indices
-            choice = top_indices[torch.randint(k, (1,), device=device)].item()
-            return int(choice % size), int(choice // size)
-
-        final_mask = available if bool(available.any().item()) else fallback_candidates
-        return self._sample_random_cell_from_mask(final_mask)
-
-    def _sample_known_survivor_cell_beyond_min_distance(
-        self,
-        *,
-        env_index: int,
-        ground_grid_x: int,
-        ground_grid_y: int,
-        available: Tensor,
-        fallback_candidates: Tensor,
-        min_distance_m: float,
-    ) -> tuple[int, int]:
-        """Sample a known survivor cell with a minimum distance and no max cap."""
-        size = self.fire_grid_size
-        device = self.fire_grid.device
-        yy, xx = torch.meshgrid(
-            torch.arange(size, device=device),
-            torch.arange(size, device=device),
-            indexing="ij",
-        )
-        cell_size_sim = (2.0 * self.x_semidim) / float(size)
-        scale = float(self.terrain_sim_units_per_meter[env_index])
-        cell_size_m = cell_size_sim / max(scale, 1e-9)
-
-        dx = (xx - int(ground_grid_x)).float()
-        dy = (yy - int(ground_grid_y)).float()
-        dist_m = torch.sqrt(dx.square() + dy.square()) * cell_size_m
-        angle = torch.atan2(dy, dx)
-        target_angle = torch.rand((), device=device) * (2.0 * math.pi) - math.pi
-        angular_error = torch.atan2(
-            torch.sin(angle - target_angle),
-            torch.cos(angle - target_angle),
-        ).abs()
-
-        confirm_m = float(self.detection_range_by_env[env_index]) / max(scale, 1e-9)
-        min_m = max(confirm_m * 1.5, float(min_distance_m))
-        base_mask = available & (dist_m >= min_m)
-
-        for tolerance_deg in (22.5, 45.0, 90.0, 180.0):
-            sector_mask = base_mask & (angular_error <= math.radians(tolerance_deg))
-            if bool(sector_mask.any().item()):
-                return self._sample_random_cell_from_mask(sector_mask)
-
-        final_mask = available if bool(available.any().item()) else fallback_candidates
-        return self._sample_random_cell_from_mask(final_mask)
-
-    def _sample_random_cell_from_mask(self, mask: Tensor) -> tuple[int, int]:
         flat = mask.flatten().nonzero(as_tuple=False).flatten()
         if flat.numel() == 0:
             raise ValueError("Cannot sample from an empty cell mask")
@@ -2828,6 +3107,7 @@ class WildfireSearchScenario(BaseScenario):
 
     def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
         """Start an irregular compact fire patch with resolution-independent area."""
+        generator = self._reset_rng_context(env_index).generator("initial_fire")
         fuel = self._fire_fuel_grid(env_index)
         candidates = (fuel > 0.20).flatten().nonzero(as_tuple=False).flatten()
         if candidates.numel() == 0:
@@ -2840,15 +3120,31 @@ class WildfireSearchScenario(BaseScenario):
             int(candidates.numel()),
         )
         if float(self.initial_fire_cells) > 0.0 and n_cells > 0:
-            seed = candidates[
-                torch.randint(candidates.numel(), (1,), device=self.fire_grid.device)
-            ].squeeze(0)
+            candidate_index = int(
+                torch.randint(
+                    int(candidates.numel()),
+                    (1,),
+                    generator=generator,
+                    device="cpu",
+                ).item()
+            )
+            seed = candidates[candidate_index]
             seed_y = torch.div(seed, width, rounding_mode="floor")
             seed_x = seed % width
-            scores = self._initial_fire_scores(seed_x, seed_y, fuel, height, width)
+            scores = self._initial_fire_scores(
+                seed_x,
+                seed_y,
+                fuel,
+                height,
+                width,
+                generator=generator,
+            )
             scores = torch.where(candidate_mask, scores, torch.full_like(scores, float("inf")))
             choice = torch.topk(scores, k=n_cells, largest=False).indices
-            self._ignite_fire_cells(self._cell_choice_mask(env_index, choice, height, width))
+            self._ignite_fire_cells(
+                self._cell_choice_mask(env_index, choice, height, width),
+                generator=generator,
+            )
 
     def _initial_fire_scores(
         self,
@@ -2857,6 +3153,8 @@ class WildfireSearchScenario(BaseScenario):
         fuel: Tensor,
         height: int,
         width: int,
+        *,
+        generator: torch.Generator | None = None,
     ) -> Tensor:
         """Rank cells for a natural-looking ignition patch instead of a circle."""
         device = self.fire_grid.device
@@ -2865,14 +3163,23 @@ class WildfireSearchScenario(BaseScenario):
         dx = (xs - seed_x).float()
         dy = (ys - seed_y).float()
 
-        angle = torch.rand((), device=device) * (2.0 * math.pi)
-        stretch = 0.65 + torch.rand((), device=device) * 1.1
+        angle = self._rand_like_with_generator(
+            torch.empty((), device=device),
+            generator,
+        ) * (2.0 * math.pi)
+        stretch = 0.65 + self._rand_like_with_generator(
+            torch.empty((), device=device),
+            generator,
+        ) * 1.1
         cos_a, sin_a = torch.cos(angle), torch.sin(angle)
         rotated_x = cos_a * dx + sin_a * dy
         rotated_y = -sin_a * dx + cos_a * dy
         ellipse = (rotated_x / stretch).square() + (rotated_y * stretch).square()
 
-        texture = torch.rand(height, width, device=device)
+        texture = self._rand_like_with_generator(
+            torch.empty(height, width, device=device),
+            generator,
+        )
         for _ in range(3):
             texture = 0.55 * texture + 0.45 * (self._neighbor_sum(texture.unsqueeze(0)).squeeze(0) / 4.0)
         texture = (texture - texture.min()) / (texture.max() - texture.min()).clamp_min(1e-6)
@@ -2891,21 +3198,58 @@ class WildfireSearchScenario(BaseScenario):
         mask[env_index].view(height * width)[choice] = True
         return mask
 
-    def _ignite_fire_cells(self, new_burns: Tensor) -> None:
+    @staticmethod
+    def _rand_like_with_generator(
+        reference: Tensor,
+        generator: torch.Generator | None,
+    ) -> Tensor:
+        if generator is None:
+            return torch.rand_like(reference)
+        return torch.rand(
+            reference.shape,
+            dtype=reference.dtype,
+            generator=generator,
+            device="cpu",
+        ).to(device=reference.device)
+
+    def _ignite_fire_cells(
+        self,
+        new_burns: Tensor,
+        *,
+        generator: torch.Generator | None = None,
+        lifetime_uniforms: Tensor | None = None,
+        intensity_uniforms: Tensor | None = None,
+    ) -> None:
         """Mark cells as actively burning and assign each a random burn lifetime."""
         if not bool(new_burns.any().item()):
             return
+        if (lifetime_uniforms is None) != (intensity_uniforms is None):
+            raise ValueError(
+                "lifetime_uniforms and intensity_uniforms must be provided together"
+            )
         min_lifetime = self.land_cover_fire_burnout_min[self.land_cover_grid]
         max_lifetime = self.land_cover_fire_burnout_max[self.land_cover_grid]
         lifetime_span = (max_lifetime - min_lifetime + 1).clamp_min(1)
+        if lifetime_uniforms is None:
+            lifetime_uniforms = self._rand_like_with_generator(
+                self.fire_intensity_grid,
+                generator,
+            )
+            intensity_uniforms = self._rand_like_with_generator(
+                self.fire_intensity_grid,
+                generator,
+            )
         random_lifetime = min_lifetime + torch.floor(
-            torch.rand_like(self.fire_intensity_grid) * lifetime_span.float()
+            lifetime_uniforms * lifetime_span.float()
         ).long()
         self.fire_grid = self.fire_grid | new_burns
         self.burned_grid = self.burned_grid | new_burns
         self.fire_age_grid = torch.where(new_burns, torch.zeros_like(self.fire_age_grid), self.fire_age_grid)
         self.fire_lifetime_grid = torch.where(new_burns, random_lifetime, self.fire_lifetime_grid)
-        ignition_intensity = self._fire_intensity_potential() * (0.80 + 0.40 * torch.rand_like(self.fire_intensity_grid))
+        ignition_intensity = self._fire_intensity_potential() * (
+            0.80
+            + 0.40 * intensity_uniforms
+        )
         self.fire_intensity_grid = torch.where(
             new_burns,
             ignition_intensity.clamp(0.25, 1.0),
@@ -2913,9 +3257,8 @@ class WildfireSearchScenario(BaseScenario):
         )
 
     def _generate_terrain(self, env_index: int) -> None:
-        """Load real terrain and place land entities on feasible cells."""
+        """Load real terrain and refresh terrain-derived mobility layers."""
         self._load_real_terrain(env_index)
-        self._place_land_entities_uniformly_on_valid_cells(env_index)
         self._refresh_mobility_layers(env_index)
 
     def _load_real_terrain(self, env_index: int) -> None:
@@ -3129,10 +3472,31 @@ class WildfireSearchScenario(BaseScenario):
 
         device = self.fire_grid.device
         available = candidates.clone()
-        entities = self._survivors + self._decoys + self.world.agents[self.n_drones:]
-        for entity in entities:
+
+        reset_rng = self._reset_rng_context(env_index)
+        deterministic_entities = (
+            (self._survivors, "survivor_positions"),
+            (self._decoys, "decoy_positions"),
+        )
+        for entities, stream_name in deterministic_entities:
+            for slot_index, entity in enumerate(entities):
+                search_mask = available if bool(available.any().item()) else candidates
+                new_x, new_y = self._sample_random_cell_from_mask(
+                    search_mask,
+                    generator=reset_rng.generator(stream_name, slot_index),
+                )
+                new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
+                all_pos = entity.state.pos.clone()
+                all_pos[env_index] = new_pos
+                entity.set_pos(all_pos, batch_index=None)
+                available[new_y, new_x] = False
+
+        for ground_index, entity in enumerate(self.world.agents[self.n_drones:]):
             search_mask = available if bool(available.any().item()) else candidates
-            new_x, new_y = self._sample_random_cell_from_mask(search_mask)
+            new_x, new_y = self._sample_random_cell_from_mask(
+                search_mask,
+                generator=reset_rng.generator("ugv_starts", ground_index),
+            )
             new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
             all_pos = entity.state.pos.clone()
             all_pos[env_index] = new_pos
@@ -3140,10 +3504,8 @@ class WildfireSearchScenario(BaseScenario):
             available[new_y, new_x] = False
 
     def _place_drones_jointly_uniform_interior(self, env_index: int) -> None:
-        """Jointly sample UAV starts, rejecting the whole team if spacing fails."""
+        """Sample prefix-stable UAV starts while enforcing team spacing."""
         if self.n_drones <= 0:
-            return
-        if self.uav_start_min_separation_m <= 0.0 and self.uav_start_edge_margin_m <= 0.0:
             return
 
         drone_agents = self.world.agents[:self.n_drones]
@@ -3167,27 +3529,59 @@ class WildfireSearchScenario(BaseScenario):
             )
 
         min_sep_sim = self.uav_start_min_separation_m * scale
-        best_min_distance = -1.0
-        for _ in range(self.uav_start_max_attempts):
-            xs = x_min + torch.rand(self.n_drones, device=device) * max(x_max - x_min, 0.0)
-            ys = y_min + torch.rand(self.n_drones, device=device) * max(y_max - y_min, 0.0)
-            positions = torch.stack([xs, ys], dim=-1)
-            pairwise = torch.pdist(positions) if self.n_drones > 1 else torch.empty(0, device=device)
-            min_distance = float(pairwise.min().detach().cpu().item()) if pairwise.numel() else math.inf
-            if min_distance > best_min_distance:
-                best_min_distance = min_distance
-            if min_distance + 1e-9 >= min_sep_sim:
-                perm = torch.randperm(self.n_drones, device=device)
-                self._set_drone_start_positions(env_index, positions[perm])
-                return
+        reset_context = None
+        if hasattr(self, "_reset_rng_contexts"):
+            reset_context = self._reset_rng_contexts[int(env_index)]
 
-        best_m = best_min_distance / max(scale, 1e-9)
-        raise ValueError(
-            "Could not sample UAV starts satisfying "
-            f"uav_start_min_separation_m={self.uav_start_min_separation_m:.1f} "
-            f"after {self.uav_start_max_attempts} attempts; best was {best_m:.1f}m. "
-            "Reduce the separation/margin or increase uav_start_max_attempts."
-        )
+        accepted: list[Tensor] = []
+        for drone_index in range(self.n_drones):
+            generator = (
+                reset_context.generator("uav_starts", drone_index)
+                if reset_context is not None
+                else None
+            )
+            best_min_distance = -1.0
+            for _ in range(self.uav_start_max_attempts):
+                if generator is None:
+                    unit = torch.rand(2, device=device)
+                else:
+                    unit = torch.rand(
+                        2,
+                        generator=generator,
+                        device="cpu",
+                    ).to(device=device)
+                candidate = torch.stack(
+                    [
+                        x_min + unit[0] * max(x_max - x_min, 0.0),
+                        y_min + unit[1] * max(y_max - y_min, 0.0),
+                    ]
+                )
+                if accepted:
+                    prior = torch.stack(accepted, dim=0)
+                    min_distance = float(
+                        torch.linalg.vector_norm(prior - candidate, dim=1)
+                        .min()
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+                else:
+                    min_distance = math.inf
+                best_min_distance = max(best_min_distance, min_distance)
+                if min_distance + 1e-9 >= min_sep_sim:
+                    accepted.append(candidate)
+                    break
+            else:
+                best_m = best_min_distance / max(scale, 1e-9)
+                raise ValueError(
+                    "Could not sample UAV starts satisfying "
+                    f"uav_start_min_separation_m={self.uav_start_min_separation_m:.1f} "
+                    f"for UAV slot {drone_index} after {self.uav_start_max_attempts} "
+                    f"attempts; best was {best_m:.1f}m. Reduce the separation/margin "
+                    "or increase uav_start_max_attempts."
+                )
+
+        self._set_drone_start_positions(env_index, torch.stack(accepted, dim=0))
 
     def _set_drone_start_positions(self, env_index: int, positions: Tensor) -> None:
         for drone_idx, agent in enumerate(self.world.agents[:self.n_drones]):
@@ -3256,11 +3650,83 @@ class WildfireSearchScenario(BaseScenario):
     def _grid_scale(self) -> float:
         return self.fire_grid_size / max(float(self.terrain_reference_grid_size), 1.0)
 
+    def _fire_spread_scale(self) -> Tensor:
+        """Resolution scale for spread based on physical cell size, not grid count."""
+        fallback = float(self._grid_scale())
+        if not hasattr(self, "terrain_sim_units_per_meter"):
+            return torch.full(
+                (self.world.batch_dim, 1, 1),
+                fallback,
+                dtype=torch.float,
+                device=self.fire_grid.device,
+            )
+        sim_units_per_meter = self.terrain_sim_units_per_meter.to(
+            device=self.fire_grid.device,
+            dtype=torch.float,
+        )
+        valid = sim_units_per_meter > 0.0
+        cell_size_sim = (2.0 * float(self.x_semidim)) / max(float(self.fire_grid_size), 1.0)
+        cell_size_m = cell_size_sim / sim_units_per_meter.clamp_min(1e-9)
+        scale = self.fire_spread_reference_cell_size_m / cell_size_m.clamp_min(1e-9)
+        fallback_tensor = torch.full_like(scale, fallback)
+        return torch.where(valid, scale, fallback_tensor).view(-1, 1, 1)
+
     def _scaled_area_cell_count(self, cells_at_reference: float, min_cells: int = 1) -> int:
         return max(int(round(float(cells_at_reference) * self._grid_scale() ** 2)), min_cells)
 
     def _world_length_to_cells(self, length: float, min_cells: int = 1) -> int:
         return max(int(round(float(length) / (2.0 * self.x_semidim) * self.fire_grid_size)), min_cells)
+
+    def _drone_dynamic_clearance_enabled(self) -> bool:
+        return (
+            self.n_drones > 0
+            and bool(getattr(self, "drone_variable_clearance_enabled", False))
+            and (
+                float(getattr(self, "drone_fire_safety_clearance_m", 0.0)) > 0.0
+                or float(getattr(self, "drone_smoke_safety_clearance_m", 0.0)) > 0.0
+            )
+        )
+
+    def _drone_safety_margin_grid_for_env(self, env_index: int) -> Tensor:
+        base = torch.full_like(
+            self.elevation_grid[env_index],
+            float(self.drone_safety_clearance_by_env[env_index].item()),
+        )
+        if not bool(getattr(self, "drone_variable_clearance_enabled", False)):
+            return base
+
+        scale = float(self.terrain_sim_units_per_meter[env_index].item())
+        margin = base
+        if self.drone_safety_clearance_land_values is not None:
+            land_margin = self.drone_safety_clearance_land_values[self.land_cover_grid[env_index]] * scale
+            margin = torch.maximum(margin, land_margin)
+        if self.drone_safety_clearance_object_values is not None:
+            object_margin = self.drone_safety_clearance_object_values[self.obstacle_type_grid[env_index]] * scale
+            margin = torch.maximum(margin, object_margin)
+        if self.drone_fire_safety_clearance_m > 0.0:
+            fire_margin = torch.full_like(margin, self.drone_fire_safety_clearance_m * scale)
+            margin = torch.where(self.fire_grid[env_index].bool(), torch.maximum(margin, fire_margin), margin)
+        if self.drone_smoke_safety_clearance_m > 0.0:
+            smoke_margin = torch.full_like(margin, self.drone_smoke_safety_clearance_m * scale)
+            smoke_mask = self.smoke_grid[env_index] >= self.drone_smoke_clearance_threshold
+            margin = torch.where(smoke_mask, torch.maximum(margin, smoke_margin), margin)
+        return margin
+
+    def _refresh_drone_required_clearance_layer(self, env_index: int) -> None:
+        margin = self._drone_safety_margin_grid_for_env(env_index)
+        self.drone_safety_clearance_margin_grid[env_index] = margin
+        self.required_clearance_grid[env_index] = self.obstacle_height_grid[env_index] + margin
+        self.required_clearance_msl_grid[env_index] = (
+            self.elevation_grid[env_index] + self.required_clearance_grid[env_index]
+        )
+        if self.required_clearance_grid[env_index].max() > self.drone_max_altitude_by_env[env_index]:
+            raise ValueError("highest drone_flight_levels entry must clear generated obstacles plus safety margin")
+
+    def _refresh_dynamic_drone_clearance_layers(self) -> None:
+        if not self._drone_dynamic_clearance_enabled():
+            return
+        for env_index in range(self.world.batch_dim):
+            self._refresh_drone_required_clearance_layer(env_index)
 
     def _refresh_mobility_layers(self, env_index: int) -> None:
         cover = self.land_cover_grid[env_index]
@@ -3273,13 +3739,7 @@ class WildfireSearchScenario(BaseScenario):
         )
         cost = self.land_cover_cost_values[cover] * (1.0 + self.slope_cost_weight * slope)
         speed = self.land_cover_speed_values[cover] / (1.0 + self.slope_speed_weight * slope)
-        clearance = self.drone_safety_clearance_by_env[env_index]
-        self.required_clearance_grid[env_index] = self.obstacle_height_grid[env_index] + clearance
-        self.required_clearance_msl_grid[env_index] = (
-            self.elevation_grid[env_index] + self.required_clearance_grid[env_index]
-        )
-        if self.required_clearance_grid[env_index].max() > self.drone_max_altitude_by_env[env_index]:
-            raise ValueError("highest drone_flight_levels entry must clear generated obstacles plus safety margin")
+        self._refresh_drone_required_clearance_layer(env_index)
         self.traversable_grid[env_index] = traversable
         self.mobility_cost_grid[env_index] = cost
         self.speed_multiplier_grid[env_index] = torch.where(
@@ -3787,22 +4247,94 @@ class WildfireSearchScenario(BaseScenario):
                 self._spread_fire()
             self._update_smoke()
 
+    def _sample_fire_spread_randomness(
+        self,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Sample policy-independent fire evolution randomness for this update."""
+        grid_size = int(self.fire_grid_size)
+        dtype = self.fire_intensity_grid.dtype
+        rate_rows = []
+        ignition_rows = []
+        spotting_rows = []
+        lifetime_rows = []
+        intensity_rows = []
+        for env_index in range(self.world.batch_dim):
+            context = self._reset_rng_context(env_index)
+            rate_rows.append(
+                torch.randn(
+                    1,
+                    1,
+                    generator=context.generator("fire_spread_rate"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            ignition_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_ignition"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            spotting_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_spotting"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            lifetime_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_burn_lifetime"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            intensity_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_ignition_intensity"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+        device = self.fire_grid.device
+        return (
+            torch.stack(rate_rows, dim=0).to(device=device),
+            torch.stack(ignition_rows, dim=0).to(device=device),
+            torch.stack(spotting_rows, dim=0).to(device=device),
+            torch.stack(lifetime_rows, dim=0).to(device=device),
+            torch.stack(intensity_rows, dim=0).to(device=device),
+        )
+
     def _spread_fire(self) -> None:
         exposure = self._directional_fire_exposure()
         fuel = self._fire_fuel_grid()
         moisture_factor = torch.exp(-self.fire_moisture_damping * self.moisture_grid.clamp(0.0, 1.0))
         burnable = (fuel > 0.0) & ~self.burned_grid
+        (
+            rate_noise,
+            ignition_uniforms,
+            spotting_uniforms,
+            lifetime_uniforms,
+            intensity_uniforms,
+        ) = self._sample_fire_spread_randomness()
         random_rate = torch.exp(
-            torch.randn(
-                self.world.batch_dim, 1, 1,
-                device=self.fire_grid.device,
-            ) * self.fire_spread_variability
+            rate_noise * self.fire_spread_variability
         ).clamp(0.35, 2.25)
+        spread_scale = self._fire_spread_scale()
         rate = (
             exposure
             * fuel
             * moisture_factor
-            * self._grid_scale()
+            * spread_scale
             * random_rate
         )
         p_ignite = 1.0 - (1.0 - self.fire_spread_prob) ** rate.clamp_min(0.0)
@@ -3810,16 +4342,23 @@ class WildfireSearchScenario(BaseScenario):
         smoke_spotting = self.smoke_grid > 0.08
         p_spot = (
             self.fire_spotting_prob
-            * self._grid_scale()
+            * spread_scale
             * random_rate
             * fuel.clamp(0.0, 1.0)
             * moisture_factor
         )
         new_burns = (
-            ((torch.rand_like(p_ignite) < p_ignite) | ((torch.rand_like(p_spot) < p_spot) & smoke_spotting))
+            (
+                (ignition_uniforms < p_ignite)
+                | ((spotting_uniforms < p_spot) & smoke_spotting)
+            )
             & burnable
         )
-        self._ignite_fire_cells(new_burns)
+        self._ignite_fire_cells(
+            new_burns,
+            lifetime_uniforms=lifetime_uniforms,
+            intensity_uniforms=intensity_uniforms,
+        )
 
         self.fire_age_grid = torch.where(
             self.fire_grid,
@@ -3903,11 +4442,17 @@ class WildfireSearchScenario(BaseScenario):
         neighbor_mean = self._neighbor_sum(smoke) / 4.0
         smoke = smoke + self.smoke_diffusion * (neighbor_mean - smoke)
 
+        # Simplified 2-D smoke transport: fire emissions are treated as a
+        # decaying, diffusing, wind-advected tracer. This mirrors the structure
+        # of operational/atmospheric smoke transport models such as NOAA ARL
+        # HYSPLIT smoke calculations and WRF-SFIRE-Chem (Kochanski et al., 2013),
+        # while remaining a local visibility-hazard proxy for VMAS training.
         shifted = self._wind_advected_grid(smoke)
         if shifted is not None:
-            smoke = smoke + self.wind_strength * (shifted - smoke)
+            smoke = smoke + self.smoke_advection_strength * (shifted - smoke)
 
         self.smoke_grid = smoke.clamp(0.0, 1.0)
+        self._refresh_dynamic_drone_clearance_layers()
         if (
             self.ugv_planner_fire_mode != "off"
             and (self.ugv_planner_smoke_cost > 0.0 or self.ugv_planner_smolder_cost > 0.0)
@@ -3927,7 +4472,7 @@ class WildfireSearchScenario(BaseScenario):
 
     def _wind_advected_grid(self, grid: Tensor) -> Tensor | None:
         wind_x, wind_y = self._normalized_wind()
-        if self.wind_strength <= 0 or (wind_x == 0.0 and wind_y == 0.0):
+        if self.smoke_advection_strength <= 0 or (wind_x == 0.0 and wind_y == 0.0):
             return None
         abs_x, abs_y = abs(wind_x), abs(wind_y)
         total = abs_x + abs_y
@@ -4240,6 +4785,7 @@ class WildfireSearchScenario(BaseScenario):
         targetable: Tensor,
     ) -> tuple[Tensor, Tensor]:
         cached = getattr(self, "_ugv_assignment_result_cache", None)
+        ground_comms_up = self._ugv_ground_comms_up_mask(device=ground_pos.device)
         step_key = tuple(int(v) for v in self.step_count.detach().cpu().reshape(-1).tolist())
         cache_key = (
             step_key,
@@ -4256,6 +4802,8 @@ class WildfireSearchScenario(BaseScenario):
                 torch.equal(cached["ground_pos"], ground_pos)
                 and torch.equal(cached["survivor_pos"], survivor_pos)
                 and torch.equal(cached["targetable"], targetable)
+                and torch.equal(cached["ground_comms_up"], ground_comms_up)
+                and torch.equal(cached["assignment_leases"], self.ugv_assignment_lease_idx)
             ):
                 return cached["assigned_idx"], cached["assigned_dist"]
 
@@ -4263,18 +4811,163 @@ class WildfireSearchScenario(BaseScenario):
             ground_pos,
             survivor_pos,
             targetable,
+            ground_comms_up=ground_comms_up,
         )
         self._ugv_assignment_result_cache = {
             "key": cache_key,
             "ground_pos": ground_pos.detach().clone(),
             "survivor_pos": survivor_pos.detach().clone(),
             "targetable": targetable.detach().clone(),
+            "ground_comms_up": ground_comms_up.detach().clone(),
+            "assignment_leases": self.ugv_assignment_lease_idx.detach().clone(),
             "assigned_idx": assigned_idx,
             "assigned_dist": assigned_dist,
         }
         return assigned_idx, assigned_dist
 
+    def _ugv_ground_comms_up_mask(self, device: torch.device) -> Tensor:
+        if self.n_ground <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
+        comms_up = self._latest_comms_up_mask(device=device)
+        return comms_up[:, self.n_drones : self.n_agents]
+
+    def _ugv_disconnected_assignment_lease_mask(
+        self,
+        n_targets: int,
+        *,
+        device: torch.device,
+    ) -> Tensor:
+        """Return targets reserved by UGVs that are currently disconnected."""
+        mask = torch.zeros(
+            self.world.batch_dim,
+            self.n_ground,
+            n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        if self.n_ground <= 0 or n_targets <= 0:
+            return mask
+        leases = self.ugv_assignment_lease_idx.to(device=device)
+        disconnected = ~self._ugv_ground_comms_up_mask(device=device)
+        valid = disconnected & (leases >= 0) & (leases < n_targets)
+        mask.scatter_(
+            dim=2,
+            index=leases.clamp(min=0, max=max(n_targets - 1, 0)).unsqueeze(-1),
+            src=valid.unsqueeze(-1),
+        )
+        return mask
+
     def _ugv_assigned_target_indices_uncached(
+        self,
+        ground_pos: Tensor,
+        survivor_pos: Tensor,
+        targetable: Tensor,
+        *,
+        ground_comms_up: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply disconnected-UGV leases around the configured assignment solver."""
+        batch_dim = ground_pos.shape[0]
+        device = ground_pos.device
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
+            return (
+                torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device),
+                torch.full((batch_dim, self.n_ground), float("inf"), device=device),
+            )
+
+        if ground_comms_up is None:
+            ground_comms_up = self._ugv_ground_comms_up_mask(device=device)
+        else:
+            ground_comms_up = ground_comms_up.to(device=device, dtype=torch.bool)
+
+        if bool(ground_comms_up.all().item()):
+            assigned_idx, assigned_dist = self._ugv_assigned_target_indices_without_leases(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            self.ugv_assignment_lease_idx.copy_(assigned_idx)
+            return assigned_idx, assigned_dist
+
+        disconnected = ~ground_comms_up
+        leases_before = self.ugv_assignment_lease_idx.to(device=device).clone()
+        valid_lease = (leases_before >= 0) & (leases_before < n_targets)
+        disconnected_leases = disconnected & valid_lease
+
+        reserved_targets = torch.zeros(
+            batch_dim,
+            n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        lease_env, lease_ground = disconnected_leases.nonzero(as_tuple=True)
+        if lease_env.numel() > 0:
+            reserved_targets[
+                lease_env,
+                leases_before[lease_env, lease_ground],
+            ] = True
+        solver_targetable = (
+            targetable
+            & ground_comms_up.unsqueeze(-1)
+            & ~reserved_targets.unsqueeze(1)
+        )
+        # A disconnected UGV's current position must not influence assignment
+        # ordering, Euclidean scores, or route-cost calculations.
+        solver_ground_pos = torch.where(
+            ground_comms_up.unsqueeze(-1),
+            ground_pos,
+            torch.zeros_like(ground_pos),
+        )
+
+        sticky_before = self.ugv_sticky_target_idx.clone()
+        sticky_age_before = self.ugv_sticky_target_age.clone()
+        assigned_idx, assigned_dist = self._ugv_assigned_target_indices_without_leases(
+            solver_ground_pos,
+            survivor_pos,
+            solver_targetable,
+        )
+
+        lease_safe = leases_before.clamp(min=0, max=n_targets - 1)
+        lease_still_local = targetable.gather(
+            dim=2,
+            index=lease_safe.unsqueeze(-1),
+        ).squeeze(-1)
+        active_private_lease = disconnected_leases & lease_still_local
+        private_dist = torch.linalg.norm(
+            survivor_pos.gather(
+                dim=1,
+                index=lease_safe.unsqueeze(-1).expand(-1, -1, 2),
+            )
+            - ground_pos,
+            dim=-1,
+        )
+        assigned_idx = torch.where(active_private_lease, leases_before, assigned_idx)
+        assigned_dist = torch.where(active_private_lease, private_dist, assigned_dist)
+
+        # Only connected UGVs publish assignment changes. Disconnected leases
+        # remain frozen even if the owner privately confirms the target.
+        self.ugv_assignment_lease_idx.copy_(torch.where(
+            ground_comms_up,
+            assigned_idx,
+            leases_before,
+        ))
+        self.ugv_sticky_target_idx.copy_(torch.where(
+            disconnected,
+            torch.where(valid_lease, leases_before, sticky_before),
+            self.ugv_sticky_target_idx,
+        ))
+        self.ugv_sticky_target_age.copy_(torch.where(
+            disconnected,
+            sticky_age_before,
+            self.ugv_sticky_target_age,
+        ))
+        # A future sequence target is not an active lease and is released while
+        # its owner is disconnected.
+        self.ugv_sequence_next_target_idx.masked_fill_(disconnected, -1)
+        self.ugv_assignment_cache_idx.copy_(assigned_idx)
+        return assigned_idx, assigned_dist
+
+    def _ugv_assigned_target_indices_without_leases(
         self,
         ground_pos: Tensor,
         survivor_pos: Tensor,
@@ -4295,7 +4988,13 @@ class WildfireSearchScenario(BaseScenario):
         if self.ugv_target_assignment_mode == "nearest" or (
             self.n_ground <= 1
             and self.ugv_target_assignment_mode
-            not in {"route_cost_greedy", "route_cost_sticky", "route_cost_global"}
+            not in {
+                "route_cost_greedy",
+                "route_cost_sticky",
+                "greedy_sequence_sticky",
+                "route_sequence_sticky",
+                "route_cost_global",
+            }
         ):
             assigned_dist, assigned_idx = masked.min(dim=2)
             assigned_idx = torch.where(
@@ -4307,6 +5006,26 @@ class WildfireSearchScenario(BaseScenario):
 
         if self.ugv_target_assignment_mode == "greedy_sticky":
             assigned_idx = self._ugv_sticky_target_indices(distances, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "greedy_sequence_sticky":
+            distances_m = distances / self.terrain_sim_units_per_meter.to(device=device).view(-1, 1, 1).clamp_min(1e-9)
+            target_pair_distances_m = self._ugv_target_pair_euclidean_costs_m(
+                survivor_pos,
+                targetable,
+            )
+            assigned_idx = self._ugv_route_sequence_sticky_target_indices(
+                distances_m,
+                target_pair_distances_m,
+                targetable,
+            )
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(
@@ -4343,6 +5062,30 @@ class WildfireSearchScenario(BaseScenario):
                 targetable,
             )
             assigned_idx = self._ugv_route_cost_sticky_target_indices(route_costs_m, targetable)
+            assigned_idx_safe = assigned_idx.clamp(min=0)
+            assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
+            assigned_dist = torch.where(
+                assigned_idx >= 0,
+                assigned_dist,
+                torch.full_like(assigned_dist, float("inf")),
+            )
+            return assigned_idx, assigned_dist
+
+        if self.ugv_target_assignment_mode == "route_sequence_sticky":
+            route_costs_m = self._ugv_route_assignment_costs_m(
+                ground_pos,
+                survivor_pos,
+                targetable,
+            )
+            target_pair_costs_m = self._ugv_target_pair_route_costs_m(
+                survivor_pos,
+                targetable,
+            )
+            assigned_idx = self._ugv_route_sequence_sticky_target_indices(
+                route_costs_m,
+                target_pair_costs_m,
+                targetable,
+            )
             assigned_idx_safe = assigned_idx.clamp(min=0)
             assigned_dist = torch.gather(distances, dim=2, index=assigned_idx_safe.unsqueeze(-1)).squeeze(-1)
             assigned_dist = torch.where(
@@ -4396,18 +5139,15 @@ class WildfireSearchScenario(BaseScenario):
                     for target in valid_targets
                     if int(target.item()) not in used
                 ]
-                candidate_targets = (
-                    torch.tensor(unused_targets, dtype=torch.long, device=device)
-                    if unused_targets
-                    else valid_targets
-                )
+                if not unused_targets:
+                    continue
+                candidate_targets = torch.tensor(unused_targets, dtype=torch.long, device=device)
                 candidate_distances = distances[env_index, ground_index, candidate_targets]
                 selected_offset = int(torch.argmin(candidate_distances).item())
                 selected = int(candidate_targets[selected_offset].item())
                 assigned_idx[env_index, ground_index] = selected
                 assigned_dist[env_index, ground_index] = distances[env_index, ground_index, selected]
-                if unused_targets:
-                    used.add(selected)
+                used.add(selected)
         return assigned_idx, assigned_dist
 
     def _ugv_sticky_target_indices(self, distances: Tensor, targetable: Tensor) -> Tensor:
@@ -4433,6 +5173,215 @@ class WildfireSearchScenario(BaseScenario):
             targetable,
             margin_by_env=margin_by_env,
         )
+
+    def _ugv_route_sequence_sticky_target_indices(
+        self,
+        route_costs_m: Tensor,
+        target_pair_costs_m: Tensor,
+        targetable: Tensor,
+    ) -> Tensor:
+        """Assign active UGV targets from short route sequences.
+
+        Candidate routes have length one or two. Only the first target becomes
+        the active planner target; the optional second target is reserved
+        internally so another UGV does not chase it first.
+        """
+        batch_dim = route_costs_m.shape[0]
+        device = route_costs_m.device
+        assigned = torch.full((batch_dim, self.n_ground), -1, dtype=torch.long, device=device)
+        next_assigned = torch.full_like(assigned, -1)
+        n_targets = int(targetable.shape[2]) if targetable.ndim == 3 else 0
+        if self.n_ground == 0 or n_targets == 0:
+            self.ugv_sequence_next_target_idx = next_assigned
+            return assigned
+
+        current_step = self.step_count.to(device=device)
+        margin = float(self.ugv_sticky_switch_margin_m)
+        ratio = float(self.ugv_sticky_switch_ratio)
+        min_age = int(self.ugv_sticky_min_age_steps)
+
+        for env_index in range(batch_dim):
+            previous_first = self.ugv_sticky_target_idx[env_index].clone()
+            previous_next = self.ugv_sequence_next_target_idx[env_index].clone()
+            candidates: list[tuple[float, float, int, int, int, int]] = []
+            reserved_target_owner: dict[int, int] = {}
+            for owner_index in range(self.n_ground):
+                for owned_target in (
+                    int(previous_first[owner_index].item()),
+                    int(previous_next[owner_index].item()),
+                ):
+                    if (
+                        owned_target >= 0
+                        and owned_target not in reserved_target_owner
+                        and bool(targetable[env_index, owner_index, owned_target].item())
+                        and bool(torch.isfinite(route_costs_m[env_index, owner_index, owned_target]).item())
+                    ):
+                        reserved_target_owner[owned_target] = owner_index
+
+            for ground_index in range(self.n_ground):
+                scoreable = (
+                    targetable[env_index, ground_index]
+                    & torch.isfinite(route_costs_m[env_index, ground_index])
+                )
+                valid_targets = [
+                    int(target.item())
+                    for target in torch.nonzero(scoreable, as_tuple=False).flatten()
+                    if reserved_target_owner.get(int(target.item()), ground_index) == ground_index
+                ]
+                if not valid_targets:
+                    continue
+
+                current = int(previous_first[ground_index].item())
+                current_valid = (
+                    current >= 0
+                    and bool(scoreable[current].item())
+                )
+                if not current_valid:
+                    queued = int(previous_next[ground_index].item())
+                    if queued >= 0 and bool(scoreable[queued].item()):
+                        current = queued
+                        current_valid = True
+
+                age = int(self.ugv_sticky_target_age[env_index, ground_index].item())
+                for first in valid_targets:
+                    first_cost = float(route_costs_m[env_index, ground_index, first].item())
+                    if not math.isfinite(first_cost):
+                        continue
+                    self._ugv_add_route_sequence_candidate(
+                        candidates,
+                        env_index,
+                        ground_index,
+                        first,
+                        -1,
+                        first_cost,
+                        1,
+                        current,
+                        current_valid,
+                        age,
+                        min_age,
+                        margin,
+                        ratio,
+                        route_costs_m,
+                        target_pair_costs_m,
+                    )
+                    for second in valid_targets:
+                        if second == first:
+                            continue
+                        pair_cost = float(target_pair_costs_m[env_index, first, second].item())
+                        if not math.isfinite(pair_cost):
+                            continue
+                        self._ugv_add_route_sequence_candidate(
+                            candidates,
+                            env_index,
+                            ground_index,
+                            first,
+                            second,
+                            first_cost + pair_cost,
+                            2,
+                            current,
+                            current_valid,
+                            age,
+                            min_age,
+                            margin,
+                            ratio,
+                            route_costs_m,
+                            target_pair_costs_m,
+                        )
+
+            candidates.sort()
+            used_targets: set[int] = set()
+            used_ground: set[int] = set()
+            for _priority, cost, neg_count, ground_index, first, second in candidates:
+                if ground_index in used_ground:
+                    continue
+                targets = [first] if second < 0 else [first, second]
+                if any(target in used_targets for target in targets):
+                    continue
+                assigned[env_index, ground_index] = first
+                if second >= 0:
+                    next_assigned[env_index, ground_index] = second
+                used_ground.add(ground_index)
+                used_targets.update(targets)
+
+            switched = (previous_first >= 0) & (assigned[env_index] >= 0) & (previous_first != assigned[env_index])
+            self.metric_ugv_assignment_switches[env_index] += switched.float().sum()
+            same = assigned[env_index] == previous_first
+            self.ugv_sticky_target_age[env_index] = torch.where(
+                (assigned[env_index] >= 0) & same,
+                self.ugv_sticky_target_age[env_index] + 1,
+                torch.zeros_like(self.ugv_sticky_target_age[env_index]),
+            )
+            self.ugv_sticky_target_idx[env_index] = assigned[env_index]
+            self.ugv_assignment_cache_idx[env_index] = assigned[env_index]
+            self.ugv_assignment_cache_step[env_index] = current_step[env_index]
+
+        self.ugv_sequence_next_target_idx = next_assigned
+        return assigned
+
+    def _ugv_target_pair_euclidean_costs_m(self, survivor_pos: Tensor, targetable: Tensor) -> Tensor:
+        """Euclidean survivor-to-survivor sequence costs in meters."""
+        batch_dim = survivor_pos.shape[0]
+        n_targets = survivor_pos.shape[1]
+        device = survivor_pos.device
+        if n_targets == 0:
+            return torch.empty((batch_dim, 0, 0), device=device, dtype=survivor_pos.dtype)
+        pair_dist_sim = torch.linalg.norm(
+            survivor_pos.unsqueeze(2) - survivor_pos.unsqueeze(1),
+            dim=-1,
+        )
+        pair_dist_m = pair_dist_sim / self.terrain_sim_units_per_meter.to(
+            device=device,
+            dtype=survivor_pos.dtype,
+        ).view(-1, 1, 1).clamp_min(1e-9)
+        if targetable.ndim == 3 and targetable.shape[1] > 0:
+            target_available = targetable.any(dim=1)
+            valid_pair = target_available.unsqueeze(2) & target_available.unsqueeze(1)
+        else:
+            valid_pair = torch.zeros(
+                (batch_dim, n_targets, n_targets),
+                dtype=torch.bool,
+                device=device,
+            )
+        eye = torch.eye(n_targets, dtype=torch.bool, device=device).unsqueeze(0)
+        valid_pair = valid_pair & ~eye
+        return torch.where(
+            valid_pair,
+            pair_dist_m,
+            torch.full_like(pair_dist_m, float("inf")),
+        )
+
+    def _ugv_add_route_sequence_candidate(
+        self,
+        candidates: list[tuple[float, float, int, int, int, int]],
+        env_index: int,
+        ground_index: int,
+        first: int,
+        second: int,
+        cost: float,
+        count: int,
+        current: int,
+        current_valid: bool,
+        age: int,
+        min_age: int,
+        margin: float,
+        ratio: float,
+        route_costs_m: Tensor,
+        target_pair_costs_m: Tensor,
+    ) -> None:
+        if not math.isfinite(cost) or count <= 0:
+            return
+        if current_valid and first != current:
+            if age < min_age:
+                return
+            keep_cost = float(route_costs_m[env_index, ground_index, current].item())
+            if second == current:
+                keep_pair = float(target_pair_costs_m[env_index, current, first].item())
+                if math.isfinite(keep_pair):
+                    keep_cost = keep_cost + keep_pair
+            if not math.isfinite(keep_cost) or cost + margin >= keep_cost * ratio:
+                return
+        priority = cost / float(count)
+        candidates.append((priority, cost, -count, ground_index, first, second))
 
     def _ugv_global_score_assignment_indices(self, scores: Tensor, targetable: Tensor) -> Tensor:
         """Exact min-cost one-to-one UGV-target assignment for each environment.
@@ -4522,10 +5471,6 @@ class WildfireSearchScenario(BaseScenario):
 
         current_step = self.step_count.to(device=device)
         for env_index in range(batch_dim):
-            if int(self.ugv_assignment_cache_step[env_index].item()) == int(current_step[env_index].item()):
-                assigned[env_index] = self.ugv_assignment_cache_idx[env_index]
-                continue
-
             previous = self.ugv_sticky_target_idx[env_index].clone()
             reserved_current: set[int] = set()
             for ground_index in range(self.n_ground):
@@ -4540,8 +5485,15 @@ class WildfireSearchScenario(BaseScenario):
 
             used: set[int] = set()
             deferred: list[int] = []
+            masked_scores = torch.where(
+                targetable[env_index] & torch.isfinite(scores[env_index]),
+                scores[env_index],
+                torch.full_like(scores[env_index], float("inf")),
+            )
+            ground_order = torch.argsort(masked_scores.min(dim=1).values)
 
-            for ground_index in range(self.n_ground):
+            for ground_index_tensor in ground_order:
+                ground_index = int(ground_index_tensor.item())
                 current = int(previous[ground_index].item())
                 current_valid = (
                     current >= 0
@@ -4559,11 +5511,10 @@ class WildfireSearchScenario(BaseScenario):
                     if int(target.item()) not in used
                     and (int(target.item()) == current or int(target.item()) not in reserved_current)
                 ]
-                candidate_targets = (
-                    torch.tensor(unused_targets, dtype=torch.long, device=device)
-                    if unused_targets
-                    else valid_targets
-                )
+                if not unused_targets:
+                    deferred.append(ground_index)
+                    continue
+                candidate_targets = torch.tensor(unused_targets, dtype=torch.long, device=device)
                 candidate_scores = scores[env_index, ground_index, candidate_targets]
                 candidate = int(candidate_targets[int(torch.argmin(candidate_scores).item())].item())
                 switch = not current_valid
@@ -4592,16 +5543,13 @@ class WildfireSearchScenario(BaseScenario):
                     for target in valid_targets
                     if int(target.item()) not in used
                 ]
-                candidate_targets = (
-                    torch.tensor(unused_targets, dtype=torch.long, device=device)
-                    if unused_targets
-                    else valid_targets
-                )
+                if not unused_targets:
+                    continue
+                candidate_targets = torch.tensor(unused_targets, dtype=torch.long, device=device)
                 candidate_scores = scores[env_index, ground_index, candidate_targets]
                 selected = int(candidate_targets[int(torch.argmin(candidate_scores).item())].item())
                 assigned[env_index, ground_index] = selected
-                if unused_targets:
-                    used.add(selected)
+                used.add(selected)
 
             switched = (previous >= 0) & (assigned[env_index] >= 0) & (previous != assigned[env_index])
             self.metric_ugv_assignment_switches[env_index] += switched.float().sum()
@@ -4615,6 +5563,71 @@ class WildfireSearchScenario(BaseScenario):
             self.ugv_assignment_cache_idx[env_index] = assigned[env_index]
             self.ugv_assignment_cache_step[env_index] = current_step[env_index]
         return assigned
+
+    def _ugv_assignment_aware_pending_targets(
+        self,
+        local_pending_targets: Tensor,
+        assigned_idx: Tensor,
+        valid_target: Tensor,
+    ) -> Tensor:
+        """Filter UGV pending pressure to match unique assignment semantics.
+
+        Assigned UGVs are pressured only for their own target. Unassigned UGVs
+        are pressured only when they know a pending target that no UGV owns.
+        """
+        unique_mode = self.ugv_target_assignment_mode in {
+            "greedy",
+            "greedy_sticky",
+            "greedy_sequence_sticky",
+            "route_cost_greedy",
+            "route_cost_sticky",
+            "route_sequence_sticky",
+        }
+        lease_mask = self._ugv_disconnected_assignment_lease_mask(
+            local_pending_targets.shape[2] if local_pending_targets.ndim == 3 else 0,
+            device=local_pending_targets.device,
+        )
+        ground_comms_up = self._ugv_ground_comms_up_mask(device=local_pending_targets.device)
+        if (
+            not unique_mode
+            and not bool(lease_mask.any().item())
+            and bool(ground_comms_up.all().item())
+        ):
+            return local_pending_targets
+        if local_pending_targets.numel() == 0 or local_pending_targets.shape[2] == 0:
+            return local_pending_targets
+
+        active_assignment_mask = torch.zeros_like(local_pending_targets, dtype=torch.bool)
+        active_assignment_mask.scatter_(
+            dim=2,
+            index=assigned_idx.clamp(min=0).unsqueeze(-1),
+            src=valid_target.unsqueeze(-1),
+        )
+        owned_mask = active_assignment_mask | lease_mask
+        if self.ugv_target_assignment_mode in {"greedy_sequence_sticky", "route_sequence_sticky"}:
+            next_idx = self.ugv_sequence_next_target_idx.to(device=local_pending_targets.device)
+            next_valid = next_idx >= 0
+            owned_mask.scatter_(
+                dim=2,
+                index=next_idx.clamp(min=0).unsqueeze(-1),
+                src=next_valid.unsqueeze(-1),
+            )
+        assigned_any = owned_mask.any(dim=1, keepdim=True)
+        assigned_to_me = local_pending_targets & active_assignment_mask
+        unassigned_pending = local_pending_targets & ~assigned_any
+        filtered = torch.where(
+            valid_target.unsqueeze(-1),
+            assigned_to_me,
+            unassigned_pending,
+        )
+        # An isolated, unassigned UGV cannot accept newly pending work and
+        # therefore must not be pressured for it until communication returns.
+        inactive_disconnected = ~ground_comms_up & ~valid_target
+        return torch.where(
+            inactive_disconnected.unsqueeze(-1),
+            torch.zeros_like(filtered),
+            filtered,
+        )
 
     def _ugv_route_assignment_costs_m(
         self,
@@ -4681,6 +5694,75 @@ class WildfireSearchScenario(BaseScenario):
                     route_cost = float(cost_to_go[sy, sx])
                     if math.isfinite(route_cost):
                         costs_m[env_index, ground_index, target_index] = route_cost * cell_m
+        return costs_m
+
+    def _ugv_target_pair_route_costs_m(
+        self,
+        target_pos: Tensor,
+        targetable: Tensor,
+    ) -> Tensor:
+        """Route cost from one pending target to another for sequence scoring."""
+        batch_dim, n_targets, _ = target_pos.shape
+        device = target_pos.device
+        costs_m = torch.full(
+            (batch_dim, n_targets, n_targets),
+            float("inf"),
+            device=device,
+            dtype=target_pos.dtype,
+        )
+        if n_targets == 0:
+            return costs_m
+
+        target_needed = targetable.any(dim=1) if targetable.ndim == 3 else torch.zeros(
+            batch_dim,
+            n_targets,
+            dtype=torch.bool,
+            device=device,
+        )
+        if not bool(target_needed.any().item()):
+            return costs_m
+
+        G = int(self.fire_grid_size)
+        cell_w_sim = 2.0 * float(self.x_semidim) / float(G)
+        cell_h_sim = 2.0 * float(self.y_semidim) / float(G)
+        bounds = (0, G - 1, 0, G - 1)
+        for env_index in range(batch_dim):
+            scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+            cell_m = max(cell_w_sim, cell_h_sim) / max(scale, 1e-9)
+            traversable, movement_cost = self._ugv_static_planner_layer_arrays_for_env(env_index)
+            traversable_tensor = self.traversable_grid[env_index]
+            for to_target in range(n_targets):
+                if not bool(target_needed[env_index, to_target].item()):
+                    continue
+                cost_to_go = self._ugv_route_assignment_cost_grid_for_survivor(
+                    env_index,
+                    to_target,
+                    target_pos[env_index, to_target],
+                    traversable,
+                    movement_cost,
+                    traversable_tensor,
+                    bounds,
+                )
+                if cost_to_go is None:
+                    continue
+                for from_target in range(n_targets):
+                    if from_target == to_target or not bool(target_needed[env_index, from_target].item()):
+                        continue
+                    sx, sy = self._single_position_to_grid_cell(target_pos[env_index, from_target])
+                    if not (0 <= sx < G and 0 <= sy < G and bool(traversable[sy, sx])):
+                        nearest_start = self._nearest_traversable_cell_in_bounds(
+                            env_index,
+                            sx,
+                            sy,
+                            bounds,
+                            traversable=traversable_tensor,
+                        )
+                        if nearest_start is None:
+                            continue
+                        sx, sy = nearest_start
+                    route_cost = float(cost_to_go[sy, sx])
+                    if math.isfinite(route_cost):
+                        costs_m[env_index, from_target, to_target] = route_cost * cell_m
         return costs_m
 
     def _ugv_route_assignment_cost_grid_for_survivor(
@@ -4784,10 +5866,15 @@ class WildfireSearchScenario(BaseScenario):
             & ~self.scouted_survivors
             & ~self.found_survivors
         )
+        # A UAV scout and a UGV confirmation can happen during the same simulator
+        # step. Use the post-scout state here so a UGV already inside the
+        # confirmation radius is not left in a one-step limbo where the target is
+        # assigned/reward-gated as scouted but cannot yet be confirmed.
+        scouted_for_ground_confirmation = self.scouted_survivors | newly_scouted
         eligible_ground_confirmations = (
             within_confirm[:, self.n_drones:, :]
             & active_survivors.unsqueeze(1)
-            & self.scouted_survivors.unsqueeze(1)
+            & scouted_for_ground_confirmation.unsqueeze(1)
         )
         if self.confirm_requires_los:
             # Confirmation also requires an unobstructed terrain sight line, not
@@ -4821,7 +5908,11 @@ class WildfireSearchScenario(BaseScenario):
             self._all_active_survivors_found()
             & ~previously_all_found
         )
-        self._record_local_survivor_knowledge(drone_seen, eligible_ground_confirmations)
+        self._record_local_survivor_knowledge(
+            drone_seen,
+            eligible_ground_confirmations,
+            self.step_drone_confirmations,
+        )
 
         # False-positive perception: drones may misclassify decoys as survivors;
         # UGVs can waste trips investigating them. This is a zero tensor when the
@@ -5219,9 +6310,14 @@ class WildfireSearchScenario(BaseScenario):
         )
         all_survivors_found_reward_by_agent = torch.zeros_like(team_confirm_reward_by_agent)
         if self.r_all_survivors_found != 0.0:
+            connected_confirm_actor = (
+                confirm_actor_events.any(dim=2) & comms_up
+            ).any(dim=1, keepdim=True)
             all_found_recipients = (
-                comms_up | confirm_actor_events.any(dim=2)
-            ) & all_survivors_found_now.unsqueeze(1)
+                comms_up
+                & connected_confirm_actor
+                & all_survivors_found_now.unsqueeze(1)
+            )
             all_survivors_found_reward_by_agent = (
                 all_found_recipients.float() * float(self.r_all_survivors_found)
             )
@@ -5234,10 +6330,9 @@ class WildfireSearchScenario(BaseScenario):
             + float(self.r_time_penalty)
         )
 
-        # Per-step pressure from each UGV's local mission memory. A disconnected
-        # UGV is only penalized for candidates it currently knows and has not
-        # locally marked as resolved; reconnection updates that local memory via
-        # the survivor-message synchronization path.
+        # Per-step pressure from each UGV's local mission memory. In unique
+        # greedy assignment modes, standby UGVs are not penalized for targets
+        # already assigned to someone else.
         if self.n_ground > 0:
             ground_slice = slice(self.n_drones, self.n_agents)
             local_pending_survivors = (
@@ -5248,7 +6343,7 @@ class WildfireSearchScenario(BaseScenario):
             if self.n_decoys > 0:
                 local_pending_decoys = (
                     self.known_decoys_by_agent[:, ground_slice, :]
-                    & ~self.dismissed_decoys.unsqueeze(1)
+                    & ~self.dismissed_decoys_by_agent[:, ground_slice, :]
                     & self._active_decoy_mask().unsqueeze(1)
                 )
                 local_pending_targets = torch.cat(
@@ -5257,6 +6352,11 @@ class WildfireSearchScenario(BaseScenario):
                 )
             else:
                 local_pending_targets = local_pending_survivors
+            local_pending_targets = self._ugv_assignment_aware_pending_targets(
+                local_pending_targets,
+                curr_ground_target_idx,
+                valid_ground_target,
+            )
             n_pending_by_ground = local_pending_targets.float().sum(dim=2)
         else:
             n_pending_by_ground = torch.zeros(
@@ -5292,6 +6392,7 @@ class WildfireSearchScenario(BaseScenario):
             coverage_new,
             uav_overlap_fraction,
             uav_outside_footprint_fraction,
+            uav_fire_footprint_fraction,
             uav_inter_uav_overlap_fraction,
             uav_coverage_opportunity_fraction,
             uav_coverage_opportunity_cells,
@@ -5438,6 +6539,9 @@ class WildfireSearchScenario(BaseScenario):
         uav_outside_footprint_penalty = self._uav_outside_footprint_penalty(
             uav_outside_footprint_fraction,
         )
+        uav_fire_footprint_penalty = self._uav_fire_footprint_penalty(
+            uav_fire_footprint_fraction,
+        )
         boundary_soft_risk, boundary_distance_m = self._uav_boundary_risk_metrics(drone_pos)
 
         self.metric_new_scouts = (newly_scouted & active_survivors).float().sum(dim=1)
@@ -5526,6 +6630,13 @@ class WildfireSearchScenario(BaseScenario):
         self.metric_uav_outside_footprint_fraction_by_drone = uav_outside_footprint_fraction
         self.metric_uav_outside_footprint_fraction = (
             uav_outside_footprint_fraction.mean(dim=1)
+            if self.n_drones > 0
+            else torch.zeros(self.world.batch_dim, device=device)
+        )
+        self.metric_reward_uav_fire_footprint = uav_fire_footprint_penalty.sum(dim=1)
+        self.metric_uav_fire_footprint_fraction_by_drone = uav_fire_footprint_fraction
+        self.metric_uav_fire_footprint_fraction = (
+            uav_fire_footprint_fraction.mean(dim=1)
             if self.n_drones > 0
             else torch.zeros(self.world.batch_dim, device=device)
         )
@@ -5707,6 +6818,7 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + uav_overlap_penalty[:, i]
                 r = r + uav_inter_uav_overlap_penalty[:, i]
                 r = r + uav_outside_footprint_penalty[:, i]
+                r = r + uav_fire_footprint_penalty[:, i]
             else:
                 g = i - self.n_drones
                 r = r + confirm_per_ground[:, g] * self.r_ground_confirm
@@ -5724,6 +6836,31 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + decoy_pursuit_penalty[:, g]
             agent.scenario_reward = r
 
+    def _sample_uav_survivor_detection_uniforms(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample one fixed-schema Bernoulli draw tensor for this step."""
+        rows = [
+            torch.rand(
+                self.obs_schema_n_drones,
+                self.obs_schema_n_survivors,
+                generator=self._reset_rng_context(env_index).generator(
+                    "uav_survivor_detection"
+                ),
+                dtype=dtype,
+                device="cpu",
+            )
+            for env_index in range(self.world.batch_dim)
+        ]
+        uniforms = torch.stack(rows, dim=0).to(device=device)
+        self.step_uav_survivor_detection_uniforms.copy_(
+            uniforms.to(dtype=self.step_uav_survivor_detection_uniforms.dtype)
+        )
+        return uniforms
+
     def _drone_survivor_detections(
         self,
         drone_dists: Tensor,
@@ -5735,7 +6872,45 @@ class WildfireSearchScenario(BaseScenario):
             return self._drone_survivor_detections_cv(drone_pos, surv_pos)
         components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
         probability = components["probability"]
-        return torch.rand_like(probability) < probability
+        detection_uniforms = self._sample_uav_survivor_detection_uniforms(
+            dtype=probability.dtype,
+            device=probability.device,
+        )
+        detected = (
+            detection_uniforms[:, : self.n_drones, : self.n_survivors]
+            < probability
+        )
+        self.step_drone_detection_confidence = torch.where(
+            detected,
+            probability,
+            torch.zeros_like(probability),
+        )
+        return detected
+
+    def _sample_uav_decoy_false_detection_uniforms(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample one fixed-schema decoy false-detection tensor for this step."""
+        rows = [
+            torch.rand(
+                self.obs_schema_n_drones,
+                self.n_decoys,
+                generator=self._reset_rng_context(env_index).generator(
+                    "uav_decoy_false_detection"
+                ),
+                dtype=dtype,
+                device="cpu",
+            )
+            for env_index in range(self.world.batch_dim)
+        ]
+        uniforms = torch.stack(rows, dim=0).to(device=device)
+        self.step_uav_decoy_false_detection_uniforms.copy_(
+            uniforms.to(dtype=self.step_uav_decoy_false_detection_uniforms.dtype)
+        )
+        return uniforms
 
     def _process_decoy_false_positives(
         self,
@@ -5755,14 +6930,22 @@ class WildfireSearchScenario(BaseScenario):
         decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
         agent_decoy_dists = torch.cdist(agent_pos, decoy_pos)
         active_decoys = self._active_decoy_mask()
+        decoy_uniforms = self._sample_uav_decoy_false_detection_uniforms(
+            dtype=agent_decoy_dists.dtype,
+            device=device,
+        )
 
         if self.n_drones > 0 and self.drone_false_positive_rate > 0.0:
             drone_decoy_dists = agent_decoy_dists[:, :self.n_drones, :]
             footprint = self._drone_camera_ranges().unsqueeze(-1)
             in_view = drone_decoy_dists <= footprint
-            draw = torch.rand_like(drone_decoy_dists)
+            draw = decoy_uniforms[:, : self.n_drones, :]
             false_det = in_view & (draw < self.drone_false_positive_rate)
-            false_det = false_det & active_decoys.unsqueeze(1) & ~self.dismissed_decoys.unsqueeze(1)
+            false_det = (
+                false_det
+                & active_decoys.unsqueeze(1)
+                & ~self.dismissed_decoys_by_agent[:, :self.n_drones, :]
+            )
             self.step_decoy_false_detections = false_det
             newly_scouted_decoys = false_det.any(dim=1) & active_decoys & ~self.dismissed_decoys
             self.scouted_decoys = self.scouted_decoys | newly_scouted_decoys
@@ -5781,13 +6964,30 @@ class WildfireSearchScenario(BaseScenario):
         if n_ground > 0:
             ground_decoy_dists = agent_decoy_dists[:, self.n_drones:, :]
             within = ground_decoy_dists < confirm_range
+            ground_dismissed = self.dismissed_decoys_by_agent[:, self.n_drones :, :]
             investigatable = (
                 within
                 & active_decoys.unsqueeze(1)
                 & self.scouted_decoys.unsqueeze(1)
-                & ~self.dismissed_decoys.unsqueeze(1)
+                & ~ground_dismissed
             )
             self.known_decoys_by_agent[:, self.n_drones:] |= investigatable
+            ground_dismissed |= investigatable
+            comms_up = self._latest_comms_up_mask(device=device)
+            dismissal_events = torch.zeros(
+                self.world.batch_dim,
+                self.n_agents,
+                self.n_decoys,
+                dtype=torch.bool,
+                device=device,
+            )
+            dismissal_events[:, self.n_drones :, :] = investigatable
+            connected_dismissals = (
+                dismissal_events & comms_up.unsqueeze(-1)
+            ).any(dim=1)
+            self.dismissed_decoys_by_agent |= (
+                comms_up.unsqueeze(-1) & connected_dismissals.unsqueeze(1)
+            )
             newly_dismissed = investigatable.any(dim=1) & active_decoys & ~self.dismissed_decoys
             self.dismissed_decoys = self.dismissed_decoys | newly_dismissed
             if bool(newly_dismissed.any().item()):
@@ -5829,6 +7029,9 @@ class WildfireSearchScenario(BaseScenario):
         n_drones = self.n_drones
         n_survivors = self.n_survivors
         result = torch.zeros(batch_dim, n_drones, n_survivors, dtype=torch.bool, device=device)
+        confidence_result = torch.zeros(
+            batch_dim, n_drones, n_survivors, dtype=torch.float, device=device,
+        )
         self.step_cv_false_positives = 0
 
         for env_i in range(batch_dim):
@@ -5864,9 +7067,14 @@ class WildfireSearchScenario(BaseScenario):
                     matched_idx = det.get("matched_survivor_index")
                     if matched_idx is not None and 0 <= matched_idx < n_survivors:
                         result[env_i, drone_i, matched_idx] = True
+                        confidence_result[env_i, drone_i, matched_idx] = max(
+                            float(confidence_result[env_i, drone_i, matched_idx].item()),
+                            min(max(float(det.get("confidence", 1.0)), 0.0), 1.0),
+                        )
                     else:
                         self.step_cv_false_positives += 1
 
+        self.step_drone_detection_confidence = confidence_result
         return result
 
     def _drone_detection_components(
@@ -6033,7 +7241,20 @@ class WildfireSearchScenario(BaseScenario):
         self._invalidate_uav_local_confidence_obs_cache()
 
     def _comms_maps_enabled(self) -> bool:
-        return getattr(self, "comms_map_mode", "global") == "per_agent"
+        return True
+
+    def _per_agent_coverage_maps_available(self) -> bool:
+        return hasattr(self, "comm_agent_coverage_grid")
+
+    def _per_agent_confidence_maps_available(self) -> bool:
+        return hasattr(self, "comm_agent_confidence_grid")
+
+    def _per_agent_comm_maps_available(self) -> bool:
+        """Return whether both per-agent map buffers have been initialized."""
+        return (
+            self._per_agent_coverage_maps_available()
+            and self._per_agent_confidence_maps_available()
+        )
 
     def _agent_index(self, agent: Agent) -> int:
         try:
@@ -6041,94 +7262,221 @@ class WildfireSearchScenario(BaseScenario):
         except ValueError:
             return 0
 
+    def _sample_comms_schema_uniforms(
+        self,
+        stream_name: str,
+        env_indices: Tensor,
+        *,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample fixed-schema communication uniforms and select physical agents."""
+        rows = [
+            torch.rand(
+                self.obs_schema_n_agents,
+                generator=self._reset_rng_context(int(env_index)).generator(stream_name),
+                dtype=torch.float32,
+                device="cpu",
+            )
+            for env_index in env_indices.detach().cpu().tolist()
+        ]
+        schema_draws = torch.stack(rows, dim=0).to(device=device)
+        return schema_draws.index_select(
+            1,
+            self._physical_agent_schema_slots.to(device=device),
+        )
+
+    def _sample_comms_schema_durations(
+        self,
+        env_indices: Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Sample fixed-schema burst durations and select physical agents."""
+        rows = [
+            torch.randint(
+                int(self.comms_dropout_min_steps),
+                int(self.comms_dropout_max_steps) + 1,
+                (self.obs_schema_n_agents,),
+                generator=self._reset_rng_context(int(env_index)).generator(
+                    "comms_burst_duration"
+                ),
+                dtype=dtype,
+                device="cpu",
+            )
+            for env_index in env_indices.detach().cpu().tolist()
+        ]
+        schema_durations = torch.stack(rows, dim=0).to(device=device)
+        return schema_durations.index_select(
+            1,
+            self._physical_agent_schema_slots.to(device=device),
+        )
+
+    def _current_comms_up_mask(self, device: torch.device | None = None) -> Tensor:
+        """Return the sampled whole-team comms state for the current observation step."""
+        base_device = self.comms_dropout_remaining_steps.device
+        if self.n_agents <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device or base_device)
+        if self.comms_dropout <= 0.0:
+            mask = torch.ones(
+                self.world.batch_dim,
+                self.n_agents,
+                dtype=torch.bool,
+                device=base_device,
+            )
+            self.comms_step_up.copy_(mask)
+        elif self.comms_dropout_mode == "bursty":
+            self._advance_bursty_comms_dropout()
+            mask = self.comms_dropout_remaining_steps <= 0
+            self.comms_step_up.copy_(mask)
+            self.comms_step_last_update_step.copy_(
+                self.step_count.to(
+                    device=self.comms_step_last_update_step.device,
+                    dtype=self.comms_step_last_update_step.dtype,
+                )
+            )
+        else:
+            current_step = self.step_count.to(
+                device=self.comms_step_last_update_step.device,
+                dtype=self.comms_step_last_update_step.dtype,
+            )
+            due = current_step != self.comms_step_last_update_step
+            if bool(due.any().item()):
+                due_idx = due.nonzero(as_tuple=False).flatten()
+                draws = self._sample_comms_schema_uniforms(
+                    "comms_iid",
+                    due_idx,
+                    device=self.comms_step_up.device,
+                )
+                self.comms_step_up[due_idx] = draws > float(self.comms_dropout)
+                self.comms_step_last_update_step[due_idx] = current_step[due_idx]
+            mask = self.comms_step_up
+
+        for idx, world_agent in enumerate(self.world.agents):
+            world_agent.comms_up = mask[:, idx].to(device=world_agent.state.pos.device)
+        return mask.to(device=device or base_device)
+
+    def _latest_comms_up_mask(self, device: torch.device | None = None) -> Tensor:
+        """Return the latest observation/action comms state without resampling."""
+        base_device = self.comms_dropout_remaining_steps.device
+        if self.n_agents <= 0:
+            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device or base_device)
+        if self.comms_dropout <= 0.0:
+            return torch.ones(
+                self.world.batch_dim,
+                self.n_agents,
+                dtype=torch.bool,
+                device=device or base_device,
+            )
+        states: list[Tensor] = []
+        missing = False
+        for idx, world_agent in enumerate(self.world.agents):
+            comms_up = getattr(world_agent, "comms_up", None)
+            if comms_up is None:
+                missing = True
+                states.append(self.comms_step_up[:, idx])
+            else:
+                states.append(comms_up.to(device=base_device, dtype=torch.bool).view(-1))
+        if missing and bool((self.comms_step_last_update_step < 0).any().item()):
+            return self._current_comms_up_mask(device=device)
+        return torch.stack(states, dim=1).to(device=device or base_device)
+
+    def _communication_exchange_mask(
+        self,
+        agent: Agent,
+        comms_keep: Tensor | None,
+        device: torch.device,
+    ) -> Tensor:
+        """Whole-team comms mask with the queried receiver state fixed."""
+        mask = self._latest_comms_up_mask(device=device).clone()
+        if comms_keep is not None and self.n_agents > 0:
+            agent_idx = self._agent_index(agent)
+            mask[:, agent_idx] = comms_keep[:, 0].to(device=device, dtype=torch.bool)
+        return mask
+
     def _sync_comm_agent_maps_for_observation(self, agent: Agent, comms_keep: Tensor) -> None:
         """Synchronize private map memories according to the active comm state.
 
-        Rewards and diagnostics still use the global maps. This only controls
-        which coverage/confidence memories are visible inside observations.
+        UAV observations and individual rewards use these accessible map
+        memories; global maps remain available for physical mission metrics.
         """
         if not self._comms_maps_enabled() or self.n_agents <= 0:
             return
-        if self.comms_dropout <= 0.0 or self.comms_dropout_mode == "bursty":
-            current_step = self.step_count.to(
-                device=self.comm_map_last_sync_step.device,
-                dtype=self.comm_map_last_sync_step.dtype,
-            )
-            due = current_step != self.comm_map_last_sync_step
-            if not bool(due.any().item()):
-                return
-            if self.comms_dropout <= 0.0:
-                connected = due.view(self.world.batch_dim, 1).expand(-1, self.n_agents)
-            else:
-                self._advance_bursty_comms_dropout()
-                connected = (self.comms_dropout_remaining_steps <= 0) & due.view(
-                    self.world.batch_dim,
-                    1,
-                )
-            if not bool(connected.any().item()):
-                self.comm_map_last_sync_step[due] = current_step[due]
-                return
-            connected_4d = connected.view(self.world.batch_dim, self.n_agents, 1, 1)
-            connected_coverage = self.comm_agent_coverage_grid & connected_4d
-            merged_coverage = self.comm_team_coverage_grid | connected_coverage.any(dim=1)
-            connected_confidence = torch.where(
-                connected_4d,
-                self.comm_agent_confidence_grid,
-                torch.zeros_like(self.comm_agent_confidence_grid),
-            )
-            merged_confidence = torch.maximum(
-                self.comm_team_confidence_grid,
-                connected_confidence.amax(dim=1),
-            )
-            self.comm_team_coverage_grid.copy_(merged_coverage)
-            self.comm_team_confidence_grid.copy_(merged_confidence)
-            self.comm_agent_coverage_grid.copy_(torch.where(
-                connected_4d,
-                self.comm_team_coverage_grid.unsqueeze(1),
-                self.comm_agent_coverage_grid,
-            ))
-            self.comm_agent_confidence_grid.copy_(torch.where(
-                connected_4d,
-                self.comm_team_confidence_grid.unsqueeze(1),
-                self.comm_agent_confidence_grid,
-            ))
+        current_step = self.step_count.to(
+            device=self.comm_map_last_sync_step.device,
+            dtype=self.comm_map_last_sync_step.dtype,
+        )
+        due = current_step != self.comm_map_last_sync_step
+        if not bool(due.any().item()):
+            return
+        connected = self._communication_exchange_mask(
+            agent,
+            comms_keep,
+            self.comm_agent_coverage_grid.device,
+        ) & due.view(self.world.batch_dim, 1)
+        if not bool(connected.any().item()):
             self.comm_map_last_sync_step[due] = current_step[due]
             return
-
-        agent_idx = self._agent_index(agent)
-        keep = comms_keep[:, 0].to(device=self.comm_agent_coverage_grid.device, dtype=torch.bool)
-        if not bool(keep.any().item()):
-            return
-        self.comm_team_coverage_grid[keep] |= self.comm_agent_coverage_grid[keep, agent_idx]
-        self.comm_team_confidence_grid[keep] = torch.maximum(
-            self.comm_team_confidence_grid[keep],
-            self.comm_agent_confidence_grid[keep, agent_idx],
+        connected_4d = connected.view(self.world.batch_dim, self.n_agents, 1, 1)
+        connected_coverage = self.comm_agent_coverage_grid & connected_4d
+        merged_coverage = self.comm_team_coverage_grid | connected_coverage.any(dim=1)
+        connected_confidence = torch.where(
+            connected_4d,
+            self.comm_agent_confidence_grid,
+            torch.zeros_like(self.comm_agent_confidence_grid),
         )
-        self.comm_agent_coverage_grid[keep, agent_idx] = self.comm_team_coverage_grid[keep]
-        self.comm_agent_confidence_grid[keep, agent_idx] = self.comm_team_confidence_grid[keep]
+        merged_confidence = torch.maximum(
+            self.comm_team_confidence_grid,
+            connected_confidence.amax(dim=1),
+        )
+        self.comm_team_coverage_grid.copy_(merged_coverage)
+        self.comm_team_confidence_grid.copy_(merged_confidence)
+        self.comm_agent_coverage_grid.copy_(torch.where(
+            connected_4d,
+            self.comm_team_coverage_grid.unsqueeze(1),
+            self.comm_agent_coverage_grid,
+        ))
+        self.comm_agent_confidence_grid.copy_(torch.where(
+            connected_4d,
+            self.comm_team_confidence_grid.unsqueeze(1),
+            self.comm_agent_confidence_grid,
+        ))
+        self.comm_map_last_sync_step[due] = current_step[due]
 
     def _coverage_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
-        if agent is None or not self._comms_maps_enabled():
+        if agent is None or not self._per_agent_coverage_maps_available():
             return self.coverage_grid.float()
-        agent_idx = min(max(self._agent_index(agent), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(self._agent_index(agent), 0),
+            self.comm_agent_coverage_grid.shape[1] - 1,
+        )
         return self.comm_agent_coverage_grid[:, agent_idx].float()
 
     def _confidence_grid_for_observation(self, agent: Agent | None = None) -> Tensor:
-        if agent is None or not self._comms_maps_enabled():
+        if agent is None or not self._per_agent_confidence_maps_available():
             return self.uav_confidence_grid.float()
-        agent_idx = min(max(self._agent_index(agent), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(self._agent_index(agent), 0),
+            self.comm_agent_confidence_grid.shape[1] - 1,
+        )
         return self.comm_agent_confidence_grid[:, agent_idx].float()
 
     def _drone_coverage_grid_for_observation(self, drone_idx: int) -> Tensor:
-        if not self._comms_maps_enabled():
+        if not self._per_agent_coverage_maps_available():
             return self.coverage_grid.float()
-        agent_idx = min(max(int(drone_idx), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(int(drone_idx), 0),
+            self.comm_agent_coverage_grid.shape[1] - 1,
+        )
         return self.comm_agent_coverage_grid[:, agent_idx].float()
 
     def _drone_confidence_grid_for_observation(self, drone_idx: int) -> Tensor:
-        if not self._comms_maps_enabled():
+        if not self._per_agent_confidence_maps_available():
             return self.uav_confidence_grid.float()
-        agent_idx = min(max(int(drone_idx), 0), self.n_agents - 1)
+        agent_idx = min(
+            max(int(drone_idx), 0),
+            self.comm_agent_confidence_grid.shape[1] - 1,
+        )
         return self.comm_agent_confidence_grid[:, agent_idx].float()
 
     def _uav_coverage_maps_for_reward(self) -> Tensor:
@@ -6139,7 +7487,7 @@ class WildfireSearchScenario(BaseScenario):
                 self.coverage_grid.shape[-2],
                 self.coverage_grid.shape[-1],
             )
-        if self._comms_maps_enabled():
+        if self._per_agent_coverage_maps_available():
             return self.comm_agent_coverage_grid[:, : self.n_drones]
         return self.coverage_grid.unsqueeze(1).expand(-1, self.n_drones, -1, -1)
 
@@ -6151,14 +7499,14 @@ class WildfireSearchScenario(BaseScenario):
                 self.uav_confidence_grid.shape[-2],
                 self.uav_confidence_grid.shape[-1],
             )
-        if self._comms_maps_enabled():
+        if self._per_agent_confidence_maps_available():
             return self.comm_agent_confidence_grid[:, : self.n_drones]
         return self.uav_confidence_grid.unsqueeze(1).expand(-1, self.n_drones, -1, -1)
 
     def _update_comm_agent_coverage_from_claims(self, claims: Tensor) -> None:
-        if not self._comms_maps_enabled() or self.n_drones <= 0:
+        if not self._per_agent_coverage_maps_available() or self.n_drones <= 0:
             return
-        count = min(self.n_drones, self.n_agents, claims.shape[1])
+        count = min(self.n_drones, self.comm_agent_coverage_grid.shape[1], claims.shape[1])
         if count <= 0:
             return
         self.comm_agent_coverage_grid[:, :count] |= claims[:, :count].to(
@@ -6169,9 +7517,13 @@ class WildfireSearchScenario(BaseScenario):
             self.comm_map_last_sync_step.fill_(-1)
 
     def _update_comm_agent_confidence_from_probability(self, probability: Tensor) -> None:
-        if not self._comms_maps_enabled() or self.n_drones <= 0:
+        if not self._per_agent_confidence_maps_available() or self.n_drones <= 0:
             return
-        count = min(self.n_drones, self.n_agents, probability.shape[1])
+        count = min(
+            self.n_drones,
+            self.comm_agent_confidence_grid.shape[1],
+            probability.shape[1],
+        )
         if count <= 0:
             return
         current = self.comm_agent_confidence_grid[:, :count]
@@ -8124,7 +9476,7 @@ class WildfireSearchScenario(BaseScenario):
         drone_pos: Tensor,
         *,
         known_coverage: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Per-drone fraction of the map newly covered by camera footprints.
 
         All drone claims are calculated before updating ``coverage_grid``.
@@ -8135,6 +9487,7 @@ class WildfireSearchScenario(BaseScenario):
         new_per_drone = torch.zeros(B, self.n_drones, device=drone_pos.device)
         overlap_fraction = torch.zeros_like(new_per_drone)
         outside_footprint_fraction = torch.zeros_like(new_per_drone)
+        fire_footprint_fraction = torch.zeros_like(new_per_drone)
         inter_uav_overlap_fraction = torch.zeros_like(new_per_drone)
         opportunity_fraction = torch.zeros_like(new_per_drone)
         opportunity_cells = torch.zeros_like(new_per_drone)
@@ -8144,6 +9497,7 @@ class WildfireSearchScenario(BaseScenario):
                 new_per_drone,
                 overlap_fraction,
                 outside_footprint_fraction,
+                fire_footprint_fraction,
                 inter_uav_overlap_fraction,
                 opportunity_fraction,
                 opportunity_cells,
@@ -8171,11 +9525,13 @@ class WildfireSearchScenario(BaseScenario):
             and self.r_uav_overlap <= 0.0
             and self.r_uav_inter_uav_overlap <= 0.0
             and self.r_uav_outside_footprint <= 0.0
+            and getattr(self, "r_uav_fire_footprint", 0.0) <= 0.0
         ):
             return (
                 new_per_drone,
                 overlap_fraction,
                 outside_footprint_fraction,
+                fire_footprint_fraction,
                 inter_uav_overlap_fraction,
                 opportunity_fraction,
                 opportunity_cells,
@@ -8211,6 +9567,25 @@ class WildfireSearchScenario(BaseScenario):
         ).clamp(min=0.0, max=1.0)
         already_covered = claims & known_coverage
         overlap_fraction = already_covered.float().sum(dim=(-1, -2)) / footprint_cells.float()
+        if (
+            getattr(self, "r_uav_fire_footprint", 0.0) > 0.0
+            and getattr(self, "uav_fire_penalty_threshold", 0.6) >= 0.0
+        ):
+            fire_grid_size = int(self.fire_grid.shape[-1])
+            fire_x = (
+                (xs + self.x_semidim) / (2.0 * self.x_semidim) * fire_grid_size
+            ).clamp(0, fire_grid_size - 1).long()
+            fire_y = (
+                (ys + self.y_semidim) / (2.0 * self.y_semidim) * fire_grid_size
+            ).clamp(0, fire_grid_size - 1).long()
+            fire_active = (
+                self.fire_grid[:, fire_y.view(G, 1), fire_x.view(1, G)]
+                >= float(getattr(self, "uav_fire_penalty_threshold", 0.6))
+            )
+            fire_footprint_fraction = (
+                (claims & fire_active.unsqueeze(1)).float().sum(dim=(-1, -2))
+                / footprint_cells.float()
+            ).clamp(0.0, 1.0)
         team_claims = claims.any(dim=1)
         newly_known_by_drone = claims & ~known_coverage
         claim_count = claims.sum(dim=1).clamp_min(1)
@@ -8267,6 +9642,7 @@ class WildfireSearchScenario(BaseScenario):
             new_credit_cells / float(G * G),
             overlap_fraction,
             outside_footprint_fraction,
+            fire_footprint_fraction,
             inter_uav_overlap_fraction,
             opportunity_fraction,
             opportunity_cells,
@@ -8444,7 +9820,7 @@ class WildfireSearchScenario(BaseScenario):
         return features
 
     def _pre_step_uav_frontier_features(self) -> Tensor:
-        if self._comms_maps_enabled() and self.n_drones > 0:
+        if self._per_agent_comm_maps_available() and self.n_drones > 0:
             features = []
             for drone_idx in range(self.n_drones):
                 features.append(self._uav_frontier_features_for_positions(
@@ -8463,7 +9839,7 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
-        if self._comms_maps_enabled():
+        if self._per_agent_comm_maps_available():
             features = []
             for drone_idx in range(self.n_drones):
                 features.append(self._uav_frontier_features_for_positions(
@@ -9180,6 +10556,17 @@ class WildfireSearchScenario(BaseScenario):
             return torch.zeros_like(outside_fraction)
         return -self.r_uav_outside_footprint * outside_fraction.clamp(min=0.0, max=1.0)
 
+    def _uav_fire_footprint_penalty(self, fire_fraction: Tensor) -> Tensor:
+        """Penalize camera footprint area over active fire cells."""
+        if self.n_drones == 0:
+            return torch.zeros(self.world.batch_dim, 0, device=fire_fraction.device)
+        if (
+            getattr(self, "r_uav_fire_footprint", 0.0) <= 0.0
+            or getattr(self, "uav_fire_penalty_threshold", 0.6) < 0.0
+        ):
+            return torch.zeros_like(fire_fraction)
+        return -getattr(self, "r_uav_fire_footprint", 0.0) * fire_fraction.clamp(min=0.0, max=1.0)
+
     def _uav_boundary_risk_metrics(self, drone_pos: Tensor) -> tuple[Tensor, Tensor]:
         """Diagnostic UAV distance-to-boundary risk before the hard world clamp is hit."""
         if self.n_drones == 0:
@@ -9366,6 +10753,46 @@ class WildfireSearchScenario(BaseScenario):
             parts.append(self._uav_astar_route_observation(agent))
         return torch.cat(parts, dim=-1)
 
+    def observation_mask_for_policy_class(self, policy_class: str) -> np.ndarray:
+        """Return a flat per-agent observation mask for class-specific critics."""
+        policy_class = str(policy_class).replace("-", "_").lower()
+        if policy_class not in {"uav", "ugv"}:
+            raise ValueError(f"unsupported policy class for observation mask: {policy_class!r}")
+        slices = wildfire_observation_slices(
+            local_map_patch_size=self.local_map_patch_size,
+            n_agents=self.obs_schema_n_agents,
+            n_survivors=self.obs_schema_n_survivors,
+            n_decoys=self.n_decoys,
+            ugv_planner_hint=self.ugv_planner_hint,
+            ugv_planner_detour_obs=self.ugv_planner_detour_obs,
+            coverage_obs_grid=self.coverage_obs_grid,
+            local_coverage_obs_grid=self.local_coverage_obs_grid,
+            uav_confidence_obs_grid=self.uav_confidence_obs_grid,
+            local_confidence_obs_grid=self.local_confidence_obs_grid,
+            uav_frontier_obs=self.uav_frontier_obs,
+            uav_frontier_mode=self.uav_frontier_mode,
+            uav_frontier_top_k=self.uav_frontier_top_k,
+            uav_cleanup_target_obs=self.uav_cleanup_target_obs,
+            uav_astar_route_obs=self.uav_astar_route_obs,
+            survivor_assignment_obs=self.survivor_assignment_obs,
+        )
+        obs_dim = max((sl.stop for sl in slices.values()), default=0)
+        mask = np.ones(obs_dim, dtype=np.float32)
+        if policy_class == "uav":
+            mask[slices["ugv_planner_hint"]] = 0.0
+        else:
+            for name in (
+                "coverage",
+                "local_coverage",
+                "uav_confidence",
+                "local_confidence",
+                "uav_frontier",
+                "uav_cleanup_target",
+                "uav_astar_route",
+            ):
+                mask[slices[name]] = 0.0
+        return mask
+
     def _coverage_observation(self, agent: Agent | None = None) -> Tensor:
         """Team-coverage situational awareness: a downsampled absolute map of
         already-scouted cells plus the global covered fraction.
@@ -9433,7 +10860,7 @@ class WildfireSearchScenario(BaseScenario):
             [drone.state.pos for drone in self.world.agents[: self.n_drones]],
             dim=1,
         )
-        if self._comms_maps_enabled():
+        if self._per_agent_confidence_maps_available():
             features = []
             for drone_idx in range(self.n_drones):
                 features.append(self._batched_local_grid_observation(
@@ -9730,10 +11157,13 @@ class WildfireSearchScenario(BaseScenario):
         self,
         drone_detections: Tensor,
         ground_confirmations: Tensor,
+        drone_confirmations: Tensor | None = None,
     ) -> None:
         """Persist mission events at the agent that directly observed them."""
         if self.n_drones:
             self.known_survivors_by_agent[:, :self.n_drones] |= drone_detections
+            if drone_confirmations is not None:
+                self.confirmed_survivors_by_agent[:, :self.n_drones] |= drone_confirmations
         if self.n_ground:
             ground_slice = slice(self.n_drones, self.n_agents)
             self.known_survivors_by_agent[:, ground_slice] |= ground_confirmations
@@ -9746,24 +11176,7 @@ class WildfireSearchScenario(BaseScenario):
         the communication state sampled for the latest observation/action cycle;
         direct observers are handled separately by the event actor mask.
         """
-        if self.n_agents <= 0:
-            return torch.zeros(self.world.batch_dim, 0, dtype=torch.bool, device=device)
-        if self.comms_dropout <= 0.0:
-            return torch.ones(
-                self.world.batch_dim,
-                self.n_agents,
-                dtype=torch.bool,
-                device=device,
-            )
-
-        states = []
-        for agent in self.world.agents:
-            comms_up = getattr(agent, "comms_up", None)
-            if comms_up is None:
-                states.append(torch.ones(self.world.batch_dim, dtype=torch.bool, device=device))
-            else:
-                states.append(comms_up.to(device=device, dtype=torch.bool).view(-1))
-        return torch.stack(states, dim=1)
+        return self._latest_comms_up_mask(device=device)
 
     def _communication_gated_team_event_reward(
         self,
@@ -9775,9 +11188,10 @@ class WildfireSearchScenario(BaseScenario):
         """Distribute sparse team event rewards without leaking through dropout.
 
         ``event_by_target`` marks newly scouted/confirmed survivors. ``actor_events``
-        marks the agents that directly observed those same events. An agent gets
-        the team reward for an event if it either directly observed the event or
-        was connected at that step.
+        marks the agents that directly observed those same events. Team reward
+        reaches only agents connected to a connected event actor; disconnected
+        direct actors keep their individual event rewards but do not broadcast
+        the sparse team reward.
         """
         if reward_weight == 0.0 or event_by_target.numel() == 0 or self.n_agents <= 0:
             return torch.zeros(
@@ -9788,26 +11202,17 @@ class WildfireSearchScenario(BaseScenario):
             )
         events = event_by_target.to(device=comms_up.device, dtype=torch.bool)
         direct = actor_events.to(device=comms_up.device, dtype=torch.bool) & events.unsqueeze(1)
-        connected = comms_up.unsqueeze(-1) & events.unsqueeze(1)
-        recipients = direct | connected
+        connected_senders = (direct & comms_up.unsqueeze(-1)).any(dim=1)
+        recipients = comms_up.unsqueeze(-1) & connected_senders.unsqueeze(1)
         return recipients.float().sum(dim=2) * float(reward_weight)
 
     def _communication_keep(self, agent: Agent) -> Tensor:
-        """Sample one receiver-level communication state for this observation."""
-        if self.comms_dropout <= 0:
-            keep = torch.ones(
-                self.world.batch_dim, 1, dtype=torch.bool, device=agent.state.pos.device,
-            )
-        elif self.comms_dropout_mode == "bursty":
-            self._advance_bursty_comms_dropout()
-            agent_idx = self.world.agents.index(agent)
-            keep = (self.comms_dropout_remaining_steps[:, agent_idx] <= 0).view(-1, 1)
-        else:
-            keep = (
-                torch.rand(self.world.batch_dim, 1, device=agent.state.pos.device)
-                > self.comms_dropout
-            )
+        """Return this agent's state from the step-level communication mask."""
+        agent_idx = self.world.agents.index(agent)
+        keep = self._current_comms_up_mask(agent.state.pos.device)[:, agent_idx : agent_idx + 1]
         agent.comms_up = keep[:, 0]
+        if self._sync_delayed_oracle_ground_knowledge():
+            self._invalidate_ugv_assignment_cache()
         return keep
 
     def _bursty_comms_start_probability(self) -> float:
@@ -9828,7 +11233,7 @@ class WildfireSearchScenario(BaseScenario):
         )
 
     def _advance_bursty_comms_dropout(self) -> None:
-        """Advance receiver-level burst outage timers once per env step."""
+        """Advance agent-level burst outage timers once per env step."""
         if self.n_agents <= 0:
             return
         current_step = self.step_count.to(
@@ -9855,17 +11260,20 @@ class WildfireSearchScenario(BaseScenario):
         if start_probability > 0.0:
             remaining = self.comms_dropout_remaining_steps[due_idx]
             connected = remaining <= 0
+            start_draws = self._sample_comms_schema_uniforms(
+                "comms_burst_start",
+                due_idx,
+                device=remaining.device,
+            )
             starts = (
-                torch.rand(remaining.shape, device=remaining.device) < start_probability
+                start_draws < start_probability
             ) & connected
+            durations = self._sample_comms_schema_durations(
+                due_idx,
+                device=remaining.device,
+                dtype=remaining.dtype,
+            )
             if bool(starts.any().item()):
-                durations = torch.randint(
-                    int(self.comms_dropout_min_steps),
-                    int(self.comms_dropout_max_steps) + 1,
-                    remaining.shape,
-                    device=remaining.device,
-                    dtype=remaining.dtype,
-                )
                 updated = torch.where(starts, durations, remaining)
                 self.comms_dropout_remaining_steps[due_idx] = updated
 
@@ -9887,11 +11295,27 @@ class WildfireSearchScenario(BaseScenario):
         local_known = self.known_survivors_by_agent[:, agent_idx]
         local_confirmed = self.confirmed_survivors_by_agent[:, agent_idx]
 
-        team_known = self.known_survivors_by_agent.any(dim=1) & active_survivors
-        team_confirmed = self.confirmed_survivors_by_agent.any(dim=1) & active_survivors
+        comms_up = self._communication_exchange_mask(agent, comms_keep, local_known.device)
+        connected_agents = comms_up.unsqueeze(-1)
+        team_known = (
+            self.known_survivors_by_agent.to(device=local_known.device)
+            & connected_agents
+        ).any(dim=1) & active_survivors
+        team_confirmed = (
+            self.confirmed_survivors_by_agent.to(device=local_confirmed.device)
+            & connected_agents
+        ).any(dim=1) & active_survivors
         connected = comms_keep.expand_as(local_known)
-        local_known = torch.where(connected, team_known, local_known & active_survivors)
-        local_confirmed = torch.where(connected, team_confirmed, local_confirmed & active_survivors)
+        local_known = torch.where(
+            connected,
+            (local_known | team_known) & active_survivors,
+            local_known & active_survivors,
+        )
+        local_confirmed = torch.where(
+            connected,
+            (local_confirmed | team_confirmed) & active_survivors,
+            local_confirmed & active_survivors,
+        )
 
         self.known_survivors_by_agent[:, agent_idx] = local_known
         self.confirmed_survivors_by_agent[:, agent_idx] = local_confirmed
@@ -9904,11 +11328,29 @@ class WildfireSearchScenario(BaseScenario):
         if has_decoys:
             active_decoys = self._active_decoy_mask()
             local_decoy_known = self.known_decoys_by_agent[:, agent_idx]
-            team_decoy_known = self.known_decoys_by_agent.any(dim=1) & active_decoys
+            local_decoy_dismissed = self.dismissed_decoys_by_agent[:, agent_idx]
+            team_decoy_known = (
+                self.known_decoys_by_agent.to(device=local_decoy_known.device)
+                & connected_agents
+            ).any(dim=1) & active_decoys
+            team_decoy_dismissed = (
+                self.dismissed_decoys_by_agent.to(device=local_decoy_dismissed.device)
+                & connected_agents
+            ).any(dim=1) & active_decoys
             connected_decoys = comms_keep.expand_as(local_decoy_known)
-            decoy_known = torch.where(connected_decoys, team_decoy_known, local_decoy_known & active_decoys)
+            decoy_known = torch.where(
+                connected_decoys,
+                (local_decoy_known | team_decoy_known) & active_decoys,
+                local_decoy_known & active_decoys,
+            )
+            local_decoy_dismissed = torch.where(
+                connected_decoys,
+                (local_decoy_dismissed | team_decoy_dismissed) & active_decoys,
+                local_decoy_dismissed & active_decoys,
+            )
             self.known_decoys_by_agent[:, agent_idx] = decoy_known
-            decoy_false_positive = decoy_known & self.dismissed_decoys & active_decoys
+            self.dismissed_decoys_by_agent[:, agent_idx] = local_decoy_dismissed
+            decoy_false_positive = decoy_known & local_decoy_dismissed & active_decoys
 
         assigned_to_me = None
         assigned_to_other = None
@@ -9930,9 +11372,10 @@ class WildfireSearchScenario(BaseScenario):
                 if has_decoys:
                     decoy_pos_for_assignment = torch.stack([d.state.pos for d in self._decoys], dim=1)
                     ground_decoy_known = self.known_decoys_by_agent[:, ground_slice]
+                    ground_decoy_dismissed = self.dismissed_decoys_by_agent[:, ground_slice]
                     decoy_targetable = (
                         ground_decoy_known
-                        & ~self.dismissed_decoys.unsqueeze(1)
+                        & ~ground_decoy_dismissed
                         & self._active_decoy_mask().unsqueeze(1)
                     )
                     targetable = torch.cat((targetable, decoy_targetable), dim=2)
@@ -9945,33 +11388,42 @@ class WildfireSearchScenario(BaseScenario):
                 )
                 assigned_valid = assigned_idx >= 0
                 n_assignment_targets = targetable.shape[2]
-                assignment_mask = torch.zeros(
+                active_assignment_mask = torch.zeros(
                     self.world.batch_dim,
                     self.n_ground,
                     n_assignment_targets,
                     dtype=torch.bool,
                     device=obs_known.device,
                 )
-                assignment_mask.scatter_(
+                active_assignment_mask.scatter_(
                     dim=2,
                     index=assigned_idx.clamp(min=0).unsqueeze(-1),
                     src=assigned_valid.unsqueeze(-1),
                 )
+                reserved_assignment_mask = self._ugv_disconnected_assignment_lease_mask(
+                    n_assignment_targets,
+                    device=obs_known.device,
+                )
+                team_assignment_mask = active_assignment_mask | reserved_assignment_mask
                 if not agent.is_drone:
                     ground_index = agent_idx - self.n_drones
-                    assigned_to_me = assignment_mask[:, ground_index, :self.n_survivors]
+                    assigned_to_me = active_assignment_mask[:, ground_index, :self.n_survivors]
                     if self.n_ground > 1:
-                        other_mask = assignment_mask.clone()
+                        other_mask = team_assignment_mask.clone()
                         other_mask[:, ground_index, :] = False
                         assigned_to_other = other_mask.any(dim=1)[:, :self.n_survivors]
                     if has_decoys:
-                        decoy_assigned_to_me = assignment_mask[:, ground_index, self.n_survivors:]
+                        decoy_assigned_to_me = active_assignment_mask[:, ground_index, self.n_survivors:]
                         if self.n_ground > 1:
                             decoy_assigned_to_other = other_mask.any(dim=1)[:, self.n_survivors:]
                 else:
-                    assigned_to_other = assignment_mask.any(dim=1)[:, :self.n_survivors]
+                    assigned_to_other = team_assignment_mask.any(dim=1)[:, :self.n_survivors]
                     if has_decoys:
-                        decoy_assigned_to_other = assignment_mask.any(dim=1)[:, self.n_survivors:]
+                        decoy_assigned_to_other = team_assignment_mask.any(dim=1)[:, self.n_survivors:]
+                receiver_connected = comms_keep.to(device=obs_known.device, dtype=torch.bool)
+                assigned_to_other &= receiver_connected.expand_as(assigned_to_other)
+                if has_decoys:
+                    decoy_assigned_to_other &= receiver_connected.expand_as(decoy_assigned_to_other)
 
         survivor_pos = torch.stack([s.state.pos for s in self._survivors], dim=1)
         relative_pos = survivor_pos - agent.state.pos.unsqueeze(1)
@@ -10070,6 +11522,13 @@ class WildfireSearchScenario(BaseScenario):
         if agent.is_drone:
             normalized_costs = torch.zeros(pos.shape[0], patch_cells, device=pos.device, dtype=pos.dtype)
             blocked = self._local_outside_map_patch(pos, self.local_map_patch_size)
+            if getattr(self, "uav_fire_block_threshold", -1.0) >= 0.0:
+                fire_patch = self._local_grid_patch(self.fire_grid, pos, self.local_map_patch_size)
+                fire_blocked = (fire_patch >= float(getattr(self, "uav_fire_block_threshold", -1.0))).to(
+                    device=pos.device,
+                    dtype=pos.dtype,
+                )
+                blocked = torch.maximum(blocked, fire_blocked)
         else:
             costs = self._local_grid_patch(self.mobility_cost_grid, pos, self.local_map_patch_size)
             blocked = (~self._local_grid_patch(self.traversable_grid, pos, self.local_map_patch_size)).float()
@@ -10337,14 +11796,14 @@ class WildfireSearchScenario(BaseScenario):
             )
 
         current_target = int(target_idx)
+        replanned_after_fire = bool(
+            self.ugv_global_route_fire_replan_pending[env_index, ground_index].item()
+        )
         needs_plan = (
             int(self.ugv_global_route_target_idx[env_index, ground_index].item()) != current_target
             or not self.ugv_global_route_paths[env_index][ground_index]
         )
         if needs_plan:
-            replanned_after_fire = bool(
-                self.ugv_global_route_fire_replan_pending[env_index, ground_index].item()
-            )
             self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = False
             self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
             plan = self._global_astar_plan_uncached_for_env(
@@ -10362,17 +11821,13 @@ class WildfireSearchScenario(BaseScenario):
                     self._ugv_fire_blocked_no_path_active(env_index)
                 )
                 return None
-            self.ugv_global_route_target_idx[env_index, ground_index] = current_target
-            self.ugv_global_route_paths[env_index][ground_index] = list(plan["path"])
-            gx, gy = plan["goal"]
-            self.ugv_global_route_goal_cell[env_index, ground_index, 0] = int(gx)
-            self.ugv_global_route_goal_cell[env_index, ground_index, 1] = int(gy)
-            self.ugv_global_route_path_index[env_index, ground_index] = 0
-            self.ugv_global_route_last_replan_step[env_index, ground_index] = int(
-                self.step_count[env_index].item()
+            self._set_ugv_global_route_plan_for_env(
+                env_index,
+                ground_index,
+                current_target,
+                plan,
+                replanned_after_fire=replanned_after_fire,
             )
-            self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
-            self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = replanned_after_fire
 
         path = self.ugv_global_route_paths[env_index][ground_index]
         if len(path) < 2:
@@ -10391,6 +11846,50 @@ class WildfireSearchScenario(BaseScenario):
 
         start = self._single_position_to_grid_cell(pos)
         planner_traversable, _planner_cost = self._ugv_planner_layer_tensors_for_env(env_index)
+        if self._global_cached_route_is_stale_for_current_position(
+            env_index,
+            pos,
+            path,
+            nearest_idx,
+            waypoint,
+            planner_traversable,
+        ):
+            plan = self._global_astar_plan_uncached_for_env(
+                env_index,
+                pos,
+                target_pos,
+                update_state=False,
+            )
+            if plan is None:
+                self._clear_ugv_global_route(env_index, ground_index)
+                self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = (
+                    replanned_after_fire
+                )
+                self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = (
+                    self._ugv_fire_blocked_no_path_active(env_index)
+                )
+                return None
+            self._set_ugv_global_route_plan_for_env(
+                env_index,
+                ground_index,
+                current_target,
+                plan,
+                replanned_after_fire=replanned_after_fire,
+            )
+            path = self.ugv_global_route_paths[env_index][ground_index]
+            goal = path[-1]
+            waypoint, nearest_idx, waypoint_idx = self._global_route_waypoint_for_env(
+                env_index,
+                pos,
+                path,
+                start_idx=0,
+            )
+            if update_index:
+                self.ugv_global_route_path_index[env_index, ground_index] = int(nearest_idx)
+                self.ugv_global_route_waypoint_cell[env_index, ground_index, 0] = int(waypoint[0])
+                self.ugv_global_route_waypoint_cell[env_index, ground_index, 1] = int(waypoint[1])
+            start = self._single_position_to_grid_cell(pos)
+            planner_traversable, _planner_cost = self._ugv_planner_layer_tensors_for_env(env_index)
         direct_blocked = not self._grid_segment_is_traversable(planner_traversable, start, goal)
         detour_needed = self._local_astar_detour_needed(
             env_index,
@@ -10412,6 +11911,76 @@ class WildfireSearchScenario(BaseScenario):
             "detour_needed": bool(detour_needed),
             "planner_mode": "global_astar",
         }
+
+    def _set_ugv_global_route_plan_for_env(
+        self,
+        env_index: int,
+        ground_index: int,
+        target_idx: int,
+        plan: dict,
+        *,
+        replanned_after_fire: bool,
+    ) -> None:
+        self.ugv_global_route_target_idx[env_index, ground_index] = int(target_idx)
+        self.ugv_global_route_paths[env_index][ground_index] = list(plan["path"])
+        gx, gy = plan["goal"]
+        self.ugv_global_route_goal_cell[env_index, ground_index, 0] = int(gx)
+        self.ugv_global_route_goal_cell[env_index, ground_index, 1] = int(gy)
+        self.ugv_global_route_path_index[env_index, ground_index] = 0
+        self.ugv_global_route_last_replan_step[env_index, ground_index] = int(
+            self.step_count[env_index].item()
+        )
+        self.ugv_global_route_fire_replan_pending[env_index, ground_index] = False
+        self.ugv_global_route_replanned_after_fire_flag[env_index, ground_index] = (
+            bool(replanned_after_fire)
+        )
+        self.ugv_global_route_fire_blocked_no_path_flag[env_index, ground_index] = False
+
+    def _global_cached_route_is_stale_for_current_position(
+        self,
+        env_index: int,
+        pos: Tensor,
+        path: list[tuple[int, int]],
+        nearest_idx: int,
+        waypoint: tuple[int, int],
+        planner_traversable: Tensor,
+    ) -> bool:
+        """Return True when the cached global path no longer locally fits the UGV.
+
+        Global A* paths are cached for speed. If the learned policy drifts away
+        from that path, blindly following the old waypoint can point through a
+        blocked local pocket. Replan only when the current cell is too far from
+        the cached route or cannot reach the selected waypoint by the same
+        line-of-sight traversability rule used for waypoint lookahead.
+        """
+        if not path:
+            return True
+        G = int(self.fire_grid_size)
+        current = self._single_position_to_grid_cell(pos)
+        cx, cy = current
+        if not (0 <= cx < G and 0 <= cy < G):
+            return True
+        if not bool(planner_traversable[cy, cx].item()):
+            return True
+        if not self._grid_segment_is_traversable(planner_traversable, current, waypoint):
+            return True
+
+        nearest_idx = max(0, min(int(nearest_idx), len(path) - 1))
+        nearest_pos = self._grid_cell_center_to_world(
+            path[nearest_idx],
+            device=pos.device,
+            dtype=pos.dtype,
+        )
+        scale = float(self.terrain_sim_units_per_meter[env_index].detach().cpu().item())
+        off_route_m = float(torch.linalg.norm(nearest_pos - pos).detach().cpu().item()) / max(scale, 1e-9)
+        cell_w_m = (2.0 * float(self.x_semidim) / float(G)) / max(scale, 1e-9)
+        cell_h_m = (2.0 * float(self.y_semidim) / float(G)) / max(scale, 1e-9)
+        cell_diag_m = math.hypot(cell_w_m, cell_h_m)
+        max_off_route_m = max(
+            2.0 * cell_diag_m,
+            min(0.5 * float(self.ugv_global_planner_lookahead_m), 20.0),
+        )
+        return off_route_m > max_off_route_m
 
     def _global_astar_plan_uncached_for_env(
         self,
@@ -12295,16 +13864,22 @@ class WildfireSearchScenario(BaseScenario):
         return self.obs_schema_n_drones + (agent_idx - self.n_drones)
 
     def _neighbor_observations(self, agent: Agent, comms_keep: Tensor) -> Tensor:
+        comms_up = self._communication_exchange_mask(agent, comms_keep, agent.state.pos.device)
+        agent_idx = self._agent_index(agent)
+        receiver_up = comms_up[:, agent_idx]
         if self.obs_schema_n_agents == self.n_agents:
             deltas = []
+            masks = []
             for other in self.world.agents:
                 if other is agent:
                     continue
+                other_idx = self._agent_index(other)
                 deltas.append(other.state.pos - agent.state.pos)
+                masks.append((receiver_up & comms_up[:, other_idx]).float().unsqueeze(-1))
             if not deltas:
                 return torch.zeros(self.world.batch_dim, 0, device=agent.state.pos.device)
             rel = torch.cat(deltas, dim=-1)
-            return rel * comms_keep.float()
+            return rel * torch.cat(masks, dim=-1).repeat_interleave(2, dim=-1)
 
         schema_self = self._obs_schema_agent_index(agent)
         out = torch.zeros(
@@ -12319,15 +13894,19 @@ class WildfireSearchScenario(BaseScenario):
             other_schema = self._obs_schema_agent_index(other)
             if other_schema == schema_self or other_schema >= self.obs_schema_n_agents:
                 continue
+            other_idx = self._agent_index(other)
             compact_slot = other_schema if other_schema < schema_self else other_schema - 1
-            out[:, 2 * compact_slot : 2 * compact_slot + 2] = other.state.pos - agent.state.pos
-        return out * comms_keep.float()
+            link_up = (receiver_up & comms_up[:, other_idx]).float().unsqueeze(-1)
+            out[:, 2 * compact_slot : 2 * compact_slot + 2] = (
+                other.state.pos - agent.state.pos
+            ) * link_up
+        return out
 
     # ------------------------------------------------------------------
     # Done
     # ------------------------------------------------------------------
     def done(self) -> Tensor:
-        all_found = self._all_active_survivors_found()
+        all_found = self._all_active_survivors_communicated_confirmed()
         timed_out = self.step_count >= self.max_steps
         return all_found | timed_out
 
@@ -12396,6 +13975,7 @@ class WildfireSearchScenario(BaseScenario):
             "reward/uav_overlap": self.metric_reward_uav_overlap,
             "reward/uav_inter_uav_overlap": self.metric_reward_uav_inter_uav_overlap,
             "reward/uav_outside_footprint": self.metric_reward_uav_outside_footprint,
+            "reward/uav_fire_footprint": self.metric_reward_uav_fire_footprint,
             "reward/ugv_progress": self.metric_reward_ugv_progress,
             "reward/ugv_approach": self.metric_reward_ugv_approach,
             "reward/ugv_movement_alignment": self.metric_reward_ugv_movement_alignment,
@@ -12414,6 +13994,7 @@ class WildfireSearchScenario(BaseScenario):
             "diagnostic/ugv_proposed_path_blocked": self.step_ugv_proposed_path_blocked.float().sum(dim=1),
             "diagnostic/uav_overlap_fraction": self.metric_uav_overlap_fraction,
             "diagnostic/uav_inter_uav_overlap_fraction": self.metric_uav_inter_uav_overlap_fraction,
+            "diagnostic/uav_fire_footprint_fraction": self.metric_uav_fire_footprint_fraction,
             "diagnostic/uav_frontier_alignment": self.metric_uav_frontier_alignment,
             "diagnostic/uav_frontier_progress_fraction": self.metric_uav_frontier_progress_fraction,
             "diagnostic/uav_frontier_uncovered_ratio": self.metric_uav_frontier_uncovered_ratio,
@@ -12574,7 +14155,7 @@ if __name__ == "__main__":
     p.add_argument("--grid-size",   type=int, default=128)
     p.add_argument("--comms-dropout", type=float, default=0.0)
     p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid")
-    p.add_argument("--comms-map-mode", choices=("global", "per_agent", "per-agent"), default="global")
+    p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5)
     p.add_argument("--comms-dropout-max-steps", type=int, default=15)
     args = p.parse_args()

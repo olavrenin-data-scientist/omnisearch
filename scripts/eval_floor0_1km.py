@@ -107,7 +107,7 @@ def main() -> None:
             for d in dropouts:
                 runs = []
                 for k in range(args.eval_seeds):
-                    env = vmas.make_env(
+                    env = WildfireSearchScenario.make_env(
                         scenario=WildfireSearchScenario(),
                         num_envs=2, device="cpu", continuous_actions=True,
                         seed=4242 + 100 * k,

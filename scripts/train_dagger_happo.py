@@ -74,7 +74,7 @@ def main():
     merged = {**algo_args["model"], **algo_args["algo"], **algo_args["train"]}
     rnn_n, rnn_h = merged["recurrent_n"], merged["hidden_sizes"][-1]
     from harl.algorithms.actors.happo import HAPPO
-    tmp = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=1, device="cpu",
+    tmp = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(), num_envs=1, device="cpu",
                         continuous_actions=True, seed=0, **sk)
     tmp.reset()
     obs_spaces = list(tmp.observation_space.spaces)
@@ -95,7 +95,7 @@ def main():
         beta = args.beta0 * (1.0 - it / max(args.iterations - 1, 1))   # expert mixing, decays to 0
         # ---- 1. Roll out current policy; label every visited state with the expert ----
         for r in range(args.rollouts):
-            e = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=2, device="cpu",
+            e = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(), num_envs=2, device="cpu",
                               continuous_actions=True, seed=args.seed + it * 100 + r, max_steps=args.rollout_steps, **sk)
             e.reset(); sc = e.scenario
             policy = HappoPolicy.from_checkpoint(str(out)); policy.reset()

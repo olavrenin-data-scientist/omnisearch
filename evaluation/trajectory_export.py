@@ -292,6 +292,22 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "drone_altitude_release_margin": round(float(scenario.drone_altitude_release_margin), 4),
         "drone_safety_clearance": round(float(scenario.drone_safety_clearance_by_env[env_index]), 6),
         "drone_safety_clearance_m": round(float(scenario.drone_safety_clearance_m), 4),
+        "drone_variable_clearance_enabled": bool(getattr(scenario, "drone_variable_clearance_enabled", False)),
+        "drone_safety_clearance_by_land_cover_m": list(
+            getattr(scenario, "drone_safety_clearance_by_land_cover_m", None) or []
+        ),
+        "drone_safety_clearance_by_object_m": list(
+            getattr(scenario, "drone_safety_clearance_by_object_m", None) or []
+        ),
+        "drone_fire_safety_clearance_m": round(
+            float(getattr(scenario, "drone_fire_safety_clearance_m", 0.0)), 4
+        ),
+        "drone_smoke_safety_clearance_m": round(
+            float(getattr(scenario, "drone_smoke_safety_clearance_m", 0.0)), 4
+        ),
+        "drone_smoke_clearance_threshold": round(
+            float(getattr(scenario, "drone_smoke_clearance_threshold", 0.0)), 4
+        ),
         "sim_units_per_meter": round(float(scenario.terrain_sim_units_per_meter[env_index]), 8),
         "sim_step_seconds": round(float(getattr(scenario, "sim_step_seconds", 1.0)), 4),
         "drone_speed_mps": round(float(getattr(scenario, "drone_speed_mps", 0.0)), 4),
@@ -320,6 +336,9 @@ def _terrain_record(scenario, env_index: int) -> dict:
         "drone_camera_fov_deg": round(float(scenario.drone_camera_fov_deg), 4),
         "drone_perception_mode": str(getattr(scenario, "drone_perception_mode", "rgb")),
         "drone_perception_sensor_stack": list(getattr(scenario, "drone_perception_sensor_stack", ("rgb",))),
+        "uav_fire_block_threshold": round(float(getattr(scenario, "uav_fire_block_threshold", -1.0)), 4),
+        "uav_fire_footprint_penalty": round(float(getattr(scenario, "r_uav_fire_footprint", 0.0)), 6),
+        "uav_fire_penalty_threshold": round(float(getattr(scenario, "uav_fire_penalty_threshold", 0.6)), 4),
         "drone_sensor_max_range": round(float(scenario.drone_sensor_max_range_by_env[env_index]), 6),
         "drone_detection_quality": [
             round(float(v), 4) for v in scenario.drone_detection_quality.cpu().tolist()
@@ -524,7 +543,7 @@ def export_trajectory(
     scenario_kwargs = dict(scenario_kwargs or {})
     max_steps = scenario_kwargs.pop("max_steps", n_steps)
 
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=num_envs,
         device="cpu",
@@ -599,6 +618,12 @@ def export_trajectory(
         "ground_confirmation_range_m": round(float(sc.ground_confirmation_range_m), 4),
         "ground_lidar_range": round(float(sc.ground_lidar_range), 8),
         "ground_lidar_range_m": round(float(sc.ground_lidar_range_m), 4),
+        "ugv_planner": {
+            "hint": str(getattr(sc, "ugv_planner_hint", "none")),
+            "dense_reward_mode": str(getattr(sc, "ugv_dense_reward_mode", "target")),
+            "target_assignment_mode": str(getattr(sc, "ugv_target_assignment_mode", "nearest")),
+            "global_lookahead_m": round(float(getattr(sc, "ugv_global_planner_lookahead_m", 20.0)), 4),
+        },
         "ugv_planner_fire": {
             "global_heuristic": str(getattr(sc, "ugv_global_planner_heuristic", "euclidean")),
             "mode": str(getattr(sc, "ugv_planner_fire_mode", "off")),
@@ -631,6 +656,7 @@ def export_trajectory(
             "smoke_emission": round(float(sc.smoke_emission), 4),
             "smoke_decay": round(float(sc.smoke_decay), 4),
             "smoke_diffusion": round(float(sc.smoke_diffusion), 4),
+            "smoke_advection_strength": round(float(sc.smoke_advection_strength), 4),
             "smolder_smoke_emission": round(float(sc.smolder_smoke_emission), 4),
             "smolder_decay": round(float(sc.smolder_decay), 4),
             "smolder_start_fraction": round(float(sc.smolder_start_fraction), 4),

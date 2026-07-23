@@ -115,7 +115,7 @@ class DiagnoseJointBaselineStrategiesTests(unittest.TestCase):
 
     def _env(self):
         kwargs = build_scenario_kwargs(_args(steps=4))
-        env = vmas.make_env(
+        env = WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
             device="cpu",

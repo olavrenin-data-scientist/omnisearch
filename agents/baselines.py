@@ -15,14 +15,13 @@ plan:
     RandomActionPolicy    random within range      random until target known, then nearest scouted
     RandomWalkPolicy      persistent random walk   random walk until target known, then nearest scouted
     LawnmowerPolicy       sweep a serpentine path  follow nearest scouted
-    HighestConfidence     bias toward unscouted    go to most-recently scouted
+    HighestConfidence     lawnmower coverage       highest-confidence, nearest UGV
     AntColony             avoid fresh pheromone    follow locally known survivors
+    MatchedHeuristic      lawnmower search        follow scenario assignment hint
 
-The "candidate" abstraction in the plan (uncertain detections with
-confidence scores) is currently a stretch — for the MVP we use
-ground-truth scout/found masks from the scenario directly. When the
-probabilistic sensor model lands, swap the lookups for belief-map
-queries; the policy interface stays the same.
+The highest-confidence baseline retains the probabilistic detector score for
+successful observations. Other heuristic target controllers use the scenario's
+scout/found mission memory directly.
 """
 
 from __future__ import annotations
@@ -43,6 +42,17 @@ from envs.wildfire_search import LAND_ROCK, LAND_WATER, WildfireSearchScenario, 
 GROUND_ROUTE_REPLAN_STEPS = 18
 GROUND_ROUTE_FIRE_PENALTY = 25.0
 GROUND_ROUTE_MAX_LOOKAHEAD_CELLS = 10
+UGV_CONTROLLER_NATIVE = "native"
+UGV_CONTROLLER_MATCHED = "matched_heuristic"
+UGV_CONTROLLER_ALIASES = {
+    "native": UGV_CONTROLLER_NATIVE,
+    "baseline": UGV_CONTROLLER_NATIVE,
+    "matched": UGV_CONTROLLER_MATCHED,
+    "matched_astar": UGV_CONTROLLER_MATCHED,
+    "matched_heuristic": UGV_CONTROLLER_MATCHED,
+    "scenario": UGV_CONTROLLER_MATCHED,
+}
+UGV_CONTROLLER_CHOICES = tuple(sorted(UGV_CONTROLLER_ALIASES))
 GROUND_RECOVERY_ANGLES = (
     0.0,
     math.pi / 6,
@@ -323,8 +333,13 @@ def _merge_local_timestamp_maps(
     local_maps: torch.Tensor,
     comms_up: torch.Tensor,
 ) -> torch.Tensor:
-    """Merge team timestamps into agents that can currently receive comms."""
-    team_latest = local_maps.amax(dim=1, keepdim=True)
+    """Merge timestamps only between agents with bidirectional communication."""
+    connected_maps = torch.where(
+        comms_up[:, :, None, None],
+        local_maps,
+        torch.full_like(local_maps, PHEROMONE_UNSEEN_STEP),
+    )
+    team_latest = connected_maps.amax(dim=1, keepdim=True)
     return torch.where(comms_up[:, :, None, None], team_latest, local_maps)
 
 
@@ -332,9 +347,72 @@ def _merge_local_bool_knowledge(
     local_knowledge: torch.Tensor,
     comms_up: torch.Tensor,
 ) -> torch.Tensor:
-    """Merge monotonic event knowledge into agents with a live receiver."""
-    team_knowledge = local_knowledge.any(dim=1, keepdim=True)
+    """Merge event knowledge only between agents with bidirectional comms."""
+    connected_knowledge = local_knowledge & comms_up[:, :, None]
+    team_knowledge = connected_knowledge.any(dim=1, keepdim=True)
     return torch.where(comms_up[:, :, None], team_knowledge, local_knowledge)
+
+
+def _priority_nearest_ground_assignments(
+    sc: WildfireSearchScenario,
+    targetable: torch.Tensor,
+    priority: torch.Tensor,
+) -> torch.Tensor:
+    """Assign highest-priority targets to their nearest available UGV."""
+    batch_dim, n_targets = targetable.shape
+    assignments = torch.full(
+        (batch_dim, sc.n_ground),
+        -1,
+        dtype=torch.long,
+        device=targetable.device,
+    )
+    if sc.n_ground <= 0 or n_targets <= 0:
+        return assignments
+
+    survivor_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
+    ground_pos = torch.stack(
+        [agent.state.pos for agent in sc.world.agents[sc.n_drones:]],
+        dim=1,
+    )
+    distances = torch.cdist(ground_pos, survivor_pos)
+    available_targets = targetable.clone()
+    available_ground = torch.ones(
+        batch_dim,
+        sc.n_ground,
+        dtype=torch.bool,
+        device=targetable.device,
+    )
+    batch_indices = torch.arange(batch_dim, device=targetable.device)
+
+    for _ in range(min(sc.n_ground, n_targets)):
+        active = available_targets.any(dim=1) & available_ground.any(dim=1)
+        if not bool(active.any().item()):
+            break
+        target_scores = torch.where(
+            available_targets,
+            priority,
+            torch.full_like(priority, float("-inf")),
+        )
+        target_idx = target_scores.argmax(dim=1)
+        target_distances = distances.gather(
+            2,
+            target_idx.view(batch_dim, 1, 1).expand(-1, sc.n_ground, 1),
+        ).squeeze(2)
+        target_distances = torch.where(
+            available_ground,
+            target_distances,
+            torch.full_like(target_distances, float("inf")),
+        )
+        ground_idx = target_distances.argmin(dim=1)
+
+        active_batch = batch_indices[active]
+        active_ground = ground_idx[active]
+        active_target = target_idx[active]
+        assignments[active_batch, active_ground] = active_target
+        available_ground[active_batch, active_ground] = False
+        available_targets[active_batch, active_target] = False
+
+    return assignments
 
 
 def _coordinated_ground_actions(
@@ -347,16 +425,39 @@ def _coordinated_ground_actions(
     """Assign at most one ground robot to each targetable survivor.
 
     With ``priority=None`` each UGV greedily picks its nearest unassigned
-    survivor. With priority scores, each UGV picks the highest-priority
-    unassigned survivor. Extra UGVs use their fallback action.
+    survivor. With priority scores, targets are considered from highest to
+    lowest priority and each is assigned to its nearest available UGV. Extra
+    UGVs use their fallback action.
     """
     if sc.n_ground == 0:
         return []
 
     B = sc.world.batch_dim
     surv_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
-    assigned = torch.zeros_like(targetable)
     actions = [a.clone() for a in fallback_actions]
+
+    if priority is not None:
+        assignments = _priority_nearest_ground_assignments(sc, targetable, priority)
+        for gi in range(sc.n_ground):
+            target_idx = assignments[:, gi]
+            has_target = target_idx >= 0
+            safe_target = target_idx.clamp(min=0)
+            target_pos = surv_pos.gather(
+                1,
+                safe_target.view(B, 1, 1).expand(B, 1, 2),
+            ).squeeze(1)
+            waypoint = _route_ground_waypoints(
+                sc,
+                gi,
+                target_pos,
+                safe_target,
+                route_cache,
+            )
+            move = _terrain_safe_ground_action(sc, gi, waypoint, actions[gi])
+            actions[gi] = torch.where(has_target.unsqueeze(-1), move, actions[gi])
+        return actions
+
+    assigned = torch.zeros_like(targetable)
     batch_idx = torch.arange(B, device=targetable.device)
 
     for gi in range(sc.n_ground):
@@ -365,11 +466,8 @@ def _coordinated_ground_actions(
         available = targetable & ~assigned
         any_targetable = available.any(dim=-1)
 
-        if priority is None:
-            d = (surv_pos - pos.unsqueeze(1)).norm(dim=-1)
-            scores = -d
-        else:
-            scores = priority
+        d = (surv_pos - pos.unsqueeze(1)).norm(dim=-1)
+        scores = -d
 
         masked_scores = torch.where(
             available, scores, torch.full_like(scores, float("-inf")),
@@ -384,6 +482,179 @@ def _coordinated_ground_actions(
             assigned[batch_idx[any_targetable], best[any_targetable]] = True
 
     return actions
+
+
+def _communication_aware_ground_actions(
+    sc: WildfireSearchScenario,
+    targetable_by_ground: torch.Tensor,
+    fallback_actions: List[torch.Tensor],
+    current_targets: torch.Tensor,
+    route_cache: List[dict] | None = None,
+    *,
+    priority: torch.Tensor | None = None,
+) -> List[torch.Tensor]:
+    """Assign local targets while preserving disconnected assignment leases."""
+    if sc.n_ground == 0:
+        return []
+    if targetable_by_ground.ndim != 3:
+        raise ValueError("targetable_by_ground must have shape [B, G, S]")
+
+    B = sc.world.batch_dim
+    device = targetable_by_ground.device
+    n_targets = targetable_by_ground.shape[-1]
+    actions = [action.clone() for action in fallback_actions]
+    if n_targets == 0:
+        current_targets.fill_(-1)
+        return actions
+
+    target_pos_all = torch.stack([s.state.pos for s in sc._survivors], dim=1)
+    comms_up = sc._latest_comms_up_mask(device=device)
+    ground_comms_up = comms_up[:, sc.n_drones : sc.n_agents]
+    disconnected = ~ground_comms_up
+    selected = torch.where(
+        disconnected,
+        current_targets,
+        torch.full_like(current_targets, -1),
+    )
+    reserved = torch.zeros(B, n_targets, dtype=torch.bool, device=device)
+    batch_idx = torch.arange(B, device=device)
+
+    lease_valid = disconnected & (current_targets >= 0) & (current_targets < n_targets)
+    lease_env, lease_ground = lease_valid.nonzero(as_tuple=True)
+    if lease_env.numel() > 0:
+        reserved[
+            lease_env,
+            current_targets[lease_env, lease_ground],
+        ] = True
+
+    survivor_pos = target_pos_all
+    ground_pos = torch.stack(
+        [agent.state.pos for agent in sc.world.agents[sc.n_drones : sc.n_agents]],
+        dim=1,
+    )
+    distances = torch.cdist(ground_pos, survivor_pos)
+
+    if priority is not None:
+        priority = priority.to(device=device, dtype=distances.dtype)
+        for env_index in range(B):
+            available_ground = ground_comms_up[env_index].clone()
+            used_targets = reserved[env_index].clone()
+            while bool(available_ground.any().item()):
+                eligible = (
+                    targetable_by_ground[env_index]
+                    & available_ground.unsqueeze(-1)
+                    & ~used_targets.unsqueeze(0)
+                )
+                candidate_targets = eligible.any(dim=0)
+                if not bool(candidate_targets.any().item()):
+                    break
+                target_scores = torch.where(
+                    candidate_targets,
+                    priority[env_index],
+                    torch.full_like(priority[env_index], float("-inf")),
+                )
+                target_index = int(torch.argmax(target_scores).item())
+                eligible_ground = available_ground & eligible[:, target_index]
+                ground_scores = torch.where(
+                    eligible_ground,
+                    distances[env_index, :, target_index],
+                    torch.full_like(distances[env_index, :, target_index], float("inf")),
+                )
+                ground_index = int(torch.argmin(ground_scores).item())
+                selected[env_index, ground_index] = target_index
+                available_ground[ground_index] = False
+                used_targets[target_index] = True
+    else:
+        for ground_index in range(sc.n_ground):
+            connected = ground_comms_up[:, ground_index]
+            available = (
+                targetable_by_ground[:, ground_index]
+                & ~reserved
+                & connected.unsqueeze(-1)
+            )
+            masked_distances = torch.where(
+                available,
+                distances[:, ground_index],
+                torch.full_like(distances[:, ground_index], float("inf")),
+            )
+            nearest_distance, nearest = masked_distances.min(dim=1)
+            has_assignment = connected & torch.isfinite(nearest_distance)
+            chosen = torch.where(
+                has_assignment,
+                nearest,
+                torch.full_like(nearest, -1),
+            )
+            selected[:, ground_index] = torch.where(
+                connected,
+                chosen,
+                selected[:, ground_index],
+            )
+            if has_assignment.any():
+                reserved[batch_idx[has_assignment], nearest[has_assignment]] = True
+
+    for ground_index in range(sc.n_ground):
+        agent_index = sc.n_drones + ground_index
+        local_targets = targetable_by_ground[:, ground_index]
+        chosen = selected[:, ground_index]
+        safe_target = chosen.clamp(min=0)
+        has_target = (
+            (chosen >= 0)
+            & local_targets.gather(1, safe_target.unsqueeze(-1)).squeeze(-1)
+        )
+        target_pos = target_pos_all.gather(
+            1,
+            safe_target.view(B, 1, 1).expand(B, 1, 2),
+        ).squeeze(1)
+        waypoint = _route_ground_waypoints(
+            sc,
+            ground_index,
+            target_pos,
+            safe_target,
+            route_cache,
+        )
+        move = _terrain_safe_ground_action(
+            sc,
+            ground_index,
+            waypoint,
+            actions[ground_index],
+        )
+        actions[ground_index] = torch.where(
+            has_target.unsqueeze(-1),
+            move,
+            actions[ground_index],
+        )
+
+    current_targets.copy_(selected)
+    return actions
+
+
+def _locally_known_pending_ground_targets(sc: WildfireSearchScenario) -> torch.Tensor:
+    n_survivors = int(getattr(sc, "n_survivors", 0))
+    if hasattr(sc, "fire_grid"):
+        device = sc.fire_grid.device
+    elif hasattr(sc, "step_count"):
+        device = sc.step_count.device
+    else:
+        device = sc.world.agents[0].state.pos.device
+    if sc.n_ground <= 0 or n_survivors <= 0:
+        return torch.zeros(
+            sc.world.batch_dim,
+            sc.n_ground,
+            n_survivors,
+            dtype=torch.bool,
+            device=device,
+        )
+    n_agents = int(getattr(sc, "n_agents", sc.n_drones + sc.n_ground))
+    ground_slice = slice(sc.n_drones, n_agents)
+    if not hasattr(sc, "known_survivors_by_agent"):
+        return (sc.scouted_survivors & ~sc.found_survivors).unsqueeze(1).expand(
+            -1, sc.n_ground, -1,
+        )
+    return (
+        sc.known_survivors_by_agent[:, ground_slice]
+        & ~sc.confirmed_survivors_by_agent[:, ground_slice]
+        & sc._active_survivor_mask().unsqueeze(1)
+    )
 
 
 def _scouted_unconfirmed_targets(sc: WildfireSearchScenario) -> torch.Tensor | None:
@@ -423,10 +694,17 @@ class RandomActionPolicy:
     def __init__(self, env=None):
         self.scenario: WildfireSearchScenario | None = None
         self.ground_route_cache: list[dict] = []
+        self.ground_target_indices: torch.Tensor | None = None
         self.previous_step_count: torch.Tensor | None = None
         if env is not None:
             self.scenario = env.scenario
             self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
+            self.ground_target_indices = torch.full(
+                (self.scenario.world.batch_dim, self.scenario.n_ground),
+                -1,
+                dtype=torch.long,
+                device=self.scenario.step_count.device,
+            )
             self.previous_step_count = self.scenario.step_count.clone()
 
     def __call__(self, env) -> List[torch.Tensor]:
@@ -437,22 +715,35 @@ class RandomActionPolicy:
         if self.scenario is None:
             self.scenario = sc
             self.ground_route_cache = [dict() for _ in range(sc.n_ground)]
+            self.ground_target_indices = torch.full(
+                (sc.world.batch_dim, sc.n_ground),
+                -1,
+                dtype=torch.long,
+                device=sc.step_count.device,
+            )
             self.previous_step_count = sc.step_count.clone()
         elif (
             self.previous_step_count is not None
             and bool((sc.step_count < self.previous_step_count).any().item())
         ):
+            reset = sc.step_count < self.previous_step_count
+            assert self.ground_target_indices is not None
+            self.ground_target_indices[reset] = -1
             for cache in self.ground_route_cache:
-                cache.clear()
+                for env_index in reset.nonzero(as_tuple=False).flatten().tolist():
+                    cache.pop(int(env_index), None)
 
         out = list(random_actions[:sc.n_drones])
         fallback = [
             random_actions[sc.n_drones + gi]
             for gi in range(sc.n_ground)
         ]
-        out.extend(_coordinated_scouted_ground_actions(
+        assert self.ground_target_indices is not None
+        out.extend(_communication_aware_ground_actions(
             sc,
+            _locally_known_pending_ground_targets(sc),
             fallback,
+            self.ground_target_indices,
             route_cache=self.ground_route_cache,
         ))
         self.previous_step_count = sc.step_count.clone()
@@ -483,6 +774,12 @@ class RandomWalkPolicy:
         )
         self.previous_step_count = sc.step_count.clone()
         self.ground_route_cache = [dict() for _ in range(sc.n_ground)]
+        self.ground_target_indices = torch.full(
+            (sc.world.batch_dim, sc.n_ground),
+            -1,
+            dtype=torch.long,
+            device=sc.fire_grid.device,
+        )
         self._randomize_environments(torch.ones_like(sc.step_count, dtype=torch.bool))
 
     def __call__(self, env) -> List[torch.Tensor]:
@@ -491,8 +788,10 @@ class RandomWalkPolicy:
         reset = sc.step_count < self.previous_step_count
         self._randomize_environments(reset)
         if bool(reset.any().item()):
+            self.ground_target_indices[reset] = -1
             for cache in self.ground_route_cache:
-                cache.clear()
+                for env_index in reset.nonzero(as_tuple=False).flatten().tolist():
+                    cache.pop(int(env_index), None)
 
         angular_std = math.sqrt(2.0 * float(sc.sim_step_seconds) / self.persistence_s)
         self.headings.add_(angular_std * torch.randn_like(self.headings))
@@ -587,9 +886,11 @@ class RandomWalkPolicy:
                 any_safe, selected_heading, reverse,
             )
             actions.append(action)
-        return _coordinated_scouted_ground_actions(
+        return _communication_aware_ground_actions(
             sc,
+            _locally_known_pending_ground_targets(sc),
             actions,
+            self.ground_target_indices,
             route_cache=self.ground_route_cache,
         )
 
@@ -603,9 +904,10 @@ class LawnmowerPolicy:
     terrain. Water/ocean and rock cells do not contribute search workload,
     and each lane is trimmed to the land segment it covers.
 
-    Ground robots head to the nearest *scouted* survivor (using the
-    scenario's `scouted_survivors` mask). If no survivor has been
-    scouted yet they hold position.
+    Ground robots head to the nearest survivor in their local mission memory.
+    Connected UGVs split targets; a disconnected UGV retains its active target,
+    which remains reserved by the team until communication returns. If no
+    locally known survivor is available they hold position.
     """
 
     def __init__(self, env):
@@ -613,6 +915,13 @@ class LawnmowerPolicy:
         self.t = 0
         self._prev_step_max = -1
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
+        self.ground_target_indices = torch.full(
+            (self.scenario.world.batch_dim, self.scenario.n_ground),
+            -1,
+            dtype=torch.long,
+            device=self.scenario.fire_grid.device,
+        )
+        self._ground_previous_step_count = self.scenario.step_count.clone()
         self.drone_waypoints: list[list[list[tuple[float, float]]]] | None = None
         self.drone_waypoint_index: torch.Tensor | None = None
         self.drone_plan_signature: tuple | None = None
@@ -623,22 +932,31 @@ class LawnmowerPolicy:
         device = sc.fire_grid.device
         out: List[torch.Tensor] = []
 
+        reset_envs = sc.step_count < self._ground_previous_step_count
+        for env_index in reset_envs.nonzero(as_tuple=False).flatten().tolist():
+            self.ground_target_indices[env_index].fill_(-1)
+            for cache in self.ground_route_cache:
+                cache.pop(int(env_index), None)
+
         # ---- Drones: land-aware, workload-balanced lawnmower coverage ----
         out.extend(self._drone_lawnmower_actions())
 
-        # ---- Ground robots: split up across scouted survivors ----
-        scouted = sc.scouted_survivors        # (B, S) bool
-        found   = sc.found_survivors          # (B, S) bool
-        targetable = scouted & ~found         # not yet confirmed
+        # ---- Ground robots: coordinate only from locally shared memory ----
+        targetable = _locally_known_pending_ground_targets(sc)
 
         hold_actions = [
             torch.zeros(B, 2, device=device)
             for _ in range(sc.n_ground)
         ]
-        out.extend(_coordinated_ground_actions(
-            sc, targetable, hold_actions, route_cache=self.ground_route_cache,
+        out.extend(_communication_aware_ground_actions(
+            sc,
+            targetable,
+            hold_actions,
+            self.ground_target_indices,
+            route_cache=self.ground_route_cache,
         ))
 
+        self._ground_previous_step_count = sc.step_count.clone()
         self.t += 1
         return out
 
@@ -858,69 +1176,96 @@ class LawnmowerPolicy:
         return waypoints
 
 # ----------------------------------------------------------------------
-# Highest-confidence-first (proxy: most-recently-scouted = freshest)
+# Highest-confidence-first
 # ----------------------------------------------------------------------
 class HighestConfidencePolicy:
     """
     Drones cover the area (lawnmower).
-    Ground robots prioritize the *most recently* scouted survivor —
-    proxy for the highest-confidence candidate in the candidate-belief
-    abstraction (the plan's intended formulation). Will be swapped for
-    a real confidence lookup once the probabilistic sensor model is in.
+    Ground robots prioritize the scouted survivor with the highest retained
+    detector confidence. Each target is assigned to its nearest available UGV.
     """
 
     def __init__(self, env):
         self.scenario: WildfireSearchScenario = env.scenario
-        self.scout_step = torch.full(
-            (self.scenario.world.batch_dim, self.scenario.n_survivors),
-            -1,
+        self.survivor_confidence_by_agent = torch.zeros(
+            (
+                self.scenario.world.batch_dim,
+                self.scenario.n_agents,
+                self.scenario.n_survivors,
+            ),
             dtype=torch.float,
             device=self.scenario.fire_grid.device,
         )
-        self.t = 0
-        self._prev_step_max = -1
+        self.ground_target_indices = torch.full(
+            (self.scenario.world.batch_dim, self.scenario.n_ground),
+            -1,
+            dtype=torch.long,
+            device=self.scenario.fire_grid.device,
+        )
+        self.previous_step_count = self.scenario.step_count.clone()
         self._lawnmower = LawnmowerPolicy(env)
         self.ground_route_cache = [dict() for _ in range(self.scenario.n_ground)]
 
     def __call__(self, env) -> List[torch.Tensor]:
         sc = self.scenario
-        cur_step_max = int(sc.step_count.max().item())
-        if cur_step_max < self._prev_step_max:
-            self.scout_step.fill_(-1)
+        reset = sc.step_count < self.previous_step_count
+        for env_index in reset.nonzero(as_tuple=False).flatten().tolist():
+            self.survivor_confidence_by_agent[env_index].zero_()
+            self.ground_target_indices[env_index].fill_(-1)
             for cache in self.ground_route_cache:
-                cache.clear()
-        self._prev_step_max = cur_step_max
+                cache.pop(int(env_index), None)
 
-        newly_scouted = sc.scouted_survivors & (self.scout_step < 0)
-        self.scout_step = torch.where(
-            newly_scouted,
-            torch.full_like(self.scout_step, float(self.t)),
-            self.scout_step,
+        step_confidence = getattr(sc, "step_drone_detection_confidence", None)
+        if step_confidence is None:
+            step_confidence = sc.step_drone_detections.float()
+        if sc.n_drones > 0:
+            self.survivor_confidence_by_agent[:, :sc.n_drones] = torch.maximum(
+                self.survivor_confidence_by_agent[:, :sc.n_drones],
+                step_confidence,
+            )
+        comms_up = sc._latest_comms_up_mask(device=sc.fire_grid.device)
+        connected_confidence = torch.where(
+            comms_up.unsqueeze(-1),
+            self.survivor_confidence_by_agent,
+            torch.zeros_like(self.survivor_confidence_by_agent),
+        )
+        team_confidence = connected_confidence.amax(dim=1, keepdim=True)
+        self.survivor_confidence_by_agent = torch.where(
+            comms_up.unsqueeze(-1),
+            team_confidence,
+            self.survivor_confidence_by_agent,
         )
 
-        actions = self._lawnmower(env)
+        actions = self._lawnmower._drone_lawnmower_actions()
 
-        # Replace ground actions with freshest unassigned scouted targets.
+        # Replace ground actions with highest-confidence scouted targets.
         # Unassigned ground robots fall back to random (not lawnmower) so they
         # explore rather than follow an aerial coverage path.
-        found = sc.found_survivors
-        targetable = (self.scout_step >= 0) & ~found
+        targetable = _locally_known_pending_ground_targets(sc)
         random_actions = env.get_random_actions()
         fallback = [
             random_actions[sc.n_drones + gi]
             for gi in range(sc.n_ground)
         ]
-        coordinated = _coordinated_ground_actions(
-            sc,
-            targetable,
-            fallback,
-            priority=self.scout_step,
-            route_cache=self.ground_route_cache,
-        )
-        for gi, action in enumerate(coordinated):
-            actions[sc.n_drones + gi] = action
+        if sc.n_ground > 0:
+            ground_slice = slice(sc.n_drones, sc.n_agents)
+            ground_comms_up = comms_up[:, ground_slice]
+            connected_ground_confidence = torch.where(
+                ground_comms_up.unsqueeze(-1),
+                self.survivor_confidence_by_agent[:, ground_slice],
+                torch.zeros_like(self.survivor_confidence_by_agent[:, ground_slice]),
+            )
+            priority = connected_ground_confidence.amax(dim=1)
+            actions.extend(_communication_aware_ground_actions(
+                sc,
+                targetable,
+                fallback,
+                self.ground_target_indices,
+                route_cache=self.ground_route_cache,
+                priority=priority,
+            ))
 
-        self.t += 1
+        self.previous_step_count = sc.step_count.clone()
         return actions
 
 
@@ -931,11 +1276,12 @@ class AntColonyPolicy:
     """Distributed stigmergic coverage with dropout-sensitive local memory.
 
     Each drone stores the last observation step for every map cell and
-    deposits timestamps over its physical camera footprint. A receiver with
-    live communications merges the newest timestamps and survivor events from
-    the team; during dropout it retains that stale map and adds only its own
-    observations. Drones move toward the nearest least-recently-seen searchable
-    cell. UGVs route to survivors known in their own local event memory.
+    deposits timestamps over its physical camera footprint. Connected agents
+    merge the newest timestamps and survivor events from connected peers;
+    during dropout an agent cannot send or receive, retains its private map,
+    and adds only its own observations. Drones move toward the nearest
+    least-recently-seen searchable cell. UGVs route to survivors known in their
+    own local event memory while disconnected assignments remain team leases.
     """
 
     def __init__(self, env):
@@ -961,6 +1307,9 @@ class AntColonyPolicy:
         )
         self.target_assignment_step = torch.full(
             (B, sc.n_drones), -1, dtype=torch.long, device=device,
+        )
+        self.ground_target_indices = torch.full(
+            (B, sc.n_ground), -1, dtype=torch.long, device=device,
         )
         self.previous_step_count = sc.step_count.clone()
         self.ground_route_cache = [dict() for _ in range(sc.n_ground)]
@@ -1002,6 +1351,7 @@ class AntColonyPolicy:
             self.known_confirmed[b].zero_()
             self.drone_targets[b].fill_(-1)
             self.target_assignment_step[b].fill_(-1)
+            self.ground_target_indices[b].fill_(-1)
             for cache in self.ground_route_cache:
                 cache.pop(int(b), None)
 
@@ -1172,59 +1522,112 @@ class AntColonyPolicy:
         device = sc.fire_grid.device
         if sc.n_ground == 0:
             return []
-
-        survivor_pos = torch.stack([s.state.pos for s in sc._survivors], dim=1)
-        comms_up = self._communication_mask()
-        selected = torch.full(
-            (B, sc.n_ground), -1, dtype=torch.long, device=device,
+        ground_slice = slice(sc.n_drones, sc.n_agents)
+        targetable = (
+            self.known_survivors[:, ground_slice]
+            & ~self.known_confirmed[:, ground_slice]
+            & sc._active_survivor_mask().unsqueeze(1)
         )
-        actions: List[torch.Tensor] = []
-        batch_idx = torch.arange(B, device=device)
+        hold = [torch.zeros(B, 2, device=device) for _ in range(sc.n_ground)]
+        return _communication_aware_ground_actions(
+            sc,
+            targetable,
+            hold,
+            self.ground_target_indices,
+            route_cache=self.ground_route_cache,
+        )
 
-        for gi in range(sc.n_ground):
-            agent_idx = sc.n_drones + gi
-            position = sc.world.agents[agent_idx].state.pos
-            available = (
-                self.known_survivors[:, agent_idx]
-                & ~self.known_confirmed[:, agent_idx]
-            )
-            for previous in range(gi):
-                mutually_connected = comms_up[:, agent_idx] & comms_up[:, sc.n_drones + previous]
-                previous_target = selected[:, previous]
-                valid_previous = mutually_connected & (previous_target >= 0)
-                if valid_previous.any():
-                    available[
-                        batch_idx[valid_previous],
-                        previous_target[valid_previous],
-                    ] = False
 
-            any_target = available.any(dim=-1)
-            distances = (survivor_pos - position.unsqueeze(1)).norm(dim=-1)
-            scores = torch.where(
-                available,
-                distances,
-                torch.full_like(distances, float("inf")),
-            )
-            target_idx = scores.argmin(dim=-1)
-            selected[:, gi] = torch.where(
-                any_target,
-                target_idx,
-                torch.full_like(target_idx, -1),
-            )
-            target_pos = survivor_pos.gather(
-                1, target_idx.view(B, 1, 1).expand(B, 1, 2),
-            ).squeeze(1)
-            waypoint = _route_ground_waypoints(
-                sc,
-                gi,
-                target_pos,
-                target_idx,
-                self.ground_route_cache,
-            )
-            hold = torch.zeros(B, 2, device=device)
-            move = _terrain_safe_ground_action(sc, gi, waypoint, hold)
-            actions.append(torch.where(any_target.unsqueeze(-1), move, hold))
+# ----------------------------------------------------------------------
+# Matched-control baseline
+# ----------------------------------------------------------------------
+class MatchedHeuristicPolicy:
+    """Lawnmower UAVs plus UGVs that obey the scenario assignment/planner hint.
+
+    This is the fairer confirmation baseline: UGV target assignment is not
+    chosen by the heuristic policy. It uses the same environment-side
+    ``ugv_target_assignment_mode`` and the same planner-hint observation that
+    HAPPO receives, then applies a simple continuous waypoint controller.
+    """
+
+    def __init__(self, env):
+        self.scenario: WildfireSearchScenario = env.scenario
+        self._lawnmower = LawnmowerPolicy(env)
+
+    def __call__(self, env) -> List[torch.Tensor]:
+        del env
+        sc = self.scenario
+        actions = self._lawnmower._drone_lawnmower_actions()
+        actions.extend(_matched_ground_actions(sc))
         return actions
+
+
+class MatchedUGVControllerPolicy:
+    """Wrap any baseline UAV policy with scenario-matched UGV assignment/pathing."""
+
+    def __init__(self, base_policy, env):
+        self.base_policy = base_policy
+        self.scenario: WildfireSearchScenario = env.scenario
+
+    def __call__(self, env) -> List[torch.Tensor]:
+        sc = self.scenario
+        base_actions = list(self.base_policy(env))
+        actions = list(base_actions[:sc.n_drones])
+        actions.extend(_matched_ground_actions(sc))
+        return actions
+
+
+def _matched_ground_actions(sc: WildfireSearchScenario) -> List[torch.Tensor]:
+    B = sc.world.batch_dim
+    device = sc.fire_grid.device
+    if sc.n_ground <= 0:
+        return []
+
+    actions: List[torch.Tensor] = []
+    for ground_index in range(sc.n_ground):
+        agent = sc.world.agents[sc.n_drones + ground_index]
+        hint = sc._ugv_planner_hint_observations(agent)
+        if hint.shape[-1] >= 4:
+            unit = hint[:, :2]
+            distance_norm = hint[:, 2:3].clamp(0.0, 1.0)
+            valid = hint[:, 3:4] > 0.5
+            action_scale = (2.0 * distance_norm).clamp(0.0, 1.0)
+            action = torch.where(valid, unit * action_scale, torch.zeros(B, 2, device=device))
+        else:
+            action = _direct_assigned_target_action(sc, ground_index)
+        actions.append(action.clamp(-1.0, 1.0))
+    return actions
+
+
+def _direct_assigned_target_action(sc: WildfireSearchScenario, ground_index: int) -> torch.Tensor:
+    """Fallback for scenarios without planner hints: move toward assigned target."""
+    B = sc.world.batch_dim
+    device = sc.fire_grid.device
+    pos_all, targetable, _is_decoy = sc._ugv_ground_target_candidates()
+    if pos_all.shape[1] == 0:
+        return torch.zeros(B, 2, device=device)
+
+    ground_pos = torch.stack(
+        [a.state.pos for a in sc.world.agents[sc.n_drones:sc.n_agents]],
+        dim=1,
+    )
+    assigned_idx, _assigned_dist = sc._ugv_assigned_target_indices(
+        ground_pos,
+        pos_all,
+        targetable,
+    )
+    target_idx = assigned_idx[:, ground_index]
+    has_target = target_idx >= 0
+    safe_idx = target_idx.clamp(min=0)
+    target_pos = pos_all.gather(
+        1,
+        safe_idx.view(B, 1, 1).expand(B, 1, 2),
+    ).squeeze(1)
+    pos = sc.world.agents[sc.n_drones + ground_index].state.pos
+    delta = target_pos - pos
+    dist = delta.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    action = delta / dist
+    return torch.where(has_target.unsqueeze(-1), action, torch.zeros_like(action))
 
 
 # ----------------------------------------------------------------------
@@ -1236,12 +1639,32 @@ BASELINES: dict[str, Callable] = {
     "lawnmower":           LawnmowerPolicy,
     "highest_confidence":  HighestConfidencePolicy,
     "ant_colony":          AntColonyPolicy,
+    "matched_heuristic":   MatchedHeuristicPolicy,
 }
 
 
-def get_baseline(name: str, env) -> Callable:
+def _normalize_ugv_controller_mode(mode: str | None) -> str:
+    normalized = (mode or UGV_CONTROLLER_NATIVE).replace("-", "_")
+    if normalized not in UGV_CONTROLLER_ALIASES:
+        raise ValueError(
+            f"Unknown UGV controller mode {mode!r}. "
+            f"Available: {list(UGV_CONTROLLER_ALIASES)}"
+        )
+    return UGV_CONTROLLER_ALIASES[normalized]
+
+
+def get_baseline(
+    name: str,
+    env,
+    *,
+    ugv_controller_mode: str | None = UGV_CONTROLLER_NATIVE,
+) -> Callable:
     """Resolve a baseline by name, constructing it on the given env."""
     if name not in BASELINES:
         raise KeyError(f"Unknown baseline {name!r}. Available: {list(BASELINES)}")
     cls = BASELINES[name]
-    return cls(env)
+    policy = cls(env)
+    mode = _normalize_ugv_controller_mode(ugv_controller_mode)
+    if mode == UGV_CONTROLLER_NATIVE or name == "matched_heuristic":
+        return policy
+    return MatchedUGVControllerPolicy(policy, env)

@@ -46,7 +46,7 @@ def collect_demos(scenario_kwargs, demos, steps, seed0, num_envs=2):
     """
     obs_rollouts, act_rollouts = None, None
     for d in range(demos):
-        e = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=int(num_envs), device="cpu",
+        e = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(), num_envs=int(num_envs), device="cpu",
                           continuous_actions=True, seed=seed0 + d, max_steps=steps, **scenario_kwargs)
         e.reset(); sc = e.scenario
         n_agents = len(e.agents)
@@ -153,7 +153,7 @@ def main():
     if args.recurrent:
         algo_args = {**algo_args, "model": {**algo_args["model"], "use_recurrent_policy": True}}
     merged = {**algo_args["model"], **algo_args["algo"], **algo_args["train"]}
-    tmp = vmas.make_env(scenario=WildfireSearchScenario(), num_envs=1, device="cpu",
+    tmp = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(), num_envs=1, device="cpu",
                         continuous_actions=True, seed=0, **scenario_kwargs)
     tmp.reset()
     obs_spaces = list(tmp.observation_space.spaces)

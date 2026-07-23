@@ -49,6 +49,11 @@ def _build_wildfire_logger_class():
             super().__init__(*a, **kw)
             self.last_aver_episode_rewards: Optional[float] = None
             self.last_average_step_rewards: Optional[float] = None
+            self.train_episode_rewards_by_agent = None
+            self.done_episode_rewards_by_agent = None
+            self.done_episode_rewards_by_class = None
+            self._reward_agent_labels: list[str] = []
+            self._reward_class_members: dict[str, list[int]] = {}
 
         def get_task_name(self):
             return "wildfire_search"
@@ -56,18 +61,100 @@ def _build_wildfire_logger_class():
         def init(self, episodes):
             super().init(episodes)
             init_env_metric_storage(self)
+            n_threads = int(self.algo_args["train"]["n_rollout_threads"])
+            self.train_episode_rewards_by_agent = np.zeros(
+                (n_threads, int(self.num_agents)),
+                dtype=np.float64,
+            )
+            scenario_kwargs = self.env_args.get("scenario_kwargs", {})
+            n_drones = int(scenario_kwargs.get("n_drones", 0))
+            n_ground = int(scenario_kwargs.get("n_ground", 0))
+            self._reward_agent_labels = []
+            self._reward_class_members = {}
+            for agent_id in range(int(self.num_agents)):
+                if agent_id < n_drones:
+                    class_name = "uav"
+                elif agent_id < n_drones + n_ground:
+                    class_name = "ugv"
+                else:
+                    class_name = "agent"
+                self._reward_agent_labels.append(f"agent{agent_id}_{class_name}")
+                self._reward_class_members.setdefault(class_name, []).append(agent_id)
+            self.done_episode_rewards_by_agent = {
+                label: [] for label in self._reward_agent_labels
+            }
+            self.done_episode_rewards_by_class = {
+                class_name: [] for class_name in self._reward_class_members
+            }
 
         def per_step(self, data):
+            self._accumulate_agent_class_rewards(data)
             accumulate_env_metrics(self, data[4], data[3])
             super().per_step(data)
+
+        def _accumulate_agent_class_rewards(self, data):
+            if self.train_episode_rewards_by_agent is None:
+                return
+            rewards = np.asarray(data[2], dtype=np.float64)
+            dones = np.asarray(data[3])
+            if rewards.ndim == 3 and rewards.shape[-1] == 1:
+                rewards = rewards[..., 0]
+            if rewards.ndim != 2:
+                return
+            n_agents = min(rewards.shape[1], self.train_episode_rewards_by_agent.shape[1])
+            self.train_episode_rewards_by_agent[:, :n_agents] += rewards[:, :n_agents]
+            dones_env = np.all(dones, axis=1)
+            done_indices = np.where(dones_env)[0]
+            for env_index in done_indices:
+                episode_rewards = self.train_episode_rewards_by_agent[env_index].copy()
+                for agent_id, label in enumerate(self._reward_agent_labels):
+                    self.done_episode_rewards_by_agent[label].append(float(episode_rewards[agent_id]))
+                for class_name, members in self._reward_class_members.items():
+                    if members:
+                        class_reward = float(np.mean(episode_rewards[members]))
+                        self.done_episode_rewards_by_class[class_name].append(class_reward)
+                self.train_episode_rewards_by_agent[env_index] = 0.0
 
         def episode_log(self, actor_train_infos, critic_train_info, actor_buffer, critic_buffer):
             # Snapshot before super() clears done_episodes_rewards
             if len(self.done_episodes_rewards) > 0:
                 self.last_aver_episode_rewards = float(np.mean(self.done_episodes_rewards))
             super().episode_log(actor_train_infos, critic_train_info, actor_buffer, critic_buffer)
+            self._log_done_agent_class_rewards()
             log_done_env_metrics(self)
             self.last_average_step_rewards = float(critic_train_info["average_step_rewards"])
+
+        def _log_done_agent_class_rewards(self):
+            if not self.done_episode_rewards_by_agent or not self.done_episode_rewards_by_class:
+                return
+            class_infos = {
+                class_name: float(np.mean(values))
+                for class_name, values in self.done_episode_rewards_by_class.items()
+                if len(values) > 0
+            }
+            if class_infos:
+                self.writter.add_scalars(
+                    "train_episode_rewards_by_class",
+                    class_infos,
+                    self.total_num_steps,
+                )
+            agent_infos = {
+                label: float(np.mean(values))
+                for label, values in self.done_episode_rewards_by_agent.items()
+                if len(values) > 0
+            }
+            if agent_infos:
+                self.writter.add_scalars(
+                    "train_episode_rewards_by_agent",
+                    agent_infos,
+                    self.total_num_steps,
+                )
+            self.done_episode_rewards_by_class = {
+                class_name: [] for class_name in self._reward_class_members
+            }
+            self.done_episode_rewards_by_agent = {
+                label: [] for label in self._reward_agent_labels
+            }
 
     return WildfireLogger
 
@@ -392,8 +479,25 @@ def _advantage_alignment_diagnostics(
 
 
 def _build_diagnostic_happo_runner_class():
+    from harl.algorithms.critics.v_critic import VCritic
+    from harl.common.buffers.on_policy_critic_buffer_fp import OnPolicyCriticBufferFP
+    from harl.common.valuenorm import ValueNorm
     from harl.runners.on_policy_ha_runner import OnPolicyHARunner
     from harl.utils.trans_tools import _t2n
+
+    class _SplitCriticLogBuffer:
+        def __init__(self, buffers: dict[str, OnPolicyCriticBufferFP]):
+            self._buffers = buffers
+
+        def get_mean_rewards(self):
+            rewards = [
+                buffer.rewards.reshape(-1)
+                for buffer in self._buffers.values()
+                if getattr(buffer, "rewards", None) is not None
+            ]
+            if not rewards:
+                return 0.0
+            return float(np.mean(np.concatenate(rewards)))
 
     class DiagnosticHAPPORunner(OnPolicyHARunner):
         """OnPolicyHARunner plus per-update actor advantage diagnostics."""
@@ -401,10 +505,15 @@ def _build_diagnostic_happo_runner_class():
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._configure_class_shared_actors()
+            self._configure_split_class_critics()
+            self._restore_split_critics_from_model_dir()
             self._restore_class_warmstart_actors()
 
         def _use_class_shared_policy(self) -> bool:
             return bool(self.algo_args.get("algo", {}).get("share_param_by_agent_class", False))
+
+        def _use_split_class_critics(self) -> bool:
+            return bool(self.algo_args.get("algo", {}).get("split_critic_by_agent_class", False))
 
         def _configure_class_shared_actors(self):
             if getattr(self, "_class_shared_policy_configured", False):
@@ -473,6 +582,192 @@ def _build_diagnostic_happo_runner_class():
             self._policy_group_representatives = representatives
             self._agent_to_policy_group = agent_to_group
             self._class_shared_policy_configured = True
+
+        def _configure_split_class_critics(self) -> None:
+            if getattr(self, "_split_class_critics_configured", False):
+                return
+            self._split_class_critics_configured = True
+            self._split_critic_active = False
+            self._split_critic_groups: dict[str, list[int]] = {}
+            self._split_critic_buffers: dict[str, OnPolicyCriticBufferFP] = {}
+            self._split_critics: dict[str, VCritic] = {}
+            self._split_value_normalizers: dict[str, ValueNorm | None] = {}
+
+            if self.algo_args["render"]["use_render"] or not self._use_split_class_critics():
+                return
+            if not self._use_class_shared_policy():
+                raise ValueError("split_critic_by_agent_class requires share_param_by_agent_class=True")
+
+            self._configure_class_shared_actors()
+            group_by_name = {
+                name: list(members)
+                for name, members in zip(self._policy_group_names, self._policy_update_groups)
+            }
+            if "uav" not in group_by_name or "ugv" not in group_by_name:
+                raise ValueError(
+                    "split_critic_by_agent_class requires both UAV and UGV policy groups"
+                )
+
+            share_observation_space = self.envs.share_observation_space[0]
+            critic_args = {**self.algo_args["model"], **self.algo_args["algo"]}
+            buffer_args = {
+                **self.algo_args["train"],
+                **self.algo_args["model"],
+                **self.algo_args["algo"],
+            }
+            split_critic_lrs = {
+                "uav": float(
+                    self.algo_args["model"].get(
+                        "uav_critic_lr",
+                        self.algo_args["model"]["critic_lr"],
+                    )
+                ),
+                "ugv": float(
+                    self.algo_args["model"].get(
+                        "ugv_critic_lr",
+                        self.algo_args["model"]["critic_lr"],
+                    )
+                ),
+            }
+            for class_name in ("uav", "ugv"):
+                members = group_by_name[class_name]
+                self._split_critic_groups[class_name] = members
+                class_critic_args = {
+                    **critic_args,
+                    "critic_lr": split_critic_lrs[class_name],
+                }
+                self._split_critics[class_name] = VCritic(
+                    class_critic_args,
+                    share_observation_space,
+                    device=self.device,
+                )
+                self._split_critic_buffers[class_name] = OnPolicyCriticBufferFP(
+                    buffer_args,
+                    share_observation_space,
+                    len(members),
+                )
+                self._split_value_normalizers[class_name] = (
+                    ValueNorm(1, device=self.device)
+                    if self.algo_args["train"]["use_valuenorm"] is True
+                    else None
+                )
+
+            self.uav_critic = self._split_critics["uav"]
+            self.ugv_critic = self._split_critics["ugv"]
+            self.uav_critic_buffer = self._split_critic_buffers["uav"]
+            self.ugv_critic_buffer = self._split_critic_buffers["ugv"]
+            self.uav_value_normalizer = self._split_value_normalizers["uav"]
+            self.ugv_value_normalizer = self._split_value_normalizers["ugv"]
+            self._split_critic_log_buffer = _SplitCriticLogBuffer(self._split_critic_buffers)
+            self._split_critic_active = True
+
+        def _split_class_share_obs(self, obs: np.ndarray, class_name: str) -> np.ndarray:
+            members = self._split_critic_groups[class_name]
+            if not hasattr(self.envs, "share_obs_for_policy_class"):
+                raise RuntimeError(
+                    "split class critics require envs.share_obs_for_policy_class()"
+                )
+            return self.envs.share_obs_for_policy_class(obs, class_name, members)
+
+        def _split_class_values(self, step: int, class_name: str):
+            critic = self._split_critics[class_name]
+            buffer = self._split_critic_buffers[class_name]
+            value, rnn_state_critic = critic.get_values(
+                np.concatenate(buffer.share_obs[step]),
+                np.concatenate(buffer.rnn_states_critic[step]),
+                np.concatenate(buffer.masks[step]),
+            )
+            values = np.array(
+                np.split(_t2n(value), self.algo_args["train"]["n_rollout_threads"])
+            )
+            rnn_states_critic = np.array(
+                np.split(
+                    _t2n(rnn_state_critic),
+                    self.algo_args["train"]["n_rollout_threads"],
+                )
+            )
+            return values, rnn_states_critic
+
+        def _split_advantages_by_agent(self) -> np.ndarray:
+            advantages_by_agent = np.zeros(
+                (
+                    self.algo_args["train"]["episode_length"],
+                    self.algo_args["train"]["n_rollout_threads"],
+                    self.num_agents,
+                    1,
+                ),
+                dtype=np.float32,
+            )
+            for class_name, members in self._split_critic_groups.items():
+                buffer = self._split_critic_buffers[class_name]
+                value_normalizer = self._split_value_normalizers[class_name]
+                if value_normalizer is not None:
+                    class_advantages = buffer.returns[:-1] - value_normalizer.denormalize(
+                        buffer.value_preds[:-1],
+                    )
+                else:
+                    class_advantages = buffer.returns[:-1] - buffer.value_preds[:-1]
+
+                active_masks = np.stack(
+                    [self.actor_buffer[agent_id].active_masks for agent_id in members],
+                    axis=2,
+                )
+                class_advantages_copy = class_advantages.copy()
+                class_advantages_copy[active_masks[:-1] == 0.0] = np.nan
+                mean_advantages = np.nanmean(class_advantages_copy)
+                std_advantages = np.nanstd(class_advantages_copy)
+                if not np.isfinite(mean_advantages):
+                    mean_advantages = 0.0
+                if not np.isfinite(std_advantages):
+                    std_advantages = 0.0
+                class_advantages = (class_advantages - mean_advantages) / (
+                    std_advantages + 1e-5
+                )
+                for local_index, agent_id in enumerate(members):
+                    advantages_by_agent[:, :, agent_id] = class_advantages[:, :, local_index]
+            return advantages_by_agent
+
+        def _critic_buffer_for_logging(self):
+            if getattr(self, "_split_critic_active", False):
+                return self._split_critic_log_buffer
+            return self.critic_buffer
+
+        def _restore_split_critics_from_model_dir(self) -> None:
+            """Restore split critic checkpoints when present.
+
+            Actor-only warm-starts and legacy single-critic checkpoints remain
+            valid: missing split critic files simply leave the freshly created
+            class critics in place.
+            """
+            import os
+
+            if (
+                not getattr(self, "_split_critic_active", False)
+                or self.algo_args["render"]["use_render"]
+                or self.algo_args["train"].get("model_dir") is None
+            ):
+                return
+            model_dir = str(self.algo_args["train"]["model_dir"])
+            for class_name, critic in self._split_critics.items():
+                critic_path = os.path.join(model_dir, f"critic_{class_name}.pt")
+                if os.path.isfile(critic_path):
+                    critic.critic.load_state_dict(
+                        torch.load(critic_path, map_location=self.device)
+                    )
+                else:
+                    print(
+                        f"[restore] No critic_{class_name}.pt in {model_dir}; "
+                        f"{class_name} critic starts fresh."
+                    )
+                value_normalizer = self._split_value_normalizers.get(class_name)
+                value_normalizer_path = os.path.join(
+                    model_dir,
+                    f"value_normalizer_{class_name}.pt",
+                )
+                if value_normalizer is not None and os.path.isfile(value_normalizer_path):
+                    value_normalizer.load_state_dict(
+                        torch.load(value_normalizer_path, map_location=self.device)
+                    )
 
         def _unique_actor_agent_ids(self) -> list[int]:
             self._configure_class_shared_actors()
@@ -611,6 +906,11 @@ def _build_diagnostic_happo_runner_class():
             return grouped
 
         def _group_advantages(self, advantages: np.ndarray, members: list[int]) -> np.ndarray:
+            if getattr(self, "_split_critic_active", False):
+                return np.concatenate(
+                    [advantages[:, :, agent_id].copy() for agent_id in members],
+                    axis=1,
+                )
             if self.state_type == "EP":
                 if len(members) == 1:
                     return advantages.copy()
@@ -640,6 +940,254 @@ def _build_diagnostic_happo_runner_class():
             out["policy_group/is_ugv"] = 1.0 if group_name == "ugv" else 0.0
             return out
 
+        def _warmstart_actor_freeze_episodes(self) -> int:
+            return max(
+                int(self.algo_args.get("train", {}).get("warmstart_actor_freeze_episodes", 0)),
+                0,
+            )
+
+        def _warmstart_actor_freeze_active(self) -> bool:
+            episode = int(getattr(self, "_current_episode", 0))
+            freeze_episodes = self._warmstart_actor_freeze_episodes()
+            return freeze_episodes > 0 and 1 <= episode <= freeze_episodes
+
+        def _skipped_actor_train_info(
+            self,
+            group_index: int,
+            representative: int,
+            group_size: int,
+        ) -> dict:
+            info = {
+                "policy_loss": 0.0,
+                "dist_entropy": 0.0,
+                "actor_grad_norm": 0.0,
+                "ratio": 1.0,
+                "actor_update_skipped": 1.0,
+                "warmstart_actor_freeze_active": 1.0,
+                "warmstart_actor_freeze_episode": float(getattr(self, "_current_episode", 0)),
+                "warmstart_actor_freeze_episodes": float(self._warmstart_actor_freeze_episodes()),
+            }
+            return self._annotate_policy_group_info(
+                info,
+                group_index,
+                representative,
+                group_size,
+            )
+
+        def warmup(self):
+            if not getattr(self, "_split_critic_active", False):
+                return super().warmup()
+
+            obs, _share_obs, available_actions = self.envs.reset()
+            for agent_id in range(self.num_agents):
+                self.actor_buffer[agent_id].obs[0] = obs[:, agent_id].copy()
+                if self.actor_buffer[agent_id].available_actions is not None:
+                    self.actor_buffer[agent_id].available_actions[0] = available_actions[
+                        :, agent_id
+                    ].copy()
+            for class_name, buffer in self._split_critic_buffers.items():
+                buffer.share_obs[0] = self._split_class_share_obs(obs, class_name)
+
+        @torch.no_grad()
+        def collect(self, step):
+            if not getattr(self, "_split_critic_active", False):
+                return super().collect(step)
+
+            action_collector = []
+            action_log_prob_collector = []
+            rnn_state_collector = []
+            for agent_id in range(self.num_agents):
+                action, action_log_prob, rnn_state = self.actor[agent_id].get_actions(
+                    self.actor_buffer[agent_id].obs[step],
+                    self.actor_buffer[agent_id].rnn_states[step],
+                    self.actor_buffer[agent_id].masks[step],
+                    self.actor_buffer[agent_id].available_actions[step]
+                    if self.actor_buffer[agent_id].available_actions is not None
+                    else None,
+                )
+                action_collector.append(_t2n(action))
+                action_log_prob_collector.append(_t2n(action_log_prob))
+                rnn_state_collector.append(_t2n(rnn_state))
+
+            actions = np.array(action_collector).transpose(1, 0, 2)
+            action_log_probs = np.array(action_log_prob_collector).transpose(1, 0, 2)
+            rnn_states = np.array(rnn_state_collector).transpose(1, 0, 2, 3)
+
+            values = {}
+            rnn_states_critic = {}
+            for class_name in self._split_critic_groups:
+                class_values, class_rnn_states = self._split_class_values(step, class_name)
+                values[class_name] = class_values
+                rnn_states_critic[class_name] = class_rnn_states
+
+            return values, actions, action_log_probs, rnn_states, rnn_states_critic
+
+        def insert(self, data):
+            if not getattr(self, "_split_critic_active", False):
+                return super().insert(data)
+
+            (
+                obs,
+                _share_obs,
+                rewards,
+                dones,
+                infos,
+                available_actions,
+                values,
+                actions,
+                action_log_probs,
+                rnn_states,
+                rnn_states_critic,
+            ) = data
+
+            dones_env = np.all(dones, axis=1)
+            rnn_states[dones_env == True] = np.zeros(
+                (
+                    (dones_env == True).sum(),
+                    self.num_agents,
+                    self.recurrent_n,
+                    self.rnn_hidden_size,
+                ),
+                dtype=np.float32,
+            )
+
+            masks = np.ones(
+                (self.algo_args["train"]["n_rollout_threads"], self.num_agents, 1),
+                dtype=np.float32,
+            )
+            masks[dones_env == True] = np.zeros(
+                ((dones_env == True).sum(), self.num_agents, 1),
+                dtype=np.float32,
+            )
+            active_masks = np.ones(
+                (self.algo_args["train"]["n_rollout_threads"], self.num_agents, 1),
+                dtype=np.float32,
+            )
+            active_masks[dones == True] = np.zeros(
+                ((dones == True).sum(), 1),
+                dtype=np.float32,
+            )
+            active_masks[dones_env == True] = np.ones(
+                ((dones_env == True).sum(), self.num_agents, 1),
+                dtype=np.float32,
+            )
+            bad_masks = np.array(
+                [
+                    [
+                        [0.0]
+                        if "bad_transition" in info[agent_id].keys()
+                        and info[agent_id]["bad_transition"] == True
+                        else [1.0]
+                        for agent_id in range(self.num_agents)
+                    ]
+                    for info in infos
+                ],
+                dtype=np.float32,
+            )
+
+            for agent_id in range(self.num_agents):
+                self.actor_buffer[agent_id].insert(
+                    obs[:, agent_id],
+                    rnn_states[:, agent_id],
+                    actions[:, agent_id],
+                    action_log_probs[:, agent_id],
+                    masks[:, agent_id],
+                    active_masks[:, agent_id],
+                    available_actions[:, agent_id]
+                    if available_actions[0] is not None
+                    else None,
+                )
+
+            for class_name, members in self._split_critic_groups.items():
+                class_rnn_states = rnn_states_critic[class_name]
+                class_rnn_states[dones_env == True] = np.zeros(
+                    (
+                        (dones_env == True).sum(),
+                        len(members),
+                        self.recurrent_n,
+                        self.rnn_hidden_size,
+                    ),
+                    dtype=np.float32,
+                )
+                self._split_critic_buffers[class_name].insert(
+                    self._split_class_share_obs(obs, class_name),
+                    class_rnn_states,
+                    values[class_name],
+                    rewards[:, members],
+                    masks[:, members],
+                    bad_masks[:, members],
+                )
+
+        @torch.no_grad()
+        def compute(self):
+            if not getattr(self, "_split_critic_active", False):
+                return super().compute()
+
+            for class_name, critic in self._split_critics.items():
+                buffer = self._split_critic_buffers[class_name]
+                next_value, _ = critic.get_values(
+                    np.concatenate(buffer.share_obs[-1]),
+                    np.concatenate(buffer.rnn_states_critic[-1]),
+                    np.concatenate(buffer.masks[-1]),
+                )
+                next_value = np.array(
+                    np.split(
+                        _t2n(next_value),
+                        self.algo_args["train"]["n_rollout_threads"],
+                    )
+                )
+                buffer.compute_returns(
+                    next_value,
+                    self._split_value_normalizers[class_name],
+                )
+
+        def after_update(self):
+            if not getattr(self, "_split_critic_active", False):
+                return super().after_update()
+            for agent_id in range(self.num_agents):
+                self.actor_buffer[agent_id].after_update()
+            for buffer in self._split_critic_buffers.values():
+                buffer.after_update()
+
+        def prep_rollout(self):
+            for agent_id in range(self.num_agents):
+                self.actor[agent_id].prep_rollout()
+            if getattr(self, "_split_critic_active", False):
+                for critic in self._split_critics.values():
+                    critic.prep_rollout()
+            else:
+                self.critic.prep_rollout()
+
+        def prep_training(self):
+            for agent_id in range(self.num_agents):
+                self.actor[agent_id].prep_training()
+            if getattr(self, "_split_critic_active", False):
+                for critic in self._split_critics.values():
+                    critic.prep_training()
+            else:
+                self.critic.prep_training()
+
+        def save(self):
+            if not getattr(self, "_split_critic_active", False):
+                return super().save()
+            for agent_id in range(self.num_agents):
+                policy_actor = self.actor[agent_id].actor
+                torch.save(
+                    policy_actor.state_dict(),
+                    str(self.save_dir) + "/actor_agent" + str(agent_id) + ".pt",
+                )
+            for class_name, critic in self._split_critics.items():
+                torch.save(
+                    critic.critic.state_dict(),
+                    str(self.save_dir) + f"/critic_{class_name}.pt",
+                )
+                value_normalizer = self._split_value_normalizers[class_name]
+                if value_normalizer is not None:
+                    torch.save(
+                        value_normalizer.state_dict(),
+                        str(self.save_dir) + f"/value_normalizer_{class_name}.pt",
+                    )
+
         def run(self):
             """Run the training pipeline with class-shared actors decayed once."""
             if self.algo_args["render"]["use_render"] is True:
@@ -657,10 +1205,17 @@ def _build_diagnostic_happo_runner_class():
             self.logger.init(episodes)
 
             for episode in range(1, episodes + 1):
+                self._current_episode = episode
+                actor_freeze_active = self._warmstart_actor_freeze_active()
                 if self.algo_args["train"]["use_linear_lr_decay"]:
-                    for agent_id in self._unique_actor_agent_ids():
-                        self.actor[agent_id].lr_decay(episode, episodes)
-                    self.critic.lr_decay(episode, episodes)
+                    if not actor_freeze_active:
+                        for agent_id in self._unique_actor_agent_ids():
+                            self.actor[agent_id].lr_decay(episode, episodes)
+                    if getattr(self, "_split_critic_active", False):
+                        for critic in self._split_critics.values():
+                            critic.lr_decay(episode, episodes)
+                    else:
+                        self.critic.lr_decay(episode, episodes)
 
                 self.logger.episode_init(episode)
 
@@ -708,7 +1263,7 @@ def _build_diagnostic_happo_runner_class():
                         actor_train_infos,
                         critic_train_info,
                         self.actor_buffer,
-                        self.critic_buffer,
+                        self._critic_buffer_for_logging(),
                     )
 
                 if episode % self.algo_args["train"]["eval_interval"] == 0:
@@ -734,17 +1289,28 @@ def _build_diagnostic_happo_runner_class():
             model_dir = str(self.algo_args["train"]["model_dir"])
             for agent_id in self._unique_actor_agent_ids():
                 actor_path = os.path.join(model_dir, f"actor_agent{agent_id}.pt")
-                self.actor[agent_id].actor.load_state_dict(torch.load(actor_path))
+                self.actor[agent_id].actor.load_state_dict(
+                    torch.load(actor_path, map_location=self.device)
+                )
 
             if self.algo_args["render"]["use_render"]:
                 return
 
+            if self._use_split_class_critics():
+                if getattr(self, "_split_critic_active", False):
+                    self._restore_split_critics_from_model_dir()
+                return
+
             critic_path = os.path.join(model_dir, "critic_agent.pt")
             if os.path.isfile(critic_path):
-                self.critic.critic.load_state_dict(torch.load(critic_path))
+                self.critic.critic.load_state_dict(
+                    torch.load(critic_path, map_location=self.device)
+                )
                 vn_path = os.path.join(model_dir, "value_normalizer.pt")
                 if self.value_normalizer is not None and os.path.isfile(vn_path):
-                    self.value_normalizer.load_state_dict(torch.load(vn_path))
+                    self.value_normalizer.load_state_dict(
+                        torch.load(vn_path, map_location=self.device)
+                    )
             else:
                 print(
                     f"[restore] No critic_agent.pt in {model_dir}; "
@@ -762,14 +1328,17 @@ def _build_diagnostic_happo_runner_class():
                 dtype=np.float32,
             )
 
-            if self.value_normalizer is not None:
+            split_critic_active = getattr(self, "_split_critic_active", False)
+            if split_critic_active:
+                advantages = self._split_advantages_by_agent()
+            elif self.value_normalizer is not None:
                 advantages = self.critic_buffer.returns[:-1] - self.value_normalizer.denormalize(
                     self.critic_buffer.value_preds[:-1],
                 )
             else:
                 advantages = self.critic_buffer.returns[:-1] - self.critic_buffer.value_preds[:-1]
 
-            if self.state_type == "FP":
+            if self.state_type == "FP" and not split_critic_active:
                 active_masks_collector = [
                     self.actor_buffer[i].active_masks for i in range(self.num_agents)
                 ]
@@ -791,6 +1360,7 @@ def _build_diagnostic_happo_runner_class():
             else:
                 group_order = list(torch.randperm(len(update_groups)).numpy())
 
+            actor_freeze_active = self._warmstart_actor_freeze_active()
             scenario_kwargs = self.env_args.get("scenario_kwargs", {})
             n_survivors = int(scenario_kwargs.get("n_survivors", 0))
             n_decoys = int(scenario_kwargs.get("n_decoys", 0))
@@ -807,6 +1377,16 @@ def _build_diagnostic_happo_runner_class():
             for group_index in group_order:
                 members = list(update_groups[group_index])
                 representative = members[0]
+                if actor_freeze_active:
+                    annotated_info = self._skipped_actor_train_info(
+                        group_index,
+                        representative,
+                        len(members),
+                    )
+                    for agent_id in members:
+                        actor_train_infos[agent_id] = dict(annotated_info)
+                    continue
+
                 old_actions_logprob_by_agent = {
                     agent_id: self._evaluate_agent_actions(agent_id)
                     for agent_id in members
@@ -816,7 +1396,7 @@ def _build_diagnostic_happo_runner_class():
                 actor_train_info = self.actor[representative].train(
                     group_buffer,
                     group_advantages,
-                    self.state_type,
+                    "FP" if split_critic_active else self.state_type,
                 )
 
                 actor_train_info.update(
@@ -845,7 +1425,31 @@ def _build_diagnostic_happo_runner_class():
                     actor_train_infos[agent_id] = dict(annotated_info)
                 factor = factor * group_ratio
 
-            critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
+            if split_critic_active:
+                critic_train_info: dict[str, float] = {}
+                value_losses: list[float] = []
+                grad_norms: list[float] = []
+                for class_name, critic in self._split_critics.items():
+                    class_info = critic.train(
+                        self._split_critic_buffers[class_name],
+                        self._split_value_normalizers[class_name],
+                    )
+                    for key, value in class_info.items():
+                        scalar = float(value)
+                        critic_train_info[f"{class_name}_{key}"] = scalar
+                        critic_train_info[f"{class_name}/{key}"] = scalar
+                    if "value_loss" in class_info:
+                        value_losses.append(float(class_info["value_loss"]))
+                    if "critic_grad_norm" in class_info:
+                        grad_norms.append(float(class_info["critic_grad_norm"]))
+                critic_train_info["value_loss"] = (
+                    float(np.mean(value_losses)) if value_losses else 0.0
+                )
+                critic_train_info["critic_grad_norm"] = (
+                    float(np.mean(grad_norms)) if grad_norms else 0.0
+                )
+            else:
+                critic_train_info = self.critic.train(self.critic_buffer, self.value_normalizer)
             return [
                 info if info is not None else {}
                 for info in actor_train_infos

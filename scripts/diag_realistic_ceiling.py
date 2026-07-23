@@ -35,7 +35,7 @@ TERRAIN = str(ROOT / "data" / "terrain_cache" / "malibu_creek_1km_128.npz")
 def recall_for(name: str, confirm_m: float, steps: int, n_envs: int, fov: float,
                flight: tuple[float, ...], seed: int, drone_confirm: bool = False) -> tuple[float, float]:
     """Return (mean recall, mean UGV travel) over n_envs parallel episodes."""
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(), num_envs=n_envs, device="cpu",
         continuous_actions=True, seed=seed,
         terrain_source="real", terrain_cache_path=TERRAIN,

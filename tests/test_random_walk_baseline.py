@@ -76,6 +76,7 @@ class RandomWalkTests(unittest.TestCase):
         policy = RandomWalkPolicy.__new__(RandomWalkPolicy)
         policy.scenario = scenario
         policy.ground_route_cache = [dict()]
+        policy.ground_target_indices = torch.full((1, 1), -1, dtype=torch.long)
         policy.headings = torch.zeros(1, 3)
         walk_actions = [
             torch.tensor([[0.8, 0.0]]),
@@ -84,7 +85,7 @@ class RandomWalkTests(unittest.TestCase):
         ]
 
         with patch(
-            "agents.baselines._coordinated_ground_actions",
+            "agents.baselines._communication_aware_ground_actions",
             return_value=[torch.tensor([[0.3, 0.3]])],
         ) as coordinated:
             ground = policy._ground_actions(
@@ -117,7 +118,7 @@ class RandomWalkTests(unittest.TestCase):
         policy = RandomActionPolicy(env)
 
         with patch(
-            "agents.baselines._coordinated_ground_actions",
+            "agents.baselines._communication_aware_ground_actions",
             return_value=[torch.tensor([[0.3, 0.3]])],
         ) as coordinated:
             actions = policy(env)

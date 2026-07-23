@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
 import math
 import sys
 from pathlib import Path
@@ -24,8 +23,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.happo_checkpoint import load_training_manifest
-from agents.happo_policy import HappoPolicy, find_latest_happo_checkpoint
+from agents.happo_policy import (
+    HappoPolicy,
+    actor_file_indices_for_scenario,
+    find_latest_happo_checkpoint,
+)
 from envs.wildfire_search import WildfireSearchScenario
+from scripts.diagnostic_json import (
+    partial_json_path,
+    write_final_json,
+    write_partial_json,
+)
 from scripts.train_happo_smoke import build_args
 
 
@@ -81,6 +89,10 @@ def _active_success_for_env(scenario: WildfireSearchScenario, env_index: int = 0
     return bool(np.logical_or(found, ~active).all())
 
 
+def _schema_count(scenario_kwargs: dict, schema_key: str, physical_key: str, fallback: int) -> int:
+    return max(int(scenario_kwargs.get(schema_key, scenario_kwargs.get(physical_key, fallback))), 0)
+
+
 def _joint_schema_ugv_defaults() -> dict:
     _, _algo_args, env_args = build_args(
         num_env_steps=100,
@@ -99,85 +111,87 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
     scenario_kwargs = {}
     if manifest is not None:
         scenario_kwargs.update(copy.deepcopy(manifest.get("env_args", {}).get("scenario_kwargs", {})))
+    has_manifest = manifest is not None
 
     if args.joint_schema_ugv_diagnostic:
         defaults = _joint_schema_ugv_defaults()
         defaults.update(scenario_kwargs)
         scenario_kwargs = defaults
+    checkpoint_n_ground = max(int(scenario_kwargs.get("n_ground", 1 if not has_manifest else 0)), 0)
+    checkpoint_schema_n_drones = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_drones",
+        "n_drones",
+        0,
+    )
+    checkpoint_schema_n_ground = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_ground",
+        "n_ground",
+        checkpoint_n_ground if checkpoint_n_ground > 0 else 1,
+    )
+    checkpoint_schema_n_survivors = _schema_count(
+        scenario_kwargs,
+        "obs_schema_n_survivors",
+        "n_survivors",
+        1,
+    )
 
-    distance_kwargs = {}
-    if (
-        args.joint_schema_ugv_diagnostic
-        or (
-            args.ugv_diagnostic_target_distance_min_m is None
-            and args.ugv_diagnostic_target_distance_max_m is None
-        )
+    for key in (
+        "known_survivor_spawn_distance_m",
+        "known_survivor_spawn_distance_min_m",
+        "known_survivor_spawn_distance_max_m",
+        "survivor_spawn_reference",
     ):
-        pass
-    else:
-        target_distance_min_m = max(
-            float(0.0 if args.ugv_diagnostic_target_distance_min_m is None else args.ugv_diagnostic_target_distance_min_m),
-            0.0,
-        )
-        distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
-        if args.ugv_diagnostic_target_distance_max_m is not None:
-            target_distance_max_m = max(
-                float(args.ugv_diagnostic_target_distance_max_m),
-                0.0,
-            )
-            if target_distance_max_m < target_distance_min_m:
-                raise ValueError(
-                    "ugv_diagnostic_target_distance_max_m must be >= "
-                    "ugv_diagnostic_target_distance_min_m"
-                )
-            target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-            distance_kwargs.update({
-                "known_survivor_spawn_distance_m": target_distance_m,
-                "known_survivor_spawn_distance_max_m": target_distance_max_m,
-            })
-        for key in (
-            "known_survivor_spawn_distance_m",
-            "known_survivor_spawn_distance_min_m",
-            "known_survivor_spawn_distance_max_m",
-        ):
-            scenario_kwargs.pop(key, None)
+        scenario_kwargs.pop(key, None)
 
     scenario_kwargs["max_steps"] = args.steps
     scenario_kwargs["comms_dropout"] = 0.0
+    scenario_kwargs["n_drones"] = 0
+    scenario_kwargs["n_ground"] = int(
+        args.n_ugvs
+        if args.n_ugvs is not None
+        else checkpoint_n_ground
+    )
+    scenario_kwargs["n_survivors"] = int(
+        args.n_survivors
+        if args.n_survivors is not None
+        else scenario_kwargs.get("n_survivors", checkpoint_schema_n_survivors)
+    )
+    scenario_kwargs["obs_schema_n_drones"] = int(
+        args.n_drones
+        if args.n_drones is not None
+        else checkpoint_schema_n_drones
+    )
+    scenario_kwargs["obs_schema_n_ground"] = int(
+        args.n_ugvs
+        if args.n_ugvs is not None
+        else checkpoint_schema_n_ground
+    )
+    scenario_kwargs["obs_schema_n_survivors"] = int(
+        args.n_survivors
+        if args.n_survivors is not None
+        else checkpoint_schema_n_survivors
+    )
     if args.joint_schema_ugv_diagnostic:
-        scenario_kwargs.setdefault("n_drones", 0)
-        scenario_kwargs.setdefault("n_ground", 2)
-        scenario_kwargs.setdefault("n_survivors", 5)
-        scenario_kwargs.setdefault("obs_schema_n_drones", 3)
-        scenario_kwargs.setdefault("obs_schema_n_ground", 2)
-        scenario_kwargs.setdefault("obs_schema_n_survivors", 5)
         scenario_kwargs.setdefault("known_survivors_at_reset", False)
         scenario_kwargs.setdefault("delayed_survivor_knowledge", True)
         scenario_kwargs.setdefault("ugv_target_assignment_mode", "route_cost_sticky")
         scenario_kwargs.setdefault("ugv_zero_uav_search_observations", True)
-        if args.enable_fire:
-            scenario_kwargs["disable_fire"] = False
     else:
-        scenario_kwargs.update({
-            "n_drones": 0,
-            "n_ground": 1,
-            "n_survivors": 1,
-            "known_survivors_at_reset": True,
-            "disable_fire": not bool(args.enable_fire),
-        })
+        scenario_kwargs.setdefault("known_survivors_at_reset", True)
+        scenario_kwargs.setdefault("disable_fire", True)
+    fire_override = getattr(args, "enable_fire", None)
+    if fire_override is not None:
+        scenario_kwargs["disable_fire"] = not bool(fire_override)
     if args.n_drones is not None:
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
-        else:
-            scenario_kwargs["n_drones"] = int(args.n_drones)
+        scenario_kwargs["obs_schema_n_drones"] = int(args.n_drones)
     if args.n_ugvs is not None:
         scenario_kwargs["n_ground"] = int(args.n_ugvs)
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
+        scenario_kwargs["obs_schema_n_ground"] = int(args.n_ugvs)
     if args.n_survivors is not None:
         scenario_kwargs["n_survivors"] = int(args.n_survivors)
-        if args.joint_schema_ugv_diagnostic:
-            scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
+        scenario_kwargs["obs_schema_n_survivors"] = int(args.n_survivors)
     if args.n_decoys is not None:
         scenario_kwargs["n_decoys"] = max(int(args.n_decoys), 0)
         if args.joint_schema_ugv_diagnostic and int(args.n_decoys) > 0:
@@ -211,7 +225,6 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         explicit_min=getattr(args, "active_decoys_min", None),
         explicit_max=getattr(args, "active_decoys_max", None),
     )
-    scenario_kwargs.update(distance_kwargs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
@@ -289,6 +302,7 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
             max(int(scenario_kwargs["ugv_planner_lookahead_cells"]), 1),
             max(patch_size // 2, 1),
         )
+    scenario_kwargs["comms_map_mode"] = "per_agent"
     return scenario_kwargs
 
 
@@ -1175,6 +1189,7 @@ def _summarize_rows(rows: list[dict], bins: int) -> dict:
         "success_rate": _finite_mean(row["full_success"] for row in rows),
         "mean_confirmed": _finite_mean(row["confirmed"] for row in rows),
         "mean_confirmation_recall": _finite_mean(row.get("confirmation_recall") for row in rows),
+        "mean_confirmation_auc": _finite_mean(row.get("confirmation_auc") for row in rows),
         "mean_initial_distance_m": _finite_mean(row["initial_distance_m"] for row in rows),
         "mean_final_distance_m": _finite_mean(row["final_distance_m"] for row in rows),
         "mean_min_distance_m": _finite_mean(row["min_distance_m"] for row in rows),
@@ -1839,9 +1854,15 @@ def run_rollout(
     scenario_kwargs: dict,
     seed: int,
     deterministic: bool,
+    actor_file_indices: list[int] | None = None,
 ) -> dict:
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
-    env = vmas.make_env(
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=deterministic,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -1849,7 +1870,7 @@ def run_rollout(
         seed=seed,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=seed)
     policy.reset()
     scenario = env.scenario
     ground_index = 0
@@ -1883,6 +1904,10 @@ def run_rollout(
     max_steps = int(scenario_kwargs["max_steps"])
     time_series = _new_time_series()
     confirmation_step: int | None = None
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
+    confirm_auc_sum = 0.0
+    auc_steps = 0
 
     for step in range(max_steps):
         target_idx, survivor = _assigned_ground_target(scenario, ground_index)
@@ -2023,6 +2048,12 @@ def run_rollout(
                     speed_mps=speed_mps,
                 )
         min_distance = min(min_distance, dist_after_m)
+        found_for_auc = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        confirm_auc_sum += (
+            float(np.logical_and(found_for_auc, active_survivor_mask).sum() / n_active_survivors)
+            if n_active_survivors > 0 else 1.0
+        )
+        auc_steps += 1
         if _active_success_for_env(scenario):
             confirmation_step = step
             break
@@ -2046,6 +2077,9 @@ def run_rollout(
     n_active_survivors = int(active_survivor_mask.sum())
     found = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
     confirmed_count = float(np.logical_and(found, active_survivor_mask).sum())
+    if auc_steps < max_steps:
+        final_confirm_recall = confirmed_count / n_active_survivors if n_active_survivors else 1.0
+        confirm_auc_sum += float(final_confirm_recall) * (max_steps - auc_steps)
     full_success = _active_success_for_env(scenario)
     return {
         "seed": seed,
@@ -2054,6 +2088,7 @@ def run_rollout(
         "survivor_slots": survivor_slots,
         "confirmed": confirmed_count,
         "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "confirmation_auc": float(confirm_auc_sum / max(max_steps, 1)),
         "full_success": float(full_success),
         "diagnostic_ground_agent_index": int(ground_agent_idx),
         "diagnostic_ground_index": int(ground_index),
@@ -2137,10 +2172,16 @@ def run_failure_trace(
     scenario_kwargs: dict,
     seed: int,
     deterministic: bool,
+    actor_file_indices: list[int] | None = None,
 ) -> dict:
     """Run one rollout and keep per-step diagnostics for debugging failures."""
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=deterministic)
-    env = vmas.make_env(
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=deterministic,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -2148,7 +2189,7 @@ def run_failure_trace(
         seed=seed,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=seed)
     policy.reset()
     scenario = env.scenario
     ground_index = 0
@@ -2160,7 +2201,12 @@ def run_failure_trace(
     trace = []
     initial_distance = _distance_m(scenario, ground.state.pos, survivor.state.pos)
     min_distance = initial_distance
-    for step in range(scenario_kwargs["max_steps"]):
+    max_steps = int(scenario_kwargs["max_steps"])
+    active_survivor_mask = _active_survivor_mask_for_env(scenario)
+    n_active_survivors = int(active_survivor_mask.sum())
+    confirm_auc_sum = 0.0
+    auc_steps = 0
+    for step in range(max_steps):
         _target_idx, survivor = _assigned_ground_target(scenario, ground_index)
         pos_before = ground.state.pos.clone()
         survivor_before = survivor.state.pos.clone()
@@ -2271,6 +2317,12 @@ def run_failure_trace(
             **{f"after_{k}": v for k, v in cell_after.items()},
         })
 
+        found_for_auc = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
+        confirm_auc_sum += (
+            float(np.logical_and(found_for_auc, active_survivor_mask).sum() / n_active_survivors)
+            if n_active_survivors > 0 else 1.0
+        )
+        auc_steps += 1
         if _active_success_for_env(scenario):
             break
 
@@ -2280,6 +2332,9 @@ def run_failure_trace(
     n_active_survivors = int(active_survivor_mask.sum())
     found = scenario.found_survivors[0].detach().cpu().numpy().astype(bool)
     confirmed_count = float(np.logical_and(found, active_survivor_mask).sum())
+    if auc_steps < max_steps:
+        final_confirm_recall = confirmed_count / n_active_survivors if n_active_survivors else 1.0
+        confirm_auc_sum += float(final_confirm_recall) * (max_steps - auc_steps)
     full_success = _active_success_for_env(scenario)
     return {
         "seed": seed,
@@ -2288,6 +2343,7 @@ def run_failure_trace(
         "survivor_slots": survivor_slots,
         "confirmed": confirmed_count,
         "confirmation_recall": confirmed_count / n_active_survivors if n_active_survivors else 1.0,
+        "confirmation_auc": float(confirm_auc_sum / max(max_steps, 1)),
         "full_success": float(full_success),
         "initial_distance_m": initial_distance,
         "final_distance_m": _distance_m(scenario, ground.state.pos, survivor.state.pos),
@@ -2309,7 +2365,7 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
     for name, action in commands.items():
         distances = []
         for seed in seeds:
-            env = vmas.make_env(
+            env = WildfireSearchScenario.make_env(
                 scenario=WildfireSearchScenario(),
                 num_envs=1,
                 device="cpu",
@@ -2317,7 +2373,7 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
                 seed=seed,
                 **copy.deepcopy(scenario_kwargs),
             )
-            env.reset()
+            env.reset(seed=seed)
             scenario = env.scenario
             ground_agent_idx = _ground_agent_index(scenario, 0)
             ground = env.agents[ground_agent_idx]
@@ -2334,9 +2390,18 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
     return out
 
 
-def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tuple[str, np.ndarray, float | None]]:
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=True)
-    env = vmas.make_env(
+def run_direction_probe(
+    checkpoint_dir: Path,
+    scenario_kwargs: dict,
+    actor_file_indices: list[int] | None = None,
+) -> list[tuple[str, np.ndarray, float | None]]:
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=True,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -2344,7 +2409,7 @@ def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tup
         seed=123,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=123)
     scenario = env.scenario
     ground_agent_idx = _ground_agent_index(scenario, 0)
     ground = env.agents[ground_agent_idx]
@@ -2375,11 +2440,17 @@ def run_direction_probe(checkpoint_dir: Path, scenario_kwargs: dict) -> list[tup
 def run_angle_bucket_probe(
     checkpoint_dir: Path,
     scenario_kwargs: dict,
+    actor_file_indices: list[int] | None = None,
     radius_m: float = 80.0,
     n_angles: int = 16,
 ) -> list[dict]:
-    policy = HappoPolicy.from_checkpoint(checkpoint_dir, deterministic=True)
-    env = vmas.make_env(
+    policy = HappoPolicy.from_checkpoint(
+        checkpoint_dir,
+        deterministic=True,
+        scenario_kwargs=scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    )
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -2387,7 +2458,7 @@ def run_angle_bucket_probe(
         seed=123,
         **copy.deepcopy(scenario_kwargs),
     )
-    env.reset()
+    env.reset(seed=123)
     scenario = env.scenario
     ground_agent_idx = _ground_agent_index(scenario, 0)
     ground = env.agents[ground_agent_idx]
@@ -2596,9 +2667,6 @@ def main() -> None:
     parser.add_argument("--active-decoys-max", type=int, default=None,
                         help="Maximum active decoys sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
-    parser.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None)
-    parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
-                        help="Omit for no upper bound when a min distance is provided.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--ugv-planner-hint",
                         choices=(
@@ -2680,8 +2748,11 @@ def main() -> None:
                         help="Override fire buffer planner cost.")
     parser.add_argument("--ugv-planner-land-cover-costs", type=float, nargs="+", default=None,
                         help="Override planner-only land-cover costs for road/open/brush/forest/rock[/water].")
-    parser.add_argument("--enable-fire", action="store_true",
-                        help="Allow fire to run in the UGV diagnostic scenario.")
+    parser.add_argument("--enable-fire", dest="enable_fire", action="store_true",
+                        help="Override checkpoint/default settings and enable fire/smoke dynamics.")
+    parser.add_argument("--disable-fire", dest="enable_fire", action="store_false",
+                        help="Override checkpoint/default settings and disable fire/smoke dynamics.")
+    parser.set_defaults(enable_fire=None)
     parser.add_argument("--stochastic", action="store_true", help="Sample actions instead of using deterministic actor means.")
     parser.add_argument("--trace-failures", action="store_true",
                         help="Print per-step diagnostics for seeds that fail to confirm.")
@@ -2822,9 +2893,19 @@ def main() -> None:
         and scenario_kwargs.get("ugv_dense_reward_mode", "target") != "target"
     ):
         parser.error("--ugv-route-aware-reward can only be combined with --ugv-dense-reward-mode target")
+    if int(scenario_kwargs.get("n_ground", 0)) < 1:
+        parser.error("diagnose_ugv_happo.py needs at least one physical UGV actor in the checkpoint")
+    try:
+        actor_file_indices = actor_file_indices_for_scenario(checkpoint_dir, scenario_kwargs)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"checkpoint: {checkpoint_dir}")
     print(f"steps: {args.steps}")
-    if args.joint_schema_ugv_diagnostic:
+    if (
+        args.joint_schema_ugv_diagnostic
+        or int(scenario_kwargs.get("obs_schema_n_drones", 0)) != int(scenario_kwargs.get("n_drones", 0))
+        or int(scenario_kwargs.get("obs_schema_n_ground", 0)) != int(scenario_kwargs.get("n_ground", 0))
+    ):
         print(
             "joint_schema_ugv_diagnostic: "
             f"{scenario_kwargs.get('n_drones', 0)} UAVs, "
@@ -2857,15 +2938,40 @@ def main() -> None:
     )
     print("-" * 72)
 
-    rows = [
-        run_rollout(
-            checkpoint_dir,
-            scenario_kwargs,
-            seed,
-            deterministic=not args.stochastic,
+    json_path = Path(args.json_output) if args.json_output else None
+    if json_path is not None:
+        print(f"partial JSON checkpoint: {partial_json_path(json_path)}")
+
+    rows = []
+    for seed_index, seed in enumerate(args.seeds, start=1):
+        rows.append(
+            run_rollout(
+                checkpoint_dir,
+                scenario_kwargs,
+                seed,
+                deterministic=not args.stochastic,
+                actor_file_indices=actor_file_indices,
+            )
         )
-        for seed in args.seeds
-    ]
+        if json_path is not None:
+            partial_summary = _summarize_rows(rows, args.time_bins)
+            write_partial_json(
+                json_path,
+                _json_sanitize(
+                    {
+                        "checkpoint": str(checkpoint_dir),
+                        "deterministic": not args.stochastic,
+                        "steps": int(args.steps),
+                        "seeds": list(args.seeds),
+                        "scenario_kwargs": scenario_kwargs,
+                        "summary": partial_summary,
+                        "rows": rows,
+                    }
+                ),
+                completed_rollouts=seed_index,
+                total_rollouts=len(args.seeds),
+                sort_keys=True,
+            )
     summary = _summarize_rows(rows, args.time_bins)
     for row in rows:
         print(
@@ -2898,6 +3004,7 @@ def main() -> None:
         "means: "
         f"confirmed={summary['mean_confirmed']:.3f} "
         f"recall={summary['mean_confirmation_recall']:.3f} "
+        f"confirm_auc={summary['mean_confirmation_auc']:.3f} "
         f"success={summary['success_rate']:.3f} "
         f"final={summary['mean_final_distance_m']:.1f}m "
         f"min={summary['mean_min_distance_m']:.1f}m "
@@ -2937,7 +3044,11 @@ def main() -> None:
         print(f"command {name:>9}: displacement={mean_m:.3f}m +/- {std_m:.3f}m")
 
     print("-" * 72)
-    for name, action, alignment in run_direction_probe(checkpoint_dir, scenario_kwargs):
+    for name, action, alignment in run_direction_probe(
+        checkpoint_dir,
+        scenario_kwargs,
+        actor_file_indices=actor_file_indices,
+    ):
         align_text = "none" if alignment is None else f"{alignment: .3f}"
         print(f"probe {name:>9}: action=[{action[0]: .3f}, {action[1]: .3f}] align={align_text}")
 
@@ -2946,6 +3057,7 @@ def main() -> None:
     for row in run_angle_bucket_probe(
         checkpoint_dir,
         scenario_kwargs,
+        actor_file_indices=actor_file_indices,
         radius_m=80.0,
     ):
         action = row["action"]
@@ -2965,16 +3077,20 @@ def main() -> None:
 
     if args.trace_failures or args.trace_all:
         trace_rows = [
-            run_failure_trace(checkpoint_dir, scenario_kwargs, seed, deterministic=not args.stochastic)
+            run_failure_trace(
+                checkpoint_dir,
+                scenario_kwargs,
+                seed,
+                deterministic=not args.stochastic,
+                actor_file_indices=actor_file_indices,
+            )
             for seed in args.seeds
         ]
         for result in trace_rows:
             if args.trace_all or result["full_success"] <= 0.0:
                 _print_failure_trace(result, tail=args.trace_tail, stride=args.trace_stride)
 
-    if args.json_output:
-        output = Path(args.json_output)
-        output.parent.mkdir(parents=True, exist_ok=True)
+    if json_path is not None:
         payload = {
             "checkpoint": str(checkpoint_dir),
             "deterministic": not args.stochastic,
@@ -2984,11 +3100,14 @@ def main() -> None:
             "summary": summary,
             "rows": rows,
         }
-        output.write_text(
-            json.dumps(_json_sanitize(payload), indent=2, sort_keys=True),
-            encoding="utf-8",
+        write_final_json(
+            json_path,
+            _json_sanitize(payload),
+            completed_rollouts=len(rows),
+            total_rollouts=len(args.seeds),
+            sort_keys=True,
         )
-        print(f"wrote JSON diagnostics: {output}")
+        print(f"wrote JSON diagnostics: {json_path}")
 
     if args.plots_output:
         output = Path(args.plots_output)

@@ -1,348 +1,448 @@
-# OmniSearch Simulation — Conceptual Overview
+# OmniSearch Simulation Overview
 
-This document describes the physical world represented by the OmniSearch MARL training environment, the assumptions behind each model component, and where those assumptions diverge from physical reality. The goal is to let a reader judge how well a policy trained in this simulator might transfer to a real wildfire scenario.
+OmniSearch is a wildfire search-and-rescue simulator built on top of
+[VMAS](https://github.com/proroklab/vectorizedmultiagentsimulator), a vectorized
+2D multi-agent simulator for efficient MARL experiments. VMAS supplies the
+batched 2D physics engine; OmniSearch adds a physically scaled wildfire mission
+layer with terrain, fire, smoke, aerial perception, ground traversal, and
+survivor scouting/confirmation.
 
----
-
-## 1. World Representation
-
-The simulation world is a **2D continuous plane** with a **discrete grid overlay**. All agent motion (position, velocity, forces) lives in continuous 2D space. Fire, smoke, terrain type, and elevation are encoded on a coarse discrete grid — by default 16×16 cells — that is draped over the same area.
-
-**What this means physically:** Agents move smoothly through space, but fire and terrain features are resolved only to the grid cell level. At the default 16×16 resolution over a roughly 2 km² area (Malibu Creek State Park), each cell represents roughly 125×125 m. Spatial detail finer than one cell is invisible to the fire and smoke models.
-
-**Key simplification:** The world is strictly 2D from a motion standpoint. Drones do not actually fly in 3D — their horizontal position is simulated in 2D and altitude is tracked as a separate scalar (see Section 5). There is no 3D collision geometry.
-
----
-
-## 2. Agents
-
-### 2.1 Drones (aerial searchers)
-
-Three drones operate in the environment. Their physical parameters are:
-
-| Parameter | Value | Physical interpretation |
-|---|---|---|
-| Max speed | 0.5 sim units/step | ~2.5× faster than ground robots |
-| Action force | 0.6 multiplier | Continuous 2D thrust |
-| Drag | 0.25 | Velocity damping per step |
-| Collision radius | 0.04 sim units | ~5 m sphere |
-| Flight altitudes | 30 m / 60 m / 90 m AGL | Three discrete operating levels |
-
-Drones collide with each other but **not with survivors** — their detection is handled by a camera model (Section 4), not physical contact. They do not collide with ground robots.
-
-**Simplification:** The drag-force-velocity dynamics are a simple linear damping model (VMAS default), not aerodynamic flight. There is no wind effect on drone motion, no battery or endurance limit, and no minimum turn radius.
-
-### 2.2 Ground Robots (UGVs)
-
-Two ground robots operate at the terrain surface. Their physical parameters are:
-
-| Parameter | Value | Physical interpretation |
-|---|---|---|
-| Max speed | 0.2 sim units/step | ~2.5× slower than drones |
-| Action force | 0.3 multiplier | Lower thrust than drones |
-| Collision radius | 0.04 sim units | ~5 m sphere |
-| Lidar range | 0.20 sim units | Short-range obstacle sensor |
-
-Ground robots physically collide with survivor landmarks — their confirmation is range-based contact (within 0.10 sim units ≈ ~12 m).
-
-**Simplification:** There is no vehicle dynamics model. Ground robots are point masses with drag. No wheel slip, no tip-over risk on slopes, no articulation constraints.
+The simulator is intentionally not a full wildfire or robotics digital twin. It
+is a **2.5D mission simulator**: robots move in continuous 2D, terrain and fire
+live on raster grids, and UAV altitude is tracked as an above-ground scalar. The
+goal is to preserve the mission-relevant structure of wildfire SAR while keeping
+the environment fast enough for reinforcement learning.
 
 ---
 
-## 3. Terrain
+## 1. World Model
 
-### 3.1 Data Sources
+The environment combines two coordinate systems:
 
-The terrain is loaded from a pre-built cache derived from two real-world datasets:
+- **Continuous VMAS plane:** UAVs, UGVs, and survivors have continuous
+  positions and velocities.
+- **Raster map layers:** fire, smoke, land cover, elevation, slope, fuel, and
+  inspection confidence are stored on grid cells.
 
-- **USGS 3DEP** (10 m resolution digital elevation model): provides bare-earth elevation for every grid cell, from which slope is derived.
-- **OpenStreetMap**: provides road networks, water bodies, and building footprints.
+Canonical task defaults are:
 
-An optional third source, **LANDFIRE**, provides vegetation fuel density maps. Without it, fuel density is derived heuristically from land cover type.
+| Quantity | Default value |
+|---|---:|
+| UAVs | 3 |
+| UGVs | 2 |
+| Survivors | 5 |
+| Fire / terrain grid | 128 x 128 |
+| Reference terrain grid | 16 x 16 |
+| Episode horizon | 500 steps |
+| Simulation step | 2 s |
+| Default horizon in simulated time | 1000 s |
 
-The default area is **Malibu Creek State Park, California** — a real wildfire-prone chaparral landscape with a mix of open terrain, dense brush, forested ridgelines, and creek drainages.
+Many diagnostic and paper runs use a compact stress-test setting:
 
-### 3.2 Land Cover Classification
+| Quantity | Diagnostic value |
+|---|---:|
+| Search area | 500 m x 500 m |
+| Grid | 128 x 128 |
+| Cell size | 3.9 m |
+| Episode horizon | 300 steps |
+| Simulated time | 600 s / 10 min |
 
-Each grid cell is assigned one of six land cover classes, which drive both fire behavior and robot traversal:
+The compact setting is useful because coverage saturates quickly. That makes it
+easier to study overlap, late-stage sparse low-confidence areas, and UAV/UGV
+handoff behavior.
 
-| Class | Fire fuel factor | Ground robot cost | Ground robot speed | Physical meaning |
-|---|---|---|---|---|
-| Road | 0.05 | 0.65 | 1.0× | Paved or dirt track |
-| Open | 0.40 | 1.0 | 0.9× | Grassland, cleared area |
-| Brush | 1.10 | 1.5 | 0.65× | Chaparral, shrubs |
-| Forest | 1.35 | 2.2 | 0.45× | Wooded area |
-| Rock | 0.0 | 4.0 | 0.0× | Impassable terrain |
-| Water | 0.0 | 8.0 | 0.0× | Rivers, lakes |
+## 2. Agent Types
 
-Objects (trees, buildings) add additional fuel on top of the land cover base.
+### UAVs
 
-**Assumption:** Land cover is static throughout the episode — it does not change as vegetation burns. In reality, a burned cell transitions to open terrain with no fuel.
+UAVs are aerial search agents. Their horizontal motion is continuous and
+holonomic, while altitude is updated by an automatic terrain-following
+controller.
 
-**Assumption:** The six-class schema is a significant reduction of real land cover complexity. Malibu chaparral includes chamise, manzanita, laurel sumac, and many other fuel types with very different burn characteristics; all are collapsed into "brush."
+| Parameter | Value |
+|---|---:|
+| Speed | 10 m/s |
+| Default flight levels | 20, 35, 50 m AGL |
+| Camera field of view | 90 deg |
+| Climb rate | 10 m/step |
+| Descent rate | 8 m/step |
+| Minimum safety clearance | 3 m |
+| Fire/smoke clearance thresholds | 25 m, smoke threshold 0.20 |
 
-### 3.3 Slope
+The controller chooses an altitude that clears terrain and obstacles while
+respecting the configured flight range. Horizontal control remains 2D; the
+altitude affects footprint size, detection quality, and energy diagnostics.
 
-Slope is computed from the USGS elevation grid as the elevation difference between neighboring cells. It affects:
+### UGVs
 
-- **Ground robot traversability:** cells steeper than 70% grade (≈35°) are impassable, except on roads.
-- **Ground robot speed:** speed is divided by (1 + 1.5 × slope), so a 30° slope roughly halves robot speed.
-- **Ground robot cost:** cost is multiplied by (1 + 2.0 × slope).
-- **Fire spread:** steeper uphill cells receive exponentially higher spread probability (Section 4.1).
+UGVs are ground confirmation agents. They move on the terrain surface and are
+constrained by traversability, terrain speed, slope, and fire-aware route
+planning.
 
-**Assumption:** Slope is a single scalar per cell derived from the 16×16 grid, not the raw 10 m DEM. Subgrid slope variation — gullies, cliff edges — is not represented.
+| Parameter | Value |
+|---|---:|
+| Speed | 1.6 m/s |
+| Acceleration | 2.0 m/s^2 |
+| Lidar range | 20 m |
+| Survivor confirmation range | 10 m |
+| Arrival slowdown radius | 10 m |
+| Arrival damping | 0.6 |
 
-### 3.4 Moisture
+UGVs use local and global A* route hints in several evaluation settings. Route
+costs incorporate land cover, slope, water/rock/building blockage, fire, and
+smoke. The learned controller still outputs continuous motion; the planner
+provides structured navigation information and diagnostics.
 
-A per-cell moisture field is derived from elevation and land cover (higher, wetter areas; water-adjacent cells are wetter). It modulates both fire spread probability and fire intensity. Moisture is static and does not respond to fire-induced drying or simulated rainfall.
+## 3. Terrain and GIS Layers
 
-**Physical reality gap:** Real wildfire moisture conditions are driven by relative humidity, time of day, recent precipitation, and fuel moisture content — none of which are modeled dynamically. The moisture field is a fixed proxy.
+OmniSearch terrain caches are derived from real geospatial data:
 
----
+- [USGS 3DEP](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services)
+  digital elevation products provide meter-valued terrain elevation. The
+  commonly used 1/3 arc-second product has approximately 10 m spacing.
+- OpenStreetMap contributes roads, water bodies, and building footprints.
+- [LANDFIRE](https://www.landfire.gov/fuel) fuel and vegetation products are
+  used when available; otherwise the simulator derives fuel density from land
+  cover.
+
+The simulator collapses the terrain into six land-cover classes:
+
+| Class | Fire fuel | UGV cost | UGV speed | Interpretation |
+|---|---:|---:|---:|---|
+| Road | 0.05 | 0.65 | 1.00 | road or trail |
+| Open | 0.40 | 1.00 | 0.95 | grass, clearing, sparse cover |
+| Brush | 1.10 | 1.50 | 0.80 | chaparral or dense shrub |
+| Forest | 1.35 | 2.20 | 0.70 | wooded terrain |
+| Rock | 0.00 | 4.00 | 0.00 | impassable rock |
+| Water | 0.00 | 8.00 | 0.00 | impassable water |
+
+Slope is derived from the elevation grid and affects both fire spread and ground
+mobility. UGVs cannot traverse non-road cells above a maximum slope of 0.70
+grade. Below that threshold, slope increases traversal cost and reduces speed:
+
+```text
+cost multiplier  = 1 + 2.0 * slope
+speed multiplier = terrain_speed / (1 + 0.5 * slope)
+```
+
+Moisture is a static cell field derived from terrain and land cover. It is used
+as a coarse proxy for fuel wetness, with wetter cells suppressing ignition and
+fire intensity.
 
 ## 4. Fire Model
 
-### 4.1 Spread Mechanism — Cellular Automaton
+Fire is modeled as a stochastic cellular automaton on the raster grid. Each
+cell can be unburned, burning, burned out, or non-burning. At every fire update,
+currently burning cells send ignition pressure to nearby unburned cells. The
+target cell then ignites with a probability determined by the accumulated
+pressure from its burning neighbors.
 
-Fire spreads via a **stochastic cellular automaton** on the discrete grid. At each fire update step (every 3 environment steps), each unburned cell receives a spread attempt from each of its 8 neighbors.
+Conceptually, ignition pressure has four physical ingredients:
 
-The **ignition probability** for a target cell is:
+- **Exposure:** stronger and closer burning neighbors create more heat exposure.
+- **Fuel:** brush and forest cells ignite more readily than road or open ground.
+- **Moisture:** wetter cells suppress spread and reduce fire intensity.
+- **Directionality:** wind and uphill slope bias spread toward downwind and
+  upslope neighbors.
 
+The simulator evaluates the eight neighboring cells around each target. For
+each burning neighbor, it builds an effective contribution:
+
+```text
+neighbor contribution
+  = fire_intensity
+  * wind_alignment_factor
+  * uphill_slope_factor
 ```
-p_ignite = 1 − (1 − base_prob)^rate
+
+These neighbor contributions are summed and then multiplied by target-cell
+factors for fuel, fuel density, moisture, and stochastic variability. The final
+spread pressure is converted into an ignition probability using a saturating
+Bernoulli form:
+
+```text
+p_ignite = 1 - (1 - base_spread_probability) ^ effective_rate
 ```
 
-where the effective rate combines:
+This form has a useful interpretation: many weak contributors or one strong
+contributor can both raise ignition probability, but the probability remains
+bounded by 1.
 
-| Factor | Formula | Physical interpretation |
-|---|---|---|
-| Fire exposure | Σ (neighbor intensity × wind_factor × slope_factor) | Radiant heat and ember flux from adjacent burning cells |
-| Fuel | land_cover_fuel × (0.65 + 0.55 × fuel_density) | Available combustible material |
-| Moisture | exp(−1.15 × moisture) | Suppression from fuel wetness |
-| Wind alignment | exp(1.25 × wind_strength × cos(θ)) | Wind blows fire downwind |
-| Uphill slope | exp(1.65 × elevation_rise) | Fire climbs faster uphill |
-| Stochastic variability | lognormal factor, clipped to [0.35, 2.25] | Run-to-run variability |
-| Target boost | 0.35 + 1.05 × (remaining fraction / target) | Keeps fire near target area |
+Canonical values:
 
-The base ignition probability is 0.065 per neighbor per update.
+| Parameter | Value |
+|---|---:|
+| Base spread probability | 0.03 |
+| Fire update interval | every 5 env steps |
+| Wind direction | (1, 0) |
+| Wind strength | 0.06 |
+| Wind spread weight | 1.25 |
+| Slope spread weight | 1.65 |
+| Moisture damping | 1.15 |
+| Spread variability | 0.55 |
+| Initial fire area | 2.5% of grid |
 
-**Wind:** Wind is a constant vector (default: eastward, strength 0.06). Wind alignment with each of the 8 spread directions is computed as a dot product; directions aligned with wind receive an exponential boost, opposing directions receive a penalty.
+### Wind and slope
 
-**Spotting:** A very low probability (8×10⁻⁵ per update per cell) allows fire to jump over unburned cells via ember transport, but only to cells already adjacent to smoke. This represents long-range spotting in a simplified way.
+Wind is represented as a fixed 2D vector. The default wind direction `(1, 0)`
+pushes spread and smoke eastward, with strength `0.06`. For each neighbor
+direction, the simulator computes alignment with the wind vector. Downwind
+directions receive an exponential boost; upwind directions receive less spread
+pressure.
 
-**Physical reality gap:**
-- The cellular automaton is a coarse approximation of fire front propagation. Real models (Rothermel, FARSITE) use reaction intensity, flame residence time, wind correction factors for slope, and fuel moisture of extinction as continuous physics-based equations.
-- Fire does not propagate through partially burned or low-fuel cells differently — ignition is binary.
-- There is no crown fire vs. surface fire distinction.
-- Spotting distance is limited to smoke-adjacent cells; in reality embers can travel kilometers.
-- Wind is spatially uniform and constant; topographic channeling and fire-induced convective columns are not modeled.
+Slope is computed from the elevation grid. Uphill spread receives an exponential
+boost, reflecting the fact that flames and preheating tend to accelerate fire
+upslope. The model is directional: a cell upslope from a burning neighbor is
+easier to ignite than a cell downslope from that same neighbor.
 
-### 4.2 Burn Lifetime and Burnout
+### Fuel, moisture, and intensity
 
-Each ignited cell is assigned a random burn lifetime between 5 and 14 fire update steps. Once the cell has burned for its lifetime, it is extinguished. The burned state is permanent — cells that have burned cannot reignite. This approximates fuel exhaustion.
+Land cover controls the amount of burnable material. Fuel-rich classes such as
+brush and forest have higher fuel factors; rock and water do not burn. Moisture
+reduces both ignition probability and fire intensity, acting as a static proxy
+for fuel wetness.
 
-**Physical reality gap:** Real burnout time depends on fuel load, density, and moisture. The random uniform distribution is a placeholder.
+Burning cells carry a continuous intensity value in `[0, 1]`. Intensity is not
+flame length or heat release rate, but it plays the same conceptual role inside
+the simulator: more intense cells spread more strongly and emit more smoke.
+Intensity evolves over the cell's burn lifetime, combining fuel/moisture
+potential with a lifecycle term that decays as the cell approaches burnout.
 
-### 4.3 Fire Intensity
+### Burn lifetime
 
-Each burning cell carries an intensity value in [0, 1] that evolves each update step. Intensity is driven by:
+When a cell ignites, it receives a land-cover-dependent burn lifetime. After
+that many fire updates, it becomes burned out and cannot reignite. Burnout
+depends on land cover:
 
-- **Fuel and moisture potential:** `0.15 + 0.85 × (fuel/moisture factor × slope factor)`
-- **Burn lifecycle:** intensity decays linearly to 25% of its peak as the cell approaches burnout
-- **Temporal smoothing:** 58% of prior intensity + 42% of target potential — a simple exponential moving average toward the physics-based potential
+| Class | Burnout updates |
+|---|---:|
+| Road | 5-20 |
+| Open | 5-20 |
+| Brush | 20-60 |
+| Forest | 60-200 |
+| Rock | non-burning |
+| Water | non-burning |
 
-Intensity affects how strongly a burning cell contributes to neighboring spread exposure, how much smoke it emits, and how severely it degrades drone camera visibility.
+This makes forest fires persist longer than grass/open fires and keeps rock and
+water as fire barriers.
 
-**Physical reality gap:** Real fire intensity (heat release rate, flame height) is a function of fireline intensity with complex wind and slope dependencies. The simplified scalar is conceptually aligned but not quantitatively calibrated.
+### Target-area regulation
 
-### 4.4 Target Area Regulation
+The simulator includes a bounded target-area regulation term to keep training
+episodes useful. Each episode samples a target burned fraction, and the spread
+rate is gently boosted when the fire is below that target. This prevents the
+fire from immediately dying out or consuming the entire map in most training
+runs. It is an engineering device for scenario diversity, not a physical
+wildfire process.
 
-Each episode samples a target burned fraction (default: 20%–40% of the grid). A feedback term boosts spread probability when the fire is below target and caps new ignitions when the target is reached. This keeps training scenarios varied without the fire either dying out or consuming everything.
-
-**This mechanism has no physical counterpart** — it is an engineering choice to maintain scenario diversity during training. In a real wildfire the area burned is determined entirely by physics.
-
----
+The model is conceptually related to classical wildfire spread ideas, especially
+the role of fuel, wind, slope, and moisture in the
+[Rothermel surface fire spread model](https://research.fs.usda.gov/treesearch/55928).
+However, OmniSearch does not implement Rothermel, FARSITE, flame length,
+fireline intensity, crown fire, suppression, or atmospheric feedback. The fire
+layer is designed to create plausible spatial hazards and smoke fields for
+learning and evaluation, not to forecast real wildfire boundaries.
 
 ## 5. Smoke Model
 
-Smoke is a scalar field on the same 16×16 grid, updated every environment step. The update has three parts:
+Smoke is a dimensionless scalar field on the same grid as fire. It is updated
+each environment step through emission, decay, diffusion, smoldering, and wind
+advection. Conceptually, the smoke field is a compact visibility layer: it marks
+where fire activity has recently degraded the aerial camera view.
 
-1. **Emission:** Each burning cell emits smoke proportional to its fire intensity and local fuel density: `smoke += intensity × 0.18 × fuel`.
-2. **Decay:** All smoke decays by a factor of 0.96 each step (approximately exponential decay with a time constant of ~25 steps).
-3. **Diffusion:** A 4-neighbor average smooths the field: `smoke += 0.16 × (mean_of_4_neighbors − smoke)`.
-4. **Wind advection:** The smoke field is shifted in the wind direction, blended at a weight equal to wind strength (0.06 by default).
+The update has five stages:
 
-Smoke affects drone camera detection probability (Section 6.2). It also enables fire spotting — cells with any smoke load (> 0.08) are candidates for spotting ignition.
+1. **Active-fire emission:** burning cells add smoke proportional to fire
+   intensity and local fuel.
+2. **Smolder emission:** cells late in their burn lifetime continue producing
+   lower-intensity residual smoke.
+3. **Decay:** smoke fades over time, representing dilution and dissipation.
+4. **Diffusion:** smoke spreads to neighboring cells by local smoothing.
+5. **Advection:** wind shifts smoke downwind.
 
-**Physical reality gap:**
-- There is no plume dynamics model. Real smoke plume behavior is governed by buoyancy, atmospheric stability, and wind shear — none of which are represented.
-- Smoke density is dimensionless and not calibrated to any physical quantity (e.g., PM2.5 concentration or optical depth).
-- There is no separation between smoke from active flaming and residual smoldering.
+| Parameter | Value |
+|---|---:|
+| Active fire smoke emission | 0.18 |
+| Smoke decay | 0.985 |
+| Smoke diffusion | 0.16 |
+| Wind advection strength | 0.30 |
+| Smolder smoke emission | 0.04 |
+| Smolder decay | 0.995 |
+| Smolder start fraction | 0.65 of burn lifetime |
 
----
+Active fire emits smoke according to:
 
-## 6. Drone Perception Model
-
-### 6.1 Camera Footprint
-
-Each drone's visible ground area is determined by its altitude and a fixed camera field-of-view angle (default: 65°). The ground footprint radius is:
-
+```text
+smoke_added = fire_intensity * smoke_emission * fuel_factor
 ```
-footprint_radius = altitude_AGL × tan(FOV / 2)
+
+After emission, the field is decayed and smoothed. Diffusion is implemented as
+a four-neighbor averaging step, so smoke gradually fills nearby cells rather than
+remaining exactly on the fire front. Advection then blends the smoke field in
+the wind direction; the default advection strength is stronger than the fire
+wind strength because smoke is allowed to drift faster than the fire front.
+
+The smoke field enters perception through the UAV line-of-sight model. The
+camera model samples smoke along the straight path from UAV to target and forms
+a weighted smoke load:
+
+```text
+smoke_load = 0.65 * mean_path_smoke + 0.35 * target_smoke
 ```
 
-At 30 m AGL, this gives a radius of about 32 m; at 90 m, about 96 m. A survivor is only a detection candidate if they fall within this footprint.
+RGB detection quality then decreases as `(1 - smoke_load)^1.24`. Thus smoke can
+reduce detection even when the survivor is not directly inside a burning cell,
+because smoke along the viewing path still lowers contrast.
 
-**Assumption:** The camera footprint is a circle, not the rectangular footprint of a real camera sensor. There is no lens distortion, no image resolution degradation toward the edges (beyond the distance factor below).
+The smoke model is not calibrated to PM2.5, optical depth, plume rise,
+atmospheric stability, or wind shear. It does not distinguish black smoke,
+white smoke, smoldering plume chemistry, or vertical plume height. It is a
+raster-level visibility proxy for SAR policy learning.
 
-### 6.2 Detection Probability
+## 6. UAV Perception
 
-The abstract UAV perception mode defaults to `rgb`. A second mode,
-`rgb_thermal`, is available for experiments with an RGB+thermal sensor stack.
-In the current calibration step, `rgb_thermal` keeps the RGB altitude and range
-factors, uses a bounded environment boost
-`q_environment = min(1, 1.30 * q_environment_rgb)`, and uses a less
-smoke-sensitive quality `q_smoke = 0.6 + 0.4 * q_smoke_rgb`. Thermal-specific
-heat-crossover terms are left for a later calibration.
+UAV survivor detection is probabilistic. A survivor or grid cell must lie inside
+the circular camera footprint:
 
-If a survivor is within the footprint, detection is **stochastic**: a random draw against a probability that is the product of four independent factors:
+```text
+footprint radius = altitude_AGL * tan(FOV / 2)
+```
 
-| Factor | Formula | Physical meaning |
+With the default 90 deg field of view, the footprint radius is approximately
+equal to altitude. A 35 m AGL UAV therefore observes an approximate 35 m radius.
+
+For a target location x, the instantaneous detection probability is the product
+of four factors:
+
+```text
+p_detect =
+    altitude_quality
+  * footprint_range_quality
+  * environment_quality
+  * fire_smoke_quality
+```
+
+The implemented factor values are documented in detail in
+[docs/perception_model.md](perception_model.md). In summary:
+
+| Factor | Implemented model | Main calibration source |
 |---|---|---|
-| Distance factor | `1 − 0.30 × (dist/footprint)²` | Detection is highest at nadir and falls quadratically to a 70% edge floor |
-| Environment factor | Per-class value | Terrain, clutter, concealment, and water-background effects |
-| Smoke/fire factor | Product of smoke, glare, and heat terms | Atmospheric degradation of the camera image |
-| Altitude quality | Interpolated from flight level | Proxy for image resolution and integration time |
+| Altitude quality | shifted-Weibull curve, quality = 1 up to 30 m and 0.900 at 50 m | [Sambolek & Ivasic-Kos 2021](https://doi.org/10.1109/ACCESS.2021.3063681) |
+| Footprint range | quadratic falloff to 0.70 at footprint edge | [Zheng et al. 2024](https://doi.org/10.1109/TPAMI.2024.3409416) |
+| Environment | land-cover multiplier: road/open 1.00, brush 0.71, forest 0.56, rock 0.86, water 0.78 | UAV SAR and detection datasets listed in `perception_model.md` |
+| Smoke | `(1 - smoke_load)^1.24` | [Liu et al. 2020](https://doi.org/10.3390/s20020349) |
+| Fire glare | `1 - 0.35 * local_fire_load` | simulator-level camera saturation proxy |
+| Heat distortion | `1 - 0.20 * mean_fire_along_path` | simulator-level heat shimmer proxy |
 
-**Smoke attenuation:** RGB uses `(1 − smoke_load)^1.24` — smoke intensity is interpreted as contrast loss from an atmospheric-transmission conversion. The exponent is fitted to the clear-normalized Faster R-CNN recalls reported by Liu et al. (2020), *Analysis of the Influence of Foggy Weather Environment on the Detection Effect of Machine Vision Obstacles*. Detection quality approaches zero as smoke becomes opaque. RGB+thermal uses `0.6 + 0.4 * q_smoke_rgb`, representing partial thermal robustness to visible smoke while keeping all other factors unchanged.
+The default `rgb` mode represents an abstract electro-optical camera. The
+optional `rgb_thermal` mode adds a conservative thermal benefit:
 
-**Footprint-edge quality:** the 70% floor is motivated by *Zone Evaluation: Revealing Spatial Bias in Object Detection* (TPAMI, 2024), which reports that outer image regions often retain roughly 70–80% of center performance depending on detector and dataset. The paper reports region-wise AP rather than a radial probability function, so the quadratic radial form remains a simulator assumption.
-
-**Environment quality:** terrain factors are ordered as `road, open, brush, forest, rock, water` and currently use `(1.00, 1.00, 0.71, 0.56, 0.86, 0.78)`. Road and open terrain are treated as unobstructed. Brush and forest follow the medium/high vegetation classes from SAVIOUR 2024 as an empirical terrain-quality proxy. Rock is treated as low-to-medium clutter. Water uses the SeaDronesSee swimmer AP50 reference as a compact proxy for glare, wave clutter, partial submersion, and maritime background ambiguity.
-
-**RGB+thermal environment boost:** RGB+thermal uses `min(1, 1.30 × q_environment_rgb)`. This represents a modest thermal benefit for camouflage/background contrast while keeping occlusion-heavy classes bounded and preventing any factor from exceeding 1. The factor is a conservative simulator-level proxy motivated by multimodal RGB/thermal detection gains reported in arXiv:2203.04567 and IEEE LRA DOI 10.1109/LRA.2019.2900907.
-
-**Fire glare:** `1 − 0.35 × max(local_fire_intensity, fire_density_near_survivor)` — fire near the survivor degrades the image as though saturating the camera sensor.
-
-**Heat shimmer:** `1 − 0.20 × mean_fire_intensity_along_path` — heat-induced refractive distortion modeled as a linear penalty.
-
-These three factors are sampled along 8 interpolated points on the straight-line path from drone to survivor, representing the integrated optical path through the atmosphere.
-
-**Altitude quality:** Lower altitudes give better detection quality (fewer pixels per meter, better feature resolution) but a smaller footprint. The quality interpolates linearly between 0.95 at the lowest flight level (30 m) and 0.55 at the highest (90 m).
-
-**Physical reality gap:**
-- The multiplicative independence of factors is a significant simplification. In reality smoke, glare, and viewing angle interact nonlinearly.
-- The exponential smoke attenuation assumes uniform smoke density along the vertical column, which ignores the actual plume structure.
-- There is no false positive detection. The model only tracks whether a known survivor is detected, not whether an agent misidentifies a non-survivor.
-- The model does not represent actual image processing. It is an abstract probability that stands in for what a real YOLOv8 pipeline (see `detection/`) would compute.
-
-### 6.3 Drone Flight Altitude
-
-Drones operate in "2.5D" — horizontal motion is 2D continuous, but each drone maintains a continuously tracked AGL altitude. The altitude controller works as follows:
-
-- The required minimum clearance over each cell is: `obstacle_height + 15 m safety margin`.
-- The drone's target altitude is the maximum required clearance along its path, clamped to the operating range [30 m, 90 m AGL].
-- Actual altitude moves toward the target at a limited rate: 10 m/step climb, 8 m/step descent.
-- A hysteresis margin of 10 m prevents rapid oscillation when crossing ridge lines.
-
-The drone's MSL altitude is: `terrain_elevation + AGL_altitude`.
-
-**Simplification:** Drones do not choose their altitude as part of their MARL action — altitude is determined automatically by the terrain. This removes one degree of freedom from the learned policy. A real drone operator would explicitly trade off altitude (footprint size vs. image resolution) as a decision.
-
----
-
-## 7. Ground Robot Traversal
-
-### 7.1 Traversability
-
-Ground robots cannot cross cells that are:
-- Water or bare rock (impassable by classification)
-- Occupied by a building or tree object
-- Steeper than 70% grade (except on roads)
-
-If a robot's commanded action would move it across an impassable cell boundary, the move is rejected and the closest safe partial move is applied instead, using a 10-candidate sliding/shortening fallback.
-
-### 7.2 Speed and Cost
-
-A robot's effective speed is scaled at each step by the terrain speed multiplier at its current cell. The multiplier ranges from 1.0 on roads to 0 on water and rock (impassable). On forest terrain a robot moves at 45% of its maximum speed.
-
-Travel cost (used in the reward) is the Euclidean distance moved multiplied by the average mobility cost over the path — effectively terrain-weighted path length.
-
-**Simplification:** Speed and cost are scalars per cell — there is no directional dependence (e.g., traversing a slope diagonally vs. directly uphill). Real vehicle traction and energy consumption are direction-dependent.
-
-**Simplification:** Ground robots are not affected by fire in terms of traversal (they can enter burning cells; the penalty is purely in the reward signal, not in physical movement capability). In reality a ground robot in active fire would be destroyed or would trigger an emergency stop.
-
----
-
-## 8. Communication
-
-Agents observe the relative positions of all other agents via shared state. Communication dropout is implemented as a Bernoulli mask applied to each agent's observation of each neighbor's position:
-
-```
-observed_delta = actual_delta × Bernoulli(1 − dropout_rate)
+```text
+environment_rgb_thermal = min(1, 1.30 * environment_rgb)
+smoke_rgb_thermal       = 0.6 + 0.4 * smoke_rgb
 ```
 
-When a message is dropped, the agent sees zero for that neighbor's relative position. The dropout is applied independently each step, with no temporal correlation (lost packets are not followed by more lost packets at a higher rate).
+The probability is used both for stochastic survivor detection and for the
+inspection-confidence map, which accumulates the probability that a survivor at
+each cell would already have been detected by the UAV team.
 
-**Simplification:** Real radio communication in a wildfire environment experiences correlated losses due to terrain shadowing, smoke absorption, and relay availability. The i.i.d. Bernoulli model is the simplest possible dropout model. There is no bandwidth limit, no latency, and no message corruption beyond total loss.
+## 7. Survivor Scouting and Confirmation
 
----
+The mission separates aerial scouting from ground confirmation:
 
-## 9. Episode Structure and Reward
+1. UAVs scout survivors through the probabilistic perception model.
+2. UGVs confirm survivors by reaching the physical confirmation radius.
 
-### 9.1 Episode Configuration
+This two-stage design reflects the operational workflow: aerial vehicles rapidly
+reduce uncertainty over the search area, while ground robots verify survivor
+locations and provide a closer contact point.
 
-Each episode samples:
-- A target burned area fraction (20%–40% of the grid)
-- An initial fire ignition patch (≈2.5% of the grid, seeded in high-fuel terrain)
-- Random initial positions for all agents and survivors in traversable terrain
+Key values:
 
-The episode ends when either all 5 survivors are confirmed or 200 steps elapse (a step is one environment tick, roughly interpreted as 1–2 seconds of real time depending on scale).
+| Quantity | Value |
+|---|---:|
+| Survivor count | 5 by default |
+| Survivor radius | 0.35 m |
+| Ground confirmation range | 10 m |
+| Default survivor knowledge | hidden until scouted |
+| Optional reveal schedule | stratified between steps 10 and 180 |
 
-### 9.2 Scout–Confirm Protocol
+Confirmation is distance-based and deterministic once a UGV is close enough.
+The simulator does not model survivor health state, medical triage, auditory
+cues, or uncertainty in UGV close-range identification.
 
-Survivor discovery requires **two distinct events**:
-1. **Scout:** A drone detects a survivor via its camera model (stochastic, distance- and environment-dependent).
-2. **Confirm:** A ground robot comes within 0.10 sim units (~12 m) of the survivor.
+## 8. UGV Traversal and Planning
 
-This two-step design reflects the operational concept: drones rapidly survey the area and mark candidate locations; ground robots navigate to each candidate to verify and (in the real system) provide assistance.
+UGV mobility is physically scaled but still abstract. The controller produces
+continuous motion, while the environment clips unsafe movement and exposes
+terrain-aware route information in planner-enabled runs.
 
-**Simplification:** In reality, confirmation would involve physical assessment of the survivor's condition by the ground robot. Here it is a pure distance threshold with no noise.
+UGV traversability excludes:
 
-### 9.3 Reward Structure
+- rock,
+- water,
+- tree/building cells,
+- steep non-road terrain above 0.70 grade.
 
-All agents share a team reward, plus individual credit terms:
+A* route costs can include:
 
-| Component | Agent | Value |
+| Term | Default value |
+|---|---:|
+| Land-cover traversal cost | class-specific, see Section 3 |
+| Slope cost weight | 2.0 |
+| Fire cost | 25.0 |
+| Burned-cell cost | 2.0 |
+| Smoke cost | 5.0 |
+| Fire replan interval | 15 steps |
+
+This is not a wheel-soil interaction model. There is no tire slip, rollover,
+vehicle damage, battery thermal model, or detailed obstacle geometry. The
+purpose is to make route choices reflect terrain and hazard structure at a
+mission-planning level.
+
+## 9. What OmniSearch Adds Beyond Standard 2D MARL Simulators
+
+Standard 2D MARL simulators such as VMAS provide fast vectorized dynamics,
+agents, sensors, collisions, and custom scenarios. OmniSearch keeps that
+efficiency but adds domain structure needed for wildfire SAR:
+
+- real-terrain raster layers from GIS data,
+- physically scaled meters and seconds,
+- UAV altitude and camera footprints,
+- probabilistic perception tied to terrain, smoke, and fire,
+- fire and smoke fields that evolve over time,
+- heterogeneous UAV/UGV roles,
+- terrain-aware ground traversal and A* route structure,
+- mission-level scout-confirm dynamics.
+
+The main improvement is not higher-fidelity low-level physics. It is the
+addition of **mission-relevant structure**: policies must reason about search
+uncertainty, terrain, hazards, aerial sensing, and ground confirmation in one
+environment.
+
+## 10. Main Assumptions
+
+| Domain | Simulator abstraction | Reality gap |
 |---|---|---|
-| New survivor confirmed | All (team) | +1.0 |
-| Time step penalty | All (team) | −0.001 |
-| Drone scouts a new survivor | Drone (individual) | +0.3 |
-| Ground robot confirms a new survivor | Ground robot (individual) | +0.5 |
-| Ground robot in burning cell | Ground robot (individual) | −1.0 per step |
-| Ground robot terrain travel cost | Ground robot (individual) | −0.05 × weighted distance |
-| Drone altitude change | Drone (individual) | −0.02 × meters climbed |
+| Physics | 2D holonomic VMAS motion plus UAV altitude scalar | no 6-DOF flight, wind-on-vehicle dynamics, wheel slip, or battery model |
+| Terrain | six land-cover classes and gridded slope | real fuel and traversability vary continuously below grid scale |
+| Fire | stochastic cellular automaton | no Rothermel/FARSITE implementation, crown fire, suppression, or plume feedback |
+| Smoke | 2D scalar diffusion/advection field | no 3D buoyant plume or calibrated optical depth |
+| Perception | factorized detection probability | no full image formation, target pose, detector thresholds, or correlated frame errors |
+| Confirmation | deterministic distance threshold | no close-range sensor uncertainty or survivor condition model |
+| Planning | A* over raster traversal costs | no full kinodynamic planning or recovery behavior |
 
-**Design note:** The individual credit terms are incentives to produce the desired role specialization (drones scout, ground robots confirm). Without them, agents could receive team reward without contributing to the scouting/confirming sub-tasks.
+OmniSearch is therefore best interpreted as a **conceptually grounded MARL test
+environment** for wildfire SAR coordination, not as a deployment-ready
+operational simulator.
 
----
+## References
 
-## 10. Summary of Key Simplifications
-
-| Domain | What the simulation does | What reality looks like |
-|---|---|---|
-| **Spatial resolution** | 16×16 grid over ~2 km² (125 m/cell) | Meter-level or finer variation in fuel, slope, and fire |
-| **Fire physics** | Stochastic CA with empirical factors | Rothermel/FARSITE reaction intensity, fuel moisture of extinction, flame geometry |
-| **Fire area** | Regulated to a sampled target fraction | Determined entirely by fuel, weather, and suppression |
-| **Smoke** | Scalar diffusion–advection field | 3D buoyant plume, Gaussian dispersion, atmospheric stability |
-| **Drone motion** | 2D + automatic altitude, linear drag | Full 6-DOF flight dynamics, battery, wind effects on trajectory |
-| **Drone detection** | Probability product of independent factors | Real image pipeline (YOLOv8) with occlusion, contrast, and resolution effects |
-| **Altitude control** | Automatic terrain-following | Pilot decision or flight plan |
-| **Ground robot dynamics** | Point mass with drag and speed scaling | Wheel-terrain interaction, tip-over, power consumption |
-| **Ground robots in fire** | Move normally, incur reward penalty | Would be destroyed; emergency stop |
-| **Terrain moisture** | Static per-cell proxy | Dynamic function of humidity, time, rain, fuel moisture content |
-| **Communication** | i.i.d. Bernoulli dropout per step | Terrain-shadowing, relay topology, latency, bandwidth limits |
-| **Survivor detection** | Distance threshold at ground robot | Physical contact, sensor reading, condition assessment |
-| **False positives** | Not modeled | Fire debris, mannequins, animals trigger false alarms in real YOLO |
-
-The simulation is well-suited for comparing coordination strategies and testing policy robustness to comms dropout. The fire physics, drone perception, and terrain traversal are conceptually grounded, but none are calibrated quantitatively to field data. A policy trained here should be expected to need significant fine-tuning before deployment on a real platform.
+- [VMAS: Vectorized Multi-Agent Simulator](https://github.com/proroklab/vectorizedmultiagentsimulator)
+- [USGS 3DEP products and services](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services)
+- [LANDFIRE fuel products](https://www.landfire.gov/fuel)
+- [Rothermel surface fire spread model overview](https://research.fs.usda.gov/treesearch/55928)
+- [Sambolek and Ivasic-Kos 2021, UAV person detection](https://doi.org/10.1109/ACCESS.2021.3063681)
+- [Liu et al. 2020, fog and machine-vision detection](https://doi.org/10.3390/s20020349)
+- [Zheng et al. 2024, spatial bias in object detection](https://doi.org/10.1109/TPAMI.2024.3409416)
+- [Detailed OmniSearch perception documentation](perception_model.md)
