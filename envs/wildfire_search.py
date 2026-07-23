@@ -103,6 +103,11 @@ _RESET_RNG_STREAM_IDS = {
     "initial_fire": 10,
     "bootstrap": 11,
     "uav_survivor_detection": 12,
+    "fire_spread_rate": 13,
+    "fire_ignition": 14,
+    "fire_spotting": 15,
+    "fire_burn_lifetime": 16,
+    "fire_ignition_intensity": 17,
 }
 _RESET_RNG_UINT64_MASK = (1 << 64) - 1
 _RESET_RNG_TORCH_SEED_MASK = (1 << 63) - 1
@@ -3188,16 +3193,30 @@ class WildfireSearchScenario(BaseScenario):
         new_burns: Tensor,
         *,
         generator: torch.Generator | None = None,
+        lifetime_uniforms: Tensor | None = None,
+        intensity_uniforms: Tensor | None = None,
     ) -> None:
         """Mark cells as actively burning and assign each a random burn lifetime."""
         if not bool(new_burns.any().item()):
             return
+        if (lifetime_uniforms is None) != (intensity_uniforms is None):
+            raise ValueError(
+                "lifetime_uniforms and intensity_uniforms must be provided together"
+            )
         min_lifetime = self.land_cover_fire_burnout_min[self.land_cover_grid]
         max_lifetime = self.land_cover_fire_burnout_max[self.land_cover_grid]
         lifetime_span = (max_lifetime - min_lifetime + 1).clamp_min(1)
+        if lifetime_uniforms is None:
+            lifetime_uniforms = self._rand_like_with_generator(
+                self.fire_intensity_grid,
+                generator,
+            )
+            intensity_uniforms = self._rand_like_with_generator(
+                self.fire_intensity_grid,
+                generator,
+            )
         random_lifetime = min_lifetime + torch.floor(
-            self._rand_like_with_generator(self.fire_intensity_grid, generator)
-            * lifetime_span.float()
+            lifetime_uniforms * lifetime_span.float()
         ).long()
         self.fire_grid = self.fire_grid | new_burns
         self.burned_grid = self.burned_grid | new_burns
@@ -3205,8 +3224,7 @@ class WildfireSearchScenario(BaseScenario):
         self.fire_lifetime_grid = torch.where(new_burns, random_lifetime, self.fire_lifetime_grid)
         ignition_intensity = self._fire_intensity_potential() * (
             0.80
-            + 0.40
-            * self._rand_like_with_generator(self.fire_intensity_grid, generator)
+            + 0.40 * intensity_uniforms
         )
         self.fire_intensity_grid = torch.where(
             new_burns,
@@ -4205,16 +4223,87 @@ class WildfireSearchScenario(BaseScenario):
                 self._spread_fire()
             self._update_smoke()
 
+    def _sample_fire_spread_randomness(
+        self,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Sample policy-independent fire evolution randomness for this update."""
+        grid_size = int(self.fire_grid_size)
+        dtype = self.fire_intensity_grid.dtype
+        rate_rows = []
+        ignition_rows = []
+        spotting_rows = []
+        lifetime_rows = []
+        intensity_rows = []
+        for env_index in range(self.world.batch_dim):
+            context = self._reset_rng_context(env_index)
+            rate_rows.append(
+                torch.randn(
+                    1,
+                    1,
+                    generator=context.generator("fire_spread_rate"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            ignition_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_ignition"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            spotting_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_spotting"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            lifetime_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_burn_lifetime"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+            intensity_rows.append(
+                torch.rand(
+                    grid_size,
+                    grid_size,
+                    generator=context.generator("fire_ignition_intensity"),
+                    dtype=dtype,
+                    device="cpu",
+                )
+            )
+        device = self.fire_grid.device
+        return (
+            torch.stack(rate_rows, dim=0).to(device=device),
+            torch.stack(ignition_rows, dim=0).to(device=device),
+            torch.stack(spotting_rows, dim=0).to(device=device),
+            torch.stack(lifetime_rows, dim=0).to(device=device),
+            torch.stack(intensity_rows, dim=0).to(device=device),
+        )
+
     def _spread_fire(self) -> None:
         exposure = self._directional_fire_exposure()
         fuel = self._fire_fuel_grid()
         moisture_factor = torch.exp(-self.fire_moisture_damping * self.moisture_grid.clamp(0.0, 1.0))
         burnable = (fuel > 0.0) & ~self.burned_grid
+        (
+            rate_noise,
+            ignition_uniforms,
+            spotting_uniforms,
+            lifetime_uniforms,
+            intensity_uniforms,
+        ) = self._sample_fire_spread_randomness()
         random_rate = torch.exp(
-            torch.randn(
-                self.world.batch_dim, 1, 1,
-                device=self.fire_grid.device,
-            ) * self.fire_spread_variability
+            rate_noise * self.fire_spread_variability
         ).clamp(0.35, 2.25)
         spread_scale = self._fire_spread_scale()
         rate = (
@@ -4235,10 +4324,17 @@ class WildfireSearchScenario(BaseScenario):
             * moisture_factor
         )
         new_burns = (
-            ((torch.rand_like(p_ignite) < p_ignite) | ((torch.rand_like(p_spot) < p_spot) & smoke_spotting))
+            (
+                (ignition_uniforms < p_ignite)
+                | ((spotting_uniforms < p_spot) & smoke_spotting)
+            )
             & burnable
         )
-        self._ignite_fire_cells(new_burns)
+        self._ignite_fire_cells(
+            new_burns,
+            lifetime_uniforms=lifetime_uniforms,
+            intensity_uniforms=intensity_uniforms,
+        )
 
         self.fire_age_grid = torch.where(
             self.fire_grid,
