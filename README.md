@@ -64,11 +64,11 @@ Serve the viewer:
 python -m http.server -d web 8080
 ```
 
-Open:
+<a href="http://localhost:8080/index.html" target="_blank" rel="noopener noreferrer">
+Open the OmniSearch trajectory viewer
+</a>
 
-```text
-http://localhost:8080
-```
+The link works while the local server above is running.
 
 Train a HAPPO run:
 
