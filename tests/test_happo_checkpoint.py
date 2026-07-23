@@ -23,7 +23,7 @@ from scripts.diagnose_joint_happo import _scenario_kwargs as diagnose_joint_scen
 from scripts.diagnose_ugv_happo import _scenario_kwargs as diagnose_ugv_scenario_kwargs
 from scripts.train_happo_smoke import (
     DEFAULT_JOINT_TRAINING_EXP_NAME,
-    _apply_default_joint_training_profile,
+    _apply_reference_training_profile,
     build_args,
 )
 
@@ -46,7 +46,8 @@ class HappoCheckpointTests(unittest.TestCase):
             preset="smoke",
             n_drones=None,
             n_ugvs=None,
-            joint_diagnostic_ugvs=2,
+            obs_schema_n_ugvs=None,
+            uav_diagnostic_drones=3,
             n_survivors=None,
             active_survivors_min=None,
             active_survivors_max=None,
@@ -65,6 +66,17 @@ class HappoCheckpointTests(unittest.TestCase):
             action_transform="clip",
             ugv_target_assignment_mode=None,
             ugv_route_progress_shortfall_penalty=None,
+            found_survivor_reward=None,
+            ground_confirm_reward=None,
+            ugv_ground_shaping_reward=None,
+            ugv_pending_penalty=None,
+            ugv_approach_reward=0.05,
+            survivor_assignment_obs=None,
+            share_param=None,
+            share_param_by_agent_class=None,
+            team_scout_reward=None,
+            drone_flight_levels_m=None,
+            drone_perception_mode=None,
             uav_fire_footprint_penalty=0.0,
             exp_name="happo_smoke",
         )
@@ -72,12 +84,12 @@ class HappoCheckpointTests(unittest.TestCase):
     def test_default_training_cli_uses_reference_joint_profile(self):
         args = self._default_training_cli_namespace()
 
-        applied = _apply_default_joint_training_profile(args, [])
+        applied = _apply_reference_training_profile(args, [])
 
         self.assertTrue(applied)
         self.assertTrue(args.joint_survivor_diagnostic)
         self.assertEqual((args.n_drones, args.n_ugvs), (4, 3))
-        self.assertEqual(args.joint_diagnostic_ugvs, 3)
+        self.assertEqual(args.obs_schema_n_ugvs, 3)
         self.assertEqual(args.n_survivors, 10)
         self.assertEqual((args.active_survivors_min, args.active_survivors_max), (10, 10))
         self.assertEqual(args.fire_grid_size, 256)
@@ -97,7 +109,7 @@ class HappoCheckpointTests(unittest.TestCase):
         args.n_rollout_threads = 1
         args.hidden_sizes = [64, 64]
 
-        _apply_default_joint_training_profile(
+        _apply_reference_training_profile(
             args,
             [
                 "--n-survivors",
@@ -119,6 +131,62 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertFalse(args.enable_fire)
         self.assertEqual(args.n_rollout_threads, 1)
         self.assertEqual(args.hidden_sizes, [64, 64])
+
+    def test_reference_profile_applies_corresponding_class_defaults(self):
+        cases = (
+            ("uav_survivor_diagnostic", (4, None), False),
+            ("joint_schema_uav_diagnostic", (4, None), False),
+            ("ugv_known_survivor_diagnostic", (None, 3), True),
+            ("joint_schema_ugv_diagnostic", (4, 3), True),
+        )
+        for mode, expected_counts, has_ugvs in cases:
+            with self.subTest(mode=mode):
+                args = self._default_training_cli_namespace()
+                setattr(args, mode, True)
+
+                applied = _apply_reference_training_profile(
+                    args,
+                    [f"--{mode.replace('_', '-')}"],
+                )
+
+                self.assertTrue(applied)
+                self.assertEqual((args.n_drones, args.n_ugvs), expected_counts)
+                self.assertEqual(args.obs_schema_n_ugvs, 3)
+                self.assertEqual(args.n_survivors, 10)
+                self.assertTrue(args.enable_fire)
+                self.assertTrue(str(args.terrain_cache_path).endswith("malibu_creek_1sqkm_256.npz"))
+                self.assertEqual(args.hidden_sizes, [128, 128])
+                if has_ugvs:
+                    self.assertEqual(args.found_survivor_reward, 4.0)
+                    self.assertEqual(args.ground_confirm_reward, 10.0)
+                    self.assertEqual(args.ugv_pending_penalty, -0.02)
+                    self.assertEqual(args.ugv_target_assignment_mode, "greedy_sticky")
+                    self.assertEqual(args.ugv_route_progress_shortfall_penalty, 0.0025)
+                    self.assertTrue(args.survivor_assignment_obs)
+                else:
+                    self.assertEqual(args.team_scout_reward, 1.0)
+                    self.assertEqual(args.uav_fire_footprint_penalty, 0.05)
+                    self.assertEqual(args.drone_perception_mode, "rgb_thermal")
+
+    def test_reference_profile_keeps_physical_and_schema_ugv_counts_separate(self):
+        args = self._default_training_cli_namespace()
+        args.joint_schema_ugv_diagnostic = True
+        args.n_ugvs = 2
+        args.obs_schema_n_ugvs = 5
+
+        _apply_reference_training_profile(
+            args,
+            [
+                "--joint-schema-ugv-diagnostic",
+                "--n-ugvs",
+                "2",
+                "--obs-schema-n-ugvs",
+                "5",
+            ],
+        )
+
+        self.assertEqual(args.n_ugvs, 2)
+        self.assertEqual(args.obs_schema_n_ugvs, 5)
 
     def test_manifest_round_trip_beside_models_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1030,6 +1098,7 @@ class HappoCheckpointTests(unittest.TestCase):
             joint_survivor_diagnostic=True,
             n_drones=4,
             n_ugvs=3,
+            obs_schema_n_ugvs=5,
         )
         _, schema_algo_args, schema_env_args = build_args(
             num_env_steps=100,
@@ -1041,6 +1110,7 @@ class HappoCheckpointTests(unittest.TestCase):
             joint_schema_ugv_diagnostic=True,
             n_drones=4,
             n_ugvs=3,
+            obs_schema_n_ugvs=5,
         )
 
         uav_scenario = uav_env_args["scenario_kwargs"]
@@ -1050,14 +1120,29 @@ class HappoCheckpointTests(unittest.TestCase):
         joint_scenario = joint_env_args["scenario_kwargs"]
         self.assertEqual(joint_scenario["n_drones"], 4)
         self.assertEqual(joint_scenario["n_ground"], 3)
+        self.assertEqual(joint_scenario["obs_schema_n_ground"], 5)
         self.assertEqual(joint_algo_args["algo"]["share_param_groups"], [0, 0, 0, 0, 1, 1, 1])
 
         schema_scenario = schema_env_args["scenario_kwargs"]
         self.assertEqual(schema_scenario["n_drones"], 0)
         self.assertEqual(schema_scenario["n_ground"], 3)
         self.assertEqual(schema_scenario["obs_schema_n_drones"], 4)
-        self.assertEqual(schema_scenario["obs_schema_n_ground"], 3)
+        self.assertEqual(schema_scenario["obs_schema_n_ground"], 5)
         self.assertEqual(schema_algo_args["algo"]["share_param_groups"], [0, 0, 0])
+
+    def test_joint_schema_rejects_fewer_ugv_slots_than_physical_ugvs(self):
+        with self.assertRaisesRegex(ValueError, "obs_schema_n_ugvs"):
+            build_args(
+                num_env_steps=100,
+                episode_length=50,
+                seed=1,
+                comms_dropout=0.0,
+                entropy_coef=0.01,
+                exp_name="joint_schema_too_few_ugv_slots",
+                joint_schema_ugv_diagnostic=True,
+                n_ugvs=3,
+                obs_schema_n_ugvs=2,
+            )
 
     def test_joint_survivor_diagnostic_can_disable_class_parameter_sharing(self):
         _, algo_args, _ = build_args(
@@ -1085,7 +1170,7 @@ class HappoCheckpointTests(unittest.TestCase):
             entropy_coef=0.01,
             exp_name="joint_diag_2ugv",
             joint_survivor_diagnostic=True,
-            joint_diagnostic_ugvs=2,
+            n_ugvs=2,
         )
 
         scenario = env_args["scenario_kwargs"]

@@ -123,7 +123,7 @@ def _joint_defaults(joint_diagnostic_ugvs: int) -> dict[str, Any]:
         entropy_coef=0.01,
         exp_name="joint_baseline_strategy_defaults",
         joint_survivor_diagnostic=True,
-        joint_diagnostic_ugvs=joint_diagnostic_ugvs,
+        n_ugvs=joint_diagnostic_ugvs,
     )
     return copy.deepcopy(env_args["scenario_kwargs"])
 
