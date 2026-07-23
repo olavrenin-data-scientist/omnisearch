@@ -61,14 +61,17 @@ python scripts/export_trajectories.py
 Serve the viewer:
 
 ```bash
-python -m http.server -d web 8080
+.venv/bin/python -m http.server 8080 --directory web
 ```
 
-<a href="http://localhost:8080/index.html" target="_blank" rel="noopener noreferrer">
-Open the OmniSearch trajectory viewer
-</a>
+[Open the OmniSearch trajectory viewer](http://127.0.0.1:8080/index.html)
 
-The link works while the local server above is running.
+The link works while the local server above is running. To open it from another
+terminal instead:
+
+```bash
+.venv/bin/python -m webbrowser -t http://127.0.0.1:8080/index.html
+```
 
 Train a HAPPO run:
 
