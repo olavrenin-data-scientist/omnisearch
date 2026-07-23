@@ -1,440 +1,182 @@
 # OmniSearch
 
-**Heterogeneous air-ground robotic swarms for wildfire survivor search.**
+OmniSearch is a wildfire search-and-rescue simulation for heterogeneous teams
+of UAVs and UGVs. UAVs scout survivors from above; UGVs navigate terrain to
+confirm them on the ground. The project studies whether a learned HAPPO policy
+can coordinate this handoff better than strong heuristic baselines.
 
 MIDS Capstone · Summer 2026 · UC Berkeley
-Team: Ann-Kathrin Schütz · Oleksii Lavrenin · Jefferson-Stanley Jules
 
-> When wildfires trap people and every second counts, our AI-trained drone and ground robot teams find survivors that human rescuers can't reach in time.
+## What Is Included
 
----
-
-## Why
-
-Wildfires routinely strand people in hazardous, hard-to-reach locations. Ground search and rescue teams cannot safely enter active burn zones; aerial drones can survey large areas but cannot verify survivors at close range. **No existing product integrates aerial drones and ground robots into an autonomous coordinated search-and-rescue system.** OmniSearch is the *coordination layer* that connects aerial eyes to ground hands.
-
-Markets at the intersection (wildfire AI, SAR drones, ground robotics) exceed **$10B** with 13–21% CAGR. Existing players occupy one column each (Skydio, Dryad, FireSwarm, Boston Dynamics). The gap — autonomous heterogeneous air-ground coordination — is where OmniSearch sits.
-
-## Research question
-
-> Can heterogeneous air-ground robot teams learn cooperative survivor verification strategies that **outperform hand-coded heuristics**, and **degrade gracefully under communication dropout**?
-
-The MVP answers this in simulation. Three sub-questions:
-
-1. **Heterogeneity** — do drones + ground robots beat drones-only / ground-only on mission-level metrics?
-2. **Coordination** — does learned MARL beat hand-coded baselines (nearest-candidate, highest-confidence, lawnmower)?
-3. **Robustness** — how does each strategy degrade across 0% → 70% comms dropout?
-
----
-
-## Architecture
-
-**MARL** is the field. **MAPPO**, **IPPO**, and **HAPPO** are three algorithms inside it. **VMAS** is the simulator they all train inside. All three algorithms train the same `WildfireSearchScenario`, so their results are directly comparable on the same six mission metrics.
-
-```
-                          MARL  (the field)
-                            │
-              ┌─────────────┼─────────────┐
-              │             │             │
-            MAPPO         IPPO          HAPPO          ← three algorithms,
-         (BenchMARL)   (BenchMARL)     (HARL)            same scenario
-              │             │             │
-              └─────────────┼─────────────┘
-                            ▼
-                ┌─────────────────────┐
-                │    VMAS simulator   │  ← the heart of everything
-                │  WildfireSearch...  │
-                └─────────────────────┘
-```
-
-In one sentence: **VMAS = where things happen. MAPPO / IPPO / HAPPO = how policies are trained. MARL = the field all three belong to.**
-
----
-
-## Stack
-
-| Layer | Tool | Notes |
-|---|---|---|
-| Multi-agent sim | [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator) | 2D, CPU-vectorized, fast |
-| Fire spread | Cellular automata over a 128×128 grid | SimFire compatible (needs Python 3.9–3.10) |
-| MARL training | [BenchMARL](https://github.com/facebookresearch/BenchMARL) (MAPPO, IPPO) + [HARL](https://github.com/PKU-MARL/HARL) (HAPPO) | All three algorithms train on the same `WildfireSearchScenario` |
-| Detection (stretch) | [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) with `classes=[0]` | Person = COCO class 0 |
-| Experiment tracking | [Weights & Biases](https://wandb.ai) | Optional; pass `loggers=["wandb"]` |
-| Deliverable (planned) | React + Three.js viewer | Strategy comparison & replay |
-
-**HAPPO is wired.** BenchMARL 1.x ships MAPPO/IPPO/MADDPG/MASAC/QMIX/VDN/IQL — *not* HAPPO. True HAPPO (Kuba 2022) is in the [HARL](https://github.com/PKU-MARL/HARL) library. We bridge HARL to our VMAS scenario via [agents/harl_env.py](agents/harl_env.py) (a HARL-shape adapter around `WildfireSearchScenario`) and run it via [scripts/train_happo_smoke.py](scripts/train_happo_smoke.py). The script monkey-patches HARL's env registry at runtime to recognise the `wildfire` env without modifying HARL source. Install HARL either with `pip install -e ".[happo]"` or, if you want a local editable checkout of HARL itself, clone it next to this repo and run `pip install -e ../HARL`. MAPPO and IPPO via BenchMARL stay available for comparison.
-
----
+- A VMAS-based wildfire search environment with UAVs, UGVs, survivors, fire,
+  smoke, terrain, and communication dropout.
+- A probabilistic UAV perception model for detection and confidence-map
+  updates.
+- HAPPO training and checkpoint loading.
+- Hand-coded baselines such as lawnmower, ant-colony, random walk, and
+  highest-confidence targeting.
+- Diagnostic scripts for baseline comparison, ablations, communication dropout,
+  terrain generalization, and survivor-load experiments.
+- A browser-based 3D trajectory viewer.
 
 ## Setup
 
-**Requirements:** Python 3.10 or 3.11. macOS / Linux. No GPU needed for the smoke runs.
+Requirements: Python 3.10 or 3.11 on macOS or Linux.
 
 ```bash
-# 1. Clone and enter
-git clone <repo-url> omnisearch && cd omnisearch
+git clone <repo-url> omnisearch
+cd omnisearch
 
-# 2. Create + activate a virtualenv (3.11 recommended; 3.10 needed for SimFire)
 python3.11 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install the project and the standard dev/notebook tools
 pip install --upgrade pip
 pip install -e ".[dev]"
-
-# 4. (Optional) register the kernel for Jupyter / IDE notebooks
-python -m ipykernel install --user --name omnisearch --display-name "Python (omnisearch)"
-
-# 5. Verify everything works
-jupyter notebook notebooks/01_setup_and_demo.ipynb
-# Or headless:
-jupyter nbconvert --to notebook --execute --inplace notebooks/01_setup_and_demo.ipynb
 ```
 
-**Additional optional packages** (only for specific workflows):
+Optional extras:
 
 ```bash
-# Geospatial terrain builder + 3D terrain export
-pip install -e ".[geo]"
-
-# Asset extraction that uses OpenCV when available
-pip install -e ".[cv]"
-
-# docs/build_walkthrough.py PDF generation
-pip install -e ".[docs]"
-
-# HAPPO / HARL integration
-pip install -e ".[happo]"
+pip install -e ".[geo]"    # terrain-cache building and 3D terrain reports
+pip install -e ".[cv]"     # OpenCV / detector utilities
+pip install -e ".[happo]"  # HAPPO / HARL training support
+pip install -e ".[docs]"   # documentation rendering utilities
 ```
 
-You can also install everything declared in [pyproject.toml](pyproject.toml) in one shot:
+Or install all optional extras:
 
 ```bash
 pip install -e ".[all]"
 ```
 
-**SimFire.** SimFire's PyGame dep requires Python 3.9–3.10. On 3.11 it won't install — fire spread falls back to the in-repo cellular-automata model, which is good enough for the MARL training story. Run `python3.10 -m venv .venv` instead if you need SimFire.
+## Quick Start
 
-**W&B login** (optional, only for training with logging):
-```bash
-wandb login
-```
-
----
-
-## How to run
-
-Each entry point is a script in `scripts/` or a notebook in `notebooks/`. All outputs land in `results/` (gitignored).
-
-**Important:** the base MARL smoke runs do **not** need real terrain, but the
-trajectory exporter and default **3D viewer** do. If you plan to use
-`scripts/export_trajectories.py` for the 3D viewer, do the one-time terrain
-setup first: install `.[geo]`, build the terrain cache, then export.
-
-### TL;DR — run everything end-to-end
-
-After [Setup](#setup), use one of these paths:
-
-- **Base validation only** — setup notebook + smoke training + baselines; no terrain required.
-- **Full pipeline including the default 3D viewer** — do the terrain setup first, then export trajectories.
-
-Base validation (~30 s + your choice of sweep budget):
+Export trajectories for the viewer:
 
 ```bash
-source .venv/bin/activate
-
-# All three algorithms — smoke train, ~5 s each
-python scripts/train_mappo_smoke.py
-python scripts/train_ippo_smoke.py
-python scripts/train_happo_smoke.py
-
-# Hand-coded baseline comparison on mission metrics — ~5 s
-python scripts/compare_baselines.py --seeds 3 --steps 200
-
-# Headline ablation: MAPPO × IPPO × HAPPO across 4 dropouts × N seeds
-python scripts/comms_dropout_sweep.py --seeds 3            # smoke (~7 min)
-```
-
-Full pipeline with real terrain + 3D viewer:
-
-```bash
-source .venv/bin/activate
-
-# One-time geo install for terrain workflows
-pip install -e ".[geo]"
-
-# Build the terrain cache first
-python scripts/build_real_terrain_cache.py \
-  --place "Malibu Creek State Park, California" \
-  --bbox -118.7644915764 34.0962803768 -118.7555084236 34.1037189693 \
-  --grid-size 256 \
-  --dem-resolution-m 10 \
-  --road-width-m 8.0 \
-  --building-height-m 7.0 \
-  --fuel-source derived \
-  --osm-timeout 180 \
-  --landfire-email your@email.com
-
-# Then export trajectory JSONs for the web viewer — ~2 s
-python scripts/export_trajectories.py \
-  --terrain-cache-path data/terrain_cache/malibu_creek_1sqkm_256.npz \
-  --approach all \
-  --grid-size 256 \
-  --steps 300
-
-# Execute all notebooks headlessly so they have fresh embedded outputs
-for nb in notebooks/0*.ipynb; do
-  jupyter nbconvert --to notebook --execute --inplace "$nb"
-done
-
-# Serve the React + Three.js viewer at http://localhost:8080 (Ctrl-C to stop)
-python -m http.server -d web 8080
-```
-
-The detailed per-component instructions follow below.
-
-### 1. Smoke training — verify the MARL pipeline runs (~3–6 s each)
-
-```bash
-python scripts/train_mappo_smoke.py     # MAPPO — centralized critic, per-group actors (BenchMARL)
-python scripts/train_ippo_smoke.py      # IPPO  — fully decentralized              (BenchMARL)
-python scripts/train_happo_smoke.py     # HAPPO — sequential update + monotonic improvement (HARL)
-python scripts/tune_happo.py --research # HAPPO tuner on mission metrics (recall + DRR)
-```
-
-Each trains a tiny budget. The successful exit is the milestone — the policy is far from converged.
-
-For HAPPO, install HARL first (one-time):
-
-```bash
-pip install -e ".[happo]"
-```
-
-If you want a local editable HARL checkout instead of the Git dependency:
-
-```bash
-cd .. && git clone https://github.com/PKU-MARL/HARL.git
-cd HARL && pip install -e .
-cd ../omnisearch
-```
-
-HAPPO runs write TensorBoard events under `results/harl_runs/.../logs`. The
-training script prints the exact log directory and launch command; generic form:
-
-```bash
-tensorboard --logdir "results/harl_runs" --port 6006
-```
-
-For a credible training run, edit the config in [agents/train_helpers.py](agents/train_helpers.py) (`research_config()`) for MAPPO/IPPO, or the `build_args()` function in `scripts/train_happo_smoke.py` for HAPPO.
-
-### 2. Comms-dropout sweep — the headline ablation
-
-```bash
-python scripts/comms_dropout_sweep.py --seeds 3              # smoke (~7 min, 36 cells)
-python scripts/comms_dropout_sweep.py --seeds 5              # detectable p<0.05 (~12 min)
-python scripts/comms_dropout_sweep.py --seeds 5 --research   # real budget (~hours)
-```
-
-Sweeps **3 algorithms** (MAPPO + IPPO + HAPPO) × **4 dropouts** (0.0, 0.2, 0.5, 0.8) × **N seeds**. Writes per-cell results, mean ± std summary, **and Mann-Whitney U significance tests** (within each algorithm: d=0.0 vs each higher d) to `results/comms_dropout_sweep_*.json`. Visualise with notebook 02.
-
-**Note**: at `--seeds 3` the minimum two-sided MW-U p is 0.1 — use `--seeds 5` or more to detect p<0.05.
-
-### 3. Baseline comparison — does MARL actually beat heuristics?
-
-```bash
-python scripts/compare_baselines.py                       # 3 seeds, 200 steps, all 4 baselines
-python scripts/compare_baselines.py --seeds 5 --steps 250
-```
-
-Runs each strategy across multiple seeds, reports mean ± std on all six mission-level metrics (survivor recall, time-to-verification, false-positive trips, hazard exposure, UGV travel cost), writes `results/baseline_comparison_*.json`. **Trained HAPPO already plugs in via the same harness** — see [agents/happo_policy.py](agents/happo_policy.py) and the `happo_trained` entry in [scripts/export_trajectories.py](scripts/export_trajectories.py). MAPPO/IPPO checkpoint loaders are still TODO.
-
-### 4. Real terrain + trajectory export
-
-If you want the default 3D viewer or real-terrain trajectory exports, do this
-one-time setup before running `scripts/export_trajectories.py`:
-
-```bash
-pip install -e ".[geo]"
-python scripts/build_real_terrain_cache.py \
-  --place "Malibu Creek State Park, California" \
-  --bbox -118.7644915764 34.0962803768 -118.7555084236 34.1037189693 \
-  --grid-size 256 \
-  --dem-resolution-m 10 \
-  --road-width-m 8.0 \
-  --building-height-m 7.0 \
-  --fuel-source derived \
-  --osm-timeout 180 \
-  --landfire-email your@email.com
 python scripts/export_trajectories.py
 ```
 
-The exporter can write terrain-less JSONs, but those only support the 2D
-viewer. For the default 3D viewer, the terrain cache must exist before export.
-See [web/README.md](web/README.md) for the full geo/terrain workflow and
-troubleshooting.
-
-### 5. Notebooks — exploratory + visualization
+Serve the viewer:
 
 ```bash
-jupyter notebook notebooks/   # opens browser file picker
+python -m http.server -d web 8080
 ```
 
-See [notebooks/README.md](notebooks/README.md) for the cell-by-cell walkthrough of each notebook.
+Open:
 
-| # | Notebook | Purpose |
-|---|---|---|
-| 01 | Setup & Demo | Environment + dependency verification |
-| 02 | Detection Pipeline | Fire → YOLOv8 person → alert |
-| 03 | Sweep Results | Visualise comms-dropout JSON |
-| 04 | Closed Loop | Sim → synthetic UAV view → detection |
-| 05 | Baseline Comparison | Bar charts + winners table per metric |
+```text
+http://localhost:8080
+```
 
-### 6. Web viewer — React + Three.js replay
-
-The **2D viewer** works from just `x`/`y`, so the quick path is:
+Train a HAPPO run:
 
 ```bash
-python scripts/export_trajectories.py   # writes web/trajectories/*.json
-python -m http.server -d web 8080       # browsers need HTTP for fetch
-# open http://localhost:8080/index2d.html
+pip install -e ".[happo]"
+python scripts/train_happo_smoke.py
 ```
 
-The **3D viewer** (`http://localhost:8080`, the default) additionally
-needs the trajectory JSONs to contain **real terrain** — which means the
-geospatial deps and a built terrain cache must exist first, or the 3D
-scene renders black. The full prerequisite chain (geo deps → build terrain
-cache → handle the hash-vs-slug filename → export → why `happo_trained`
-can be dark → retrain) plus a **Troubleshooting table** of every common
-local failure is in **[web/README.md](web/README.md)** — start there if
-the 3D scene is blank.
+Run a baseline export with communication dropout:
 
-No `npm install`, no build — single HTML file, deps loaded from `esm.sh`.
-
----
-
-## Project layout
-
-```
-omnisearch/
-├── envs/wildfire_search.py        # WildfireSearchScenario (VMAS)
-│
-├── agents/
-│   ├── wildfire_task.py           # BenchMARL Task wiring (MAPPO / IPPO)
-│   ├── train_helpers.py           # smoke_config() / research_config()
-│   ├── baselines.py               # Hand-coded coordination strategies
-│   ├── harl_env.py                # HARL-shape adapter (single env) for HAPPO
-│   ├── harl_vec_env.py            # Batched VMAS vec env for HAPPO (4× FPS)
-│   ├── harl_runner.py             # train_happo() entry point + monkey-patches
-│   └── happo_policy.py            # Load HAPPO checkpoint → VMAS policy(env)
-│
-├── detection/                     # Fire → YOLOv8 person pipeline (real images)
-│   ├── fire_detector.py           # HSV thresholding + connected components
-│   ├── person_detector.py         # YOLOv8 wrapper, classes=[0]
-│   └── pipeline.py                # Two-stage: fire-first, then person
-│
-├── evaluation/
-│   ├── mission_metrics.py         # The 6 metrics from the project plan + DRR
-│   ├── closed_loop.py             # Sim rollout + per-frame detection + GT scoring
-│   ├── sim_renderer.py            # Synthetic UAV top-down view of the scenario
-│   └── trajectory_export.py       # Per-step state → JSON for the web viewer
-│
-├── scripts/
-│   ├── train_mappo_smoke.py       # MAPPO smoke run (BenchMARL)
-│   ├── train_ippo_smoke.py        # IPPO  smoke run (BenchMARL)
-│   ├── train_happo_smoke.py       # HAPPO smoke run (HARL)
-│   ├── comms_dropout_sweep.py     # MAPPO × IPPO × HAPPO × 4 dropouts × N seeds + MW-U
-│   ├── compare_baselines.py       # Multi-seed baseline comparison
-│   └── export_trajectories.py     # → web/trajectories/*.json for the viewer
-│
-├── notebooks/                     # See notebooks/README.md
-├── results/                       # Training artifacts (gitignored)
-└── web/                           # React + Three.js strategy viewer
-    ├── index.html                 # 3D viewer (default)
-    ├── index2d.html               # 2D viewer
-    └── README.md
+```bash
+python scripts/export_trajectories.py \
+  --approach ant_colony \
+  --comms-dropout 0.3 \
+  --comms-dropout-mode bursty
 ```
 
----
+## Real Terrain
 
-## Mission-level metrics (the MVP success criteria)
+The simulator can use cached real terrain layers. Build a cache once:
 
-Every coordination strategy — hand-coded baseline or trained policy — is scored on the same six metrics. Direction column shows which way improvement runs.
+```bash
+pip install -e ".[geo]"
 
-| Metric | Direction | Definition |
-|---|---|---|
-| `survivor_recall` | higher | fraction of survivors confirmed by a ground robot |
-| `time_to_verification` | lower | avg steps between drone scout and ground confirmation |
-| `false_positive_trips` | lower | ground-robot trips to a location with no survivor |
-| `hazard_exposure` | lower | step-count ground robots spend on burning cells |
-| `ugv_travel_cost` | lower | total ground-robot path length |
-| `drr` (across dropouts) | higher | degradation resilience ratio under comms loss |
-
-Definitions and implementation in [evaluation/mission_metrics.py](evaluation/mission_metrics.py).
-
-Baselines defined in [agents/baselines.py](agents/baselines.py):
-- **`random_action`** — both agent types take independent random actions (control)
-- **`random_walk`** — both agent types follow persistent random headings with reactive boundary and terrain avoidance
-- **`lawnmower`** — drones sweep a serpentine path; ground robots head to nearest scouted survivor
-- **`nearest_candidate`** — drones use persistent random walks; ground robots go to nearest scouted-not-confirmed survivor
-- **`highest_confidence`** — drones lawnmower; ground robots prioritize freshest scout
-
-### Smoke comparison (3 seeds × 200 steps)
-
-```
-strategy                recall     ttv   haz  ugv_dist
-------------------------------------------------------
-random_action             0.00     nan     0      1.11
-lawnmower                 0.27   154.3     0      1.76
-nearest_candidate         0.33   169.0     0      1.77
-highest_confidence        0.00     nan     0      3.33
+python scripts/build_real_terrain_cache.py \
+  --place "Malibu Creek State Park, California" \
+  --grid-size 256
 ```
 
-`nearest_candidate` is the strongest baseline at 33% recall. **HAPPO/MAPPO must beat 33%** to justify the training complexity.
+Then export trajectories on that terrain:
 
----
+```bash
+python scripts/export_trajectories.py \
+  --terrain-cache-path data/terrain_cache/malibu_creek_1sqkm_256.npz \
+  --grid-size 256 \
+  --steps 900
+```
 
-## Status
+## Main Scripts
 
-| Component | Status |
+| Script | Purpose |
 |---|---|
-| Environment + dependencies | ✓ |
-| `WildfireSearchScenario` (heterogeneous, CA fire, comms_dropout knob) | ✓ |
-| BenchMARL wired (MAPPO + IPPO) | ✓ |
-| HAPPO wired (HARL adapter + smoke train passes) | ✓ |
-| Comms-dropout sweep (3 algos × seeds × Mann-Whitney U) | ✓ |
-| Mission-level metrics (6 + DRR) | ✓ |
-| Hand-coded baselines + comparison harness | ✓ |
-| Detection pipeline (fire → YOLOv8 person → alert) | ✓ |
-| Closed-loop sim → UAV view → detection | ✓ |
-| Trained HAPPO loadable into the trajectory viewer | ✓ |
-| Web deliverable (React + Three.js strategy viewer) | ✓ |
-| Comms-state visualization in viewer (per-step UP/DOWN per agent) | ✓ |
-| HAPPO at research budget (currently 80k smoke; needs 400k+ for clear wins over baselines) | ✗ |
-| Multi-seed sweep with N≥5 seeds (current default is 3) | ✗ |
-| Probabilistic sensor model + candidate belief map | ✗ — baselines currently use ground-truth scout/found |
+| `scripts/train_happo_smoke.py` | Train HAPPO on the wildfire scenario |
+| `scripts/export_trajectories.py` | Export viewer trajectories for HAPPO or baselines |
+| `scripts/diagnose_joint_happo.py` | Evaluate trained HAPPO over many seeds |
+| `scripts/diagnose_joint_baseline_strategies.py` | Evaluate one heuristic baseline over many seeds |
 
----
+## Baselines
 
-## Project plan
+Baselines are implemented in `agents/baselines.py` and can be selected with
+`--approach`:
 
-The full project plan with problem statement, market analysis, target customer research, and detailed roadmap is the source of truth for scope and direction. Key sections relevant to this codebase:
+```text
+random_action
+random_walk
+lawnmower
+highest_confidence
+ant_colony
+```
 
-- §17.3 — Probabilistic sensor model (current implementation uses ground-truth shortcut; full model is a TODO)
-- §17.5 — Coordination strategies (all implemented in [agents/baselines.py](agents/baselines.py))
-- §17.6 — Evaluation metrics (implemented in [evaluation/mission_metrics.py](evaluation/mission_metrics.py))
-- §17.7 — Real-world data sources for scenario realism (NIFC, LANDFIRE, etc. — not yet integrated)
+For baseline exports, UGV behavior can use either the baseline's native
+targeting or the matched planner-aware controller:
 
----
+```bash
+python scripts/export_trajectories.py \
+  --approach lawnmower
+```
 
-## Contributing
+## Documentation
 
-The codebase is organised by *function*, not by *team member*. Anyone can edit any file. Conventions:
+The detailed documentation lives in `docs/`:
 
-- **Tests / smoke runs first.** New code should land with a smoke test demonstrating it runs.
-- **One commit per logical change.** Bundle the test, the implementation, and the README update.
-- **Don't commit `results/`** — it's gitignored.
+- [Simulation overview](docs/simulation_overview.md)
+- [Simulation pipeline](docs/simulation_pipeline.md)
+- [Perception model](docs/perception_model.md)
+- [Reinforcement learning and HAPPO](docs/reinforcement_learning_happo.md)
+- [Observation and reward system](docs/observation_reward_system.md)
+- [Baseline approaches and route planning](docs/baseline_approaches.md)
+- [Communication dropout](docs/communication_dropout.md)
+- [Web viewer notes](web/README.md)
+- [Notebook guide](notebooks/README.md)
 
----
+## Project Layout
+
+```text
+omnisearch/
+├── envs/          # VMAS wildfire scenario
+├── agents/        # HAPPO adapters, policies, and heuristic baselines
+├── evaluation/    # metrics, rendering, trajectory export
+├── scripts/       # training, diagnostics, export, terrain tools
+├── docs/          # conceptual and operational documentation
+├── notebooks/     # exploratory analysis
+├── web/           # browser viewer
+├── outputs/       # diagnostic outputs
+└── results/       # training runs and local artifacts
+```
+
+## Outputs
+
+Common generated artifacts:
+
+| Path | Description |
+|---|---|
+| `data/terrain_cache/*.npz` | terrain caches |
+| `web/trajectories/*.json` | viewer trajectories |
+| `outputs/**/*.json` | diagnostic summaries |
+| `outputs/**/*.png` | plots for reports and slides |
+| `results/harl_runs/...` | HAPPO training runs |
 
 ## License
 
