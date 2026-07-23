@@ -1,9 +1,0 @@
-{
-  "model": "/Users/alexlavre/Documents/omnisearch_capstone/omnisearch/models/survivor_naip_yolov8s.pt",
-  "overall_precision": 0.6459854014598541,
-  "overall_recall": 0.885,
-  "fp_rate_per_frame": 0.16666666666666666,
-  "spatial_mean_error_px": 2.9145256621192233,
-  "stability_count_consistent": true,
-  "verdict": "INTEGRATE"
-}

@@ -1,6 +1,6 @@
 {
   "builder": "terrain.usgs_osm_builder.build_real_terrain_cache",
-  "cache_path": "/Users/aschuetz/Software/capstone/omnisearch/data/terrain_cache/a92f23f81299_256.npz",
+  "cache_path": "data/terrain_cache/a92f23f81299_256.npz",
   "fuel": {
     "derived_seed": 291128421,
     "landfire_layer_list": [],
@@ -76,7 +76,7 @@
       "sim_units_per_meter": 0.0016434521456265983
     }
   },
-  "metadata_path": "/Users/aschuetz/Software/capstone/omnisearch/data/terrain_cache/a92f23f81299_256.metadata.json",
+  "metadata_path": "data/terrain_cache/a92f23f81299_256.metadata.json",
   "outputs": {
     "building_cell_count": 12239,
     "land_cover_counts": {
@@ -111,7 +111,7 @@
     "place": "San Marcos Foothills, California",
     "requested_dem_resolution_m": 10,
     "road_width_m": 8.0,
-    "source_cache_dir": "/Users/aschuetz/Software/capstone/omnisearch/data/source_cache",
+    "source_cache_dir": "data/source_cache",
     "terrain_elevation_scale": 0.3
   },
   "schema_version": 3,
