@@ -51,6 +51,7 @@ from agents.harl_terrain_cnn import (
     wildfire_single_observation_dim,
 )
 from envs.wildfire_defaults import (
+    COMMS_DROPOUT_MODE,
     DRONE_FIRE_SAFETY_CLEARANCE_M,
     DRONE_SAFETY_CLEARANCE_BY_LAND_COVER_M,
     DRONE_SAFETY_CLEARANCE_BY_OBJECT_M,
@@ -441,7 +442,7 @@ def build_args(
     comms_dropout:  float,
     entropy_coef:   float,
     exp_name:       str,
-    comms_dropout_mode: str = "iid",
+    comms_dropout_mode: str = COMMS_DROPOUT_MODE,
     comms_map_mode: str = "per_agent",
     comms_dropout_min_steps: int = 5,
     comms_dropout_max_steps: int = 15,
@@ -1892,7 +1893,7 @@ def main():
     p.add_argument("--seed",           type=int,   default=1)
     p.add_argument("--comms-dropout",  type=float, default=0.0,
                    help="Per-step prob each agent's comms are dropped (default: 0.0).")
-    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
+    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default=COMMS_DROPOUT_MODE,
                    help="Communication dropout process: iid preserves one-step Bernoulli dropout; "
                         "bursty creates temporary outages with resync on reconnect.")
     p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent",

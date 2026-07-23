@@ -328,6 +328,10 @@ class HappoCheckpointTests(unittest.TestCase):
         _, _, default_env_args = build_args(exp_name="default", **common_kwargs)
         _, _, search_env_args = build_args(exp_name="search", reward_search=True, **common_kwargs)
 
+        self.assertEqual(
+            default_env_args["scenario_kwargs"]["comms_dropout_mode"],
+            "bursty",
+        )
         expected = {
             "r_found_survivor": 10.0,
             "r_drone_scout": 2.0,

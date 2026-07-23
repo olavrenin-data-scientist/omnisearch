@@ -1,6 +1,7 @@
 import unittest
 
 from agents.baselines import BASELINES
+from envs.wildfire_defaults import COMMS_DROPOUT_MODE
 from scripts.export_trajectories import (
     DEFAULT_EXPORT_DRONES,
     DEFAULT_EXPORT_GRID_SIZE,
@@ -60,6 +61,7 @@ class ExportTrajectorySelectionTests(unittest.TestCase):
         self.assertEqual(scenario["uav_frontier_mode"], "local_global")
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
         self.assertTrue(scenario["survivor_assignment_obs"])
+        self.assertEqual(COMMS_DROPOUT_MODE, "bursty")
 
 
 if __name__ == "__main__":

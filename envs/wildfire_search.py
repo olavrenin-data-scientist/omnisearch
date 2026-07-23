@@ -34,6 +34,7 @@ from vmas.simulator.sensors import Lidar
 from vmas.simulator.utils import Color, ScenarioUtils
 
 from envs.wildfire_defaults import (
+    COMMS_DROPOUT_MODE,
     DRONE_CAMERA_FOV_DEG,
     DRONE_ENVIRONMENT_DETECTION_FACTORS,
     DRONE_FLIGHT_LEVELS_M,
@@ -756,7 +757,9 @@ class WildfireSearchScenario(BaseScenario):
 
         # Communication
         self.comms_dropout = min(max(float(kwargs.pop("comms_dropout", 0.0)), 0.0), 1.0)
-        self.comms_dropout_mode = str(kwargs.pop("comms_dropout_mode", "iid")).replace("-", "_").lower()
+        self.comms_dropout_mode = str(
+            kwargs.pop("comms_dropout_mode", COMMS_DROPOUT_MODE)
+        ).replace("-", "_").lower()
         if self.comms_dropout_mode not in {"iid", "bursty"}:
             raise ValueError("comms_dropout_mode must be one of: iid, bursty")
         configured_comms_map_mode = str(
@@ -14154,7 +14157,11 @@ if __name__ == "__main__":
     p.add_argument("--n-survivors", type=int, default=5)
     p.add_argument("--grid-size",   type=int, default=128)
     p.add_argument("--comms-dropout", type=float, default=0.0)
-    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid")
+    p.add_argument(
+        "--comms-dropout-mode",
+        choices=("iid", "bursty"),
+        default=COMMS_DROPOUT_MODE,
+    )
     p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5)
     p.add_argument("--comms-dropout-max-steps", type=int, default=15)

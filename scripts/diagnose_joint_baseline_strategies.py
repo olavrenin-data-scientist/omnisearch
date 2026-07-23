@@ -33,6 +33,7 @@ from agents.happo_policy import (
     actor_file_indices_for_scenario,
     find_latest_happo_checkpoint,
 )
+from envs.wildfire_defaults import COMMS_DROPOUT_MODE
 from envs.wildfire_search import WildfireSearchScenario
 from scripts.diagnostic_json import (
     partial_json_path,
@@ -182,7 +183,7 @@ def build_scenario_kwargs(
     scenario_kwargs.setdefault("delayed_survivor_knowledge", False)
     scenario_kwargs.setdefault("drone_can_confirm", False)
     scenario_kwargs.setdefault("comms_dropout", 0.0)
-    scenario_kwargs.setdefault("comms_dropout_mode", "iid")
+    scenario_kwargs.setdefault("comms_dropout_mode", COMMS_DROPOUT_MODE)
     scenario_kwargs["comms_map_mode"] = "per_agent"
     scenario_kwargs.setdefault("comms_dropout_min_steps", 5)
     scenario_kwargs.setdefault("comms_dropout_max_steps", 15)
@@ -1603,7 +1604,7 @@ def main() -> None:
     print(
         "communication: "
         f"dropout={scenario_kwargs.get('comms_dropout', 0.0):.2f}, "
-        f"mode={scenario_kwargs.get('comms_dropout_mode', 'iid')}, "
+        f"mode={scenario_kwargs.get('comms_dropout_mode', COMMS_DROPOUT_MODE)}, "
         f"maps={scenario_kwargs.get('comms_map_mode', 'per_agent')}, "
         f"burst={scenario_kwargs.get('comms_dropout_min_steps', 5)}.."
         f"{scenario_kwargs.get('comms_dropout_max_steps', 15)} steps"

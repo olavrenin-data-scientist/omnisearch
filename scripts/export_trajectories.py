@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 import vmas
 
 from envs.wildfire_defaults import (
+    COMMS_DROPOUT_MODE,
     DRONE_CAMERA_FOV_DEG,
     DRONE_FIRE_SAFETY_CLEARANCE_M,
     DRONE_FLIGHT_LEVELS_M,
@@ -207,8 +208,12 @@ def main():
              "0.0 = perfect radio, 0.3 = visible dropouts in viewer, "
              "0.8 = mostly broken.",
     )
-    p.add_argument("--comms-dropout-mode", choices=("iid", "bursty"), default="iid",
-                   help="Communication dropout process for trajectory export.")
+    p.add_argument(
+        "--comms-dropout-mode",
+        choices=("iid", "bursty"),
+        default=COMMS_DROPOUT_MODE,
+        help="Communication dropout process for trajectory export.",
+    )
     p.add_argument("--comms-map-mode", choices=("per_agent", "per-agent"), default="per_agent",
                    help="Use communication-gated per-agent coverage/confidence maps.")
     p.add_argument("--comms-dropout-min-steps", type=int, default=5,
@@ -581,7 +586,6 @@ def main():
     args = p.parse_args()
     steps_cli = _cli_option_present("--steps")
     comms_dropout_cli = _cli_option_present("--comms-dropout")
-    comms_dropout_mode_cli = _cli_option_present("--comms-dropout-mode")
     comms_map_mode_cli = _cli_option_present("--comms-map-mode")
     comms_dropout_min_cli = _cli_option_present("--comms-dropout-min-steps")
     comms_dropout_max_cli = _cli_option_present("--comms-dropout-max-steps")
@@ -714,8 +718,6 @@ def main():
                 max_steps=args.steps if steps_cli else None,
                 comms_dropout=args.comms_dropout if comms_dropout_cli else None,
             )
-            if comms_dropout_mode_cli:
-                scenario_kwargs["comms_dropout_mode"] = args.comms_dropout_mode
             if comms_map_mode_cli:
                 scenario_kwargs["comms_map_mode"] = args.comms_map_mode
             if comms_dropout_min_cli:
@@ -877,6 +879,7 @@ def main():
         scenario_kwargs["ugv_target_assignment_mode"] = "greedy_sticky"
     if args.enable_fire is not None:
         scenario_kwargs["disable_fire"] = not bool(args.enable_fire)
+    scenario_kwargs["comms_dropout_mode"] = args.comms_dropout_mode
     if args.ugv_target_assignment_mode is not None:
         scenario_kwargs["ugv_target_assignment_mode"] = args.ugv_target_assignment_mode.replace("-", "_")
     if args.ugv_planner_hint is not None:
