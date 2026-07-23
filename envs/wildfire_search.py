@@ -109,6 +109,9 @@ _RESET_RNG_STREAM_IDS = {
     "fire_burn_lifetime": 16,
     "fire_ignition_intensity": 17,
     "uav_decoy_false_detection": 18,
+    "comms_iid": 19,
+    "comms_burst_start": 20,
+    "comms_burst_duration": 21,
 }
 _RESET_RNG_UINT64_MASK = (1 << 64) - 1
 _RESET_RNG_TORCH_SEED_MASK = (1 << 63) - 1
@@ -251,6 +254,17 @@ class WildfireSearchScenario(BaseScenario):
         if self.obs_schema_n_survivors < self.n_survivors:
             raise ValueError("obs_schema_n_survivors must be >= n_survivors")
         self.obs_schema_n_agents = self.obs_schema_n_drones + self.obs_schema_n_ground
+        self._physical_agent_schema_slots = torch.tensor(
+            [
+                *range(self.n_drones),
+                *range(
+                    self.obs_schema_n_drones,
+                    self.obs_schema_n_drones + self.n_ground,
+                ),
+            ],
+            dtype=torch.long,
+            device=device,
+        )
 
         # World geometry
         self.x_semidim = float(kwargs.pop("x_semidim", 1.0))
@@ -7248,6 +7262,56 @@ class WildfireSearchScenario(BaseScenario):
         except ValueError:
             return 0
 
+    def _sample_comms_schema_uniforms(
+        self,
+        stream_name: str,
+        env_indices: Tensor,
+        *,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample fixed-schema communication uniforms and select physical agents."""
+        rows = [
+            torch.rand(
+                self.obs_schema_n_agents,
+                generator=self._reset_rng_context(int(env_index)).generator(stream_name),
+                dtype=torch.float32,
+                device="cpu",
+            )
+            for env_index in env_indices.detach().cpu().tolist()
+        ]
+        schema_draws = torch.stack(rows, dim=0).to(device=device)
+        return schema_draws.index_select(
+            1,
+            self._physical_agent_schema_slots.to(device=device),
+        )
+
+    def _sample_comms_schema_durations(
+        self,
+        env_indices: Tensor,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Sample fixed-schema burst durations and select physical agents."""
+        rows = [
+            torch.randint(
+                int(self.comms_dropout_min_steps),
+                int(self.comms_dropout_max_steps) + 1,
+                (self.obs_schema_n_agents,),
+                generator=self._reset_rng_context(int(env_index)).generator(
+                    "comms_burst_duration"
+                ),
+                dtype=dtype,
+                device="cpu",
+            )
+            for env_index in env_indices.detach().cpu().tolist()
+        ]
+        schema_durations = torch.stack(rows, dim=0).to(device=device)
+        return schema_durations.index_select(
+            1,
+            self._physical_agent_schema_slots.to(device=device),
+        )
+
     def _current_comms_up_mask(self, device: torch.device | None = None) -> Tensor:
         """Return the sampled whole-team comms state for the current observation step."""
         base_device = self.comms_dropout_remaining_steps.device
@@ -7279,9 +7343,9 @@ class WildfireSearchScenario(BaseScenario):
             due = current_step != self.comms_step_last_update_step
             if bool(due.any().item()):
                 due_idx = due.nonzero(as_tuple=False).flatten()
-                draws = torch.rand(
-                    due_idx.numel(),
-                    self.n_agents,
+                draws = self._sample_comms_schema_uniforms(
+                    "comms_iid",
+                    due_idx,
                     device=self.comms_step_up.device,
                 )
                 self.comms_step_up[due_idx] = draws > float(self.comms_dropout)
@@ -11196,17 +11260,20 @@ class WildfireSearchScenario(BaseScenario):
         if start_probability > 0.0:
             remaining = self.comms_dropout_remaining_steps[due_idx]
             connected = remaining <= 0
+            start_draws = self._sample_comms_schema_uniforms(
+                "comms_burst_start",
+                due_idx,
+                device=remaining.device,
+            )
             starts = (
-                torch.rand(remaining.shape, device=remaining.device) < start_probability
+                start_draws < start_probability
             ) & connected
+            durations = self._sample_comms_schema_durations(
+                due_idx,
+                device=remaining.device,
+                dtype=remaining.dtype,
+            )
             if bool(starts.any().item()):
-                durations = torch.randint(
-                    int(self.comms_dropout_min_steps),
-                    int(self.comms_dropout_max_steps) + 1,
-                    remaining.shape,
-                    device=remaining.device,
-                    dtype=remaining.dtype,
-                )
                 updated = torch.where(starts, durations, remaining)
                 self.comms_dropout_remaining_steps[due_idx] = updated
 
