@@ -108,6 +108,7 @@ _RESET_RNG_STREAM_IDS = {
     "fire_spotting": 15,
     "fire_burn_lifetime": 16,
     "fire_ignition_intensity": 17,
+    "uav_decoy_false_detection": 18,
 }
 _RESET_RNG_UINT64_MASK = (1 << 64) - 1
 _RESET_RNG_TORCH_SEED_MASK = (1 << 63) - 1
@@ -1333,6 +1334,13 @@ class WildfireSearchScenario(BaseScenario):
             dtype=torch.float,
             device=device,
         )
+        self.step_uav_decoy_false_detection_uniforms = torch.zeros(
+            batch_dim,
+            self.obs_schema_n_drones,
+            self.n_decoys,
+            dtype=torch.float,
+            device=device,
+        )
         self.step_ground_confirmations = torch.zeros(
             batch_dim, self.n_ground, self.n_survivors, dtype=torch.bool, device=device,
         )
@@ -2469,6 +2477,7 @@ class WildfireSearchScenario(BaseScenario):
             self.step_drone_detections.zero_()
             self.step_drone_detection_confidence.zero_()
             self.step_uav_survivor_detection_uniforms.zero_()
+            self.step_uav_decoy_false_detection_uniforms.zero_()
             self.step_ground_confirmations.zero_()
             self.known_survivors_by_agent.zero_()
             self.confirmed_survivors_by_agent.zero_()
@@ -2527,6 +2536,7 @@ class WildfireSearchScenario(BaseScenario):
             self.step_drone_detections[env_index] = False
             self.step_drone_detection_confidence[env_index] = 0.0
             self.step_uav_survivor_detection_uniforms[env_index] = 0.0
+            self.step_uav_decoy_false_detection_uniforms[env_index] = 0.0
             self.step_ground_confirmations[env_index] = False
             self.known_survivors_by_agent[env_index] = False
             self.confirmed_survivors_by_agent[env_index] = False
@@ -6863,6 +6873,31 @@ class WildfireSearchScenario(BaseScenario):
         )
         return detected
 
+    def _sample_uav_decoy_false_detection_uniforms(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample one fixed-schema decoy false-detection tensor for this step."""
+        rows = [
+            torch.rand(
+                self.obs_schema_n_drones,
+                self.n_decoys,
+                generator=self._reset_rng_context(env_index).generator(
+                    "uav_decoy_false_detection"
+                ),
+                dtype=dtype,
+                device="cpu",
+            )
+            for env_index in range(self.world.batch_dim)
+        ]
+        uniforms = torch.stack(rows, dim=0).to(device=device)
+        self.step_uav_decoy_false_detection_uniforms.copy_(
+            uniforms.to(dtype=self.step_uav_decoy_false_detection_uniforms.dtype)
+        )
+        return uniforms
+
     def _process_decoy_false_positives(
         self,
         agent_pos: Tensor,
@@ -6881,12 +6916,16 @@ class WildfireSearchScenario(BaseScenario):
         decoy_pos = torch.stack([d.state.pos for d in self._decoys], dim=1)
         agent_decoy_dists = torch.cdist(agent_pos, decoy_pos)
         active_decoys = self._active_decoy_mask()
+        decoy_uniforms = self._sample_uav_decoy_false_detection_uniforms(
+            dtype=agent_decoy_dists.dtype,
+            device=device,
+        )
 
         if self.n_drones > 0 and self.drone_false_positive_rate > 0.0:
             drone_decoy_dists = agent_decoy_dists[:, :self.n_drones, :]
             footprint = self._drone_camera_ranges().unsqueeze(-1)
             in_view = drone_decoy_dists <= footprint
-            draw = torch.rand_like(drone_decoy_dists)
+            draw = decoy_uniforms[:, : self.n_drones, :]
             false_det = in_view & (draw < self.drone_false_positive_rate)
             false_det = (
                 false_det
