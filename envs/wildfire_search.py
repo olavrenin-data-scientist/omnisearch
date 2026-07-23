@@ -3242,6 +3242,7 @@ class WildfireSearchScenario(BaseScenario):
 
     def _seed_initial_fire(self, env_index: int, height: int, width: int) -> None:
         """Start an irregular compact fire patch with resolution-independent area."""
+        generator = self._reset_rng_context(env_index).generator("initial_fire")
         fuel = self._fire_fuel_grid(env_index)
         candidates = (fuel > 0.20).flatten().nonzero(as_tuple=False).flatten()
         if candidates.numel() == 0:
@@ -3254,15 +3255,31 @@ class WildfireSearchScenario(BaseScenario):
             int(candidates.numel()),
         )
         if float(self.initial_fire_cells) > 0.0 and n_cells > 0:
-            seed = candidates[
-                torch.randint(candidates.numel(), (1,), device=self.fire_grid.device)
-            ].squeeze(0)
+            candidate_index = int(
+                torch.randint(
+                    int(candidates.numel()),
+                    (1,),
+                    generator=generator,
+                    device="cpu",
+                ).item()
+            )
+            seed = candidates[candidate_index]
             seed_y = torch.div(seed, width, rounding_mode="floor")
             seed_x = seed % width
-            scores = self._initial_fire_scores(seed_x, seed_y, fuel, height, width)
+            scores = self._initial_fire_scores(
+                seed_x,
+                seed_y,
+                fuel,
+                height,
+                width,
+                generator=generator,
+            )
             scores = torch.where(candidate_mask, scores, torch.full_like(scores, float("inf")))
             choice = torch.topk(scores, k=n_cells, largest=False).indices
-            self._ignite_fire_cells(self._cell_choice_mask(env_index, choice, height, width))
+            self._ignite_fire_cells(
+                self._cell_choice_mask(env_index, choice, height, width),
+                generator=generator,
+            )
 
     def _initial_fire_scores(
         self,
@@ -3271,6 +3288,8 @@ class WildfireSearchScenario(BaseScenario):
         fuel: Tensor,
         height: int,
         width: int,
+        *,
+        generator: torch.Generator | None = None,
     ) -> Tensor:
         """Rank cells for a natural-looking ignition patch instead of a circle."""
         device = self.fire_grid.device
@@ -3279,14 +3298,23 @@ class WildfireSearchScenario(BaseScenario):
         dx = (xs - seed_x).float()
         dy = (ys - seed_y).float()
 
-        angle = torch.rand((), device=device) * (2.0 * math.pi)
-        stretch = 0.65 + torch.rand((), device=device) * 1.1
+        angle = self._rand_like_with_generator(
+            torch.empty((), device=device),
+            generator,
+        ) * (2.0 * math.pi)
+        stretch = 0.65 + self._rand_like_with_generator(
+            torch.empty((), device=device),
+            generator,
+        ) * 1.1
         cos_a, sin_a = torch.cos(angle), torch.sin(angle)
         rotated_x = cos_a * dx + sin_a * dy
         rotated_y = -sin_a * dx + cos_a * dy
         ellipse = (rotated_x / stretch).square() + (rotated_y * stretch).square()
 
-        texture = torch.rand(height, width, device=device)
+        texture = self._rand_like_with_generator(
+            torch.empty(height, width, device=device),
+            generator,
+        )
         for _ in range(3):
             texture = 0.55 * texture + 0.45 * (self._neighbor_sum(texture.unsqueeze(0)).squeeze(0) / 4.0)
         texture = (texture - texture.min()) / (texture.max() - texture.min()).clamp_min(1e-6)
@@ -3305,7 +3333,26 @@ class WildfireSearchScenario(BaseScenario):
         mask[env_index].view(height * width)[choice] = True
         return mask
 
-    def _ignite_fire_cells(self, new_burns: Tensor) -> None:
+    @staticmethod
+    def _rand_like_with_generator(
+        reference: Tensor,
+        generator: torch.Generator | None,
+    ) -> Tensor:
+        if generator is None:
+            return torch.rand_like(reference)
+        return torch.rand(
+            reference.shape,
+            dtype=reference.dtype,
+            generator=generator,
+            device="cpu",
+        ).to(device=reference.device)
+
+    def _ignite_fire_cells(
+        self,
+        new_burns: Tensor,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> None:
         """Mark cells as actively burning and assign each a random burn lifetime."""
         if not bool(new_burns.any().item()):
             return
@@ -3313,13 +3360,18 @@ class WildfireSearchScenario(BaseScenario):
         max_lifetime = self.land_cover_fire_burnout_max[self.land_cover_grid]
         lifetime_span = (max_lifetime - min_lifetime + 1).clamp_min(1)
         random_lifetime = min_lifetime + torch.floor(
-            torch.rand_like(self.fire_intensity_grid) * lifetime_span.float()
+            self._rand_like_with_generator(self.fire_intensity_grid, generator)
+            * lifetime_span.float()
         ).long()
         self.fire_grid = self.fire_grid | new_burns
         self.burned_grid = self.burned_grid | new_burns
         self.fire_age_grid = torch.where(new_burns, torch.zeros_like(self.fire_age_grid), self.fire_age_grid)
         self.fire_lifetime_grid = torch.where(new_burns, random_lifetime, self.fire_lifetime_grid)
-        ignition_intensity = self._fire_intensity_potential() * (0.80 + 0.40 * torch.rand_like(self.fire_intensity_grid))
+        ignition_intensity = self._fire_intensity_potential() * (
+            0.80
+            + 0.40
+            * self._rand_like_with_generator(self.fire_intensity_grid, generator)
+        )
         self.fire_intensity_grid = torch.where(
             new_burns,
             ignition_intensity.clamp(0.25, 1.0),

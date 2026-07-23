@@ -28,7 +28,15 @@ class ScenarioRngInvarianceTests(unittest.TestCase):
     schema_n_drones = 3
     schema_n_ground = 2
 
-    def _env(self, *, seed: int, n_drones: int, n_ground: int, num_envs: int = 1):
+    def _env(
+        self,
+        *,
+        seed: int,
+        n_drones: int,
+        n_ground: int,
+        num_envs: int = 1,
+        disable_fire: bool = True,
+    ):
         return WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=num_envs,
@@ -55,7 +63,7 @@ class ScenarioRngInvarianceTests(unittest.TestCase):
             decoy_reveal_initial_count=0,
             decoy_reveal_start_step=10,
             decoy_reveal_end_step=180,
-            disable_fire=True,
+            disable_fire=disable_fire,
             fire_grid_size=128,
             max_steps=300,
             terrain_source="real",
@@ -199,6 +207,112 @@ class ScenarioRngInvarianceTests(unittest.TestCase):
                     self._snapshot(first.scenario, env_index),
                     self._snapshot(second.scenario, env_index),
                 )
+
+    @staticmethod
+    def _initial_fire_snapshot(scenario, env_index: int) -> tuple[torch.Tensor, ...]:
+        return tuple(
+            tensor[env_index].detach().cpu().clone()
+            for tensor in (
+                scenario.fire_grid,
+                scenario.burned_grid,
+                scenario.fire_age_grid,
+                scenario.fire_lifetime_grid,
+                scenario.fire_intensity_grid,
+            )
+        )
+
+    def test_initial_fire_does_not_depend_on_physical_agent_count(self):
+        configurations = ((3, 2), (2, 2), (3, 1), (1, 1))
+        for seed in (1000, 1001, 1013):
+            expected = None
+            for n_drones, n_ground in configurations:
+                env = self._env(
+                    seed=seed,
+                    n_drones=n_drones,
+                    n_ground=n_ground,
+                    disable_fire=False,
+                )
+                env.reset(seed=seed)
+                actual = self._initial_fire_snapshot(env.scenario, 0)
+                if expected is None:
+                    expected = actual
+                else:
+                    for actual_tensor, expected_tensor in zip(actual, expected):
+                        self.assertTrue(torch.equal(actual_tensor, expected_tensor))
+
+    def test_initial_fire_is_stable_across_asynchronous_reset_order(self):
+        first = self._env(
+            seed=1000,
+            n_drones=3,
+            n_ground=2,
+            num_envs=2,
+            disable_fire=False,
+        )
+        second = self._env(
+            seed=1000,
+            n_drones=3,
+            n_ground=2,
+            num_envs=2,
+            disable_fire=False,
+        )
+        first.reset(seed=1000)
+        second.reset(seed=1000)
+
+        first.reset_at(index=0, return_observations=False)
+        first.reset_at(index=1, return_observations=False)
+        second.reset_at(index=1, return_observations=False)
+        second.reset_at(index=0, return_observations=False)
+
+        for env_index in (0, 1):
+            first_fire = self._initial_fire_snapshot(first.scenario, env_index)
+            second_fire = self._initial_fire_snapshot(second.scenario, env_index)
+            for first_tensor, second_tensor in zip(first_fire, second_fire):
+                self.assertTrue(torch.equal(first_tensor, second_tensor))
+
+    def test_initial_fire_seed_changes_with_scenario_seed(self):
+        snapshots = []
+        for seed in (1000, 1001):
+            env = self._env(
+                seed=seed,
+                n_drones=3,
+                n_ground=2,
+                disable_fire=False,
+            )
+            env.reset(seed=seed)
+            snapshots.append(self._initial_fire_snapshot(env.scenario, 0))
+
+        self.assertTrue(
+            any(
+                not torch.equal(first, second)
+                for first, second in zip(snapshots[0], snapshots[1])
+            )
+        )
+
+    def test_initial_fire_sampling_does_not_advance_global_rng(self):
+        env = self._env(
+            seed=1000,
+            n_drones=3,
+            n_ground=2,
+            disable_fire=True,
+        )
+        env.reset(seed=1000)
+        scenario = env.scenario
+        scenario.fire_grid.zero_()
+        scenario.burned_grid.zero_()
+        scenario.fire_age_grid.zero_()
+        scenario.fire_lifetime_grid.zero_()
+        scenario.fire_intensity_grid.zero_()
+        scenario._reset_rng_contexts[0] = _ResetRngContext(
+            base_seed=1000,
+            env_index=0,
+            episode_index=0,
+        )
+        torch.manual_seed(2468)
+        state_before = torch.random.get_rng_state().clone()
+
+        scenario._seed_initial_fire(0, scenario.fire_grid_size, scenario.fire_grid_size)
+
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), state_before))
 
     def test_cell_sampling_changes_only_when_selected_cell_is_infeasible(self):
         scenario = WildfireSearchScenario()
