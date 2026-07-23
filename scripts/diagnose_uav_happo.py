@@ -236,7 +236,7 @@ def run_rollout(
     if str(diagnostic_level).replace("-", "_").lower() != "fast":
         raise ValueError("diagnose_uav_happo.py only supports fast diagnostics")
 
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",

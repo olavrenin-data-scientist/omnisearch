@@ -46,7 +46,7 @@ def run_one(strategy: str, seed: int, steps: int, extra: dict) -> float:
         ground_confirm_min=0.0,
     )
     kwargs.update(extra)
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=2, device="cpu",
         continuous_actions=True, seed=seed,

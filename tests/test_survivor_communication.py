@@ -17,7 +17,7 @@ TERRAIN_500M_CACHE = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.np
 
 class SurvivorCommunicationTests(unittest.TestCase):
     def _env(self, *, n_survivors=2, comms_dropout=0.0, **kwargs):
-        return vmas.make_env(
+        return WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
             device="cpu",
@@ -49,7 +49,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
             "terrain_cache_path": str(TERRAIN_CACHE),
         }
         params.update(kwargs)
-        return vmas.make_env(
+        return WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=num_envs,
             device="cpu",
@@ -245,7 +245,7 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertEqual(scenario.r_found_survivor, 10.0)
 
     def test_ugv_spawns_are_traversable_under_runtime_lookup(self):
-        env = vmas.make_env(
+        env = WildfireSearchScenario.make_env(
             scenario=WildfireSearchScenario(),
             num_envs=1,
             device="cpu",

@@ -147,7 +147,7 @@ def run_closed_loop(
     pipeline = pipeline or DetectionPipeline()
     renderer = renderer or UAVRenderer()
 
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=num_envs,
         device=device,

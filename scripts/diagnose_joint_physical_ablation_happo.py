@@ -450,7 +450,7 @@ def run_rollout(
     *,
     time_bins: int,
 ) -> dict[str, Any]:
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",

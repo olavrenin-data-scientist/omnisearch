@@ -497,7 +497,7 @@ def run_rollout(
     stochastic_happo: bool = False,
     baseline_ugv_controller: str = "native",
 ) -> dict[str, Any]:
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",

@@ -1888,7 +1888,7 @@ def run_rollout(
         scenario_kwargs=scenario_kwargs,
         actor_file_indices=actor_file_indices,
     )
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -2207,7 +2207,7 @@ def run_failure_trace(
         scenario_kwargs=scenario_kwargs,
         actor_file_indices=actor_file_indices,
     )
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -2391,7 +2391,7 @@ def run_action_magnitude_probe(checkpoint_dir: Path, scenario_kwargs: dict, seed
     for name, action in commands.items():
         distances = []
         for seed in seeds:
-            env = vmas.make_env(
+            env = WildfireSearchScenario.make_env(
                 scenario=WildfireSearchScenario(),
                 num_envs=1,
                 device="cpu",
@@ -2427,7 +2427,7 @@ def run_direction_probe(
         scenario_kwargs=scenario_kwargs,
         actor_file_indices=actor_file_indices,
     )
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
@@ -2476,7 +2476,7 @@ def run_angle_bucket_probe(
         scenario_kwargs=scenario_kwargs,
         actor_file_indices=actor_file_indices,
     )
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",

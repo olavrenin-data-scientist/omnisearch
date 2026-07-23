@@ -212,7 +212,7 @@ def evaluate_policy(
     that fits ``action_fn(env) -> actions`` plugs in.
     """
     scenario_kwargs = scenario_kwargs or {}
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=num_envs,
         device=device,

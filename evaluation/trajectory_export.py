@@ -543,7 +543,7 @@ def export_trajectory(
     scenario_kwargs = dict(scenario_kwargs or {})
     max_steps = scenario_kwargs.pop("max_steps", n_steps)
 
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=num_envs,
         device="cpu",

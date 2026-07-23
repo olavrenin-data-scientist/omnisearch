@@ -88,6 +88,88 @@ UGV_GLOBAL_PLANNER_HEURISTICS = {"euclidean", "terrain"}
 _SCIPY_SPARSE_TOOLS = None
 _SCIPY_SPARSE_UNAVAILABLE = False
 
+# These IDs are part of seeded-scenario reproducibility. Never renumber an
+# existing stream; append a new ID when adding another reset subsystem.
+_RESET_RNG_STREAM_IDS = {
+    "terrain": 1,
+    "survivor_activation": 2,
+    "survivor_positions": 3,
+    "survivor_reveals": 4,
+    "decoy_activation": 5,
+    "decoy_positions": 6,
+    "decoy_reveals": 7,
+    "uav_starts": 8,
+    "ugv_starts": 9,
+    "initial_fire": 10,
+    "bootstrap": 11,
+}
+_RESET_RNG_UINT64_MASK = (1 << 64) - 1
+_RESET_RNG_TORCH_SEED_MASK = (1 << 63) - 1
+
+
+def _splitmix64(value: int) -> int:
+    """Mix one integer without depending on Python's process-randomized hash."""
+    value = (int(value) + 0x9E3779B97F4A7C15) & _RESET_RNG_UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _RESET_RNG_UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _RESET_RNG_UINT64_MASK
+    return (value ^ (value >> 31)) & _RESET_RNG_UINT64_MASK
+
+
+def _stable_reset_stream_seed(
+    *,
+    base_seed: int,
+    env_index: int,
+    episode_index: int,
+    stream_id: int,
+    slot_index: int | None,
+) -> int:
+    mixed = _splitmix64(base_seed)
+    slot_component = 0 if slot_index is None else int(slot_index) + 1
+    for component in (int(env_index) + 1, int(episode_index) + 1, stream_id, slot_component):
+        mixed = _splitmix64(mixed ^ _splitmix64(component))
+    return mixed & _RESET_RNG_TORCH_SEED_MASK
+
+
+class _ResetRngContext:
+    """Independent reset-time random streams for one environment episode.
+
+    Stable entities must use ``slot_index`` so removing another entity or
+    changing its retry count cannot advance their random sequence.
+    """
+
+    def __init__(self, *, base_seed: int, env_index: int, episode_index: int):
+        self.base_seed = int(base_seed)
+        self.env_index = int(env_index)
+        self.episode_index = int(episode_index)
+        self._generators: dict[tuple[str, int | None], torch.Generator] = {}
+
+    def stream_seed(self, stream_name: str, slot_index: int | None = None) -> int:
+        if stream_name not in _RESET_RNG_STREAM_IDS:
+            valid = ", ".join(sorted(_RESET_RNG_STREAM_IDS))
+            raise ValueError(f"unknown reset RNG stream {stream_name!r}; expected one of: {valid}")
+        if slot_index is not None and int(slot_index) < 0:
+            raise ValueError("reset RNG slot_index must be nonnegative")
+        return _stable_reset_stream_seed(
+            base_seed=self.base_seed,
+            env_index=self.env_index,
+            episode_index=self.episode_index,
+            stream_id=_RESET_RNG_STREAM_IDS[stream_name],
+            slot_index=slot_index,
+        )
+
+    def generator(
+        self,
+        stream_name: str,
+        slot_index: int | None = None,
+    ) -> torch.Generator:
+        key = (stream_name, None if slot_index is None else int(slot_index))
+        generator = self._generators.get(key)
+        if generator is None:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(self.stream_seed(stream_name, slot_index))
+            self._generators[key] = generator
+        return generator
+
 
 def _scipy_sparse_tools():
     global _SCIPY_SPARSE_TOOLS, _SCIPY_SPARSE_UNAVAILABLE
@@ -131,6 +213,13 @@ class WildfireSearchScenario(BaseScenario):
     # ------------------------------------------------------------------
     # World construction
     # ------------------------------------------------------------------
+    @staticmethod
+    def make_env(**kwargs):
+        """Build the reset-aware VMAS environment required by this scenario."""
+        from envs.wildfire_vmas import make_wildfire_env
+
+        return make_wildfire_env(**kwargs)
+
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         # Team composition
         self.n_drones    = kwargs.pop("n_drones", 3)
@@ -1703,6 +1792,12 @@ class WildfireSearchScenario(BaseScenario):
         self._zero_step_metric_buffers(batch_dim, device)
         self.terrain_source_description = ["real"] * batch_dim
         self.terrain_source_metadata = [{} for _ in range(batch_dim)]
+        self._reset_rng_base_seed: int | None = None
+        self._reset_rng_pending_explicit_seed: int | None = None
+        self._reset_rng_episode_indices = [-1 for _ in range(batch_dim)]
+        self._reset_rng_contexts: list[_ResetRngContext | None] = [
+            None for _ in range(batch_dim)
+        ]
 
         # Per-agent reward buffers (filled in _compute_step_rewards)
         for agent in world.agents:
@@ -2256,7 +2351,60 @@ class WildfireSearchScenario(BaseScenario):
     # ------------------------------------------------------------------
     # Reset
     # ------------------------------------------------------------------
+    def _notify_explicit_reset_seed(self, seed: int) -> None:
+        """Receive reset(seed=...) intent from the reset-aware VMAS boundary."""
+        self._reset_rng_pending_explicit_seed = int(seed)
+
+    def _begin_reset_rng(self, env_index: int | None) -> dict[int, _ResetRngContext]:
+        """Create deterministic reset identities without consuming global RNG."""
+        explicit_seed = self._reset_rng_pending_explicit_seed
+        base_seed = int(torch.initial_seed()) if explicit_seed is None else explicit_seed
+        batch_dim = int(self.world.batch_dim)
+
+        if env_index is None:
+            if explicit_seed is not None or self._reset_rng_base_seed != base_seed:
+                self._reset_rng_episode_indices = [0 for _ in range(batch_dim)]
+            else:
+                self._reset_rng_episode_indices = [
+                    max(episode_index + 1, 0)
+                    for episode_index in self._reset_rng_episode_indices
+                ]
+            env_indices = range(batch_dim)
+        else:
+            env_index = int(env_index)
+            if env_index < 0 or env_index >= batch_dim:
+                raise IndexError(
+                    f"reset env_index {env_index} outside batch dimension {batch_dim}"
+                )
+            if explicit_seed is not None or self._reset_rng_base_seed != base_seed:
+                self._reset_rng_episode_indices = [-1 for _ in range(batch_dim)]
+            self._reset_rng_episode_indices[env_index] = max(
+                self._reset_rng_episode_indices[env_index] + 1,
+                0,
+            )
+            env_indices = (env_index,)
+
+        self._reset_rng_base_seed = base_seed
+        self._reset_rng_pending_explicit_seed = None
+        contexts: dict[int, _ResetRngContext] = {}
+        for index in env_indices:
+            context = _ResetRngContext(
+                base_seed=base_seed,
+                env_index=index,
+                episode_index=self._reset_rng_episode_indices[index],
+            )
+            self._reset_rng_contexts[index] = context
+            contexts[index] = context
+        return contexts
+
+    def _reset_rng_context(self, env_index: int) -> _ResetRngContext:
+        context = self._reset_rng_contexts[int(env_index)]
+        if context is None:
+            raise RuntimeError(f"reset RNG context for environment {env_index} is not initialized")
+        return context
+
     def reset_world_at(self, env_index: int = None):
+        self._begin_reset_rng(env_index)
         ScenarioUtils.spawn_entities_randomly(
             entities=self._survivors + self._decoys + self.world.agents,
             world=self.world,
@@ -2490,15 +2638,29 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_survivors <= 0:
             return
         device = self.active_survivors.device
+        generator = self._reset_rng_context(env_index).generator("survivor_activation")
         min_count = min(max(int(self.active_survivors_min), 0), self.n_survivors)
         max_count = min(max(int(self.active_survivors_max), min_count), self.n_survivors)
         if min_count == max_count:
             count = min_count
         else:
-            count = int(torch.randint(min_count, max_count + 1, (1,), device=device).item())
+            count = int(
+                torch.randint(
+                    min_count,
+                    max_count + 1,
+                    (1,),
+                    generator=generator,
+                    device="cpu",
+                ).item()
+            )
         mask = torch.zeros(self.n_survivors, dtype=torch.bool, device=device)
         if count > 0:
-            mask[torch.randperm(self.n_survivors, device=device)[:count]] = True
+            active_indices = torch.randperm(
+                self.n_survivors,
+                generator=generator,
+                device="cpu",
+            )[:count].to(device=device)
+            mask[active_indices] = True
         self.active_survivors[env_index] = mask
 
     def _active_survivor_entities(self, env_index: int) -> list[Landmark]:
@@ -2532,15 +2694,29 @@ class WildfireSearchScenario(BaseScenario):
         if self.n_decoys <= 0:
             return
         device = self.active_decoys.device
+        generator = self._reset_rng_context(env_index).generator("decoy_activation")
         min_count = min(max(int(self.active_decoys_min), 0), self.n_decoys)
         max_count = min(max(int(self.active_decoys_max), min_count), self.n_decoys)
         if min_count == max_count:
             count = min_count
         else:
-            count = int(torch.randint(min_count, max_count + 1, (1,), device=device).item())
+            count = int(
+                torch.randint(
+                    min_count,
+                    max_count + 1,
+                    (1,),
+                    generator=generator,
+                    device="cpu",
+                ).item()
+            )
         mask = torch.zeros(self.n_decoys, dtype=torch.bool, device=device)
         if count > 0:
-            mask[torch.randperm(self.n_decoys, device=device)[:count]] = True
+            active_indices = torch.randperm(
+                self.n_decoys,
+                generator=generator,
+                device="cpu",
+            )[:count].to(device=device)
+            mask[active_indices] = True
         self.active_decoys[env_index] = mask
 
     def _active_decoy_entities(self, env_index: int) -> list[Landmark]:
@@ -2583,69 +2759,97 @@ class WildfireSearchScenario(BaseScenario):
         if not self.delayed_survivor_knowledge or self.n_survivors <= 0:
             return
         device = self.survivor_reveal_steps.device
+        generator = self._reset_rng_context(env_index).generator("survivor_reveals")
         active_idx = torch.nonzero(
-            self._active_survivor_mask()[env_index],
+            self._active_survivor_mask()[env_index].detach().to(device="cpu"),
             as_tuple=False,
         ).flatten()
         count = int(active_idx.numel())
-        reveal_steps = torch.full((self.n_survivors,), -1, dtype=torch.long, device=device)
+        reveal_steps = torch.full((self.n_survivors,), -1, dtype=torch.long, device="cpu")
         if count <= 0:
-            self.survivor_reveal_steps[env_index] = reveal_steps
+            self.survivor_reveal_steps[env_index] = reveal_steps.to(device=device)
             return
         initial_count = min(int(self.survivor_reveal_initial_count), count)
-        active_reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
-        order = torch.randperm(count, device=device)
+        active_reveal_steps = torch.full(
+            (count,),
+            self.max_steps + 1,
+            dtype=torch.long,
+            device="cpu",
+        )
+        order = torch.randperm(count, generator=generator, device="cpu")
         if initial_count > 0:
             active_reveal_steps[order[:initial_count]] = 0
         remaining = count - initial_count
         if remaining > 0:
             start = int(min(max(self.survivor_reveal_start_step, 0), self.max_steps))
             end = int(min(max(self.survivor_reveal_end_step, start), self.max_steps))
-            edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
+            edges = torch.linspace(float(start), float(end), remaining + 1, device="cpu")
             for k, active_order_idx in enumerate(order[initial_count:]):
                 lo = int(torch.floor(edges[k]).item())
                 hi = int(torch.floor(edges[k + 1]).item())
                 if hi <= lo:
                     step = lo
                 else:
-                    step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
+                    step = int(
+                        torch.randint(
+                            lo,
+                            hi + 1,
+                            (1,),
+                            generator=generator,
+                            device="cpu",
+                        ).item()
+                    )
                 active_reveal_steps[active_order_idx] = step
         reveal_steps[active_idx] = active_reveal_steps
-        self.survivor_reveal_steps[env_index] = reveal_steps
+        self.survivor_reveal_steps[env_index] = reveal_steps.to(device=device)
 
     def _sample_delayed_decoy_reveals(self, env_index: int) -> None:
         if not self.delayed_decoy_knowledge or self.n_decoys <= 0:
             return
         device = self.decoy_reveal_steps.device
+        generator = self._reset_rng_context(env_index).generator("decoy_reveals")
         active_idx = torch.nonzero(
-            self._active_decoy_mask()[env_index],
+            self._active_decoy_mask()[env_index].detach().to(device="cpu"),
             as_tuple=False,
         ).flatten()
         count = int(active_idx.numel())
-        reveal_steps = torch.full((self.n_decoys,), -1, dtype=torch.long, device=device)
+        reveal_steps = torch.full((self.n_decoys,), -1, dtype=torch.long, device="cpu")
         if count <= 0:
-            self.decoy_reveal_steps[env_index] = reveal_steps
+            self.decoy_reveal_steps[env_index] = reveal_steps.to(device=device)
             return
         initial_count = min(int(self.decoy_reveal_initial_count), count)
-        active_reveal_steps = torch.full((count,), self.max_steps + 1, dtype=torch.long, device=device)
-        order = torch.randperm(count, device=device)
+        active_reveal_steps = torch.full(
+            (count,),
+            self.max_steps + 1,
+            dtype=torch.long,
+            device="cpu",
+        )
+        order = torch.randperm(count, generator=generator, device="cpu")
         if initial_count > 0:
             active_reveal_steps[order[:initial_count]] = 0
         remaining = count - initial_count
         if remaining > 0:
             start = int(min(max(self.decoy_reveal_start_step, 0), self.max_steps))
             end = int(min(max(self.decoy_reveal_end_step, start), self.max_steps))
-            edges = torch.linspace(float(start), float(end), remaining + 1, device=device)
+            edges = torch.linspace(float(start), float(end), remaining + 1, device="cpu")
             for k, active_order_idx in enumerate(order[initial_count:]):
                 lo = int(torch.floor(edges[k]).item())
                 hi = int(torch.floor(edges[k + 1]).item())
                 if hi <= lo:
                     step = lo
                 else:
-                    step = int(torch.randint(lo, hi + 1, (1,), device=device).item())
+                    step = int(
+                        torch.randint(
+                            lo,
+                            hi + 1,
+                            (1,),
+                            generator=generator,
+                            device="cpu",
+                        ).item()
+                    )
                 active_reveal_steps[active_order_idx] = step
         reveal_steps[active_idx] = active_reveal_steps
-        self.decoy_reveal_steps[env_index] = reveal_steps
+        self.decoy_reveal_steps[env_index] = reveal_steps.to(device=device)
 
     def _apply_delayed_survivor_reveals(self, env_index: int | None = None) -> None:
         if not self.delayed_survivor_knowledge or self.n_survivors <= 0:
@@ -2841,6 +3045,10 @@ class WildfireSearchScenario(BaseScenario):
         for survivor_idx, survivor in enumerate(self._survivors):
             if not bool(self._active_survivor_mask()[env_index, survivor_idx].item()):
                 continue
+            generator = self._reset_rng_context(env_index).generator(
+                "survivor_positions",
+                survivor_idx,
+            )
             reference_agent = reference_agents[survivor_idx % len(reference_agents)]
             gx, gy = self._positions_to_grid(reference_agent.state.pos[env_index].view(1, 1, 2))
             x, y = int(gx.item()), int(gy.item())
@@ -2852,10 +3060,13 @@ class WildfireSearchScenario(BaseScenario):
                     available=available,
                     fallback_candidates=candidates,
                     min_distance_m=self.known_survivor_spawn_distance_min_m,
+                    generator=generator,
                 )
             else:
                 if self.known_survivor_spawn_distance_max_m > self.known_survivor_spawn_distance_min_m:
-                    sample = torch.rand((), device=device)
+                    sample = float(
+                        torch.rand((), generator=generator, device="cpu").item()
+                    )
                     target_m = (
                         self.known_survivor_spawn_distance_min_m
                         + sample * (
@@ -2864,11 +3075,7 @@ class WildfireSearchScenario(BaseScenario):
                         )
                     )
                 else:
-                    target_m = torch.tensor(
-                        self.known_survivor_spawn_distance_min_m,
-                        device=device,
-                        dtype=torch.float32,
-                    )
+                    target_m = float(self.known_survivor_spawn_distance_min_m)
                 new_x, new_y = self._sample_known_survivor_cell_near_ground(
                     env_index=env_index,
                     ground_grid_x=x,
@@ -2876,6 +3083,7 @@ class WildfireSearchScenario(BaseScenario):
                     available=available,
                     fallback_candidates=candidates,
                     target_distance_m=target_m,
+                    generator=generator,
                 )
             new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
             all_pos = survivor.state.pos.clone()
@@ -2891,7 +3099,8 @@ class WildfireSearchScenario(BaseScenario):
         ground_grid_y: int,
         available: Tensor,
         fallback_candidates: Tensor,
-        target_distance_m: Tensor,
+        target_distance_m: float | Tensor,
+        generator: torch.Generator,
     ) -> tuple[int, int]:
         """Sample a survivor cell near a UGV without imposing row-major angle bias."""
         size = self.fire_grid_size
@@ -2911,7 +3120,11 @@ class WildfireSearchScenario(BaseScenario):
         dy = (yy - int(ground_grid_y)).float()
         dist_m = torch.sqrt(dx.square() + dy.square()) * cell_size_m
         angle = torch.atan2(dy, dx)
-        target_angle = torch.rand((), device=device) * (2.0 * math.pi) - math.pi
+        target_angle = (
+            float(torch.rand((), generator=generator, device="cpu").item())
+            * (2.0 * math.pi)
+            - math.pi
+        )
         angular_error = torch.atan2(
             torch.sin(angle - target_angle),
             torch.cos(angle - target_angle),
@@ -2926,7 +3139,10 @@ class WildfireSearchScenario(BaseScenario):
         for tolerance_deg in (22.5, 45.0, 90.0, 180.0):
             sector_mask = radial_mask & (angular_error <= math.radians(tolerance_deg))
             if bool(sector_mask.any().item()):
-                return self._sample_random_cell_from_mask(sector_mask)
+                return self._sample_random_cell_from_mask(
+                    sector_mask,
+                    generator=generator,
+                )
 
         candidate_mask = radial_mask if bool(radial_mask.any().item()) else base_mask
         if bool(candidate_mask.any().item()):
@@ -2937,11 +3153,14 @@ class WildfireSearchScenario(BaseScenario):
             ).flatten()
             k = min(128, int(torch.isfinite(radial_error).sum().item()))
             top_indices = torch.topk(radial_error, k=k, largest=False).indices
-            choice = top_indices[torch.randint(k, (1,), device=device)].item()
+            choice_index = int(
+                torch.randint(k, (1,), generator=generator, device="cpu").item()
+            )
+            choice = top_indices[choice_index].item()
             return int(choice % size), int(choice // size)
 
         final_mask = available if bool(available.any().item()) else fallback_candidates
-        return self._sample_random_cell_from_mask(final_mask)
+        return self._sample_random_cell_from_mask(final_mask, generator=generator)
 
     def _sample_known_survivor_cell_beyond_min_distance(
         self,
@@ -2952,6 +3171,7 @@ class WildfireSearchScenario(BaseScenario):
         available: Tensor,
         fallback_candidates: Tensor,
         min_distance_m: float,
+        generator: torch.Generator,
     ) -> tuple[int, int]:
         """Sample a known survivor cell with a minimum distance and no max cap."""
         size = self.fire_grid_size
@@ -2969,7 +3189,11 @@ class WildfireSearchScenario(BaseScenario):
         dy = (yy - int(ground_grid_y)).float()
         dist_m = torch.sqrt(dx.square() + dy.square()) * cell_size_m
         angle = torch.atan2(dy, dx)
-        target_angle = torch.rand((), device=device) * (2.0 * math.pi) - math.pi
+        target_angle = (
+            float(torch.rand((), generator=generator, device="cpu").item())
+            * (2.0 * math.pi)
+            - math.pi
+        )
         angular_error = torch.atan2(
             torch.sin(angle - target_angle),
             torch.cos(angle - target_angle),
@@ -2982,12 +3206,34 @@ class WildfireSearchScenario(BaseScenario):
         for tolerance_deg in (22.5, 45.0, 90.0, 180.0):
             sector_mask = base_mask & (angular_error <= math.radians(tolerance_deg))
             if bool(sector_mask.any().item()):
-                return self._sample_random_cell_from_mask(sector_mask)
+                return self._sample_random_cell_from_mask(
+                    sector_mask,
+                    generator=generator,
+                )
 
         final_mask = available if bool(available.any().item()) else fallback_candidates
-        return self._sample_random_cell_from_mask(final_mask)
+        return self._sample_random_cell_from_mask(final_mask, generator=generator)
 
-    def _sample_random_cell_from_mask(self, mask: Tensor) -> tuple[int, int]:
+    def _sample_random_cell_from_mask(
+        self,
+        mask: Tensor,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> tuple[int, int]:
+        if generator is not None:
+            flat_mask = mask.detach().to(device="cpu", dtype=torch.bool).flatten()
+            if not bool(flat_mask.any().item()):
+                raise ValueError("Cannot sample from an empty cell mask")
+            # A fixed random priority over all cells makes fallback stable:
+            # changing an unrelated infeasible cell cannot change the winner.
+            priority = torch.randperm(
+                flat_mask.numel(),
+                generator=generator,
+                device="cpu",
+            )
+            choice = int(priority[flat_mask[priority]][0].item())
+            return choice % self.fire_grid_size, choice // self.fire_grid_size
+
         flat = mask.flatten().nonzero(as_tuple=False).flatten()
         if flat.numel() == 0:
             raise ValueError("Cannot sample from an empty cell mask")
@@ -3296,10 +3542,31 @@ class WildfireSearchScenario(BaseScenario):
 
         device = self.fire_grid.device
         available = candidates.clone()
-        entities = self._survivors + self._decoys + self.world.agents[self.n_drones:]
-        for entity in entities:
+
+        reset_rng = self._reset_rng_context(env_index)
+        deterministic_entities = (
+            (self._survivors, "survivor_positions"),
+            (self._decoys, "decoy_positions"),
+        )
+        for entities, stream_name in deterministic_entities:
+            for slot_index, entity in enumerate(entities):
+                search_mask = available if bool(available.any().item()) else candidates
+                new_x, new_y = self._sample_random_cell_from_mask(
+                    search_mask,
+                    generator=reset_rng.generator(stream_name, slot_index),
+                )
+                new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
+                all_pos = entity.state.pos.clone()
+                all_pos[env_index] = new_pos
+                entity.set_pos(all_pos, batch_index=None)
+                available[new_y, new_x] = False
+
+        for ground_index, entity in enumerate(self.world.agents[self.n_drones:]):
             search_mask = available if bool(available.any().item()) else candidates
-            new_x, new_y = self._sample_random_cell_from_mask(search_mask)
+            new_x, new_y = self._sample_random_cell_from_mask(
+                search_mask,
+                generator=reset_rng.generator("ugv_starts", ground_index),
+            )
             new_pos = self._grid_cell_center_to_world(new_x, new_y, device=device)
             all_pos = entity.state.pos.clone()
             all_pos[env_index] = new_pos
@@ -3307,10 +3574,8 @@ class WildfireSearchScenario(BaseScenario):
             available[new_y, new_x] = False
 
     def _place_drones_jointly_uniform_interior(self, env_index: int) -> None:
-        """Jointly sample UAV starts, rejecting the whole team if spacing fails."""
+        """Sample prefix-stable UAV starts while enforcing team spacing."""
         if self.n_drones <= 0:
-            return
-        if self.uav_start_min_separation_m <= 0.0 and self.uav_start_edge_margin_m <= 0.0:
             return
 
         drone_agents = self.world.agents[:self.n_drones]
@@ -3334,27 +3599,59 @@ class WildfireSearchScenario(BaseScenario):
             )
 
         min_sep_sim = self.uav_start_min_separation_m * scale
-        best_min_distance = -1.0
-        for _ in range(self.uav_start_max_attempts):
-            xs = x_min + torch.rand(self.n_drones, device=device) * max(x_max - x_min, 0.0)
-            ys = y_min + torch.rand(self.n_drones, device=device) * max(y_max - y_min, 0.0)
-            positions = torch.stack([xs, ys], dim=-1)
-            pairwise = torch.pdist(positions) if self.n_drones > 1 else torch.empty(0, device=device)
-            min_distance = float(pairwise.min().detach().cpu().item()) if pairwise.numel() else math.inf
-            if min_distance > best_min_distance:
-                best_min_distance = min_distance
-            if min_distance + 1e-9 >= min_sep_sim:
-                perm = torch.randperm(self.n_drones, device=device)
-                self._set_drone_start_positions(env_index, positions[perm])
-                return
+        reset_context = None
+        if hasattr(self, "_reset_rng_contexts"):
+            reset_context = self._reset_rng_contexts[int(env_index)]
 
-        best_m = best_min_distance / max(scale, 1e-9)
-        raise ValueError(
-            "Could not sample UAV starts satisfying "
-            f"uav_start_min_separation_m={self.uav_start_min_separation_m:.1f} "
-            f"after {self.uav_start_max_attempts} attempts; best was {best_m:.1f}m. "
-            "Reduce the separation/margin or increase uav_start_max_attempts."
-        )
+        accepted: list[Tensor] = []
+        for drone_index in range(self.n_drones):
+            generator = (
+                reset_context.generator("uav_starts", drone_index)
+                if reset_context is not None
+                else None
+            )
+            best_min_distance = -1.0
+            for _ in range(self.uav_start_max_attempts):
+                if generator is None:
+                    unit = torch.rand(2, device=device)
+                else:
+                    unit = torch.rand(
+                        2,
+                        generator=generator,
+                        device="cpu",
+                    ).to(device=device)
+                candidate = torch.stack(
+                    [
+                        x_min + unit[0] * max(x_max - x_min, 0.0),
+                        y_min + unit[1] * max(y_max - y_min, 0.0),
+                    ]
+                )
+                if accepted:
+                    prior = torch.stack(accepted, dim=0)
+                    min_distance = float(
+                        torch.linalg.vector_norm(prior - candidate, dim=1)
+                        .min()
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+                else:
+                    min_distance = math.inf
+                best_min_distance = max(best_min_distance, min_distance)
+                if min_distance + 1e-9 >= min_sep_sim:
+                    accepted.append(candidate)
+                    break
+            else:
+                best_m = best_min_distance / max(scale, 1e-9)
+                raise ValueError(
+                    "Could not sample UAV starts satisfying "
+                    f"uav_start_min_separation_m={self.uav_start_min_separation_m:.1f} "
+                    f"for UAV slot {drone_index} after {self.uav_start_max_attempts} "
+                    f"attempts; best was {best_m:.1f}m. Reduce the separation/margin "
+                    "or increase uav_start_max_attempts."
+                )
+
+        self._set_drone_start_positions(env_index, torch.stack(accepted, dim=0))
 
     def _set_drone_start_positions(self, env_index: int, positions: Tensor) -> None:
         for drone_idx, agent in enumerate(self.world.agents[:self.n_drones]):

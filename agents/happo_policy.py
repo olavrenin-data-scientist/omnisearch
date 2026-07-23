@@ -139,7 +139,7 @@ def _build_policy_spaces(scenario_kwargs: Optional[dict]) -> tuple[list[str], li
     import vmas
     from envs.wildfire_search import WildfireSearchScenario
 
-    tmp = vmas.make_env(
+    tmp = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",

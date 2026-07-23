@@ -36,7 +36,7 @@ from evaluation.mission_metrics import EpisodeRecorder, MissionMetrics
 
 
 def run_one(strategy_name: str, seed: int, steps: int) -> MissionMetrics:
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=2, device="cpu",
         continuous_actions=True, seed=seed,

@@ -1027,7 +1027,7 @@ in.
 ```python
 def evaluate_policy(n_steps=200, seed=0, num_envs=2,
                    action_fn=None, scenario_kwargs=None, …):
-    env = vmas.make_env(scenario=WildfireSearchScenario(),
+    env = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(),
                         num_envs=num_envs, seed=seed,
                         continuous_actions=True, **scenario_kwargs)
     env.reset()
@@ -1068,7 +1068,7 @@ trajectory without needing Python at all.
 def export_trajectory(strategy_name, make_policy, output_path,
                       n_steps=200, seed=0, num_envs=2, env_index=0,
                       scenario_kwargs=None):
-    env = vmas.make_env(scenario=WildfireSearchScenario(),
+    env = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(),
                         num_envs=num_envs, seed=seed, …)
     env.reset()
     action_fn = make_policy(env)  # policy is built AFTER the env exists
@@ -1229,7 +1229,7 @@ README results table both consume.
 
 ```python
 def run_one(strategy_name, seed, steps):
-    env = vmas.make_env(scenario=WildfireSearchScenario(),
+    env = WildfireSearchScenario.make_env(scenario=WildfireSearchScenario(),
                         num_envs=2, seed=seed, …)
     env.reset()
     cls = BASELINES[strategy_name]

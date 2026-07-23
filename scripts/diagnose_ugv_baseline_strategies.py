@@ -283,7 +283,7 @@ def run_rollout(
     happo_cache: dict[tuple[Path, bool], HappoPolicy] | None = None,
     stochastic_happo: bool = False,
 ) -> dict[str, Any]:
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",

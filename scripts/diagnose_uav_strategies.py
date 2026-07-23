@@ -181,7 +181,7 @@ def run_rollout(
     stochastic_happo: bool = False,
     moving_no_confidence_gain_threshold: float = DEFAULT_MOVING_NO_CONFIDENCE_GAIN_THRESHOLD,
 ) -> dict[str, Any]:
-    env = vmas.make_env(
+    env = WildfireSearchScenario.make_env(
         scenario=WildfireSearchScenario(),
         num_envs=1,
         device="cpu",
