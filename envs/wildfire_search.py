@@ -102,6 +102,7 @@ _RESET_RNG_STREAM_IDS = {
     "ugv_starts": 9,
     "initial_fire": 10,
     "bootstrap": 11,
+    "uav_survivor_detection": 12,
 }
 _RESET_RNG_UINT64_MASK = (1 << 64) - 1
 _RESET_RNG_TORCH_SEED_MASK = (1 << 63) - 1
@@ -131,7 +132,7 @@ def _stable_reset_stream_seed(
 
 
 class _ResetRngContext:
-    """Independent reset-time random streams for one environment episode.
+    """Independent scenario random streams for one environment episode.
 
     Stable entities must use ``slot_index`` so removing another entity or
     changing its retry count cannot advance their random sequence.
@@ -1320,6 +1321,13 @@ class WildfireSearchScenario(BaseScenario):
         self.step_drone_detection_confidence = torch.zeros(
             batch_dim, self.n_drones, self.n_survivors, dtype=torch.float, device=device,
         )
+        self.step_uav_survivor_detection_uniforms = torch.zeros(
+            batch_dim,
+            self.obs_schema_n_drones,
+            self.obs_schema_n_survivors,
+            dtype=torch.float,
+            device=device,
+        )
         self.step_ground_confirmations = torch.zeros(
             batch_dim, self.n_ground, self.n_survivors, dtype=torch.bool, device=device,
         )
@@ -2455,6 +2463,7 @@ class WildfireSearchScenario(BaseScenario):
             self.scouted_survivors.zero_()
             self.step_drone_detections.zero_()
             self.step_drone_detection_confidence.zero_()
+            self.step_uav_survivor_detection_uniforms.zero_()
             self.step_ground_confirmations.zero_()
             self.known_survivors_by_agent.zero_()
             self.confirmed_survivors_by_agent.zero_()
@@ -2512,6 +2521,7 @@ class WildfireSearchScenario(BaseScenario):
             self.scouted_survivors[env_index] = False
             self.step_drone_detections[env_index] = False
             self.step_drone_detection_confidence[env_index] = 0.0
+            self.step_uav_survivor_detection_uniforms[env_index] = 0.0
             self.step_ground_confirmations[env_index] = False
             self.known_survivors_by_agent[env_index] = False
             self.confirmed_survivors_by_agent[env_index] = False
@@ -6706,6 +6716,31 @@ class WildfireSearchScenario(BaseScenario):
                 r = r + decoy_pursuit_penalty[:, g]
             agent.scenario_reward = r
 
+    def _sample_uav_survivor_detection_uniforms(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Sample one fixed-schema Bernoulli draw tensor for this step."""
+        rows = [
+            torch.rand(
+                self.obs_schema_n_drones,
+                self.obs_schema_n_survivors,
+                generator=self._reset_rng_context(env_index).generator(
+                    "uav_survivor_detection"
+                ),
+                dtype=dtype,
+                device="cpu",
+            )
+            for env_index in range(self.world.batch_dim)
+        ]
+        uniforms = torch.stack(rows, dim=0).to(device=device)
+        self.step_uav_survivor_detection_uniforms.copy_(
+            uniforms.to(dtype=self.step_uav_survivor_detection_uniforms.dtype)
+        )
+        return uniforms
+
     def _drone_survivor_detections(
         self,
         drone_dists: Tensor,
@@ -6717,7 +6752,14 @@ class WildfireSearchScenario(BaseScenario):
             return self._drone_survivor_detections_cv(drone_pos, surv_pos)
         components = self._drone_detection_components(drone_dists, drone_pos, surv_pos)
         probability = components["probability"]
-        detected = torch.rand_like(probability) < probability
+        detection_uniforms = self._sample_uav_survivor_detection_uniforms(
+            dtype=probability.dtype,
+            device=probability.device,
+        )
+        detected = (
+            detection_uniforms[:, : self.n_drones, : self.n_survivors]
+            < probability
+        )
         self.step_drone_detection_confidence = torch.where(
             detected,
             probability,
