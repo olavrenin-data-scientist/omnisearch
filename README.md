@@ -7,6 +7,8 @@ can coordinate this handoff better than strong heuristic baselines.
 
 MIDS Capstone · Summer 2026 · UC Berkeley
 
+![OmniSearch 3D strategy viewer showing UAV and UGV wildfire search and rescue](web/web_demo.png)
+
 ## What Is Included
 
 - A VMAS-based wildfire search environment with UAVs, UGVs, survivors, fire,
