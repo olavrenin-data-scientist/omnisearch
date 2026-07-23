@@ -133,42 +133,13 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         1,
     )
 
-    distance_kwargs = {}
-    if (
-        args.joint_schema_ugv_diagnostic
-        or (
-            args.ugv_diagnostic_target_distance_min_m is None
-            and args.ugv_diagnostic_target_distance_max_m is None
-        )
+    for key in (
+        "known_survivor_spawn_distance_m",
+        "known_survivor_spawn_distance_min_m",
+        "known_survivor_spawn_distance_max_m",
+        "survivor_spawn_reference",
     ):
-        pass
-    else:
-        target_distance_min_m = max(
-            float(0.0 if args.ugv_diagnostic_target_distance_min_m is None else args.ugv_diagnostic_target_distance_min_m),
-            0.0,
-        )
-        distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
-        if args.ugv_diagnostic_target_distance_max_m is not None:
-            target_distance_max_m = max(
-                float(args.ugv_diagnostic_target_distance_max_m),
-                0.0,
-            )
-            if target_distance_max_m < target_distance_min_m:
-                raise ValueError(
-                    "ugv_diagnostic_target_distance_max_m must be >= "
-                    "ugv_diagnostic_target_distance_min_m"
-                )
-            target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-            distance_kwargs.update({
-                "known_survivor_spawn_distance_m": target_distance_m,
-                "known_survivor_spawn_distance_max_m": target_distance_max_m,
-            })
-        for key in (
-            "known_survivor_spawn_distance_m",
-            "known_survivor_spawn_distance_min_m",
-            "known_survivor_spawn_distance_max_m",
-        ):
-            scenario_kwargs.pop(key, None)
+        scenario_kwargs.pop(key, None)
 
     scenario_kwargs["max_steps"] = args.steps
     scenario_kwargs["comms_dropout"] = 0.0
@@ -250,7 +221,6 @@ def _scenario_kwargs(checkpoint_dir: Path, args: argparse.Namespace) -> dict:
         explicit_min=getattr(args, "active_decoys_min", None),
         explicit_max=getattr(args, "active_decoys_max", None),
     )
-    scenario_kwargs.update(distance_kwargs)
     if args.terrain_cache_path:
         scenario_kwargs["terrain_source"] = "real"
         scenario_kwargs["terrain_cache_path"] = args.terrain_cache_path
@@ -2693,9 +2663,6 @@ def main() -> None:
     parser.add_argument("--active-decoys-max", type=int, default=None,
                         help="Maximum active decoys sampled per episode. Default preserves the checkpoint manifest.")
     parser.add_argument("--ground-min-confirm-radius-m", type=float, default=None)
-    parser.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None)
-    parser.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
-                        help="Omit for no upper bound when a min distance is provided.")
     parser.add_argument("--local-map-patch-size", type=int, default=None)
     parser.add_argument("--ugv-planner-hint",
                         choices=(

@@ -391,7 +391,6 @@ class SurvivorCommunicationTests(unittest.TestCase):
             n_drones=1,
             n_ground=0,
             known_survivors_at_reset=False,
-            survivor_spawn_reference="drone",
             drone_scouts_confirm_survivors=True,
         )
         scenario = env.scenario
@@ -2171,52 +2170,23 @@ class SurvivorCommunicationTests(unittest.TestCase):
         self.assertTrue(bool(scenario.found_survivors[0, 0]))
         self.assertTrue(bool(scenario.step_ground_confirmations[0, 0, 0]))
 
-    def test_known_survivor_spawn_distance_places_candidate_near_ground(self):
-        env = self._diagnostic_env(
+    def test_legacy_distance_conditioning_keys_are_ignored(self):
+        expected = self._diagnostic_env()
+        legacy = self._diagnostic_env(
+            survivor_spawn_reference="ground",
             known_survivor_spawn_distance_m=80.0,
-            ground_confirm_min_m=20.0,
-        )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        scale = float(scenario.terrain_sim_units_per_meter[0])
-        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
-
-        self.assertGreater(distance_m, 20.0)
-        self.assertLess(distance_m, 120.0)
-
-    def test_known_survivor_spawn_distance_range_is_supported(self):
-        env = self._diagnostic_env(
-            known_survivor_spawn_distance_m=65.0,
             known_survivor_spawn_distance_min_m=30.0,
             known_survivor_spawn_distance_max_m=100.0,
-            ground_confirm_min_m=20.0,
         )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        scale = float(scenario.terrain_sim_units_per_meter[0])
-        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
 
-        self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
-        self.assertEqual(scenario.known_survivor_spawn_distance_max_m, 100.0)
-        self.assertGreater(distance_m, 20.0)
-        self.assertLess(distance_m, 150.0)
-
-    def test_known_survivor_spawn_distance_min_without_max_is_unbounded(self):
-        env = self._diagnostic_env(
-            known_survivor_spawn_distance_min_m=30.0,
-            terrain_cache_path=str(TERRAIN_500M_CACHE),
-        )
-        scenario = env.scenario
-        ground = env.agents[0]
-        survivor = scenario._survivors[0]
-        scale = float(scenario.terrain_sim_units_per_meter[0])
-        distance_m = float(torch.linalg.norm(ground.state.pos - survivor.state.pos) / scale)
-
-        self.assertEqual(scenario.known_survivor_spawn_distance_min_m, 30.0)
-        self.assertTrue(math.isinf(scenario.known_survivor_spawn_distance_max_m))
-        self.assertGreaterEqual(distance_m, 30.0)
+        self.assertTrue(torch.equal(
+            expected.scenario._survivors[0].state.pos,
+            legacy.scenario._survivors[0].state.pos,
+        ))
+        self.assertFalse(hasattr(legacy.scenario, "survivor_spawn_reference"))
+        self.assertFalse(hasattr(legacy.scenario, "known_survivor_spawn_distance_m"))
+        self.assertFalse(hasattr(legacy.scenario, "known_survivor_spawn_distance_min_m"))
+        self.assertFalse(hasattr(legacy.scenario, "known_survivor_spawn_distance_max_m"))
 
     def test_ugv_planner_patch_size_must_be_positive_odd(self):
         with self.assertRaises(ValueError):
@@ -3484,40 +3454,6 @@ class SurvivorCommunicationTests(unittest.TestCase):
         target_idx = torch.zeros_like(gate, dtype=torch.long)
         scenario._ugv_planner_progress_rewards(start_pos, end_pos, target_pos, target_idx, gate)
         self.assertEqual(calls["count"], 2)
-
-    def test_known_survivor_spawn_distance_range_samples_angles(self):
-        labels = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
-        counts = {label: 0 for label in labels}
-        distances_m = []
-        torch.manual_seed(123)
-        env = self._diagnostic_env(
-            known_survivor_spawn_distance_m=55.0,
-            known_survivor_spawn_distance_min_m=30.0,
-            known_survivor_spawn_distance_max_m=80.0,
-            terrain_cache_path=str(TERRAIN_500M_CACHE),
-        )
-        scenario = env.scenario
-
-        for _ in range(320):
-            env.reset()
-            ground_pos = env.agents[0].state.pos[0]
-            survivor_pos = scenario._survivors[0].state.pos[0]
-            offset = survivor_pos - ground_pos
-            angle = float(torch.atan2(offset[1], offset[0]))
-            bucket = int(((angle + math.pi / 8.0) % (2.0 * math.pi)) / (math.pi / 4.0))
-            counts[labels[bucket]] += 1
-            scale = float(scenario.terrain_sim_units_per_meter[0])
-            distances_m.append(float(torch.linalg.norm(offset) / scale))
-
-        self.assertEqual(set(counts.keys()), set(labels))
-        self.assertGreaterEqual(min(counts.values()), 20)
-        self.assertLessEqual(max(counts.values()), 70)
-        self.assertGreater(sum(counts[label] for label in ("S", "SW")), 0)
-        self.assertLessEqual(sum(counts[label] for label in ("S", "SW")), 130)
-        self.assertGreater(min(distances_m), 20.0)
-        self.assertLess(max(distances_m), 95.0)
-        self.assertGreater(sum(distances_m) / len(distances_m), 45.0)
-        self.assertLess(sum(distances_m) / len(distances_m), 65.0)
 
     def test_local_map_patch_size_uses_flattened_patch_features_for_ugv(self):
         env = self._diagnostic_env(local_map_patch_size=11)

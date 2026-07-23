@@ -566,8 +566,6 @@ class HappoCheckpointTests(unittest.TestCase):
             terrain_cache_path="terrain.npz",
             ground_confirm_min_m=20.0,
             ugv_known_survivor_diagnostic=True,
-            ugv_diagnostic_target_distance_min_m=30.0,
-            ugv_diagnostic_target_distance_max_m=100.0,
             local_map_patch_size=11,
             slope_speed_weight=0.5,
             land_cover_speeds=(1.0, 0.95, 0.8, 0.7, 0.0, 0.0),
@@ -582,9 +580,9 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["local_map_patch_size"], 11)
         self.assertTrue(scenario["known_survivors_at_reset"])
-        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 65.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 100.0)
+        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
+        self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
         self.assertTrue(scenario["disable_fire"])
         self.assertEqual(scenario["comms_dropout"], 0.5)
         self.assertEqual(scenario["r_drone_scout"], 0.0)
@@ -624,7 +622,7 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(env_args["action_transform"], "radial_tanh")
         self.assertEqual(scenario["local_map_patch_size"], 7)
         self.assertTrue(scenario["terrain_cache_path"].endswith("malibu_creek_500m_128.npz"))
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
         self.assertFalse(scenario["disable_fire"])
         self.assertEqual(scenario["ugv_planner_hint"], "global_astar")
@@ -2121,7 +2119,7 @@ class HappoCheckpointTests(unittest.TestCase):
         scenario = env_args["scenario_kwargs"]
         self.assertTrue(scenario["known_survivors_at_reset"])
         self.assertNotIn("known_survivor_spawn_distance_m", scenario)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 30.0)
+        self.assertNotIn("known_survivor_spawn_distance_min_m", scenario)
         self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
         self.assertEqual(scenario["n_survivors"], 1)
         self.assertEqual(scenario["active_survivors_min"], 1)
@@ -2151,42 +2149,6 @@ class HappoCheckpointTests(unittest.TestCase):
         self.assertEqual(scenario["n_decoys"], 4)
         self.assertEqual(scenario["active_decoys_min"], 0)
         self.assertEqual(scenario["active_decoys_max"], 4)
-
-    def test_ugv_known_survivor_exact_distance_uses_min_equals_max(self):
-        _, _, env_args = build_args(
-            num_env_steps=100,
-            episode_length=50,
-            seed=1,
-            comms_dropout=0.5,
-            entropy_coef=0.01,
-            exp_name="diag",
-            ugv_known_survivor_diagnostic=True,
-            ugv_diagnostic_target_distance_min_m=80.0,
-            ugv_diagnostic_target_distance_max_m=80.0,
-        )
-
-        scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["known_survivor_spawn_distance_m"], 80.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 80.0)
-        self.assertEqual(scenario["known_survivor_spawn_distance_max_m"], 80.0)
-
-    def test_ugv_known_survivor_min_distance_can_omit_max(self):
-        _, _, env_args = build_args(
-            num_env_steps=100,
-            episode_length=50,
-            seed=1,
-            comms_dropout=0.5,
-            entropy_coef=0.01,
-            exp_name="diag",
-            ugv_known_survivor_diagnostic=True,
-            ugv_diagnostic_target_distance_min_m=80.0,
-        )
-
-        scenario = env_args["scenario_kwargs"]
-        self.assertEqual(scenario["known_survivor_spawn_distance_min_m"], 80.0)
-        self.assertNotIn("known_survivor_spawn_distance_m", scenario)
-        self.assertNotIn("known_survivor_spawn_distance_max_m", scenario)
-
 
 if __name__ == "__main__":
     unittest.main()

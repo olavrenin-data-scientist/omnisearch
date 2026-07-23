@@ -94,7 +94,6 @@ DEFAULT_DRONE_FIRE_SAFETY_CLEARANCE_M = DRONE_FIRE_SAFETY_CLEARANCE_M
 DEFAULT_DRONE_SMOKE_SAFETY_CLEARANCE_M = DRONE_SMOKE_SAFETY_CLEARANCE_M
 DEFAULT_DRONE_SMOKE_CLEARANCE_THRESHOLD = DRONE_SMOKE_CLEARANCE_THRESHOLD
 DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE = 7
-DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M = 30.0
 DEFAULT_UGV_DIAG_LR = 2.5e-4
 DEFAULT_UGV_DIAG_CRITIC_LR = 5.0e-4
 DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH = ROOT / "data" / "terrain_cache" / "malibu_creek_500m_128.npz"
@@ -304,8 +303,6 @@ def build_args(
     survivor_reveal_start_step: int = 10,
     survivor_reveal_end_step: int = 180,
     survivor_assignment_obs: bool | None = None,
-    ugv_diagnostic_target_distance_min_m: float | None = None,
-    ugv_diagnostic_target_distance_max_m: float | None = None,
     found_survivor_reward: float | None = None,
     ground_confirm_reward: float | None = None,
     uav_no_global_coverage_obs: bool = False,
@@ -469,8 +466,6 @@ def build_args(
             terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
         if local_map_patch_size == 3:
             local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if ugv_known_survivor_diagnostic and ugv_diagnostic_target_distance_min_m is None:
-            ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
         if lr == 5e-4:
             lr = DEFAULT_UGV_DIAG_LR
         if critic_lr == 5e-4:
@@ -1331,30 +1326,6 @@ def build_args(
     if ugv_known_survivor_diagnostic:
         ugv_known_survivor_count = 1 if n_survivors is None else survivor_count
         ugv_active_min, ugv_active_max = _active_survivor_range_for(ugv_known_survivor_count)
-        distance_kwargs = {}
-        if ugv_diagnostic_target_distance_min_m is None and ugv_diagnostic_target_distance_max_m is None:
-            pass
-        else:
-            target_distance_min_m = max(
-                float(0.0 if ugv_diagnostic_target_distance_min_m is None else ugv_diagnostic_target_distance_min_m),
-                0.0,
-            )
-            distance_kwargs["known_survivor_spawn_distance_min_m"] = target_distance_min_m
-            if ugv_diagnostic_target_distance_max_m is not None:
-                target_distance_max_m = max(
-                    float(ugv_diagnostic_target_distance_max_m),
-                    0.0,
-                )
-                if target_distance_max_m < target_distance_min_m:
-                    raise ValueError(
-                        "ugv_diagnostic_target_distance_max_m must be >= "
-                        "ugv_diagnostic_target_distance_min_m"
-                    )
-                target_distance_m = 0.5 * (target_distance_min_m + target_distance_max_m)
-                distance_kwargs.update({
-                    "known_survivor_spawn_distance_m": target_distance_m,
-                    "known_survivor_spawn_distance_max_m": target_distance_max_m,
-                })
         scenario_kwargs.update({
             "n_drones": 0,
             "n_ground": 1 if n_ugvs is None else max(int(n_ugvs), 1),
@@ -1381,7 +1352,6 @@ def build_args(
             "r_time_penalty": -0.0005,
             "r_coverage": 0.0,
         })
-        scenario_kwargs.update(distance_kwargs)
     if uav_survivor_diagnostic or joint_schema_uav_diagnostic:
         found_reward = 0.0
         all_survivors_reward = 0.0
@@ -2130,11 +2100,6 @@ def main():
                    help="Earliest delayed reveal step after the initial survivors.")
     p.add_argument("--survivor-reveal-end-step", type=int, default=180,
                    help="Latest delayed reveal step after the initial survivors.")
-    p.add_argument("--ugv-diagnostic-target-distance-min-m", type=float, default=None,
-                   help="Minimum known-survivor start distance sampled at reset for the UGV diagnostic task.")
-    p.add_argument("--ugv-diagnostic-target-distance-max-m", type=float, default=None,
-                   help="Maximum known-survivor start distance sampled at reset for the UGV diagnostic task. "
-                        "Omit for no upper bound; use min=max for an exact target distance.")
     p.add_argument("--uav-coverage-only", action="store_true",
                    help="In UAV diagnostic mode, disable survivor and time rewards; "
                         "leave only coverage rewards and coverage-quality penalties.")
@@ -2337,8 +2302,6 @@ def main():
             args.terrain_cache_path = str(DEFAULT_UGV_DIAG_TERRAIN_CACHE_PATH)
         if args.local_map_patch_size == 3:
             args.local_map_patch_size = DEFAULT_UGV_DIAG_LOCAL_MAP_PATCH_SIZE
-        if args.ugv_known_survivor_diagnostic and args.ugv_diagnostic_target_distance_min_m is None:
-            args.ugv_diagnostic_target_distance_min_m = DEFAULT_UGV_DIAG_TARGET_DISTANCE_MIN_M
         if args.lr == 5e-4:
             args.lr = DEFAULT_UGV_DIAG_LR
         if args.critic_lr == 5e-4:
@@ -3359,8 +3322,6 @@ def main():
         survivor_reveal_start_step = args.survivor_reveal_start_step,
         survivor_reveal_end_step = args.survivor_reveal_end_step,
         survivor_assignment_obs = args.survivor_assignment_obs,
-        ugv_diagnostic_target_distance_min_m = args.ugv_diagnostic_target_distance_min_m,
-        ugv_diagnostic_target_distance_max_m = args.ugv_diagnostic_target_distance_max_m,
         found_survivor_reward = args.found_survivor_reward,
         ground_confirm_reward = args.ground_confirm_reward,
         uav_no_global_coverage_obs = args.uav_no_global_coverage_obs,
