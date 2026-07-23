@@ -12,6 +12,7 @@ import argparse
 import copy
 import json
 import math
+import os
 import sys
 import time
 from collections import Counter
@@ -1366,6 +1367,65 @@ def _spec_metadata(spec: StrategySpec, *, baseline_ugv_controller: str = "native
     }
 
 
+def _partial_json_path(final_path: Path) -> Path:
+    if final_path.suffix:
+        return final_path.with_name(f"{final_path.stem}.partial{final_path.suffix}")
+    return final_path.with_name(f"{final_path.name}.partial.json")
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, allow_nan=True),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _diagnostic_payload(
+    *,
+    scenario_kwargs: dict[str, Any],
+    specs: list[StrategySpec],
+    baseline_ugv_controller: str,
+    scenario_checkpoint: Path | None,
+    seeds: list[int],
+    stochastic: bool,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+    complete: bool,
+    total_rollouts: int,
+) -> dict[str, Any]:
+    return {
+        "scenario_kwargs": scenario_kwargs,
+        "metadata": {
+            "strategy": _spec_metadata(
+                specs[0],
+                baseline_ugv_controller=baseline_ugv_controller,
+            ),
+            "strategies": [
+                _spec_metadata(
+                    spec,
+                    baseline_ugv_controller=baseline_ugv_controller,
+                )
+                for spec in specs
+            ],
+            "happo_deterministic": not stochastic,
+            "steps": int(scenario_kwargs["max_steps"]),
+            "scenario_source_checkpoint": (
+                None if scenario_checkpoint is None else str(scenario_checkpoint)
+            ),
+            "seeds": [int(seed) for seed in seeds],
+            "scenario_kwargs": scenario_kwargs,
+            "complete": bool(complete),
+            "completed_rollouts": len(rows),
+            "total_rollouts": int(total_rollouts),
+        },
+        "rows": rows,
+        "summary": summary,
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1584,6 +1644,11 @@ def main() -> None:
     print(f"planned rollout: {len(specs)} strategies x {len(args.seeds)} seeds x {args.steps} steps")
     print("-" * 104)
 
+    json_path = Path(args.json_output) if args.json_output else None
+    partial_json_path = _partial_json_path(json_path) if json_path is not None else None
+    if partial_json_path is not None:
+        print(f"partial JSON checkpoint: {partial_json_path}")
+
     rows: list[dict[str, Any]] = []
     happo_cache: dict[tuple[Path, bool, tuple[int, ...]], HappoPolicy] = {}
     total_rollouts = len(specs) * len(args.seeds)
@@ -1604,6 +1669,21 @@ def main() -> None:
             rows.append(row)
             _print_row(row)
             completed_rollouts += 1
+            if partial_json_path is not None:
+                partial_summary = summarize(rows, bins=args.time_bins)
+                partial_payload = _diagnostic_payload(
+                    scenario_kwargs=scenario_kwargs,
+                    specs=specs,
+                    baseline_ugv_controller=baseline_ugv_controller,
+                    scenario_checkpoint=scenario_checkpoint,
+                    seeds=args.seeds,
+                    stochastic=args.stochastic,
+                    rows=rows,
+                    summary=partial_summary,
+                    complete=False,
+                    total_rollouts=total_rollouts,
+                )
+                _write_json_atomic(partial_json_path, partial_payload)
             elapsed_rollout_s = time.perf_counter() - rollout_started_at
             completed_steps = int(args.steps) * completed_rollouts
             rollout_steps_per_second = completed_steps / max(elapsed_rollout_s, 1e-9)
@@ -1619,28 +1699,23 @@ def main() -> None:
 
     summary = summarize(rows, bins=args.time_bins)
     _print_summary(summary)
-    payload = {
-        "scenario_kwargs": scenario_kwargs,
-        "metadata": {
-            "strategy": _spec_metadata(specs[0], baseline_ugv_controller=baseline_ugv_controller),
-            "strategies": [
-                _spec_metadata(spec, baseline_ugv_controller=baseline_ugv_controller)
-                for spec in specs
-            ],
-            "happo_deterministic": not args.stochastic,
-            "steps": int(scenario_kwargs["max_steps"]),
-            "scenario_source_checkpoint": None if scenario_checkpoint is None else str(scenario_checkpoint),
-            "seeds": [int(seed) for seed in args.seeds],
-            "scenario_kwargs": scenario_kwargs,
-        },
-        "rows": rows,
-        "summary": summary,
-    }
-    if args.json_output:
-        path = Path(args.json_output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, allow_nan=True), encoding="utf-8")
-        print(f"wrote json: {path}")
+    payload = _diagnostic_payload(
+        scenario_kwargs=scenario_kwargs,
+        specs=specs,
+        baseline_ugv_controller=baseline_ugv_controller,
+        scenario_checkpoint=scenario_checkpoint,
+        seeds=args.seeds,
+        stochastic=args.stochastic,
+        rows=rows,
+        summary=summary,
+        complete=True,
+        total_rollouts=total_rollouts,
+    )
+    if json_path is not None:
+        _write_json_atomic(json_path, payload)
+        if partial_json_path is not None:
+            partial_json_path.unlink(missing_ok=True)
+        print(f"wrote json: {json_path}")
     if args.plots_output:
         write_plots(rows, summary, Path(args.plots_output))
         print(f"wrote plots: {args.plots_output}")
