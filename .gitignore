@@ -228,6 +228,7 @@ __marimo__/
 wandb/
 runs/
 results/*
+outputs/*
 !results/.gitkeep
 *.mp4
 # Web app trajectory exports (regenerated via scripts/export_trajectories.py)
