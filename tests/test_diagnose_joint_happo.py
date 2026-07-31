@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import types
 
 import pytest
@@ -78,12 +79,62 @@ def test_recall_threshold_time_stats_reports_seconds_and_reached_fraction() -> N
         },
     ]
 
-    stats = _recall_threshold_time_stats(rows, key="first_confirm_steps", threshold=0.80)
+    stats = _recall_threshold_time_stats(
+        rows,
+        key="first_confirm_steps",
+        threshold=0.80,
+        max_survivors=5,
+    )
 
+    assert stats["required_count"] == pytest.approx(4.0)
+    assert stats["eligible_count"] == pytest.approx(2.0)
     assert stats["reached_count"] == pytest.approx(1.0)
     assert stats["reached_fraction"] == pytest.approx(0.5)
     assert stats["mean_s"] == pytest.approx(40.0)
     assert stats["std_s"] == pytest.approx(0.0)
+    assert stats["ci95_s"] == pytest.approx(0.0)
+
+
+def test_recall_threshold_time_uses_configured_max_and_valid_seed_ci() -> None:
+    rows = [
+        {
+            "survivors": 5,
+            "step_seconds": 2.0,
+            "first_confirm_steps": [1, 2, 3, 4, 5],
+        },
+        {
+            "survivors": 10,
+            "step_seconds": 2.0,
+            "first_confirm_steps": list(range(1, 11)),
+        },
+        {
+            "survivors": 10,
+            "step_seconds": 2.0,
+            "first_confirm_steps": list(range(2, 21, 2)),
+        },
+        {
+            "survivors": 10,
+            "step_seconds": 2.0,
+            "first_confirm_steps": [1, 2, 3, 4, 5, None, None, None, None, None],
+        },
+    ]
+
+    stats = _recall_threshold_time_stats(
+        rows,
+        key="first_confirm_steps",
+        threshold=1.0,
+        max_survivors=10,
+    )
+
+    assert stats["required_count"] == pytest.approx(10.0)
+    assert stats["eligible_count"] == pytest.approx(3.0)
+    assert stats["ineligible_count"] == pytest.approx(1.0)
+    assert stats["reached_count"] == pytest.approx(2.0)
+    assert stats["valid_count"] == pytest.approx(2.0)
+    assert stats["reached_fraction"] == pytest.approx(2.0 / 3.0)
+    assert stats["mean_s"] == pytest.approx(30.0)
+    assert stats["std_s"] == pytest.approx(10.0)
+    assert stats["ci95_s"] == pytest.approx(1.96 * 10.0 / math.sqrt(2.0))
 
 
 def test_scenario_kwargs_can_override_checkpoint_comms(tmp_path) -> None:

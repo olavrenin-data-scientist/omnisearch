@@ -388,14 +388,19 @@ def _recall_threshold_time_stats(
     *,
     key: str,
     threshold: float,
-) -> dict[str, float]:
+    max_survivors: int | None = None,
+) -> dict[str, Any]:
+    if max_survivors is None:
+        max_survivors = max((int(row.get("survivors", 0)) for row in rows), default=0)
+    max_survivors = max(int(max_survivors), 0)
+    required = max(1, int(math.ceil(float(threshold) * max_survivors - 1e-9)))
     times_s: list[float] = []
+    eligible_count = 0
     for row in rows:
         survivors = int(row.get("survivors", 0))
-        if survivors <= 0:
-            times_s.append(0.0)
+        if survivors < required:
             continue
-        required = max(1, int(math.ceil(float(threshold) * survivors - 1e-9)))
+        eligible_count += 1
         event_steps = sorted(
             float(step)
             for step in row.get(key, [])
@@ -405,22 +410,48 @@ def _recall_threshold_time_stats(
             continue
         step_seconds = max(float(row.get("step_seconds", 1.0)), 1e-9)
         times_s.append(event_steps[required - 1] * step_seconds)
-    total = max(len(rows), 1)
+    reached_count = len(times_s)
+    std_s = _std(times_s)
+    ci95_s = (
+        1.96 * std_s / math.sqrt(reached_count)
+        if reached_count > 0 and math.isfinite(std_s)
+        else float("nan")
+    )
+    mean_s = _mean(times_s)
     return {
         "threshold": float(threshold),
-        "reached_count": float(len(times_s)),
-        "reached_fraction": float(len(times_s) / total),
-        "mean_s": _mean(times_s),
-        "std_s": _std(times_s),
+        "threshold_basis": "configured_max_survivors",
+        "max_survivors": float(max_survivors),
+        "required_count": float(required),
+        "total_count": float(len(rows)),
+        "eligible_count": float(eligible_count),
+        "eligible_fraction": float(eligible_count / len(rows)) if rows else float("nan"),
+        "ineligible_count": float(len(rows) - eligible_count),
+        "reached_count": float(reached_count),
+        "valid_count": float(reached_count),
+        "reached_fraction": (
+            float(reached_count / eligible_count) if eligible_count > 0 else float("nan")
+        ),
+        "mean_s": mean_s,
+        "std_s": std_s,
+        "ci95_s": ci95_s,
+        "ci95_lower_s": mean_s - ci95_s,
+        "ci95_upper_s": mean_s + ci95_s,
     }
 
 
-def _threshold_time_summary(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, float]]:
+def _threshold_time_summary(
+    rows: list[dict[str, Any]],
+    key: str,
+    *,
+    max_survivors: int | None = None,
+) -> dict[str, dict[str, Any]]:
     return {
         f"recall_{int(round(threshold * 100)):03d}": _recall_threshold_time_stats(
             rows,
             key=key,
             threshold=threshold,
+            max_survivors=max_survivors,
         )
         for threshold in RECALL_TIME_THRESHOLDS
     }
@@ -907,7 +938,12 @@ def _mean_path_by_agent(rows: list[dict[str, Any]], key: str) -> list[float]:
     ]
 
 
-def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
+def summarize(
+    rows: list[dict[str, Any]],
+    bins: int = 5,
+    *,
+    max_survivors: int | None = None,
+) -> dict[str, Any]:
     success_count = int(sum(bool(row["full_confirm_success"]) for row in rows))
     latency_values_s: list[float] = []
     for row in rows:
@@ -1045,8 +1081,16 @@ def summarize(rows: list[dict[str, Any]], bins: int = 5) -> dict[str, Any]:
             key="first_confirm_steps",
             bins=bins,
         ),
-        "time_to_scout_s": _threshold_time_summary(rows, "first_scout_steps"),
-        "time_to_confirm_s": _threshold_time_summary(rows, "first_confirm_steps"),
+        "time_to_scout_s": _threshold_time_summary(
+            rows,
+            "first_scout_steps",
+            max_survivors=max_survivors,
+        ),
+        "time_to_confirm_s": _threshold_time_summary(
+            rows,
+            "first_confirm_steps",
+            max_survivors=max_survivors,
+        ),
         "fast_metrics": {
             "scout_recall": _mean_std([row["scout_recall"] for row in rows]),
             "confirm_recall": _mean_std([row["confirm_recall"] for row in rows]),
@@ -1653,7 +1697,11 @@ def main() -> None:
             _print_row(row)
             completed_rollouts += 1
             if json_path is not None:
-                partial_summary = summarize(rows, bins=args.time_bins)
+                partial_summary = summarize(
+                    rows,
+                    bins=args.time_bins,
+                    max_survivors=active_survivors_max,
+                )
                 partial_payload = _diagnostic_payload(
                     scenario_kwargs=scenario_kwargs,
                     specs=specs,
@@ -1683,7 +1731,11 @@ def main() -> None:
                 print(f"ETA {_format_duration(eta_s)}", flush=True)
             print(f"progress: {completed_rollouts}/{total_rollouts} rollouts", flush=True)
 
-    summary = summarize(rows, bins=args.time_bins)
+    summary = summarize(
+        rows,
+        bins=args.time_bins,
+        max_survivors=active_survivors_max,
+    )
     _print_summary(summary)
     payload = _diagnostic_payload(
         scenario_kwargs=scenario_kwargs,
