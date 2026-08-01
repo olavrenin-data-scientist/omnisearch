@@ -191,16 +191,14 @@ def _diagnostic_output_paths(
                 'positive integer survivor count'
             )
 
-    if comms_dropout is not None and survivor_count is not None:
-        raise ValueError('specify either comms_dropout or survivor_count, not both')
-
     strategy_tag = str(strategy).replace('-', '_')
     if survivor_count is not None:
         survivor_count = int(survivor_count)
         if survivor_count < 1:
             raise ValueError('survivor_count must be at least 1')
+        tag = _dropout_tag(0.0 if comms_dropout is None else comms_dropout)
         stem = (
-            f'{strategy_tag}_{model_label}_{survivor_count}_'
+            f'{strategy_tag}_{model_label}_{survivor_count}_dropout{tag}_'
             f'seeds_{seeds[0]}_{seeds[1]}'
         )
     else:
