@@ -20,9 +20,20 @@ def _scenario_number(scenario, key):
 def _survivor_count_value(count):
     return int(count)
 
-def _run_identity(path, payload, file_index):
-    if len(RUN_IDENTITIES) == len(JSON_FILES):
-        strategy, count = RUN_IDENTITIES[file_index]
+def _run_identity(
+    path,
+    payload,
+    file_index,
+    run_identities=None,
+    json_files=None,
+    strategies=None,
+):
+    if (
+        run_identities is not None
+        and json_files is not None
+        and len(run_identities) == len(json_files)
+    ):
+        strategy, count = run_identities[file_index]
         return _strategy_tag(strategy), int(count)
 
     metadata = payload.get('metadata', {})
@@ -30,7 +41,10 @@ def _run_identity(path, payload, file_index):
     if payload_strategy is None and isinstance(metadata, dict):
         payload_strategy = metadata.get('strategy') or metadata.get('approach')
     stem = path.stem.lower()
-    configured_strategies = [_strategy_tag(strategy) for strategy in STRATEGIES]
+    configured_strategies = [
+        _strategy_tag(strategy)
+        for strategy in (strategies if strategies is not None else STRATEGY_LABELS)
+    ]
     strategy = _strategy_tag(payload_strategy) if payload_strategy else next(
         (name for name in configured_strategies if stem.startswith(f'{name}_')),
         'unknown',
