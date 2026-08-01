@@ -36,19 +36,8 @@ def _run_identity(
         strategy, count = run_identities[file_index]
         return _strategy_tag(strategy), int(count)
 
-    metadata = payload.get('metadata', {})
-    payload_strategy = payload.get('strategy') or payload.get('approach')
-    if payload_strategy is None and isinstance(metadata, dict):
-        payload_strategy = metadata.get('strategy') or metadata.get('approach')
     stem = path.stem.lower()
-    configured_strategies = [
-        _strategy_tag(strategy)
-        for strategy in (strategies if strategies is not None else STRATEGY_LABELS)
-    ]
-    strategy = _strategy_tag(payload_strategy) if payload_strategy else next(
-        (name for name in configured_strategies if stem.startswith(f'{name}_')),
-        'unknown',
-    )
+    strategy = _strategy_tag(_strategy_from_payload(path, payload))
 
     scenario = _payload_scenario(payload)
     active_min = _scenario_number(scenario, 'active_survivors_min')
