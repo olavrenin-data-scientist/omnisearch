@@ -1239,14 +1239,34 @@ function makeRadialPointTexture() {
   return texture;
 }
 
+// Flame sprite: a hot opaque centre with a tight falloff. The soft radial
+// texture above reads as haze when used for fire — this keeps embers crisp.
+function makeFlamePointTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 31);
+  gradient.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+  gradient.addColorStop(0.30, 'rgba(255,255,255,0.92)');
+  gradient.addColorStop(0.55, 'rgba(255,255,255,0.42)');
+  gradient.addColorStop(0.80, 'rgba(255,255,255,0.10)');
+  gradient.addColorStop(1.00, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 64, 64);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
 function buildFireColumnInstances(maxCount) {
-  const emberTexture = makeRadialPointTexture();
+  const emberTexture = makeFlamePointTexture();
   const glowMesh = new THREE.InstancedMesh(
     new THREE.CircleGeometry(1, 28),
     new THREE.MeshBasicMaterial({
-      color: 0xff4d16,
+      color: 0xff3c00,
       transparent: true,
-      opacity: 0.36,
+      opacity: 0.40,
       blending: THREE.AdditiveBlending,
       depthTest: false,
       depthWrite: false,
@@ -1262,10 +1282,10 @@ function buildFireColumnInstances(maxCount) {
   emberGeometry.setAttribute('position', new THREE.BufferAttribute(emberPositions, 3));
   emberGeometry.setDrawRange(0, 0);
   const emberMesh = new THREE.Points(emberGeometry, new THREE.PointsMaterial({
-    color: 0xff7c24,
+    color: 0xff6a00,
     transparent: true,
-    opacity: 0.48,
-    size: 12.0,
+    opacity: 0.72,
+    size: 8.5,
     sizeAttenuation: false,
     map: emberTexture,
     blending: THREE.AdditiveBlending,
@@ -1281,10 +1301,10 @@ function buildFireColumnInstances(maxCount) {
   const coreMesh = new THREE.Points(
     coreGeometry,
     new THREE.PointsMaterial({
-      color: 0xffc86a,
+      color: 0xffb830,
       transparent: true,
-      opacity: 0.34,
-      size: 6.0,
+      opacity: 0.70,
+      size: 4.0,
       sizeAttenuation: false,
       map: emberTexture,
       blending: THREE.AdditiveBlending,
@@ -1372,8 +1392,8 @@ function buildSmokeInstances(maxCount) {
   const mesh = new THREE.Points(geometry, new THREE.PointsMaterial({
     color: 0xb7c0ca,
     transparent: true,
-    opacity: 0.20,
-    size: 13.0,
+    opacity: 0.13,
+    size: 11.0,
     sizeAttenuation: false,
     map: makeRadialPointTexture(),
     blending: THREE.NormalBlending,
@@ -1815,12 +1835,12 @@ function useThree3D(meta, frame, frames, histories, showCoverage, showPlanner) {
       // Fire flicker — vary opacity globally across all instances.
       const s = stateRef.current;
       if (s?.fireInstances) {
-        s.fireInstances.glowMesh.material.opacity = 0.28 + 0.06 * Math.sin(t * 5.2);
-        s.fireInstances.emberMesh.material.opacity = 0.44 + 0.07 * Math.sin(t * 8.0);
-        s.fireInstances.coreMesh.material.opacity = 0.30 + 0.05 * Math.sin(t * 11.0 + 1.1);
+        s.fireInstances.glowMesh.material.opacity = 0.38 + 0.08 * Math.sin(t * 5.2);
+        s.fireInstances.emberMesh.material.opacity = 0.70 + 0.10 * Math.sin(t * 8.0);
+        s.fireInstances.coreMesh.material.opacity = 0.66 + 0.10 * Math.sin(t * 11.0 + 1.1);
       }
       if (s?.smokeMesh) {
-        s.smokeMesh.material.opacity = 0.16 + 0.04 * Math.sin(t * 2.5);
+        s.smokeMesh.material.opacity = 0.11 + 0.03 * Math.sin(t * 2.5);
       }
       // Billboard: orient all agent/comms markers to face the camera
       if (s?.agentGroup) {
